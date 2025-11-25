@@ -1,0 +1,34 @@
+# Docker Compose for LibreClinica API Test Database
+# This creates an ISOLATED test database that is separate from production
+
+version: '3.8'
+
+services:
+  libreclinica-test-db:
+    image: postgres:14
+    container_name: libreclinica-test-db
+    environment:
+      POSTGRES_USER: clinica
+      POSTGRES_PASSWORD: clinica
+      POSTGRES_DB: libreclinica_test
+    ports:
+      - "5433:5432"  # Different port from production (5432)
+    volumes:
+      - ./tests/schema/libreclinica-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - test-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinica -d libreclinica_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  test-db-data:
+    driver: local
+
+# Usage:
+# Start:  docker-compose -f docker-compose.test.yml up -d
+# Stop:   docker-compose -f docker-compose.test.yml down
+# Reset:  docker-compose -f docker-compose.test.yml down -v && docker-compose -f docker-compose.test.yml up -d
+

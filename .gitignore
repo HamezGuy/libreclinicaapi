@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build outputs
+dist/
+build/
+
+# Environment and sensitive files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Text files (notes, temporary docs)
+*.txt
+
+# Test coverage
+coverage/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database files
+*.sqlite
+*.db
+
+# Secrets and keys
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+
+# Backup files
+*.backup
+*.bak
+*.BACKUP
