@@ -53,3 +53,9 @@ credentials/
 *.backup
 *.bak
 *.BACKUP
+
+# Batch files (Windows scripts)
+*.bat
+
+# Test environment
+.env.test
