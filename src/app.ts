@@ -63,7 +63,7 @@ app.use(helmet({
 
 // CORS - Cross-Origin Resource Sharing
 const corsOptions = {
-  origin: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:4200'],
+  origin: config.security.allowedOrigins.length > 0 ? config.security.allowedOrigins : ['http://localhost:4200', 'https://www.accuratrials.com'],
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
