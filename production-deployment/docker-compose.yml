@@ -4,7 +4,7 @@ services:
   # ==========================================
   # 1. Database (PostgreSQL)
   # ==========================================
-  db:
+  postgres:
     image: postgres:14-alpine
     container_name: libreclinica_db
     restart: always
@@ -15,9 +15,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     networks:
-      lc_network:
-        aliases:
-          - postgres
+      - lc_network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U clinica -d libreclinica"]
       interval: 5s
@@ -32,11 +30,11 @@ services:
     container_name: libreclinica_core
     restart: always
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
     environment:
       dbType: postgres
-      dbHost: db
+      dbHost: postgres
       dbPort: 5432
       dbName: libreclinica
       dbUser: clinica
@@ -63,13 +61,13 @@ services:
     container_name: libreclinica_api
     restart: always
     depends_on:
-      - db
+      - postgres
       - core
     environment:
       NODE_ENV: production
       PORT: 3000
       # Database Connection
-      LIBRECLINICA_DB_HOST: db
+      LIBRECLINICA_DB_HOST: postgres
       LIBRECLINICA_DB_PORT: 5432
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: clinica
