@@ -27,7 +27,8 @@ $DOCKER_COMPOSE down || true
 mkdir -p certbot/conf certbot/www
 
 # 2. Bootstrapping SSL
-if [ ! -d "./certbot/conf/live/$DOMAIN" ]; then
+# Use sudo to check directory existence due to root permissions
+if ! sudo test -d "./certbot/conf/live/$DOMAIN"; then
     echo "SSL certificate not found. Starting bootstrapping process..."
     
     # Copy init config (HTTP only) to active config
