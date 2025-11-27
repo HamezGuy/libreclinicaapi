@@ -1,26 +1,22 @@
-FROM node:18-alpine as builder
-
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci
-
-COPY . .
-RUN npm run build
-
 FROM node:18-alpine
 
 WORKDIR /app
-ENV NODE_ENV=production
 
+# Install dependencies
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm install --production
 
-COPY --from=builder /app/dist ./dist
-# Copy schema file if needed at runtime
-COPY --from=builder /app/database ./database
+# Copy source code
+COPY . .
+
+# Build TypeScript
+RUN npm install typescript -g
+RUN npm run build
+
+# Remove dev dependencies (optional, can skip for debugging)
+# RUN npm prune --production
 
 EXPOSE 3000
 
-CMD ["node", "dist/server.js"]
-
+# Check if dist exists before running, otherwise run from source (fallback)
+CMD ["sh", "-c", "if [ -d 'dist' ]; then node dist/server.js; else npm run start; fi"]
