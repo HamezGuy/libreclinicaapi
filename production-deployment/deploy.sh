@@ -42,7 +42,8 @@ if [ ! -d "./certbot/conf/live/$DOMAIN" ]; then
     echo "Requesting Certificate from Let's Encrypt..."
     $DOCKER_COMPOSE run --rm --entrypoint "" certbot certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN --email $EMAIL --agree-tos --no-eff-email --force-renewal
     
-    if [ ! -f "./certbot/conf/live/$DOMAIN/fullchain.pem" ]; then
+    # Use sudo to check file existence due to root permissions on certbot files
+    if ! sudo test -f "./certbot/conf/live/$DOMAIN/fullchain.pem"; then
         echo "ERROR: Certificate generation failed! Check the logs above."
         exit 1
     fi
