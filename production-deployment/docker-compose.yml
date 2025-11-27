@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # 1. Database (PostgreSQL)
+  # ==========================================
+  db:
+    image: postgres:14-alpine
+    container_name: libreclinica_db
+    restart: always
+    environment:
+      POSTGRES_DB: libreclinica
+      POSTGRES_USER: clinica
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-clinica_secure_password}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - lc_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinica -d libreclinica"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ==========================================
+  # 2. LibreClinica Core (Java/Tomcat)
+  # ==========================================
+  core:
+    image: jaspersnel/libreclinica:latest
+    container_name: libreclinica_core
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      dbType: postgres
+      dbHost: db
+      dbPort: 5432
+      dbName: libreclinica
+      dbUser: clinica
+      dbPass: ${DB_PASSWORD:-clinica_secure_password}
+      sysURL: https://api.accuratrials.com/LibreClinica
+      supportURL: https://www.accuratrials.com
+    volumes:
+      - core_data:/usr/local/tomcat/libreclinica.data
+    networks:
+      - lc_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/LibreClinica/pages/login/login || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # ==========================================
+  # 3. LibreClinica API (Node.js)
+  # ==========================================
+  api:
+    build: ../libreclinica-api
+    image: libreclinica-api:latest
+    container_name: libreclinica_api
+    restart: always
+    depends_on:
+      - db
+      - core
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Database Connection
+      LIBRECLINICA_DB_HOST: db
+      LIBRECLINICA_DB_PORT: 5432
+      LIBRECLINICA_DB_NAME: libreclinica
+      LIBRECLINICA_DB_USER: clinica
+      LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-clinica_secure_password}
+      # Core SOAP Connection
+      LIBRECLINICA_SOAP_URL: http://core:8080/LibreClinica/ws
+      SOAP_USERNAME: root
+      SOAP_PASSWORD: ${SOAP_PASSWORD:-root}
+      # Security
+      JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
+      ALLOWED_ORIGINS: https://www.accuratrials.com,https://api.accuratrials.com
+    networks:
+      - lc_network
+
+  # ==========================================
+  # 4. Nginx (Reverse Proxy & SSL)
+  # ==========================================
+  nginx:
+    image: nginx:alpine
+    container_name: libreclinica_nginx
+    restart: always
+    ports:
+      - "0.0.0.0:80:80"   # Explicit IPv4 binding
+      - "0.0.0.0:443:443" # Explicit IPv4 binding
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - api
+      - core
+    networks:
+      - lc_network
+
+  # ==========================================
+  # 5. Certbot (SSL Renewal)
+  # ==========================================
+  certbot:
+    image: certbot/certbot
+    container_name: libreclinica_certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    # Check for renewal every 12 hours
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  db_data:
+  core_data:
+
+networks:
+  lc_network:
+    driver: bridge
