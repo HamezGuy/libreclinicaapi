@@ -2,16 +2,26 @@
 set -e
 
 DOMAIN="api.accuratrials.com"
-EMAIL="admin@accuratrials.com" # Replace if needed
+EMAIL="admin@accuratrials.com"
 
-echo "=== Starting Deployment for $DOMAIN ==="
+# Detect Docker Compose command
+if docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker-compose"
+else
+    echo "Error: neither 'docker compose' nor 'docker-compose' found."
+    exit 1
+fi
+
+echo "=== Starting Deployment for $DOMAIN using $DOCKER_COMPOSE ==="
 
 # 0. Ensure correct directory
 cd "$(dirname "$0")"
 
 # 1. Stop any existing containers
 echo "Stopping existing containers..."
-docker-compose down
+$DOCKER_COMPOSE down || true
 
 # Ensure certbot directories exist
 mkdir -p certbot/conf certbot/www
@@ -24,16 +34,16 @@ if [ ! -d "./certbot/conf/live/$DOMAIN" ]; then
     cp nginx-init.conf nginx.conf
     
     echo "Starting Nginx for validation..."
-    docker-compose up -d nginx
+    $DOCKER_COMPOSE up -d nginx
     
     echo "Waiting for Nginx to be ready..."
-    sleep 5
+    sleep 10
     
     echo "Requesting Certificate from Let's Encrypt..."
-    docker-compose run --rm certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN --email $EMAIL --agree-tos --no-eff-email
+    $DOCKER_COMPOSE run --rm certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN --email $EMAIL --agree-tos --no-eff-email
     
     echo "Certificate obtained! Stopping Nginx..."
-    docker-compose stop nginx
+    $DOCKER_COMPOSE stop nginx
 else
     echo "SSL certificate already exists. Skipping bootstrap."
 fi
@@ -43,9 +53,8 @@ echo "Applying production configuration..."
 cp nginx-prod.conf nginx.conf
 
 echo "Starting full stack..."
-docker-compose up -d --build
+$DOCKER_COMPOSE up -d --build
 
 echo "=== Deployment Complete ==="
 echo "API should be reachable at https://$DOMAIN/api/health"
 echo "Core should be reachable at https://$DOMAIN/LibreClinica"
-
