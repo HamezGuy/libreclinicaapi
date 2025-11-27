@@ -40,7 +40,7 @@ if [ ! -d "./certbot/conf/live/$DOMAIN" ]; then
     sleep 10
     
     echo "Requesting Certificate from Let's Encrypt..."
-    $DOCKER_COMPOSE run --rm --entrypoint "" certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN --email $EMAIL --agree-tos --no-eff-email --force-renewal
+    $DOCKER_COMPOSE run --rm --entrypoint "" certbot certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN --email $EMAIL --agree-tos --no-eff-email --force-renewal
     
     if [ ! -f "./certbot/conf/live/$DOMAIN/fullchain.pem" ]; then
         echo "ERROR: Certificate generation failed! Check the logs above."
