@@ -62,6 +62,15 @@ export const config = {
   logging: {
     level: process.env.LOG_LEVEL || 'info',
     filePath: process.env.LOG_FILE_PATH || './logs'
+  },
+  
+  woundScanner: {
+    appDomain: process.env.WOUND_SCANNER_APP_DOMAIN || 'yourapp.com',
+    urlScheme: process.env.WOUND_SCANNER_URL_SCHEME || 'woundscanner',
+    captureTokenExpiry: process.env.CAPTURE_TOKEN_EXPIRY || '15m',
+    s3Bucket: process.env.WOUND_IMAGES_S3_BUCKET || '',
+    s3Region: process.env.WOUND_IMAGES_S3_REGION || 'us-east-1',
+    enableAuditChain: process.env.WOUND_ENABLE_AUDIT_CHAIN !== 'false'
   }
 };
 

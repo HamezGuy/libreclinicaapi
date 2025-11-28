@@ -1,5 +1,7 @@
 /**
  * Authentication Routes
+ * 
+ * Includes WoundScanner capture token endpoints
  */
 
 import express from 'express';
@@ -18,9 +20,15 @@ router.post('/login', validate({ body: authSchemas.login }), controller.login);
 router.post('/google', validate({ body: authSchemas.googleAuth }), controller.googleLogin);
 router.post('/refresh', validate({ body: authSchemas.refreshToken }), controller.refresh);
 
+// Token validation for iOS app (no auth - token in body)
+router.post('/validate-token', controller.validateCaptureToken);
+
 // Protected routes (auth required)
 router.get('/verify', authMiddleware, controller.verify);
 router.post('/logout', authMiddleware, controller.logout);
+
+// Capture token generation (requires auth)
+router.post('/capture-token', authMiddleware, controller.generateCaptureToken);
 
 export default router;
 

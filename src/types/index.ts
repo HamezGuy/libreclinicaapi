@@ -6,7 +6,11 @@
  * - API request/response types
  * - SOAP message types
  * - Business logic types
+ * - Wound Scanner types
  */
+
+// Re-export Wound Scanner types
+export * from './wound.types';
 
 /**
  * ============================================================================

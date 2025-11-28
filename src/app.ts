@@ -37,6 +37,8 @@ import randomizationRoutes from './routes/randomization.routes';
 import monitoringRoutes from './routes/monitoring.routes';
 import codingRoutes from './routes/coding.routes';
 import dataLocksRoutes from './routes/data-locks.routes';
+// WoundScanner integration
+import woundsRoutes from './routes/wounds.routes';
 
 const app = express();
 
@@ -137,6 +139,8 @@ app.use('/api/randomization', randomizationRoutes);
 app.use('/api/monitoring', monitoringRoutes);
 app.use('/api/coding', codingRoutes);
 app.use('/api/data-locks', dataLocksRoutes);
+// WoundScanner integration
+app.use('/api/wounds', woundsRoutes);
 
 // ============================================================================
 // ROOT ENDPOINT
@@ -165,7 +169,8 @@ app.get('/', (req: Request, res: Response) => {
       randomization: '/api/randomization',
       monitoring: '/api/monitoring',
       coding: '/api/coding',
-      dataLocks: '/api/data-locks'
+      dataLocks: '/api/data-locks',
+      wounds: '/api/wounds'
     }
   });
 });
