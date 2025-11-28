@@ -81,5 +81,147 @@ export const stats = asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: result });
 });
 
-export default { list, get, create, respond, updateStatus, stats };
+/**
+ * Get query types
+ */
+export const getQueryTypes = asyncHandler(async (req: Request, res: Response) => {
+  const result = await queryService.getQueryTypes();
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get resolution statuses
+ */
+export const getResolutionStatuses = asyncHandler(async (req: Request, res: Response) => {
+  const result = await queryService.getResolutionStatuses();
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get queries for a specific form
+ */
+export const getFormQueries = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId } = req.params;
+
+  const result = await queryService.getFormQueries(parseInt(eventCrfId));
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Reassign query
+ */
+export const reassign = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+  const { assignedUserId } = req.body;
+
+  if (!assignedUserId) {
+    res.status(400).json({ success: false, message: 'assignedUserId is required' });
+    return;
+  }
+
+  const result = await queryService.reassignQuery(
+    parseInt(id),
+    assignedUserId,
+    user.userId
+  );
+
+  res.json(result);
+});
+
+/**
+ * Get query count by status
+ */
+export const countByStatus = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await queryService.getQueryCountByStatus(parseInt(studyId as string));
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get query count by type
+ */
+export const countByType = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await queryService.getQueryCountByType(parseInt(studyId as string));
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get query thread (conversation)
+ */
+export const getThread = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  const result = await queryService.getQueryThread(parseInt(id));
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get overdue queries
+ */
+export const getOverdue = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, days } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await queryService.getOverdueQueries(
+    parseInt(studyId as string),
+    parseInt(days as string) || 7
+  );
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get my assigned queries
+ */
+export const getMyAssigned = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { studyId } = req.query;
+
+  const result = await queryService.getMyAssignedQueries(
+    user.userId,
+    studyId ? parseInt(studyId as string) : undefined
+  );
+
+  res.json({ success: true, data: result });
+});
+
+export default { 
+  list, 
+  get, 
+  create, 
+  respond, 
+  updateStatus, 
+  stats, 
+  getQueryTypes, 
+  getResolutionStatuses, 
+  getFormQueries, 
+  reassign, 
+  countByStatus, 
+  countByType, 
+  getThread, 
+  getOverdue, 
+  getMyAssigned 
+};
 

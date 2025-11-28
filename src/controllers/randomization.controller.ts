@@ -38,4 +38,105 @@ export const getGroups = asyncHandler(async (req: Request, res: Response) => {
   res.json(result);
 });
 
-export default { list, create, getGroups };
+/**
+ * Get randomization statistics for a study
+ */
+export const getStats = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await randomizationService.getRandomizationStats(parseInt(studyId as string));
+
+  res.json(result);
+});
+
+/**
+ * Check if subject can be randomized
+ */
+export const canRandomize = asyncHandler(async (req: Request, res: Response) => {
+  const { subjectId } = req.params;
+
+  const result = await randomizationService.canRandomize(parseInt(subjectId));
+
+  res.json(result);
+});
+
+/**
+ * Get subject's randomization info
+ */
+export const getSubjectRandomization = asyncHandler(async (req: Request, res: Response) => {
+  const { subjectId } = req.params;
+
+  const result = await randomizationService.getSubjectRandomization(parseInt(subjectId));
+
+  res.json(result);
+});
+
+/**
+ * Remove randomization
+ */
+export const remove = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { subjectId } = req.params;
+
+  const result = await randomizationService.removeRandomization(
+    parseInt(subjectId),
+    user.userId
+  );
+
+  res.json(result);
+});
+
+/**
+ * Get unblinding events
+ */
+export const getUnblindingEvents = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await randomizationService.getUnblindingEvents(parseInt(studyId as string));
+
+  res.json(result);
+});
+
+/**
+ * Unblind a subject
+ */
+export const unblind = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { subjectId } = req.params;
+  const { reason } = req.body;
+
+  if (!reason) {
+    res.status(400).json({ success: false, message: 'Reason is required for unblinding' });
+    return;
+  }
+
+  const result = await randomizationService.unblindSubject(
+    parseInt(subjectId),
+    user.userId,
+    reason
+  );
+
+  res.json(result);
+});
+
+export default { 
+  list, 
+  create, 
+  getGroups, 
+  getStats, 
+  canRandomize, 
+  getSubjectRandomization, 
+  remove, 
+  getUnblindingEvents, 
+  unblind 
+};

@@ -41,4 +41,76 @@ export const verify = asyncHandler(async (req: Request, res: Response) => {
   res.json(result);
 });
 
-export default { list, get, verify };
+/**
+ * Bulk verify multiple SDV records
+ */
+export const bulkVerify = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventCrfIds } = req.body;
+
+  if (!eventCrfIds || !Array.isArray(eventCrfIds)) {
+    res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
+    return;
+  }
+
+  const result = await sdvService.bulkVerifySDV(eventCrfIds, user.userId);
+
+  res.json(result);
+});
+
+/**
+ * Get SDV status for a subject
+ */
+export const getSubjectStatus = asyncHandler(async (req: Request, res: Response) => {
+  const { subjectId } = req.params;
+
+  const result = await sdvService.getSubjectSDVStatus(parseInt(subjectId));
+
+  res.json(result);
+});
+
+/**
+ * Get SDV statistics for a study
+ */
+export const getStats = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await sdvService.getSDVStats(parseInt(studyId as string));
+
+  res.json(result);
+});
+
+/**
+ * Get SDV by visit/event
+ */
+export const getByVisit = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+
+  if (!studyId) {
+    res.status(400).json({ success: false, message: 'studyId is required' });
+    return;
+  }
+
+  const result = await sdvService.getSDVByVisit(parseInt(studyId as string));
+
+  res.json(result);
+});
+
+/**
+ * Unverify SDV record
+ */
+export const unverify = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+
+  const result = await sdvService.unverifySDV(parseInt(id), user.userId);
+
+  res.json(result);
+});
+
+export default { list, get, verify, bulkVerify, getSubjectStatus, getStats, getByVisit, unverify };

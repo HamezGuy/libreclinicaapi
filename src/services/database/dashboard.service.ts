@@ -526,11 +526,360 @@ export const getStudyProgress = async (studyId: number): Promise<any> => {
   }
 };
 
+/**
+ * Get enrollment trend over time
+ */
+export const getEnrollmentTrend = async (
+  studyId: number,
+  days: number = 30
+): Promise<any[]> => {
+  logger.info('Getting enrollment trend', { studyId, days });
+
+  try {
+    const query = `
+      SELECT 
+        DATE(ss.enrollment_date) as date,
+        COUNT(*) as enrolled,
+        SUM(COUNT(*)) OVER (ORDER BY DATE(ss.enrollment_date)) as cumulative
+      FROM study_subject ss
+      WHERE ss.study_id = $1
+        AND ss.enrollment_date >= CURRENT_DATE - INTERVAL '${days} days'
+      GROUP BY DATE(ss.enrollment_date)
+      ORDER BY date
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows.map(row => ({
+      date: row.date?.toISOString().split('T')[0],
+      enrolled: parseInt(row.enrolled),
+      cumulative: parseInt(row.cumulative)
+    }));
+  } catch (error: any) {
+    logger.error('Enrollment trend error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get completion trend over time
+ * Note: Uses date_updated when completion_status_id indicates complete (4 or 5)
+ */
+export const getCompletionTrend = async (
+  studyId: number,
+  days: number = 30
+): Promise<any[]> => {
+  logger.info('Getting completion trend', { studyId, days });
+
+  try {
+    const query = `
+      SELECT 
+        DATE(ec.date_updated) as date,
+        COUNT(*) as completed
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      WHERE ss.study_id = $1
+        AND cs.name IN ('complete', 'signed')
+        AND ec.date_updated >= CURRENT_DATE - INTERVAL '${days} days'
+      GROUP BY DATE(ec.date_updated)
+      ORDER BY date
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows.map(row => ({
+      date: row.date?.toISOString().split('T')[0],
+      completed: parseInt(row.completed)
+    }));
+  } catch (error: any) {
+    logger.error('Completion trend error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get site performance metrics
+ */
+export const getSitePerformance = async (studyId: number): Promise<any[]> => {
+  logger.info('Getting site performance', { studyId });
+
+  try {
+    // Sites are child studies with parent_study_id = studyId
+    const query = `
+      SELECT 
+        s.study_id as site_id,
+        s.name as site_name,
+        s.unique_identifier as site_number,
+        COUNT(DISTINCT ss.study_subject_id) as enrolled_subjects,
+        COUNT(DISTINCT ec.event_crf_id) as total_forms,
+        COUNT(DISTINCT CASE WHEN cs.name IN ('complete', 'signed') THEN ec.event_crf_id END) as completed_forms,
+        COUNT(DISTINCT dn.discrepancy_note_id) as open_queries
+      FROM study s
+      LEFT JOIN study_subject ss ON ss.study_id = s.study_id
+      LEFT JOIN study_event se ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      LEFT JOIN discrepancy_note dn ON dn.study_id = s.study_id AND dn.resolution_status_id IN (1,2,3)
+      WHERE s.parent_study_id = $1
+      GROUP BY s.study_id, s.name, s.unique_identifier
+      ORDER BY s.name
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows.map(row => ({
+      siteId: row.site_id,
+      siteName: row.site_name,
+      siteNumber: row.site_number,
+      enrolledSubjects: parseInt(row.enrolled_subjects) || 0,
+      totalForms: parseInt(row.total_forms) || 0,
+      completedForms: parseInt(row.completed_forms) || 0,
+      completionRate: row.total_forms > 0 
+        ? Math.round((parseInt(row.completed_forms) / parseInt(row.total_forms)) * 100) 
+        : 0,
+      openQueries: parseInt(row.open_queries) || 0
+    }));
+  } catch (error: any) {
+    logger.error('Site performance error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get form completion rates by CRF
+ */
+export const getFormCompletionRates = async (studyId: number): Promise<any[]> => {
+  logger.info('Getting form completion rates', { studyId });
+
+  try {
+    const query = `
+      SELECT 
+        c.crf_id,
+        c.name as form_name,
+        COUNT(ec.event_crf_id) as total_instances,
+        COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END) as completed,
+        COUNT(CASE WHEN cs.name NOT IN ('complete', 'signed') THEN 1 END) as incomplete
+      FROM crf c
+      INNER JOIN crf_version cv ON c.crf_id = cv.crf_id
+      INNER JOIN event_definition_crf edc ON cv.crf_version_id = edc.default_version_id OR cv.crf_id = c.crf_id
+      INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
+      LEFT JOIN event_crf ec ON ec.crf_version_id = cv.crf_version_id
+      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      WHERE sed.study_id = $1
+      GROUP BY c.crf_id, c.name
+      ORDER BY c.name
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows.map(row => ({
+      formId: row.crf_id,
+      formName: row.form_name,
+      totalInstances: parseInt(row.total_instances) || 0,
+      completed: parseInt(row.completed) || 0,
+      incomplete: parseInt(row.incomplete) || 0,
+      completionRate: row.total_instances > 0 
+        ? Math.round((parseInt(row.completed) / parseInt(row.total_instances)) * 100) 
+        : 0
+    }));
+  } catch (error: any) {
+    logger.error('Form completion rates error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get data quality metrics
+ */
+export const getDataQualityMetrics = async (studyId: number): Promise<any> => {
+  logger.info('Getting data quality metrics', { studyId });
+
+  try {
+    const query = `
+      SELECT 
+        (SELECT COUNT(*) FROM discrepancy_note WHERE study_id = $1 AND parent_dn_id IS NULL) as total_queries,
+        (SELECT COUNT(*) FROM discrepancy_note WHERE study_id = $1 AND parent_dn_id IS NULL AND resolution_status_id IN (1,2,3)) as open_queries,
+        (SELECT COUNT(*) FROM discrepancy_note WHERE study_id = $1 AND parent_dn_id IS NULL AND resolution_status_id = 4) as resolved_queries,
+        (SELECT COUNT(*) FROM event_crf ec 
+         INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+         INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+         WHERE ss.study_id = $1 AND ec.sdv_status = true) as sdv_verified,
+        (SELECT COUNT(*) FROM event_crf ec 
+         INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+         INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+         WHERE ss.study_id = $1) as total_crfs,
+        (SELECT COUNT(*) FROM audit_log_event ale
+         WHERE ale.audit_date >= CURRENT_DATE - INTERVAL '30 days') as audit_events_30d
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    const row = result.rows[0];
+
+    return {
+      totalQueries: parseInt(row.total_queries) || 0,
+      openQueries: parseInt(row.open_queries) || 0,
+      resolvedQueries: parseInt(row.resolved_queries) || 0,
+      queryResolutionRate: row.total_queries > 0 
+        ? Math.round((parseInt(row.resolved_queries) / parseInt(row.total_queries)) * 100) 
+        : 100,
+      sdvVerified: parseInt(row.sdv_verified) || 0,
+      totalCRFs: parseInt(row.total_crfs) || 0,
+      sdvRate: row.total_crfs > 0 
+        ? Math.round((parseInt(row.sdv_verified) / parseInt(row.total_crfs)) * 100) 
+        : 0,
+      auditEvents30Days: parseInt(row.audit_events_30d) || 0
+    };
+  } catch (error: any) {
+    logger.error('Data quality metrics error', { error: error.message });
+    return {};
+  }
+};
+
+/**
+ * Get subject status distribution
+ */
+export const getSubjectStatusDistribution = async (studyId: number): Promise<any[]> => {
+  logger.info('Getting subject status distribution', { studyId });
+
+  try {
+    const query = `
+      SELECT 
+        st.name as status,
+        COUNT(ss.study_subject_id) as count
+      FROM status st
+      LEFT JOIN study_subject ss ON ss.status_id = st.status_id AND ss.study_id = $1
+      WHERE st.status_id IN (1,2,3,4,5)
+      GROUP BY st.name, st.status_id
+      ORDER BY st.status_id
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows.map(row => ({
+      status: row.status,
+      count: parseInt(row.count) || 0
+    }));
+  } catch (error: any) {
+    logger.error('Subject status distribution error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get real-time activity feed
+ */
+export const getActivityFeed = async (studyId: number, limit: number = 20): Promise<any[]> => {
+  logger.info('Getting activity feed', { studyId, limit });
+
+  try {
+    const query = `
+      SELECT 
+        ale.audit_id,
+        ale.audit_date,
+        ale.audit_table,
+        ale.entity_name,
+        ale.old_value,
+        ale.new_value,
+        alet.name as event_type,
+        u.user_name,
+        u.first_name || ' ' || u.last_name as user_full_name
+      FROM audit_log_event ale
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      LEFT JOIN user_account u ON ale.user_id = u.user_id
+      ORDER BY ale.audit_date DESC
+      LIMIT $1
+    `;
+
+    const result = await pool.query(query, [limit]);
+    return result.rows.map(row => ({
+      id: row.audit_id,
+      timestamp: row.audit_date,
+      table: row.audit_table,
+      entityName: row.entity_name,
+      eventType: row.event_type,
+      oldValue: row.old_value,
+      newValue: row.new_value,
+      userName: row.user_name,
+      userFullName: row.user_full_name
+    }));
+  } catch (error: any) {
+    logger.error('Activity feed error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get study health score
+ */
+export const getStudyHealthScore = async (studyId: number): Promise<any> => {
+  logger.info('Getting study health score', { studyId });
+
+  try {
+    // Get various metrics and calculate health score
+    const [enrollment, completion, queries] = await Promise.all([
+      getEnrollmentStats(studyId),
+      getCompletionStats(studyId),
+      getQueryStatistics(studyId, 'month')
+    ]);
+
+    // Calculate factor scores (0-100)
+    const enrollmentScore = enrollment.targetEnrollment 
+      ? Math.min(100, Math.round((enrollment.totalSubjects / enrollment.targetEnrollment) * 100))
+      : 50;
+
+    const dataCompletionScore = completion.completionPercentage || 0;
+
+    const queryResolutionScore = queries.totalQueries > 0
+      ? Math.round((queries.closedQueries / queries.totalQueries) * 100)
+      : 100;
+
+    // Protocol compliance estimated from query rate
+    const protocolComplianceScore = queries.queryRate < 0.5 
+      ? 90 
+      : queries.queryRate < 1 ? 75 : 60;
+
+    // Overall score is weighted average
+    const overallScore = Math.round(
+      (enrollmentScore * 0.25) +
+      (dataCompletionScore * 0.35) +
+      (queryResolutionScore * 0.25) +
+      (protocolComplianceScore * 0.15)
+    );
+
+    return {
+      score: overallScore,
+      factors: {
+        enrollment: enrollmentScore,
+        dataCompletion: dataCompletionScore,
+        queryResolution: queryResolutionScore,
+        protocolCompliance: protocolComplianceScore
+      },
+      lastUpdated: new Date()
+    };
+  } catch (error: any) {
+    logger.error('Study health score error', { error: error.message });
+    return {
+      score: 0,
+      factors: {
+        enrollment: 0,
+        dataCompletion: 0,
+        queryResolution: 0,
+        protocolCompliance: 0
+      }
+    };
+  }
+};
+
 export default {
   getEnrollmentStats,
   getCompletionStats,
   getQueryStatistics,
   getUserActivityStats,
-  getStudyProgress
+  getStudyProgress,
+  getEnrollmentTrend,
+  getCompletionTrend,
+  getSitePerformance,
+  getFormCompletionRates,
+  getDataQualityMetrics,
+  getSubjectStatusDistribution,
+  getActivityFeed,
+  getStudyHealthScore
 };
 

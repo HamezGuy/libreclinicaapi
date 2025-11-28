@@ -16,5 +16,15 @@ router.get('/completion', validate({ query: dashboardSchemas.completion }), cont
 router.get('/queries', validate({ query: dashboardSchemas.queries }), controller.getQueries);
 router.get('/activity', validate({ query: dashboardSchemas.activity }), controller.getActivity);
 
+// New enhanced dashboard endpoints
+router.get('/enrollment-trend', controller.getEnrollmentTrend);
+router.get('/completion-trend', controller.getCompletionTrend);
+router.get('/site-performance', controller.getSitePerformance);
+router.get('/form-completion-rates', controller.getFormCompletionRates);
+router.get('/data-quality', controller.getDataQualityMetrics);
+router.get('/subject-status-distribution', controller.getSubjectStatusDistribution);
+router.get('/activity-feed', controller.getActivityFeed);
+router.get('/health-score', controller.getStudyHealthScore);
+
 export default router;
 

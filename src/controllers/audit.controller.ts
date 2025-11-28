@@ -51,5 +51,108 @@ export const getSubjectAudit = asyncHandler(async (req: Request, res: Response) 
   res.json(result);
 });
 
-export default { get, exportCsv, getSubjectAudit };
+/**
+ * Get audit event types
+ */
+export const getEventTypes = asyncHandler(async (req: Request, res: Response) => {
+  const result = await auditService.getAuditEventTypes();
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get auditable tables list
+ */
+export const getTables = asyncHandler(async (req: Request, res: Response) => {
+  const result = await auditService.getAuditableTables();
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get audit statistics
+ */
+export const getStats = asyncHandler(async (req: Request, res: Response) => {
+  const { days } = req.query;
+
+  const result = await auditService.getAuditStatistics(
+    parseInt(days as string) || 30
+  );
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get form audit trail
+ */
+export const getFormAudit = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId } = req.params;
+
+  const result = await auditService.getFormAudit(parseInt(eventCrfId));
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get audit summary by date range
+ */
+export const getSummary = asyncHandler(async (req: Request, res: Response) => {
+  const { startDate, endDate } = req.query;
+
+  if (!startDate || !endDate) {
+    res.status(400).json({ success: false, message: 'startDate and endDate are required' });
+    return;
+  }
+
+  const result = await auditService.getAuditSummary(
+    startDate as string,
+    endDate as string
+  );
+
+  res.json(result);
+});
+
+/**
+ * Get compliance report
+ */
+export const getComplianceReport = asyncHandler(async (req: Request, res: Response) => {
+  const { startDate, endDate, studyId } = req.query;
+
+  if (!startDate || !endDate) {
+    res.status(400).json({ success: false, message: 'startDate and endDate are required' });
+    return;
+  }
+
+  const result = await auditService.getComplianceReport({
+    startDate: startDate as string,
+    endDate: endDate as string,
+    studyId: studyId ? parseInt(studyId as string) : undefined
+  });
+
+  res.json(result);
+});
+
+/**
+ * Get recent audit events
+ */
+export const getRecent = asyncHandler(async (req: Request, res: Response) => {
+  const { limit } = req.query;
+
+  const result = await auditService.getRecentAuditEvents(
+    parseInt(limit as string) || 50
+  );
+
+  res.json({ success: true, data: result });
+});
+
+export default { 
+  get, 
+  exportCsv, 
+  getSubjectAudit, 
+  getEventTypes, 
+  getTables, 
+  getStats, 
+  getFormAudit, 
+  getSummary, 
+  getComplianceReport, 
+  getRecent 
+};
 

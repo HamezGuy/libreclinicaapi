@@ -318,11 +318,242 @@ export const getAuditStatistics = async (
   }
 };
 
+/**
+ * Get audit event types from database
+ */
+export const getAuditEventTypes = async (): Promise<any[]> => {
+  logger.info('Getting audit event types');
+
+  try {
+    const query = `
+      SELECT 
+        audit_log_event_type_id as id,
+        name,
+        description
+      FROM audit_log_event_type
+      ORDER BY audit_log_event_type_id
+    `;
+
+    const result = await pool.query(query);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get audit event types error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get auditable tables list
+ */
+export const getAuditableTables = async (): Promise<any[]> => {
+  logger.info('Getting auditable tables');
+
+  try {
+    const query = `
+      SELECT DISTINCT audit_table as name,
+        COUNT(*) as event_count
+      FROM audit_log_event
+      GROUP BY audit_table
+      ORDER BY event_count DESC
+    `;
+
+    const result = await pool.query(query);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get auditable tables error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get form/CRF specific audit trail
+ */
+export const getFormAudit = async (eventCrfId: number): Promise<any[]> => {
+  logger.info('Getting form audit', { eventCrfId });
+
+  try {
+    const query = `
+      SELECT 
+        ale.audit_id,
+        ale.audit_date,
+        ale.audit_table,
+        u.user_name,
+        u.first_name || ' ' || u.last_name as user_full_name,
+        ale.entity_id,
+        ale.entity_name,
+        ale.old_value,
+        ale.new_value,
+        alet.name as event_type,
+        ale.reason_for_change
+      FROM audit_log_event ale
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      LEFT JOIN user_account u ON ale.user_id = u.user_id
+      WHERE ale.event_crf_id = $1
+      ORDER BY ale.audit_date DESC
+    `;
+
+    const result = await pool.query(query, [eventCrfId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get form audit error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get audit by date range with summary
+ */
+export const getAuditSummary = async (startDate: string, endDate: string): Promise<any> => {
+  logger.info('Getting audit summary', { startDate, endDate });
+
+  try {
+    const query = `
+      SELECT 
+        DATE(ale.audit_date) as date,
+        alet.name as event_type,
+        COUNT(*) as count
+      FROM audit_log_event ale
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      GROUP BY DATE(ale.audit_date), alet.name
+      ORDER BY date DESC, count DESC
+    `;
+
+    const result = await pool.query(query, [startDate, endDate]);
+
+    // Group by date
+    const summary: any = {};
+    for (const row of result.rows) {
+      const dateKey = row.date?.toISOString().split('T')[0];
+      if (!summary[dateKey]) {
+        summary[dateKey] = { date: dateKey, events: {}, total: 0 };
+      }
+      summary[dateKey].events[row.event_type] = parseInt(row.count);
+      summary[dateKey].total += parseInt(row.count);
+    }
+
+    return {
+      success: true,
+      data: Object.values(summary)
+    };
+  } catch (error: any) {
+    logger.error('Get audit summary error', { error: error.message });
+    return { success: false, data: [] };
+  }
+};
+
+/**
+ * Get compliance report
+ * Returns audit data formatted for 21 CFR Part 11 compliance reports
+ */
+export const getComplianceReport = async (request: {
+  startDate: string;
+  endDate: string;
+  studyId?: number;
+}): Promise<any> => {
+  logger.info('Generating compliance report', request);
+
+  try {
+    const { startDate, endDate } = request;
+
+    // Get summary statistics
+    const statsQuery = `
+      SELECT 
+        COUNT(*) as total_events,
+        COUNT(DISTINCT ale.user_id) as unique_users,
+        COUNT(DISTINCT DATE(ale.audit_date)) as active_days,
+        MIN(ale.audit_date) as first_event,
+        MAX(ale.audit_date) as last_event
+      FROM audit_log_event ale
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+    `;
+
+    const statsResult = await pool.query(statsQuery, [startDate, endDate]);
+    const stats = statsResult.rows[0];
+
+    // Get events by type
+    const typeQuery = `
+      SELECT 
+        alet.name as event_type,
+        COUNT(*) as count
+      FROM audit_log_event ale
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      GROUP BY alet.name
+      ORDER BY count DESC
+    `;
+
+    const typeResult = await pool.query(typeQuery, [startDate, endDate]);
+
+    // Get user activity
+    const userQuery = `
+      SELECT 
+        u.user_name,
+        u.first_name || ' ' || u.last_name as user_full_name,
+        COUNT(*) as event_count
+      FROM audit_log_event ale
+      INNER JOIN user_account u ON ale.user_id = u.user_id
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      GROUP BY u.user_name, u.first_name, u.last_name
+      ORDER BY event_count DESC
+    `;
+
+    const userResult = await pool.query(userQuery, [startDate, endDate]);
+
+    // Get login events
+    const loginQuery = `
+      SELECT 
+        aul.login_attempt_date,
+        aul.user_name,
+        aul.login_status
+      FROM audit_user_login aul
+      WHERE aul.login_attempt_date >= $1 AND aul.login_attempt_date <= $2
+      ORDER BY aul.login_attempt_date DESC
+      LIMIT 100
+    `;
+
+    const loginResult = await pool.query(loginQuery, [startDate, endDate]);
+
+    return {
+      success: true,
+      data: {
+        reportPeriod: { startDate, endDate },
+        generatedAt: new Date().toISOString(),
+        summary: {
+          totalEvents: parseInt(stats.total_events),
+          uniqueUsers: parseInt(stats.unique_users),
+          activeDays: parseInt(stats.active_days),
+          firstEvent: stats.first_event,
+          lastEvent: stats.last_event
+        },
+        eventsByType: typeResult.rows.map(r => ({
+          type: r.event_type,
+          count: parseInt(r.count)
+        })),
+        userActivity: userResult.rows.map(r => ({
+          userName: r.user_name,
+          fullName: r.user_full_name,
+          eventCount: parseInt(r.event_count)
+        })),
+        recentLogins: loginResult.rows
+      }
+    };
+  } catch (error: any) {
+    logger.error('Compliance report error', { error: error.message });
+    return { success: false, message: error.message };
+  }
+};
+
 export default {
   getAuditTrail,
   getSubjectAudit,
   getRecentAuditEvents,
   exportAuditTrailCSV,
-  getAuditStatistics
+  getAuditStatistics,
+  getAuditEventTypes,
+  getAuditableTables,
+  getFormAudit,
+  getAuditSummary,
+  getComplianceReport
 };
 

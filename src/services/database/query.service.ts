@@ -450,11 +450,350 @@ export const getQueryStats = async (studyId: number): Promise<any> => {
   }
 };
 
+/**
+ * Get query types from database
+ */
+export const getQueryTypes = async (): Promise<any[]> => {
+  logger.info('Getting query types');
+
+  try {
+    const query = `
+      SELECT 
+        discrepancy_note_type_id as id,
+        name,
+        description
+      FROM discrepancy_note_type
+      ORDER BY discrepancy_note_type_id
+    `;
+
+    const result = await pool.query(query);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get query types error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get resolution statuses from database
+ */
+export const getResolutionStatuses = async (): Promise<any[]> => {
+  logger.info('Getting resolution statuses');
+
+  try {
+    const query = `
+      SELECT 
+        resolution_status_id as id,
+        name
+      FROM resolution_status
+      ORDER BY resolution_status_id
+    `;
+
+    const result = await pool.query(query);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get resolution statuses error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get queries for a specific form (event_crf)
+ */
+export const getFormQueries = async (eventCrfId: number): Promise<any[]> => {
+  logger.info('Getting form queries', { eventCrfId });
+
+  try {
+    const query = `
+      SELECT 
+        dn.discrepancy_note_id,
+        dn.description,
+        dn.detailed_notes,
+        dnt.name as type_name,
+        dnst.name as status_name,
+        dn.date_created,
+        u1.user_name as created_by,
+        u2.user_name as assigned_to,
+        (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count
+      FROM discrepancy_note dn
+      INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
+      LEFT JOIN user_account u1 ON dn.owner_id = u1.user_id
+      LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
+      INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
+      WHERE decm.event_crf_id = $1
+        AND dn.parent_dn_id IS NULL
+      ORDER BY dn.date_created DESC
+    `;
+
+    const result = await pool.query(query, [eventCrfId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get form queries error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Reassign query to another user
+ */
+export const reassignQuery = async (
+  queryId: number,
+  assignedUserId: number,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Reassigning query', { queryId, assignedUserId, userId });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Get current assignment
+    const currentQuery = await client.query(
+      'SELECT assigned_user_id FROM discrepancy_note WHERE discrepancy_note_id = $1',
+      [queryId]
+    );
+
+    if (currentQuery.rows.length === 0) {
+      throw new Error('Query not found');
+    }
+
+    const oldAssignedUserId = currentQuery.rows[0].assigned_user_id;
+
+    // Update assignment
+    await client.query(`
+      UPDATE discrepancy_note
+      SET assigned_user_id = $1, date_updated = NOW(), update_id = $2
+      WHERE discrepancy_note_id = $3
+    `, [assignedUserId, userId, queryId]);
+
+    // Log audit event
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Query Reassigned', $3::text, $4::text,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Query Updated' LIMIT 1)
+      )
+    `, [userId, queryId, oldAssignedUserId, assignedUserId]);
+
+    await client.query('COMMIT');
+
+    return { success: true, message: 'Query reassigned successfully' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Reassign query error', { error: error.message });
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Get query counts by status
+ */
+export const getQueryCountByStatus = async (studyId: number): Promise<any[]> => {
+  logger.info('Getting query count by status', { studyId });
+
+  try {
+    const query = `
+      SELECT 
+        rs.resolution_status_id as status_id,
+        rs.name as status_name,
+        COUNT(dn.discrepancy_note_id) as count
+      FROM resolution_status rs
+      LEFT JOIN discrepancy_note dn ON rs.resolution_status_id = dn.resolution_status_id 
+        AND dn.study_id = $1 AND dn.parent_dn_id IS NULL
+      GROUP BY rs.resolution_status_id, rs.name
+      ORDER BY rs.resolution_status_id
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get query count by status error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get query counts by type
+ */
+export const getQueryCountByType = async (studyId: number): Promise<any[]> => {
+  logger.info('Getting query count by type', { studyId });
+
+  try {
+    const query = `
+      SELECT 
+        dnt.discrepancy_note_type_id as type_id,
+        dnt.name as type_name,
+        COUNT(dn.discrepancy_note_id) as count
+      FROM discrepancy_note_type dnt
+      LEFT JOIN discrepancy_note dn ON dnt.discrepancy_note_type_id = dn.discrepancy_note_type_id 
+        AND dn.study_id = $1 AND dn.parent_dn_id IS NULL
+      GROUP BY dnt.discrepancy_note_type_id, dnt.name
+      ORDER BY dnt.discrepancy_note_type_id
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get query count by type error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get query thread (conversation history)
+ */
+export const getQueryThread = async (queryId: number): Promise<any[]> => {
+  logger.info('Getting query thread', { queryId });
+
+  try {
+    const query = `
+      WITH RECURSIVE query_thread AS (
+        -- Get the parent query
+        SELECT 
+          dn.discrepancy_note_id,
+          dn.parent_dn_id,
+          dn.description,
+          dn.detailed_notes,
+          dn.date_created,
+          u.user_name as created_by,
+          u.first_name || ' ' || u.last_name as user_full_name,
+          0 as level
+        FROM discrepancy_note dn
+        LEFT JOIN user_account u ON dn.owner_id = u.user_id
+        WHERE dn.discrepancy_note_id = $1
+        
+        UNION ALL
+        
+        -- Get all responses
+        SELECT 
+          dn.discrepancy_note_id,
+          dn.parent_dn_id,
+          dn.description,
+          dn.detailed_notes,
+          dn.date_created,
+          u.user_name as created_by,
+          u.first_name || ' ' || u.last_name as user_full_name,
+          qt.level + 1
+        FROM discrepancy_note dn
+        INNER JOIN query_thread qt ON dn.parent_dn_id = qt.discrepancy_note_id
+        LEFT JOIN user_account u ON dn.owner_id = u.user_id
+      )
+      SELECT * FROM query_thread
+      ORDER BY date_created ASC
+    `;
+
+    const result = await pool.query(query, [queryId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get query thread error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get overdue queries
+ */
+export const getOverdueQueries = async (studyId: number, daysThreshold: number = 7): Promise<any[]> => {
+  logger.info('Getting overdue queries', { studyId, daysThreshold });
+
+  try {
+    const query = `
+      SELECT 
+        dn.discrepancy_note_id,
+        dn.description,
+        dn.date_created,
+        EXTRACT(DAY FROM NOW() - dn.date_created) as days_open,
+        dnt.name as type_name,
+        dnst.name as status_name,
+        ss.label as subject_label,
+        u.user_name as assigned_to
+      FROM discrepancy_note dn
+      INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
+      LEFT JOIN user_account u ON dn.assigned_user_id = u.user_id
+      LEFT JOIN event_crf ec ON dn.entity_type = 'event_crf' AND dn.entity_id = ec.event_crf_id
+      LEFT JOIN study_event se ON ec.study_event_id = se.study_event_id
+      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      WHERE dn.study_id = $1
+        AND dn.parent_dn_id IS NULL
+        AND dnst.name IN ('New', 'Updated', 'Resolution Proposed')
+        AND dn.date_created < NOW() - INTERVAL '${daysThreshold} days'
+      ORDER BY dn.date_created ASC
+    `;
+
+    const result = await pool.query(query, [studyId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get overdue queries error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get my assigned queries
+ */
+export const getMyAssignedQueries = async (userId: number, studyId?: number): Promise<any[]> => {
+  logger.info('Getting my assigned queries', { userId, studyId });
+
+  try {
+    let query = `
+      SELECT 
+        dn.discrepancy_note_id,
+        dn.description,
+        dn.date_created,
+        dnt.name as type_name,
+        dnst.name as status_name,
+        ss.label as subject_label,
+        s.name as study_name
+      FROM discrepancy_note dn
+      INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
+      LEFT JOIN study s ON dn.study_id = s.study_id
+      LEFT JOIN event_crf ec ON dn.entity_type = 'event_crf' AND dn.entity_id = ec.event_crf_id
+      LEFT JOIN study_event se ON ec.study_event_id = se.study_event_id
+      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      WHERE dn.assigned_user_id = $1
+        AND dn.parent_dn_id IS NULL
+        AND dnst.name NOT IN ('Closed', 'Not Applicable')
+    `;
+
+    const params = [userId];
+
+    if (studyId) {
+      query += ` AND dn.study_id = $2`;
+      params.push(studyId);
+    }
+
+    query += ` ORDER BY dn.date_created DESC`;
+
+    const result = await pool.query(query, params);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get my assigned queries error', { error: error.message });
+    return [];
+  }
+};
+
 export default {
   getQueries,
   getQueryById,
   createQuery,
   addQueryResponse,
   updateQueryStatus,
-  getQueryStats
+  getQueryStats,
+  getQueryTypes,
+  getResolutionStatuses,
+  getFormQueries,
+  reassignQuery,
+  getQueryCountByStatus,
+  getQueryCountByType,
+  getQueryThread,
+  getOverdueQueries,
+  getMyAssignedQueries
 };
