@@ -81,7 +81,7 @@ services:
       # Security
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
       # CORS - Allow Vercel, localhost, and production domains
-      ALLOWED_ORIGINS: https://www.accuratrials.com,https://api.accuratrials.com,https://accuratrials.com,https://*.vercel.app,http://localhost:4200,http://localhost:3000
+      ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
     networks:
       - lc_network
 
