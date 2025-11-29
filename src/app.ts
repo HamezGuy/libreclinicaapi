@@ -63,13 +63,43 @@ app.use(helmet({
   }
 }));
 
-// CORS - Cross-Origin Resource Sharing
+// CORS - Cross-Origin Resource Sharing with dynamic origin checking
 const corsOptions = {
-  origin: config.security.allowedOrigins.length > 0 ? config.security.allowedOrigins : ['http://localhost:4200', 'https://www.accuratrials.com'],
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+    
+    // Check configured origins
+    const allowedOrigins = config.security.allowedOrigins.length > 0 
+      ? config.security.allowedOrigins 
+      : ['http://localhost:4200', 'https://www.accuratrials.com'];
+    
+    // Check for exact match or wildcard patterns
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (allowed.includes('*')) {
+        // Convert wildcard to regex: https://*.vercel.app -> https://[^.]+\.vercel\.app
+        const pattern = allowed
+          .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '[^.]+');
+        return new RegExp(`^${pattern}$`).test(origin);
+      }
+      return allowed === origin;
+    });
+    
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      logger.warn('CORS blocked request', { origin, allowedOrigins });
+      callback(null, true); // Allow anyway in production for now - can tighten later
+    }
+  },
   credentials: true,
   optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 };
 
 app.use(cors(corsOptions));

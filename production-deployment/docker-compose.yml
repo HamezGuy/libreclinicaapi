@@ -63,6 +63,8 @@ services:
     depends_on:
       - postgres
       - core
+    ports:
+      - "3000:3000"  # Expose for direct access and debugging
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -78,7 +80,8 @@ services:
       SOAP_PASSWORD: ${SOAP_PASSWORD:-root}
       # Security
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
-      ALLOWED_ORIGINS: https://www.accuratrials.com,https://api.accuratrials.com
+      # CORS - Allow Vercel, localhost, and production domains
+      ALLOWED_ORIGINS: https://www.accuratrials.com,https://api.accuratrials.com,https://accuratrials.com,https://*.vercel.app,http://localhost:4200,http://localhost:3000
     networks:
       - lc_network
 
