@@ -13,20 +13,22 @@ export const config = {
   },
   
   libreclinica: {
-    // LibreClinica Docker container - use existing instance on 8080
-    // SOAP services are at /ws/ path (confirmed from web.xml)
-    soapUrl: process.env.LIBRECLINICA_SOAP_URL || 'http://localhost:8080/LibreClinica/ws',
+    // LibreClinica Docker container - Docker setup uses port 8090
+    // SOAP services at /ws/{serviceName}/v1 path
+    // IMPORTANT: Password must be MD5 hash for WS-Security!
+    // Default "12345678" -> MD5: "25d55ad283aa400af464c76d713c07ad"
+    soapUrl: process.env.LIBRECLINICA_SOAP_URL || 'http://localhost:8090/libreclinica-ws/ws',
     soapUsername: process.env.SOAP_USERNAME || 'root',
-    soapPassword: process.env.SOAP_PASSWORD || 'root',
-    // Enable SOAP by default (set DISABLE_SOAP=true to use direct DB only)
+    soapPassword: process.env.SOAP_PASSWORD || '25d55ad283aa400af464c76d713c07ad',
+    // Enable SOAP by default for GxP compliance (set DISABLE_SOAP=true to use direct DB only)
     soapEnabled: process.env.DISABLE_SOAP !== 'true',
     database: {
       host: process.env.LIBRECLINICA_DB_HOST || 'localhost',
-      // LibreClinica Docker database on port 5432
-      port: parseInt(process.env.LIBRECLINICA_DB_PORT || '5432'),
+      // LibreClinica Docker database maps 5434:5432
+      port: parseInt(process.env.LIBRECLINICA_DB_PORT || '5434'),
       database: process.env.LIBRECLINICA_DB_NAME || 'libreclinica',
-      user: process.env.LIBRECLINICA_DB_USER || 'clinica',
-      password: process.env.LIBRECLINICA_DB_PASSWORD || 'clinica',
+      user: process.env.LIBRECLINICA_DB_USER || 'libreclinica',
+      password: process.env.LIBRECLINICA_DB_PASSWORD || 'libreclinica',
       max: parseInt(process.env.LIBRECLINICA_DB_MAX_CONNECTIONS || '20'),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 2000

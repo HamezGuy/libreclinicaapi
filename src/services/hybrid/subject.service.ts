@@ -1,11 +1,18 @@
 /**
  * Subject Service (Hybrid)
  * 
- * Combines SOAP and Database operations for subject management
- * - Use SOAP for creating subjects when available (GxP compliant with validation)
- * - Use direct Database when SOAP is disabled (for local development)
- * - Use Database for reading/listing subjects (faster)
- * - Provides complete subject information with progress tracking
+ * RESPONSIBILITY SEPARATION:
+ * ═══════════════════════════════════════════════════════════════
+ * SOAP (Part 11 Compliant) - USE THESE:
+ *   - createSubject() - Enroll subject via studySubject/create
+ *   - isSubjectExists() - Check via studySubject/isStudySubject  
+ *   - listSubjects() - Get list via studySubject/listAllByStudy
+ * 
+ * Database (Stats/Enrichment Only):
+ *   - Add progress tracking (form completion %)
+ *   - Add statistics (events, queries)
+ *   - Fallback when SOAP unavailable
+ * ═══════════════════════════════════════════════════════════════
  */
 
 import { pool } from '../../config/database';
@@ -182,7 +189,12 @@ const createSubjectDirect = async (
 };
 
 /**
- * Get subject list with filters (Database - fast)
+ * Get subject list - SOAP PRIMARY, DB for stats enrichment
+ * 
+ * Strategy:
+ * 1. Try SOAP studySubject/listAllByStudy first (Part 11 compliant)
+ * 2. Enrich with DB stats (progress, events)
+ * 3. Fallback to pure DB if SOAP unavailable
  */
 export const getSubjectList = async (
   studyId: number,
@@ -190,14 +202,62 @@ export const getSubjectList = async (
     status?: string;
     page?: number;
     limit?: number;
-  }
+  },
+  userId?: number,
+  username?: string
 ): Promise<PaginatedResponse<any>> => {
-  logger.info('Getting subject list', { studyId, filters });
+  logger.info('Getting subject list (SOAP primary)', { studyId, filters, soapEnabled: config.libreclinica.soapEnabled });
 
   try {
     const { status, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
 
+    // Try SOAP first for Part 11 compliance
+    if (config.libreclinica.soapEnabled && userId && username) {
+      try {
+        // Get study OID first
+        const studyOidQuery = `SELECT oc_oid FROM study WHERE study_id = $1`;
+        const oidResult = await pool.query(studyOidQuery, [studyId]);
+        const studyOid = oidResult.rows[0]?.oc_oid || `S_${studyId}`;
+
+        const soapResult = await subjectSoap.listSubjects(studyOid, userId, username);
+        
+        if (soapResult.success && soapResult.data) {
+          logger.info('✅ Subjects retrieved via SOAP', { studyId });
+          
+          // Enrich with DB stats
+          const enrichedSubjects = await enrichSubjectsWithStats(soapResult.data, studyId);
+          
+          // Apply status filter if specified
+          let filteredSubjects = enrichedSubjects;
+          if (status) {
+            filteredSubjects = enrichedSubjects.filter((s: any) => 
+              s.status?.toLowerCase() === status.toLowerCase()
+            );
+          }
+          
+          // Apply pagination
+          const paginatedSubjects = filteredSubjects.slice(offset, offset + limit);
+          
+          return {
+            success: true,
+            data: paginatedSubjects.map((s: any) => ({ ...s, source: 'SOAP' })),
+            pagination: {
+              page,
+              limit,
+              total: filteredSubjects.length,
+              totalPages: Math.ceil(filteredSubjects.length / limit)
+            }
+          };
+        }
+      } catch (soapError: any) {
+        logger.warn('SOAP subject list failed, falling back to DB', { error: soapError.message });
+      }
+    }
+
+    // Fallback to database
+    logger.info('📋 Using database fallback for subject list');
+    
     const conditions: string[] = ['ss.study_id = $1'];
     const params: any[] = [studyId];
     let paramIndex = 2;
@@ -244,7 +304,8 @@ export const getSubjectList = async (
           INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
           WHERE se.study_subject_id = ss.study_subject_id
             AND cs.name IN ('complete', 'signed')
-        ) as completed_forms
+        ) as completed_forms,
+        'DATABASE' as source
       FROM study_subject ss
       INNER JOIN subject s ON ss.subject_id = s.subject_id
       INNER JOIN status st ON ss.status_id = st.status_id
@@ -421,6 +482,90 @@ export const getSubjectProgress = async (subjectId: number): Promise<any> => {
     throw error;
   }
 };
+
+/**
+ * Helper: Enrich SOAP subject list with database statistics
+ */
+async function enrichSubjectsWithStats(soapSubjects: any, studyId: number): Promise<any[]> {
+  // Parse SOAP response - could be ODM XML or object array
+  let subjects: any[] = [];
+  
+  if (typeof soapSubjects === 'string') {
+    // Parse ODM XML
+    subjects = subjectSoap.parseSubjectListOdm(soapSubjects);
+  } else if (Array.isArray(soapSubjects)) {
+    subjects = soapSubjects;
+  } else if (soapSubjects.subjects) {
+    subjects = Array.isArray(soapSubjects.subjects) ? soapSubjects.subjects : [soapSubjects.subjects];
+  }
+
+  if (subjects.length === 0) {
+    return [];
+  }
+
+  try {
+    // Get stats for all subjects
+    const labels = subjects.map(s => s.studySubjectId || s.label || s.subjectKey).filter(Boolean);
+    
+    if (labels.length === 0) {
+      return subjects;
+    }
+
+    const statsQuery = `
+      SELECT 
+        ss.study_subject_id,
+        ss.label,
+        ss.secondary_label,
+        ss.enrollment_date,
+        st.name as status,
+        s.gender,
+        s.date_of_birth,
+        ss.date_created,
+        (
+          SELECT COUNT(*)
+          FROM study_event se
+          WHERE se.study_subject_id = ss.study_subject_id
+        ) as total_events,
+        (
+          SELECT COUNT(*)
+          FROM study_event se
+          INNER JOIN event_crf ec ON se.study_event_id = ec.study_event_id
+          INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+          WHERE se.study_subject_id = ss.study_subject_id
+            AND cs.name IN ('complete', 'signed')
+        ) as completed_forms
+      FROM study_subject ss
+      INNER JOIN subject s ON ss.subject_id = s.subject_id
+      INNER JOIN status st ON ss.status_id = st.status_id
+      WHERE ss.study_id = $1 AND ss.label = ANY($2)
+    `;
+
+    const statsResult = await pool.query(statsQuery, [studyId, labels]);
+    
+    // Create lookup map
+    const statsMap = new Map();
+    for (const row of statsResult.rows) {
+      statsMap.set(row.label, row);
+    }
+
+    // Merge SOAP data with DB stats
+    return subjects.map(soapSubject => {
+      const label = soapSubject.studySubjectId || soapSubject.label || soapSubject.subjectKey;
+      const stats = statsMap.get(label) || {};
+      return {
+        ...stats,
+        ...soapSubject,
+        label: label,
+        study_subject_id: stats.study_subject_id,
+        total_events: parseInt(stats.total_events) || 0,
+        completed_forms: parseInt(stats.completed_forms) || 0
+      };
+    });
+  } catch (error: any) {
+    logger.warn('Failed to enrich subjects with stats', { error: error.message });
+    return subjects;
+  }
+}
 
 export default {
   createSubject,

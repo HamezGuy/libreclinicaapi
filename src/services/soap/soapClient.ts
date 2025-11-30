@@ -1,23 +1,24 @@
 /**
  * SOAP Client
  * 
- * Base SOAP client for LibreClinica Web Services
- * - Handles SOAP authentication (WS-Security)
+ * Custom SOAP client for LibreClinica Web Services
+ * - Uses raw HTTP with WS-Security headers (LibreClinica specific)
+ * - Handles authentication with MD5-hashed passwords
  * - Provides retry logic and error handling
- * - Supports ODM 1.3 standard
- * - Logs all SOAP operations for audit
  * 
- * LibreClinica SOAP Web Services (at /ws/ - confirmed from web.xml):
- * - Study Service: http://localhost:8080/LibreClinica/ws/study/v1
- * - StudySubject Service: http://localhost:8080/LibreClinica/ws/studySubject/v1
- * - Data Service: http://localhost:8080/LibreClinica/ws/data/v1
- * - Event Service: http://localhost:8080/LibreClinica/ws/event/v1
- * - CRF Service: http://localhost:8080/LibreClinica/ws/crf/v1
+ * LibreClinica SOAP Web Services (at /libreclinica-ws/ws):
+ * - Study Service: Uses v1:listAllRequest, v1:getMetadataRequest
+ * - StudySubject Service: Uses v1:createRequest, v1:listAllByStudyRequest
+ * - Data Service: Uses v1:importRequest
+ * - Event Service: Uses v1:scheduleRequest
+ * 
+ * IMPORTANT: LibreClinica requires WS-Security UsernameToken with MD5-hashed password!
  */
 
-import * as soap from 'soap';
+import axios, { AxiosInstance } from 'axios';
 import { config } from '../../config/environment';
 import { logger } from '../../config/logger';
+import { parseStringPromise } from 'xml2js';
 
 /**
  * SOAP client configuration
@@ -25,7 +26,7 @@ import { logger } from '../../config/logger';
 interface SoapClientConfig {
   baseUrl: string;
   username: string;
-  password: string;
+  password: string; // MD5 hash of actual password
   timeout: number;
   maxRetries: number;
 }
@@ -52,113 +53,168 @@ interface SoapResponse<T = any> {
 }
 
 /**
+ * Namespace mappings for LibreClinica SOAP services
+ */
+const SOAP_NAMESPACES: Record<string, string> = {
+  study: 'http://openclinica.org/ws/study/v1',
+  studySubject: 'http://openclinica.org/ws/studySubject/v1',
+  data: 'http://openclinica.org/ws/data/v1',
+  event: 'http://openclinica.org/ws/event/v1'
+};
+
+/**
  * SOAP Client Class
+ * Custom implementation for LibreClinica's WS-Security requirements
  */
 export class SoapClient {
   private config: SoapClientConfig;
-  private clients: Map<string, any> = new Map();
+  private httpClient: AxiosInstance;
 
   constructor() {
+    // Configuration with MD5-hashed password for WS-Security
     this.config = {
-      // LibreClinica SOAP is at /ws/ (confirmed from web.xml servlet mapping)
-      baseUrl: config.libreclinica.soapUrl || 'http://localhost:8080/LibreClinica/ws',
+      baseUrl: config.libreclinica.soapUrl || 'http://localhost:8090/libreclinica-ws/ws',
       username: config.libreclinica.soapUsername || 'root',
-      password: config.libreclinica.soapPassword || 'root',
-      timeout: 30000, // 30 seconds
+      password: config.libreclinica.soapPassword || '25d55ad283aa400af464c76d713c07ad',
+      timeout: 30000,
       maxRetries: 3
     };
+
+    // Create HTTP client
+    this.httpClient = axios.create({
+      timeout: this.config.timeout,
+      headers: {
+        'Content-Type': 'text/xml;charset=UTF-8',
+        'Accept': 'text/xml, application/xml'
+      }
+    });
   }
 
   /**
-   * Get WSDL URL for a service
-   * LibreClinica SOAP endpoints (at /ws/ - from web.xml):
-   * - study/v1 - Study metadata
-   * - studySubject/v1 - Subject enrollment
-   * - event/v1 - Event scheduling  
-   * - crf/v1 - CRF/Form data import
+   * Build WS-Security SOAP envelope
    */
-  private getWsdlUrl(serviceName: string): string {
-    const wsdlUrls: Record<string, string> = {
-      study: `${this.config.baseUrl}/study/v1?wsdl`,
-      studySubject: `${this.config.baseUrl}/studySubject/v1?wsdl`,
-      event: `${this.config.baseUrl}/event/v1?wsdl`,
-      data: `${this.config.baseUrl}/data/v1?wsdl`,
-      studyEventDefinition: `${this.config.baseUrl}/studyEventDefinition/v1?wsdl`,
-      // Legacy aliases
-      subject: `${this.config.baseUrl}/studySubject/v1?wsdl`,
-      crf: `${this.config.baseUrl}/data/v1?wsdl`
-    };
-
-    return wsdlUrls[serviceName] || wsdlUrls.studySubject;
+  private buildSoapEnvelope(
+    serviceName: string, 
+    methodName: string, 
+    parameters: any
+  ): string {
+    const namespace = SOAP_NAMESPACES[serviceName];
+    
+    // Convert parameters to XML elements
+    const parametersXml = this.buildParametersXml(parameters);
+    
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" 
+                  xmlns:v1="${namespace}"
+                  xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+   <soapenv:Header>
+      <wsse:Security soapenv:mustUnderstand="1">
+         <wsse:UsernameToken>
+            <wsse:Username>${this.config.username}</wsse:Username>
+            <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">${this.config.password}</wsse:Password>
+         </wsse:UsernameToken>
+      </wsse:Security>
+   </soapenv:Header>
+   <soapenv:Body>
+      <v1:${methodName}Request>
+         ${parametersXml}
+      </v1:${methodName}Request>
+   </soapenv:Body>
+</soapenv:Envelope>`;
   }
 
   /**
-   * Create or get cached SOAP client for a service
+   * Convert parameters object to XML elements
    */
-  private async getClient(serviceName: string): Promise<any> {
-    // Return cached client if available
-    if (this.clients.has(serviceName)) {
-      return this.clients.get(serviceName);
+  private buildParametersXml(params: any, prefix: string = 'v1'): string {
+    if (!params || Object.keys(params).length === 0) {
+      return '';
     }
 
-    const wsdlUrl = this.getWsdlUrl(serviceName);
-
-    try {
-      logger.debug(`Creating SOAP client for ${serviceName}`, { wsdlUrl });
-
-      // WSDL fetch requires HTTP Basic Auth
-      const basicAuth = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
+    let xml = '';
+    for (const [key, value] of Object.entries(params)) {
+      if (value === null || value === undefined) continue;
       
-      const client = await soap.createClientAsync(wsdlUrl, {
-        endpoint: wsdlUrl.replace('?wsdl', ''),
-        wsdl_options: {
-          timeout: this.config.timeout
-        },
-        wsdl_headers: {
-          Authorization: `Basic ${basicAuth}`
+      if (typeof value === 'object' && !Array.isArray(value)) {
+        // Nested object
+        xml += `<${prefix}:${key}>${this.buildParametersXml(value, prefix)}</${prefix}:${key}>`;
+      } else if (Array.isArray(value)) {
+        // Array - repeat the element
+        for (const item of value) {
+          if (typeof item === 'object') {
+            xml += `<${prefix}:${key}>${this.buildParametersXml(item, prefix)}</${prefix}:${key}>`;
+          } else {
+            xml += `<${prefix}:${key}>${this.escapeXml(String(item))}</${prefix}:${key}>`;
+          }
         }
+      } else {
+        xml += `<${prefix}:${key}>${this.escapeXml(String(value))}</${prefix}:${key}>`;
+      }
+    }
+    return xml;
+  }
+
+  /**
+   * Escape special XML characters
+   */
+  private escapeXml(str: string): string {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  /**
+   * Parse SOAP response
+   */
+  private async parseSoapResponse(xmlResponse: string): Promise<any> {
+    try {
+      const result = await parseStringPromise(xmlResponse, {
+        explicitArray: false,
+        ignoreAttrs: false,
+        tagNameProcessors: [(name) => name.replace(/^.*:/, '')]
       });
+      
+      // Extract body content
+      const envelope = result.Envelope || result['SOAP-ENV:Envelope'] || result;
+      const body = envelope.Body || envelope['SOAP-ENV:Body'];
+      
+      if (!body) {
+        throw new Error('No SOAP Body found in response');
+      }
 
-      // Add WS-Security header for SOAP requests
-      const wsSecurity = new soap.WSSecurity(
-        this.config.username,
-        this.config.password,
-        {
-          hasTimeStamp: false,
-          hasTokenCreated: false
-        }
-      );
+      // Check for fault
+      const fault = body.Fault || body['SOAP-ENV:Fault'];
+      if (fault) {
+        throw new Error(fault.faultstring || fault.faultcode || 'SOAP Fault');
+      }
 
-      client.setSecurity(wsSecurity);
+      // Return first child of body (the response element)
+      const bodyKeys = Object.keys(body).filter(k => k !== '$');
+      if (bodyKeys.length > 0) {
+        return body[bodyKeys[0]];
+      }
 
-      // Cache the client
-      this.clients.set(serviceName, client);
-
-      logger.info(`SOAP client created for ${serviceName}`);
-
-      return client;
+      return body;
     } catch (error: any) {
-      logger.error(`Failed to create SOAP client for ${serviceName}`, {
-        error: error.message,
-        wsdlUrl
-      });
-      throw new Error(`SOAP client creation failed: ${error.message}`);
+      logger.error('Failed to parse SOAP response', { error: error.message });
+      throw error;
     }
   }
 
   /**
    * Execute SOAP request with retry logic
    */
-  public async executeRequest<T>(
-    options: SoapRequestOptions
-  ): Promise<SoapResponse<T>> {
+  public async executeRequest<T>(options: SoapRequestOptions): Promise<SoapResponse<T>> {
     const { serviceName, methodName, parameters, userId, username } = options;
 
     logger.info('Executing SOAP request', {
       serviceName,
       methodName,
       userId,
-      username
+      username: username || 'system'
     });
 
     let lastError: any;
@@ -166,37 +222,59 @@ export class SoapClient {
     // Retry logic
     for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
       try {
-        const client = await this.getClient(serviceName);
+        const soapEnvelope = this.buildSoapEnvelope(serviceName, methodName, parameters);
+        
+        logger.debug('SOAP Request', { 
+          url: this.config.baseUrl,
+          serviceName,
+          methodName
+        });
 
-        // Execute SOAP method
         const startTime = Date.now();
-        const [result] = await client[`${methodName}Async`](parameters);
+        const response = await this.httpClient.post(this.config.baseUrl, soapEnvelope);
         const duration = Date.now() - startTime;
 
         logger.info('SOAP request successful', {
           serviceName,
           methodName,
           duration,
-          attempt
+          attempt,
+          status: response.status
         });
+
+        const parsedResponse = await this.parseSoapResponse(response.data);
 
         return {
           success: true,
-          data: result
+          data: parsedResponse
         };
       } catch (error: any) {
         lastError = error;
+
+        const statusCode = error.response?.status;
+        const responseData = error.response?.data;
 
         logger.warn(`SOAP request failed (attempt ${attempt}/${this.config.maxRetries})`, {
           serviceName,
           methodName,
           error: error.message,
+          statusCode,
           attempt
         });
 
-        // Don't retry on certain errors
-        if (error.message.includes('Authentication') || error.message.includes('Authorization')) {
+        // Don't retry on authentication errors
+        if (statusCode === 401 || statusCode === 403) {
           break;
+        }
+
+        // Try to parse fault from response
+        if (responseData) {
+          try {
+            const fault = await this.parseSoapResponse(responseData);
+            logger.debug('SOAP Fault details', { fault });
+          } catch {
+            // Ignore parsing errors for fault
+          }
         }
 
         // Wait before retry (exponential backoff)
@@ -206,7 +284,6 @@ export class SoapClient {
       }
     }
 
-    // All retries failed
     logger.error('SOAP request failed after all retries', {
       serviceName,
       methodName,
@@ -216,7 +293,7 @@ export class SoapClient {
     return {
       success: false,
       error: lastError.message,
-      soapFault: lastError.root
+      soapFault: lastError.response?.data
     };
   }
 
@@ -225,9 +302,21 @@ export class SoapClient {
    */
   public async testConnection(serviceName: string = 'study'): Promise<boolean> {
     try {
-      const client = await this.getClient(serviceName);
-      logger.info(`SOAP connection test successful for ${serviceName}`);
-      return true;
+      logger.debug('Testing SOAP connection', { serviceName });
+      
+      // Try a simple listAll request to test connectivity
+      const result = await this.executeRequest({
+        serviceName: serviceName as any,
+        methodName: 'listAll',
+        parameters: {}
+      });
+
+      logger.info(`SOAP connection test: ${result.success ? 'SUCCESS' : 'FAILED'}`, {
+        serviceName,
+        success: result.success
+      });
+
+      return result.success;
     } catch (error: any) {
       logger.error(`SOAP connection test failed for ${serviceName}`, {
         error: error.message
@@ -237,29 +326,11 @@ export class SoapClient {
   }
 
   /**
-   * Clear cached clients (useful for reconnection)
+   * Clear any cached state (for reconnection)
    */
   public clearClients(): void {
-    this.clients.clear();
-    logger.info('SOAP clients cache cleared');
-  }
-
-  /**
-   * Build WS-Security header manually (alternative authentication)
-   */
-  private buildAuthHeader(): string {
-    const timestamp = new Date().toISOString();
-    
-    return `
-      <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-        <wsse:UsernameToken>
-          <wsse:Username>${this.config.username}</wsse:Username>
-          <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">
-            ${this.config.password}
-          </wsse:Password>
-        </wsse:UsernameToken>
-      </wsse:Security>
-    `;
+    logger.info('SOAP client state cleared');
+    // Nothing to clear with our stateless HTTP approach
   }
 
   /**
@@ -270,47 +341,29 @@ export class SoapClient {
   }
 
   /**
-   * Parse SOAP fault/error
+   * Parse SOAP error
    */
   public parseSoapError(error: any): string {
-    if (error.root?.Envelope?.Body?.Fault) {
-      const fault = error.root.Envelope.Body.Fault;
-      return fault.faultstring || fault.faultcode || 'SOAP Fault occurred';
+    if (error.response?.data) {
+      const data = error.response.data;
+      if (typeof data === 'string' && data.includes('faultstring')) {
+        const match = data.match(/<faultstring>([^<]+)<\/faultstring>/);
+        if (match) {
+          return match[1];
+        }
+      }
     }
-
-    if (error.message) {
-      return error.message;
-    }
-
-    return 'Unknown SOAP error occurred';
+    return error.message || 'Unknown SOAP error';
   }
 
   /**
-   * Validate ODM response
-   * Checks for errors in ODM XML response
+   * Get configuration (for diagnostics)
    */
-  public validateOdmResponse(odmXml: string): { isValid: boolean; errors: string[] } {
-    const errors: string[] = [];
-
-    // Check for empty response
-    if (!odmXml || odmXml.trim() === '') {
-      errors.push('Empty ODM response received');
-      return { isValid: false, errors };
-    }
-
-    // Check for error messages in ODM
-    if (odmXml.includes('<Error>') || odmXml.includes('<error>')) {
-      errors.push('ODM contains error elements');
-    }
-
-    // Check for validation errors
-    if (odmXml.includes('ValidationError')) {
-      errors.push('ODM validation errors present');
-    }
-
+  public getConfig(): { baseUrl: string; username: string; passwordSet: boolean } {
     return {
-      isValid: errors.length === 0,
-      errors
+      baseUrl: this.config.baseUrl,
+      username: this.config.username,
+      passwordSet: !!this.config.password
     };
   }
 }
@@ -331,14 +384,10 @@ export const getSoapClient = (): SoapClient => {
 };
 
 /**
- * Reset SOAP client singleton (useful for testing)
+ * Reset SOAP client singleton (useful for testing/reconnection)
  */
 export const resetSoapClient = (): void => {
-  if (soapClientInstance) {
-    soapClientInstance.clearClients();
-  }
   soapClientInstance = null;
 };
 
 export default getSoapClient;
-

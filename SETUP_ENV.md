@@ -7,22 +7,25 @@ Create a `.env` file in the `libreclinica-api` directory with the following cont
 ```env
 # LibreClinica REST API Configuration
 NODE_ENV=development
-PORT=3000
+PORT=3001
 
-# Database Connection
+# Database Connection (Docker maps 5434:5432)
 LIBRECLINICA_DB_HOST=localhost
-LIBRECLINICA_DB_PORT=5432
+LIBRECLINICA_DB_PORT=5434
 LIBRECLINICA_DB_NAME=libreclinica
-LIBRECLINICA_DB_USER=clinica
-LIBRECLINICA_DB_PASSWORD=clinica
+LIBRECLINICA_DB_USER=libreclinica
+LIBRECLINICA_DB_PASSWORD=libreclinica
 LIBRECLINICA_DB_SSL=false
 LIBRECLINICA_DB_MAX_CONNECTIONS=20
 
-# SOAP Web Services
-LIBRECLINICA_SOAP_URL=http://localhost:8080/LibreClinica/ws
+# SOAP Web Services (Docker runs LibreClinica on port 8090)
+# IMPORTANT: Password must be MD5 HASH for WS-Security!
+# Default password "12345678" -> MD5 hash below
+LIBRECLINICA_SOAP_URL=http://localhost:8090/libreclinica-ws/ws
 SOAP_USERNAME=root
-SOAP_PASSWORD=root
+SOAP_PASSWORD=25d55ad283aa400af464c76d713c07ad
 LIBRECLINICA_SOAP_TIMEOUT=30000
+DISABLE_SOAP=false
 
 # JWT Authentication
 JWT_SECRET=libreclinica-super-secret-jwt-key-change-in-production-32chars
@@ -54,41 +57,61 @@ LOG_TO_CONSOLE=true
 AUDIT_LOG_ENABLED=true
 ```
 
-## Step 2: Verify LibreClinica is Running
+## Step 2: Verify LibreClinica Docker is Running
 
-Make sure LibreClinica Docker container is running:
+Start the LibreClinica Docker containers with the patched SOAP WAR:
 
 ```powershell
-cd D:\EDC-Projects\LibreClinica-Setup\LibreClinica
-docker compose up -d
+cd D:\EDC-Projects\libreclinica-api
+docker-compose -f docker-compose.libreclinica.yml up -d
 ```
 
 Check if it's accessible:
-- Web UI: http://localhost:8080/LibreClinica
-- Database: localhost:5432
-- SOAP API: http://localhost:8080/LibreClinica/ws
+- Web UI: http://localhost:8090/libreclinica/
+- Database: localhost:5434 (user: libreclinica, pass: libreclinica)
+- SOAP API: http://localhost:8090/libreclinica-ws/ws/studySubject/v1?wsdl
+
+**IMPORTANT**: The default Docker image has BROKEN SOAP! 
+The docker-compose.libreclinica.yml mounts a patched WAR file from `libreclinica-fix/`.
 
 ## Step 3: Start the API Server
 
+Using PowerShell (recommended - sets all environment variables):
+```powershell
+cd D:\EDC-Projects\libreclinica-api
+.\START_LOCAL.ps1
+```
+
+Or using npm (requires .env file):
 ```powershell
 cd D:\EDC-Projects\libreclinica-api
 npm run dev
 ```
 
-The API will be available at: http://localhost:3000
+The API will be available at: http://localhost:3001
 
 ## Step 4: Test the API
 
 Health check:
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3001/health
 ```
 
-Login test:
+API health with SOAP status:
 ```bash
-curl -X POST http://localhost:3000/api/auth/login \
+curl http://localhost:3001/api/health
+```
+
+Login test (use MD5 hash of password):
+```bash
+curl -X POST http://localhost:3001/api/auth/login \
   -H "Content-Type: application/json" \
-  -d "{\"username\":\"root\",\"password\":\"root\"}"
+  -d "{\"username\":\"root\",\"password\":\"12345678\"}"
+```
+
+SOAP status check:
+```bash
+curl http://localhost:3001/api/soap/status
 ```
 
 ## Step 5: Start the Angular Frontend

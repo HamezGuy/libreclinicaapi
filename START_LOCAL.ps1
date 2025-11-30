@@ -49,12 +49,13 @@ $env:LIBRECLINICA_DB_NAME = "libreclinica"
 $env:LIBRECLINICA_DB_USER = "libreclinica"
 $env:LIBRECLINICA_DB_PASSWORD = "libreclinica"
 
-# SOAP Configuration - DISABLED for local development
-# (SOAP services have classloader issues in the Docker image)
-$env:LIBRECLINICA_SOAP_URL = "http://localhost:8090/libreclinica/ws"
+# SOAP Configuration - ENABLED for GxP compliance
+# Uses the patched LibreClinica WAR with working SOAP services
+# CRITICAL: Password must be MD5 hash! "12345678" -> "25d55ad283aa400af464c76d713c07ad"
+$env:LIBRECLINICA_SOAP_URL = "http://localhost:8090/libreclinica-ws/ws"
 $env:SOAP_USERNAME = "root"
-$env:SOAP_PASSWORD = "root"
-$env:DISABLE_SOAP = "true"  # Disable SOAP, use database mode
+$env:SOAP_PASSWORD = "25d55ad283aa400af464c76d713c07ad"
+$env:DISABLE_SOAP = "false"  # Enable SOAP for GxP-compliant operations
 
 # Server Configuration
 $env:PORT = "3001"
@@ -74,9 +75,10 @@ $env:SESSION_TIMEOUT_MINUTES = "30"
 
 Write-Host "`nConfiguration:" -ForegroundColor Cyan
 Write-Host "  Database: localhost:5434/libreclinica" -ForegroundColor White
-Write-Host "  SOAP: Disabled (database-only mode)" -ForegroundColor Yellow
+Write-Host "  SOAP: Enabled (GxP-compliant mode)" -ForegroundColor Green
+Write-Host "  SOAP URL: $($env:LIBRECLINICA_SOAP_URL)" -ForegroundColor White
 Write-Host "  Port: $($env:PORT)" -ForegroundColor White
-Write-Host "  Mode: Development" -ForegroundColor White
+Write-Host "  Mode: Development (Hybrid SOAP + DB)" -ForegroundColor White
 
 Write-Host "`nStarting LibreClinica API..." -ForegroundColor Yellow
 Write-Host "API will be available at: http://localhost:3001" -ForegroundColor Green

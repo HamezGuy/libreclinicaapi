@@ -19,12 +19,14 @@ const router = Router();
 
 /**
  * SOAP service endpoints to check
+ * LibreClinica SOAP endpoints use /ws/{serviceName}/v1 format
  */
 const SOAP_SERVICES = [
   { name: 'studySubject', endpoint: '/studySubject/v1', description: 'Subject enrollment' },
   { name: 'study', endpoint: '/study/v1', description: 'Study metadata' },
-  { name: 'data', endpoint: '/crf/v1', description: 'CRF data import/export' },
-  { name: 'event', endpoint: '/event/v1', description: 'Study events' }
+  { name: 'data', endpoint: '/data/v1', description: 'CRF data import/export' },
+  { name: 'event', endpoint: '/event/v1', description: 'Study events' },
+  { name: 'crf', endpoint: '/crf/v1', description: 'CRF definitions' }
 ];
 
 /**

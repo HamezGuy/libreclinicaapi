@@ -1,21 +1,32 @@
 /**
  * Study Service (Hybrid)
  * 
- * Combines SOAP and Database for study operations
- * - Use SOAP for metadata retrieval
- * - Use Database for study lists and statistics
+ * RESPONSIBILITY SEPARATION:
+ * ═══════════════════════════════════════════════════════════════
+ * SOAP (Part 11 Compliant):
+ *   - listStudies() - Get official study list from LibreClinica
+ *   - getStudyMetadata() - Get ODM metadata
+ * 
+ * Database (Stats/Enrichment Only):
+ *   - Add statistics (enrollment counts, completion rates)
+ *   - User access filtering (study_user_role)
+ *   - Pagination
+ * ═══════════════════════════════════════════════════════════════
  */
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { config } from '../../config/environment';
 import * as studySoap from '../soap/studySoap.service';
 import { Study, StudyMetadata, PaginatedResponse } from '../../types';
 
 /**
- * Get studies list with statistics
+ * Get studies list - SOAP PRIMARY, DB for stats enrichment
  * 
- * Returns studies the user has access to (via study_user_role)
- * OR studies they created (via owner_id)
+ * Strategy:
+ * 1. Get study list from SOAP (official source)
+ * 2. Enrich with statistics from DB (enrollment, completion)
+ * 3. Filter by user access from DB
  */
 export const getStudies = async (
   userId: number,
@@ -23,13 +34,46 @@ export const getStudies = async (
     status?: string;
     page?: number;
     limit?: number;
-  }
+  },
+  username?: string
 ): Promise<PaginatedResponse<any>> => {
-  logger.info('📋 Getting studies for user', { userId, filters });
+  logger.info('📋 Getting studies for user (SOAP primary)', { userId, filters, soapEnabled: config.libreclinica.soapEnabled });
 
   try {
     const { status, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
+
+    // Try SOAP first for Part 11 compliance
+    if (config.libreclinica.soapEnabled && username) {
+      try {
+        const soapResult = await studySoap.listStudies(userId, username);
+        if (soapResult.success && soapResult.data) {
+          logger.info('✅ Studies retrieved via SOAP', { count: soapResult.data.length });
+          
+          // Enrich with DB stats
+          const enrichedStudies = await enrichStudiesWithStats(soapResult.data, userId);
+          
+          // Apply pagination
+          const paginatedStudies = enrichedStudies.slice(offset, offset + limit);
+          
+          return {
+            success: true,
+            data: paginatedStudies,
+            pagination: {
+              page,
+              limit,
+              total: enrichedStudies.length,
+              totalPages: Math.ceil(enrichedStudies.length / limit)
+            }
+          };
+        }
+      } catch (soapError: any) {
+        logger.warn('SOAP study list failed, falling back to DB', { error: soapError.message });
+      }
+    }
+
+    // Fallback to database if SOAP unavailable
+    logger.info('📋 Using database fallback for study list');
 
     const conditions: string[] = ['1=1'];
     const params: any[] = [];
@@ -564,6 +608,68 @@ export const deleteStudy = async (
     client.release();
   }
 };
+
+/**
+ * Helper: Enrich SOAP study list with database statistics
+ * This adds enrollment counts, completion rates, etc. to SOAP-sourced studies
+ */
+async function enrichStudiesWithStats(soapStudies: any[], userId: number): Promise<any[]> {
+  if (!soapStudies || soapStudies.length === 0) {
+    return [];
+  }
+
+  try {
+    // Get stats for all studies in one query
+    const studyOids = soapStudies.map(s => s.oid || s.identifier).filter(Boolean);
+    
+    if (studyOids.length === 0) {
+      return soapStudies;
+    }
+
+    const statsQuery = `
+      SELECT 
+        s.study_id,
+        s.oc_oid,
+        s.unique_identifier,
+        st.name as status,
+        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects,
+        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id AND status_id = 1) as active_subjects,
+        (SELECT COUNT(DISTINCT sed.study_event_definition_id) FROM study_event_definition sed WHERE sed.study_id = s.study_id) as total_events,
+        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id) as total_forms
+      FROM study s
+      INNER JOIN status st ON s.status_id = st.status_id
+      WHERE s.oc_oid = ANY($1) OR s.unique_identifier = ANY($1)
+    `;
+
+    const statsResult = await pool.query(statsQuery, [studyOids]);
+    
+    // Create a map for quick lookup
+    const statsMap = new Map();
+    for (const row of statsResult.rows) {
+      statsMap.set(row.oc_oid, row);
+      statsMap.set(row.unique_identifier, row);
+    }
+
+    // Merge SOAP data with DB stats
+    return soapStudies.map(soapStudy => {
+      const stats = statsMap.get(soapStudy.oid) || statsMap.get(soapStudy.identifier) || {};
+      return {
+        ...soapStudy,
+        study_id: stats.study_id,
+        status: soapStudy.status || stats.status,
+        enrolled_subjects: parseInt(stats.enrolled_subjects) || 0,
+        active_subjects: parseInt(stats.active_subjects) || 0,
+        total_events: parseInt(stats.total_events) || 0,
+        total_forms: parseInt(stats.total_forms) || 0,
+        source: 'SOAP' // Mark as SOAP-sourced for Part 11 compliance
+      };
+    });
+  } catch (error: any) {
+    logger.warn('Failed to enrich studies with stats', { error: error.message });
+    // Return SOAP studies without enrichment
+    return soapStudies.map(s => ({ ...s, source: 'SOAP' }));
+  }
+}
 
 // Re-export getStudyForms from form.service for backwards compatibility
 export { getStudyForms } from './form.service';
