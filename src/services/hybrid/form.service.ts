@@ -82,10 +82,11 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
     const versionQuery = `
       SELECT * FROM crf_version
       WHERE crf_id = $1
-      ORDER BY revision_notes DESC
+      ORDER BY crf_version_id DESC
       LIMIT 1
     `;
     const versionResult = await pool.query(versionQuery, [crfId]);
+    const versionId = versionResult.rows[0]?.crf_version_id;
 
     // Get item groups
     const itemGroupsQuery = `
@@ -98,12 +99,34 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       WHERE igm.crf_version_id = $1
       ORDER BY ig.name
     `;
-    const itemGroupsResult = await pool.query(itemGroupsQuery, [versionResult.rows[0]?.crf_version_id]);
+    const itemGroupsResult = await pool.query(itemGroupsQuery, [versionId]);
+
+    // Get items with their metadata
+    const itemsQuery = `
+      SELECT 
+        i.item_id,
+        i.name,
+        i.description,
+        i.units,
+        i.oc_oid,
+        idt.name as data_type,
+        idt.code as data_type_code,
+        igm.ordinal,
+        ig.name as group_name
+      FROM item i
+      INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+      INNER JOIN item_group ig ON igm.item_group_id = ig.item_group_id
+      INNER JOIN item_data_type idt ON i.item_data_type_id = idt.item_data_type_id
+      WHERE igm.crf_version_id = $1
+      ORDER BY igm.ordinal
+    `;
+    const itemsResult = await pool.query(itemsQuery, [versionId]);
 
     return {
       crf,
       version: versionResult.rows[0],
-      itemGroups: itemGroupsResult.rows
+      itemGroups: itemGroupsResult.rows,
+      items: itemsResult.rows
     };
   } catch (error: any) {
     logger.error('Get form metadata error', { error: error.message });
@@ -271,6 +294,200 @@ export const getFormById = async (crfId: number): Promise<any> => {
   }
 };
 
+/**
+ * Create a new form template (CRF)
+ */
+export const createForm = async (
+  data: {
+    name: string;
+    description?: string;
+    studyId?: number;
+  },
+  userId: number
+): Promise<{ success: boolean; crfId?: number; message?: string }> => {
+  logger.info('Creating form template', { name: data.name, userId });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Generate OC OID
+    const ocOid = `F_${data.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase().substring(0, 30)}`;
+
+    // Check if OC OID exists
+    const existsCheck = await client.query(
+      `SELECT crf_id FROM crf WHERE oc_oid = $1`,
+      [ocOid]
+    );
+
+    if (existsCheck.rows.length > 0) {
+      return {
+        success: false,
+        message: 'A form with this name already exists'
+      };
+    }
+
+    // Insert CRF
+    const crfResult = await client.query(`
+      INSERT INTO crf (
+        name, description, status_id, owner_id, date_created, oc_oid, source_study_id
+      ) VALUES (
+        $1, $2, 1, $3, NOW(), $4, $5
+      )
+      RETURNING crf_id
+    `, [
+      data.name,
+      data.description || '',
+      userId,
+      ocOid,
+      data.studyId || null
+    ]);
+
+    const crfId = crfResult.rows[0].crf_id;
+
+    // Create initial version
+    const versionOid = `${ocOid}_V1`;
+    await client.query(`
+      INSERT INTO crf_version (
+        crf_id, name, description, status_id, owner_id, date_created, oc_oid
+      ) VALUES (
+        $1, 'v1.0', $2, 1, $3, NOW(), $4
+      )
+    `, [
+      crfId,
+      data.description || 'Initial version',
+      userId,
+      versionOid
+    ]);
+
+    await client.query('COMMIT');
+
+    logger.info('Form template created successfully', { crfId, name: data.name });
+
+    return {
+      success: true,
+      crfId,
+      message: 'Form template created successfully'
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Create form error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to create form: ${error.message}`
+    };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Update a form template
+ */
+export const updateForm = async (
+  crfId: number,
+  data: {
+    name?: string;
+    description?: string;
+  },
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Updating form template', { crfId, userId });
+
+  try {
+    const updates: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (data.name) {
+      updates.push(`name = $${paramIndex++}`);
+      params.push(data.name);
+    }
+
+    if (data.description !== undefined) {
+      updates.push(`description = $${paramIndex++}`);
+      params.push(data.description);
+    }
+
+    updates.push(`date_updated = NOW()`);
+    updates.push(`update_id = $${paramIndex++}`);
+    params.push(userId);
+
+    params.push(crfId);
+
+    const query = `
+      UPDATE crf
+      SET ${updates.join(', ')}
+      WHERE crf_id = $${paramIndex}
+    `;
+
+    await pool.query(query, params);
+
+    logger.info('Form template updated successfully', { crfId });
+
+    return {
+      success: true,
+      message: 'Form template updated successfully'
+    };
+  } catch (error: any) {
+    logger.error('Update form error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to update form: ${error.message}`
+    };
+  }
+};
+
+/**
+ * Delete a form template (soft delete by changing status)
+ */
+export const deleteForm = async (
+  crfId: number,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Deleting form template', { crfId, userId });
+
+  try {
+    // Check if form is in use
+    const usageCheck = await pool.query(`
+      SELECT COUNT(*) as count FROM event_crf ec
+      JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      WHERE cv.crf_id = $1
+    `, [crfId]);
+
+    if (parseInt(usageCheck.rows[0].count) > 0) {
+      return {
+        success: false,
+        message: 'Cannot delete form - it is being used by subjects'
+      };
+    }
+
+    // Set status to removed (status_id = 5 typically)
+    await pool.query(`
+      UPDATE crf
+      SET status_id = 5, date_updated = NOW(), update_id = $1
+      WHERE crf_id = $2
+    `, [userId, crfId]);
+
+    logger.info('Form template deleted successfully', { crfId });
+
+    return {
+      success: true,
+      message: 'Form template deleted successfully'
+    };
+  } catch (error: any) {
+    logger.error('Delete form error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to delete form: ${error.message}`
+    };
+  }
+};
+
 export default {
   saveFormData,
   getFormData,
@@ -279,6 +496,9 @@ export default {
   validateFormData,
   getStudyForms,
   getAllForms,
-  getFormById
+  getFormById,
+  createForm,
+  updateForm,
+  deleteForm
 };
 

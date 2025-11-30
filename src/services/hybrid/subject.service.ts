@@ -2,31 +2,40 @@
  * Subject Service (Hybrid)
  * 
  * Combines SOAP and Database operations for subject management
- * - Use SOAP for creating subjects (GxP compliant with validation)
+ * - Use SOAP for creating subjects when available (GxP compliant with validation)
+ * - Use direct Database when SOAP is disabled (for local development)
  * - Use Database for reading/listing subjects (faster)
  * - Provides complete subject information with progress tracking
  */
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { config } from '../../config/environment';
 import * as subjectSoap from '../soap/subjectSoap.service';
 import { SubjectCreateRequest, SubjectDetails, ApiResponse, PaginatedResponse } from '../../types';
 
 /**
- * Create subject via SOAP (GxP compliant)
+ * Create subject via SOAP or direct database (depending on config)
  */
 export const createSubject = async (
   request: SubjectCreateRequest,
   userId: number,
   username: string
 ): Promise<ApiResponse<any>> => {
-  logger.info('Creating subject (hybrid)', { request, userId });
+  logger.info('Creating subject (hybrid)', { request, userId, soapEnabled: config.libreclinica.soapEnabled });
+
+  // If SOAP is disabled, use direct database creation
+  if (!config.libreclinica.soapEnabled) {
+    return createSubjectDirect(request, userId, username);
+  }
 
   // Use SOAP service for GxP-compliant creation
   const result = await subjectSoap.createSubject(request, userId, username);
 
   if (!result.success) {
-    return result;
+    // Fallback to direct database if SOAP fails
+    logger.warn('SOAP creation failed, attempting direct database creation');
+    return createSubjectDirect(request, userId, username);
   }
 
   // Verify creation in database
@@ -52,6 +61,124 @@ export const createSubject = async (
   }
 
   return result;
+};
+
+/**
+ * Create subject directly in database (for local development or SOAP fallback)
+ */
+const createSubjectDirect = async (
+  request: SubjectCreateRequest,
+  userId: number,
+  username: string
+): Promise<ApiResponse<any>> => {
+  logger.info('Creating subject directly in database', { request, userId });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Create subject record first
+    const subjectQuery = `
+      INSERT INTO subject (
+        date_of_birth, gender, unique_identifier, date_created, date_updated, 
+        owner_id, update_id, dob_collected, status_id
+      ) VALUES (
+        $1, $2, $3, NOW(), NOW(), $4, $4, $5, 1
+      )
+      RETURNING subject_id
+    `;
+    
+    const gender = request.gender === 'Male' || request.gender === 'm' ? 'm' : 
+                   request.gender === 'Female' || request.gender === 'f' ? 'f' : '';
+    const dobCollected = request.dateOfBirth ? true : false;
+    
+    const subjectResult = await client.query(subjectQuery, [
+      request.dateOfBirth || null,
+      gender,
+      request.studySubjectId, // Use studySubjectId as unique identifier
+      userId,
+      dobCollected
+    ]);
+
+    const subjectId = subjectResult.rows[0].subject_id;
+
+    // 2. Create study_subject record
+    const studySubjectQuery = `
+      INSERT INTO study_subject (
+        label, secondary_label, subject_id, study_id, status_id, 
+        enrollment_date, date_created, date_updated, owner_id, oc_oid
+      ) VALUES (
+        $1, $2, $3, $4, 1, $5, NOW(), NOW(), $6, $7
+      )
+      RETURNING study_subject_id
+    `;
+
+    // Generate OC OID
+    const ocOid = `SS_${request.studySubjectId.replace(/[^a-zA-Z0-9]/g, '')}`.substring(0, 40);
+
+    const studySubjectResult = await client.query(studySubjectQuery, [
+      request.studySubjectId,
+      request.secondaryId || '',
+      subjectId,
+      request.studyId,
+      request.enrollmentDate || new Date().toISOString().split('T')[0],
+      userId,
+      ocOid
+    ]);
+
+    const studySubjectId = studySubjectResult.rows[0].study_subject_id;
+
+    // 3. Create audit log entry
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'study_subject', $1, $2, 'Subject',
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Create%' OR name LIKE '%Insert%' LIMIT 1)
+      )
+    `, [userId, studySubjectId]);
+
+    await client.query('COMMIT');
+
+    logger.info('Subject created successfully via direct database', { 
+      subjectId, 
+      studySubjectId, 
+      label: request.studySubjectId 
+    });
+
+    return {
+      success: true,
+      message: 'Subject created successfully',
+      data: {
+        subjectId,
+        studySubjectId,
+        label: request.studySubjectId,
+        studyId: request.studyId,
+        enrollmentDate: request.enrollmentDate,
+        ocOid
+      }
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Direct subject creation failed', { error: error.message });
+    
+    // Check for duplicate
+    if (error.code === '23505') { // Unique violation
+      return {
+        success: false,
+        message: 'Subject with this ID already exists'
+      };
+    }
+
+    return {
+      success: false,
+      message: 'Failed to create subject: ' + error.message
+    };
+  } finally {
+    client.release();
+  }
 };
 
 /**

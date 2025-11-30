@@ -13,6 +13,9 @@ import { Study, StudyMetadata, PaginatedResponse } from '../../types';
 
 /**
  * Get studies list with statistics
+ * 
+ * Returns studies the user has access to (via study_user_role)
+ * OR studies they created (via owner_id)
  */
 export const getStudies = async (
   userId: number,
@@ -22,7 +25,7 @@ export const getStudies = async (
     limit?: number;
   }
 ): Promise<PaginatedResponse<any>> => {
-  logger.info('Getting studies', { userId, filters });
+  logger.info('📋 Getting studies for user', { userId, filters });
 
   try {
     const { status, page = 1, limit = 20 } = filters;
@@ -32,14 +35,21 @@ export const getStudies = async (
     const params: any[] = [];
     let paramIndex = 1;
 
-    // Filter by user access
-    conditions.push(`EXISTS (
-      SELECT 1 FROM study_user_role sur
-      WHERE sur.study_id = s.study_id
-        AND sur.user_name = (SELECT user_name FROM user_account WHERE user_id = $${paramIndex++})
-        AND sur.status_id = 1
+    // Filter by user access OR owner
+    // User can see studies they own OR are assigned to
+    conditions.push(`(
+      s.owner_id = $${paramIndex++}
+      OR EXISTS (
+        SELECT 1 FROM study_user_role sur
+        WHERE sur.study_id = s.study_id
+          AND sur.user_name = (SELECT user_name FROM user_account WHERE user_id = $${paramIndex++})
+          AND sur.status_id = 1
+      )
     )`);
-    params.push(userId);
+    params.push(userId, userId);
+
+    // Only show parent studies (not sites which have parent_study_id set)
+    conditions.push(`s.parent_study_id IS NULL`);
 
     if (status) {
       conditions.push(`st.name = $${paramIndex++}`);
@@ -59,15 +69,32 @@ export const getStudies = async (
     const countResult = await pool.query(countQuery, params);
     const total = parseInt(countResult.rows[0].total);
 
+    logger.info('📊 Study count for user', { userId, total });
+
     // Get studies with stats
     const dataQuery = `
       SELECT 
-        s.*,
-        st.name as status_name,
-        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as total_subjects,
+        s.study_id,
+        s.unique_identifier,
+        s.name,
+        s.summary,
+        s.principal_investigator,
+        s.sponsor,
+        s.expected_total_enrollment,
+        s.date_planned_start,
+        s.date_planned_end,
+        s.date_created,
+        s.date_updated,
+        s.status_id,
+        s.owner_id,
+        s.oc_oid,
+        s.protocol_type,
+        st.name as status,
+        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id AND status_id = 1) as active_subjects,
         (SELECT COUNT(DISTINCT sed.study_event_definition_id) FROM study_event_definition sed WHERE sed.study_id = s.study_id) as total_events,
-        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id) as total_forms
+        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id) as total_forms,
+        (SELECT COUNT(DISTINCT s2.study_id) FROM study s2 WHERE s2.parent_study_id = s.study_id) as total_sites
       FROM study s
       INNER JOIN status st ON s.status_id = st.status_id
       WHERE ${whereClause}
@@ -78,6 +105,13 @@ export const getStudies = async (
     params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
+
+    logger.info('✅ Studies retrieved', { 
+      userId, 
+      count: dataResult.rows.length,
+      total,
+      page 
+    });
 
     return {
       success: true,
@@ -90,7 +124,7 @@ export const getStudies = async (
       }
     };
   } catch (error: any) {
-    logger.error('Get studies error', { error: error.message });
+    logger.error('❌ Get studies error', { error: error.message, userId });
     throw error;
   }
 };
@@ -310,20 +344,28 @@ export const createStudy = async (
       `, [studyId, userId, username.rows[0].user_name]);
     }
 
-    // Log audit event
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name, new_value,
-        audit_log_event_type_id
-      ) VALUES (
-        NOW(), 'study', $1, $2, 'Study', $3,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Study Created' LIMIT 1)
-      )
-    `, [userId, studyId, data.name]);
+    // Log audit event - audit_log_event does NOT have study_id column
+    try {
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id, entity_name, new_value,
+          audit_log_event_type_id
+        ) VALUES (
+          NOW(), 'study', $1, $2, 'Study', $3,
+          COALESCE(
+            (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%create%' OR name ILIKE '%insert%' LIMIT 1),
+            1
+          )
+        )
+      `, [userId, studyId, data.name]);
+    } catch (auditError: any) {
+      // Don't fail study creation if audit logging fails
+      logger.warn('Audit logging failed for study creation', { error: auditError.message });
+    }
 
     await client.query('COMMIT');
 
-    logger.info('Study created successfully', { studyId, name: data.name });
+    logger.info('✅ Study created successfully', { studyId, name: data.name, userId });
 
     return {
       success: true,
@@ -332,7 +374,7 @@ export const createStudy = async (
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
-    logger.error('Create study error', { error: error.message, data });
+    logger.error('❌ Create study error', { error: error.message, data });
 
     return {
       success: false,

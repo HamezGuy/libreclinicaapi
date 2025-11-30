@@ -42,6 +42,12 @@ async function testDatabaseConnection(): Promise<boolean> {
  * Test SOAP connection
  */
 async function testSoapConnection(): Promise<boolean> {
+  // Skip SOAP if disabled in config
+  if (!config.libreclinica.soapEnabled) {
+    logger.info('SOAP disabled - using direct database access only');
+    return false;
+  }
+
   try {
     const soapClient = getSoapClient();
     const isConnected = await soapClient.testConnection('study');

@@ -1,7 +1,7 @@
 # LibreClinica Docker Compose for Integration Testing
 # 
-# This file sets up a real LibreClinica instance for automated testing
-# Required for 21 CFR Part 11 compliance testing
+# This file sets up a real LibreClinica instance with WORKING SOAP services
+# The default Docker image has broken SOAP - we mount the patched WAR file
 #
 # Usage:
 #   docker-compose -f docker-compose.libreclinica.yml up -d
@@ -12,19 +12,20 @@ services:
   # ==========================================================================
   # LibreClinica Database (PostgreSQL)
   # ==========================================================================
-  libreclinica-db:
+  postgres:
     image: postgres:14-alpine
-    container_name: libreclinica-test-db
+    container_name: libreclinica-postgres
     environment:
       POSTGRES_DB: libreclinica
-      POSTGRES_USER: clinica
-      POSTGRES_PASSWORD: clinica
+      POSTGRES_USER: libreclinica
+      POSTGRES_PASSWORD: libreclinica
     volumes:
       - libreclinica-db-data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     ports:
       - "5434:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U clinica -d libreclinica"]
+      test: ["CMD-SHELL", "pg_isready -U libreclinica -d libreclinica"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -33,31 +34,34 @@ services:
 
   # ==========================================================================
   # LibreClinica Application Server (Tomcat)
+  # 
+  # IMPORTANT: The default jaspersnel/libreclinica image has BROKEN SOAP!
+  # It's missing Spring Web Services dependencies.
+  # 
+  # We mount the patched WAR file that includes all dependencies.
   # ==========================================================================
   libreclinica:
     image: jaspersnel/libreclinica:latest
     container_name: libreclinica-test-app
     environment:
-      # Database connection - must match datainfo.properties format
       dbType: postgres
-      dbHost: libreclinica-db
+      dbHost: postgres
       dbPort: 5432
       dbName: libreclinica
-      dbUser: clinica
-      dbPass: clinica
-      # Additional LibreClinica properties
-      sysURL: http://localhost:8080/LibreClinica
-      supportURL: http://localhost:8080
+      dbUser: libreclinica
+      dbPass: libreclinica
+      sysURL: http://localhost:8090/libreclinica
+      supportURL: http://localhost:8090
       filePath: /usr/local/tomcat/libreclinica.data/
       userAccountNotification: email
       adminEmail: admin@test.local
     ports:
       - "8090:8080"
     depends_on:
-      libreclinica-db:
+      postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/LibreClinica/pages/login/login || exit 0"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/libreclinica/pages/login/login || exit 0"]
       interval: 20s
       timeout: 15s
       retries: 30
@@ -66,6 +70,8 @@ services:
       - libreclinica-test-network
     volumes:
       - libreclinica-data:/usr/local/tomcat/libreclinica.data
+      # Mount the PATCHED WAR file that has working SOAP dependencies
+      - ../libreclinica-fix/LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
 
   # ==========================================================================
   # Test Database (for API tests - separate from LibreClinica)
@@ -80,7 +86,8 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./tests/schema/libreclinica-full-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./tests/schema/libreclinica-seed-data.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U clinica -d libreclinica_test"]
       interval: 5s
@@ -96,4 +103,3 @@ volumes:
 networks:
   libreclinica-test-network:
     driver: bridge
-

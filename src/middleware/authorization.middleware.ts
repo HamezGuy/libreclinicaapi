@@ -6,6 +6,11 @@ import { AuthRequest } from './auth.middleware';
 /**
  * Role-based authorization middleware (21 CFR Part 11 §11.10(g))
  * Checks user permissions for the requested operation
+ * 
+ * LibreClinica User Types:
+ * - user_type_id 1: business_admin (has all privileges)
+ * - user_type_id 2: tech-admin (has technical privileges)
+ * - user_type_id 3: user (standard user)
  */
 export const requireRole = (...allowedRoles: string[]) => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -23,21 +28,35 @@ export const requireRole = (...allowedRoles: string[]) => {
     }
     
     try {
-      // Get user roles from database
-      const result = await db.query(`
+      // Check if user is a system admin by user_type
+      const adminCheckQuery = `
+        SELECT ut.user_type
+        FROM user_account ua
+        JOIN user_type ut ON ua.user_type_id = ut.user_type_id
+        WHERE ua.user_id = $1
+      `;
+      const adminResult = await db.query(adminCheckQuery, [authReq.user.userId]);
+      const userTypeFromDb = adminResult.rows[0]?.user_type?.toLowerCase() || '';
+      
+      // Get user roles from study_user_role
+      const roleResult = await db.query(`
         SELECT DISTINCT role_name
         FROM study_user_role
         WHERE user_name = $1
           AND status_id = 1
       `, [authReq.user.userName]);
       
-      const userRoles = result.rows.map(r => r.role_name);
+      const userRoles = roleResult.rows.map(r => r.role_name);
+      
+      // System admin types can do anything
+      const isSystemAdmin = 
+        userTypeFromDb.includes('admin') ||  // business_admin, tech-admin
+        userTypeFromDb === 'sysadmin' ||
+        authReq.user?.userType?.toLowerCase()?.includes('admin');
       
       // Check if user has at least one of the allowed roles
-      // sysadmin and admin users have all permissions
       const hasPermission = 
-        authReq.user?.userType === 'sysadmin' ||
-        authReq.user?.userType === 'admin' ||
+        isSystemAdmin ||
         userRoles.includes('admin') ||
         allowedRoles.some(role => userRoles.includes(role));
       
@@ -45,6 +64,7 @@ export const requireRole = (...allowedRoles: string[]) => {
         logger.warn('Insufficient permissions', {
           userId: authReq.user.userId,
           userName: authReq.user.userName,
+          userType: userTypeFromDb,
           userRoles,
           requiredRoles: allowedRoles,
           path: req.path
@@ -54,7 +74,7 @@ export const requireRole = (...allowedRoles: string[]) => {
           success: false,
           error: {
             code: 'FORBIDDEN',
-            message: 'Insufficient permissions for this operation'
+            message: 'Insufficient permissions for this operation. Required role: ' + allowedRoles.join(' or ')
           }
         });
         return;
@@ -62,6 +82,7 @@ export const requireRole = (...allowedRoles: string[]) => {
       
       logger.debug('Authorization check passed', {
         userId: authReq.user.userId,
+        userType: userTypeFromDb,
         userRoles,
         requiredRoles: allowedRoles
       });

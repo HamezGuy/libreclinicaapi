@@ -450,43 +450,84 @@ async function updateLastVisit(userId: number): Promise<void> {
   await pool.query(query, [userId]);
 }
 
+/**
+ * Log successful login to LibreClinica's native audit_user_login table
+ * 
+ * CORRECT audit_user_login schema:
+ * - id (SERIAL), user_name, user_account_id, audit_date, 
+ * - login_attempt_date, login_status, details, version
+ */
 async function logSuccessfulLogin(userId: number, username: string, ipAddress: string): Promise<void> {
-  const query = `
-    INSERT INTO audit_log_event (
-      audit_date, audit_table, user_id, entity_id, audit_log_event_type_id
+  // Insert into audit_user_login (LibreClinica's native login audit table)
+  // Note: column is `login_status` NOT `login_status_code`
+  const loginAuditQuery = `
+    INSERT INTO audit_user_login (
+      user_name, user_account_id, audit_date, login_attempt_date, login_status, details, version
     ) VALUES (
-      NOW(), 'user_account', $1, $2,
-      (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'User Login' LIMIT 1)
+      $1, $2, NOW(), NOW(), 1, $3, 1
     )
   `;
   
   try {
-    await pool.query(query, [userId, userId]);
+    await pool.query(loginAuditQuery, [username, userId, `Login from ${ipAddress}`]);
+    logger.info('Login audit recorded to audit_user_login', { userId, username, ipAddress });
   } catch (error: any) {
-    logger.error('Failed to log successful login', {
+    logger.error('Failed to log successful login to audit_user_login', {
       error: error.message,
-      userId
+      userId,
+      username
     });
   }
 }
 
+/**
+ * Log failed login attempt to LibreClinica's native audit_user_login table
+ */
 async function logFailedLogin(username: string, ipAddress: string, reason: string): Promise<void> {
-  const query = `
-    INSERT INTO audit_log_event (
-      audit_date, audit_table, user_id, entity_name, audit_log_event_type_id
+  // Insert into audit_user_login with status 0 (failed)
+  const loginAuditQuery = `
+    INSERT INTO audit_user_login (
+      user_name, user_account_id, audit_date, login_attempt_date, login_status, details, version
     ) VALUES (
-      NOW(), 'user_account', 0, $1,
-      (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Failed Login Attempt' LIMIT 1)
+      $1, 
+      (SELECT user_id FROM user_account WHERE user_name = $1 LIMIT 1),
+      NOW(),
+      NOW(), 
+      0, 
+      $2, 
+      1
     )
   `;
   
   try {
-    await pool.query(query, [username]);
+    await pool.query(loginAuditQuery, [username, `Failed: ${reason} from ${ipAddress}`]);
+    logger.warn('Failed login audit recorded to audit_user_login', { username, ipAddress, reason });
   } catch (error: any) {
-    logger.error('Failed to log failed login', {
+    logger.error('Failed to log failed login to audit_user_login', {
       error: error.message,
-      username
+      username,
+      reason
     });
+  }
+}
+
+/**
+ * Log user logout to LibreClinica's native audit_user_login table
+ */
+export async function logUserLogout(userId: number, username: string, ipAddress: string): Promise<void> {
+  const loginAuditQuery = `
+    INSERT INTO audit_user_login (
+      user_name, user_account_id, audit_date, login_attempt_date, login_status, details, version
+    ) VALUES (
+      $1, $2, NOW(), NOW(), 2, $3, 1
+    )
+  `;
+  
+  try {
+    await pool.query(loginAuditQuery, [username, userId, `Logout from ${ipAddress}`]);
+    logger.info('Logout audit recorded to audit_user_login', { userId, username });
+  } catch (error: any) {
+    logger.error('Failed to log logout', { error: error.message, userId });
   }
 }
 
@@ -539,6 +580,7 @@ export default {
   buildJwtPayload,
   getUserRoleDetails,
   userHasPermission,
-  isUserAdmin
+  isUserAdmin,
+  logUserLogout
 };
 

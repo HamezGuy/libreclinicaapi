@@ -1,5 +1,7 @@
 /**
  * Form Routes
+ * 
+ * CRUD operations for form templates (CRFs) and form data
  */
 
 import express from 'express';
@@ -18,6 +20,11 @@ router.get('/', controller.list);
 router.get('/by-study', controller.getByStudy);
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:crfId/metadata', controller.getMetadata);
+
+// Form templates (CRFs) - write operations
+router.post('/', requireRole('admin', 'coordinator'), controller.create);
+router.put('/:id', requireRole('admin', 'coordinator'), validate({ params: commonSchemas.idParam }), controller.update);
+router.delete('/:id', requireRole('admin'), validate({ params: commonSchemas.idParam }), controller.remove);
 
 // Form data operations
 router.post('/save', requireRole('data_entry', 'investigator'), soapRateLimiter, validate({ body: formSchemas.saveData }), controller.saveData);

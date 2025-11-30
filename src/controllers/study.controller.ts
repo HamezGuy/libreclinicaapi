@@ -17,10 +17,22 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { status, page, limit } = req.query;
 
+  logger.info('📋 Study list request', {
+    userId: user.userId,
+    username: user.userName,
+    filters: { status, page, limit }
+  });
+
   const result = await studyService.getStudies(user.userId, {
     status: status as string,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 20
+  });
+
+  logger.info('📋 Study list response', {
+    userId: user.userId,
+    count: result.data?.length || 0,
+    total: result.pagination?.total || 0
   });
 
   res.json(result);
@@ -65,7 +77,15 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
 
+  logger.info('📥 Received study creation request', { 
+    body: req.body,
+    userId: user.userId,
+    username: user.username
+  });
+
   const result = await studyService.createStudy(req.body, user.userId);
+
+  logger.info('📤 Study creation result', { result });
 
   res.status(result.success ? 201 : 400).json(result);
 });

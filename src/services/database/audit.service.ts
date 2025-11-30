@@ -155,7 +155,7 @@ export const getSubjectAudit = async (
 /**
  * Get recent audit events
  * Returns most recent audit events across all studies
- * Note: audit_log_event does NOT have study_id column - study info must be derived from entity relationships
+ * COMBINES: audit_log_event (data changes) + audit_user_login (login/logout events)
  */
 export const getRecentAuditEvents = async (
   limit: number = 50
@@ -163,23 +163,49 @@ export const getRecentAuditEvents = async (
   logger.info('Querying recent audit events', { limit });
 
   try {
+    // Combined query: data events + login events
     const query = `
-      SELECT 
-        ale.audit_id,
-        ale.audit_date,
-        ale.audit_table,
-        ale.user_id,
-        u.user_name,
-        u.first_name || ' ' || u.last_name as user_full_name,
-        ale.entity_id,
-        ale.entity_name,
-        alet.name as event_type,
-        ale.old_value,
-        ale.new_value
-      FROM audit_log_event ale
-      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
-      LEFT JOIN user_account u ON ale.user_id = u.user_id
-      ORDER BY ale.audit_date DESC
+      (
+        SELECT 
+          ale.audit_id::text as audit_id,
+          ale.audit_date,
+          ale.audit_table,
+          ale.user_id,
+          u.user_name,
+          u.first_name || ' ' || u.last_name as user_full_name,
+          ale.entity_id,
+          ale.entity_name,
+          COALESCE(alet.name, 'Data Change') as event_type,
+          ale.old_value,
+          ale.new_value,
+          'data' as event_category
+        FROM audit_log_event ale
+        LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+        LEFT JOIN user_account u ON ale.user_id = u.user_id
+      )
+      UNION ALL
+      (
+        SELECT 
+          'login_' || aul.id::text as audit_id,
+          aul.login_attempt_date as audit_date,
+          'user_login' as audit_table,
+          aul.user_account_id as user_id,
+          aul.user_name,
+          u.first_name || ' ' || u.last_name as user_full_name,
+          aul.user_account_id as entity_id,
+          aul.user_name as entity_name,
+          CASE 
+            WHEN aul.login_status = 1 THEN 'User Login'
+            WHEN aul.login_status = 2 THEN 'User Logout'
+            ELSE 'Failed Login Attempt'
+          END as event_type,
+          NULL as old_value,
+          aul.details as new_value,
+          'login' as event_category
+        FROM audit_user_login aul
+        LEFT JOIN user_account u ON aul.user_account_id = u.user_id
+      )
+      ORDER BY audit_date DESC
       LIMIT $1
     `;
 
@@ -280,8 +306,7 @@ export const exportAuditTrailCSV = async (
 
 /**
  * Get audit statistics
- * Note: audit_log_event does NOT have study_id column
- * We return global statistics filtered by date only
+ * COMBINES: audit_log_event (data changes) + audit_user_login (login/logout events)
  */
 export const getAuditStatistics = async (
   days: number = 30
@@ -292,23 +317,57 @@ export const getAuditStatistics = async (
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
 
-    const query = `
+    // Get data event stats
+    const dataEventsQuery = `
       SELECT 
-        COUNT(*) as total_events,
-        COUNT(DISTINCT ale.user_id) as unique_users,
-        COUNT(DISTINCT DATE(ale.audit_date)) as active_days,
-        COUNT(CASE WHEN alet.name LIKE '%Login%' THEN 1 END) as login_events,
-        COUNT(CASE WHEN alet.name LIKE '%Data%' THEN 1 END) as data_events,
+        COUNT(*) as total_data_events,
+        COUNT(DISTINCT ale.user_id) as data_unique_users,
+        COUNT(CASE WHEN alet.name LIKE '%Data%' OR alet.name LIKE '%Entry%' THEN 1 END) as data_entry_events,
         COUNT(CASE WHEN alet.name LIKE '%Subject%' THEN 1 END) as subject_events,
-        COUNT(CASE WHEN alet.name LIKE '%Query%' THEN 1 END) as query_events
+        COUNT(CASE WHEN alet.name LIKE '%Query%' OR alet.name LIKE '%Discrepancy%' THEN 1 END) as query_events,
+        COUNT(CASE WHEN alet.name LIKE '%SDV%' OR alet.name LIKE '%Verif%' THEN 1 END) as sdv_events
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
       WHERE ale.audit_date >= $1
     `;
 
-    const result = await pool.query(query, [startDate]);
+    // Get login event stats from audit_user_login
+    const loginEventsQuery = `
+      SELECT 
+        COUNT(*) as total_login_events,
+        COUNT(DISTINCT user_account_id) as login_unique_users,
+        COUNT(CASE WHEN login_status = 1 THEN 1 END) as successful_logins,
+        COUNT(CASE WHEN login_status = 0 THEN 1 END) as failed_logins,
+        COUNT(CASE WHEN login_status = 2 THEN 1 END) as logouts
+      FROM audit_user_login
+      WHERE login_attempt_date >= $1
+    `;
 
-    return result.rows[0];
+    const [dataResult, loginResult] = await Promise.all([
+      pool.query(dataEventsQuery, [startDate]),
+      pool.query(loginEventsQuery, [startDate])
+    ]);
+
+    const dataStats = dataResult.rows[0] || {};
+    const loginStats = loginResult.rows[0] || {};
+
+    return {
+      total_events: parseInt(dataStats.total_data_events || 0) + parseInt(loginStats.total_login_events || 0),
+      unique_users: Math.max(
+        parseInt(dataStats.data_unique_users || 0),
+        parseInt(loginStats.login_unique_users || 0)
+      ),
+      active_days: days,
+      // Login events (from audit_user_login)
+      login_events: parseInt(loginStats.successful_logins || 0),
+      failed_login_events: parseInt(loginStats.failed_logins || 0),
+      logout_events: parseInt(loginStats.logouts || 0),
+      // Data events (from audit_log_event)
+      data_events: parseInt(dataStats.data_entry_events || 0),
+      subject_events: parseInt(dataStats.subject_events || 0),
+      query_events: parseInt(dataStats.query_events || 0),
+      sdv_events: parseInt(dataStats.sdv_events || 0)
+    };
   } catch (error: any) {
     logger.error('Audit statistics error', {
       error: error.message
@@ -544,6 +603,387 @@ export const getComplianceReport = async (request: {
   }
 };
 
+/**
+ * Record audit event directly to database
+ * Uses LibreClinica's CORRECT audit_log_event schema
+ */
+export const recordAuditEvent = async (data: {
+  audit_table: string;
+  entity_id: number;
+  user_id: number;
+  user_name: string;
+  audit_log_event_type_id: number;
+  old_value?: string;
+  new_value?: string;
+  reason_for_change?: string;
+  study_id?: number;
+  event_crf_id?: number;
+  study_event_id?: number;
+}): Promise<{ success: boolean; data?: { audit_id: number }; message?: string }> => {
+  logger.info('Recording audit event to database', {
+    audit_table: data.audit_table,
+    entity_id: data.entity_id,
+    user_id: data.user_id
+  });
+
+  try {
+    // LibreClinica's actual audit_log_event columns:
+    // audit_id (SERIAL), audit_date, audit_table, user_id, entity_id, entity_name,
+    // old_value, new_value, audit_log_event_type_id, reason_for_change,
+    // study_id, event_crf_id, study_event_id
+    const query = `
+      INSERT INTO audit_log_event (
+        audit_date, 
+        audit_table, 
+        user_id, 
+        entity_id, 
+        entity_name,
+        old_value, 
+        new_value, 
+        audit_log_event_type_id, 
+        reason_for_change,
+        study_id,
+        event_crf_id,
+        study_event_id
+      ) VALUES (
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+      ) RETURNING audit_id
+    `;
+
+    const result = await pool.query(query, [
+      data.audit_table,
+      data.user_id,
+      data.entity_id,
+      data.user_name,  // entity_name
+      data.old_value || null,
+      data.new_value || null,
+      data.audit_log_event_type_id,
+      data.reason_for_change || null,
+      data.study_id || null,
+      data.event_crf_id || null,
+      data.study_event_id || null
+    ]);
+
+    return {
+      success: true,
+      data: { audit_id: result.rows[0].audit_id },
+      message: 'Audit event recorded'
+    };
+  } catch (error: any) {
+    logger.error('Failed to record audit event', { error: error.message });
+    return { success: false, message: error.message };
+  }
+};
+
+/**
+ * Common audit event types for tracking user actions
+ */
+export const AuditEventTypes = {
+  // Document/Form access
+  FORM_VIEWED: 1,
+  FORM_CREATED: 2,
+  FORM_UPDATED: 3,
+  FORM_DELETED: 4,
+  FORM_SIGNED: 5,
+  
+  // Subject access
+  SUBJECT_VIEWED: 10,
+  SUBJECT_CREATED: 11,
+  SUBJECT_UPDATED: 12,
+  
+  // Study access
+  STUDY_ACCESSED: 20,
+  STUDY_EXPORTED: 21,
+  
+  // Query events  
+  QUERY_CREATED: 30,
+  QUERY_RESPONDED: 31,
+  QUERY_CLOSED: 32,
+  
+  // SDV events
+  SDV_VERIFIED: 40,
+  SDV_REJECTED: 41,
+  
+  // Report events
+  REPORT_GENERATED: 50,
+  AUDIT_EXPORTED: 51
+};
+
+/**
+ * Track user action - Simplified API for controllers to record audit events
+ * Uses LibreClinica's CORRECT audit_log_event schema
+ * 
+ * @example
+ * await trackUserAction({
+ *   userId: user.userId,
+ *   username: user.username,
+ *   action: 'FORM_VIEWED',
+ *   entityType: 'event_crf',
+ *   entityId: eventCrfId,
+ *   details: 'Viewed wound assessment form'
+ * });
+ */
+export const trackUserAction = async (data: {
+  userId: number;
+  username: string;
+  action: string;
+  entityType: string;
+  entityId?: number;
+  entityName?: string;
+  details?: string;
+  oldValue?: string;
+  newValue?: string;
+  studyId?: number;
+  eventCrfId?: number;
+  studyEventId?: number;
+}): Promise<{ success: boolean; auditId?: number }> => {
+  try {
+    // Map action to event type ID (or use 1 as default)
+    const eventTypeId = (AuditEventTypes as any)[data.action] || 1;
+    
+    // Use LibreClinica's CORRECT column order
+    const query = `
+      INSERT INTO audit_log_event (
+        audit_date, 
+        audit_table, 
+        user_id,
+        entity_id, 
+        entity_name, 
+        old_value, 
+        new_value, 
+        audit_log_event_type_id,
+        reason_for_change,
+        study_id,
+        event_crf_id,
+        study_event_id
+      ) VALUES (
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+      ) RETURNING audit_id
+    `;
+
+    const result = await pool.query(query, [
+      data.entityType,                                    // audit_table
+      data.userId,                                        // user_id
+      data.entityId || null,                              // entity_id
+      data.entityName || data.username,                   // entity_name
+      data.oldValue || null,                              // old_value
+      data.newValue || data.details || null,              // new_value
+      eventTypeId,                                        // audit_log_event_type_id
+      data.details || `${data.action} by ${data.username}`, // reason_for_change
+      data.studyId || null,                               // study_id
+      data.eventCrfId || null,                            // event_crf_id
+      data.studyEventId || null                           // study_event_id
+    ]);
+
+    logger.info('User action tracked', {
+      action: data.action,
+      entityType: data.entityType,
+      entityId: data.entityId,
+      userId: data.userId
+    });
+
+    return { success: true, auditId: result.rows[0].audit_id };
+  } catch (error: any) {
+    logger.error('Failed to track user action', { 
+      error: error.message,
+      action: data.action 
+    });
+    return { success: false };
+  }
+};
+
+/**
+ * Track document/form access
+ */
+export const trackDocumentAccess = async (
+  userId: number,
+  username: string,
+  documentType: string,
+  documentId: number,
+  documentName?: string,
+  action: 'view' | 'edit' | 'sign' | 'export' = 'view'
+): Promise<void> => {
+  const actionMap = {
+    view: 'FORM_VIEWED',
+    edit: 'FORM_UPDATED',
+    sign: 'FORM_SIGNED',
+    export: 'AUDIT_EXPORTED'
+  };
+
+  await trackUserAction({
+    userId,
+    username,
+    action: actionMap[action],
+    entityType: documentType,
+    entityId: documentId,
+    entityName: documentName,
+    details: `${action} ${documentType} ${documentName || documentId}`
+  });
+};
+
+/**
+ * Get audit logs with flexible filtering
+ * Alias for getAuditTrail with additional parameters
+ */
+export const getAuditLogs = async (params: {
+  studyId?: number;
+  userId?: number;
+  eventType?: string;
+  startDate?: string;
+  endDate?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<any> => {
+  const page = Math.floor((params.offset || 0) / (params.limit || 50)) + 1;
+  return getAuditTrail({
+    studyId: params.studyId,
+    userId: params.userId,
+    eventType: params.eventType,
+    startDate: params.startDate,
+    endDate: params.endDate,
+    limit: params.limit || 50,
+    page
+  });
+};
+
+/**
+ * Get subject audit trail
+ * Alias for getSubjectAudit with API response format
+ */
+export const getSubjectAuditTrail = async (subjectId: number): Promise<any> => {
+  const result = await getSubjectAudit(subjectId);
+  return {
+    success: result.success,
+    data: result.data,
+    message: result.success ? 'Subject audit trail retrieved' : 'Failed to retrieve audit trail'
+  };
+};
+
+/**
+ * Get form audit trail
+ * Alias for getFormAudit with API response format
+ */
+export const getFormAuditTrail = async (eventCrfId: number): Promise<any> => {
+  const data = await getFormAudit(eventCrfId);
+  return {
+    success: true,
+    data,
+    message: 'Form audit trail retrieved'
+  };
+};
+
+/**
+ * Record electronic signature to database
+ */
+export const recordElectronicSignature = async (data: {
+  entity_type: string;
+  entity_id: number;
+  signer_username: string;
+  meaning: string;
+  reason_for_change?: string;
+  signed_at: Date;
+}): Promise<{ success: boolean; data?: { signature_id: number }; message?: string }> => {
+  logger.info('Recording electronic signature to database', {
+    entity_type: data.entity_type,
+    entity_id: data.entity_id,
+    signer_username: data.signer_username
+  });
+
+  try {
+    // Record as audit event with signature flag
+    const query = `
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, entity_id, user_id, 
+        audit_log_event_type_id, new_value, reason_for_change
+      ) 
+      SELECT 
+        $1, $2, $3, u.user_id, 30, $4, $5
+      FROM user_account u
+      WHERE u.user_name = $6
+      RETURNING audit_id
+    `;
+
+    const signatureValue = JSON.stringify({
+      type: 'electronic_signature',
+      meaning: data.meaning,
+      signed_at: data.signed_at.toISOString()
+    });
+
+    const result = await pool.query(query, [
+      data.signed_at,
+      data.entity_type,
+      data.entity_id,
+      signatureValue,
+      data.reason_for_change || `Electronic signature: ${data.meaning}`,
+      data.signer_username
+    ]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: 'User not found for signature' };
+    }
+
+    return {
+      success: true,
+      data: { signature_id: result.rows[0].audit_id },
+      message: 'Electronic signature recorded'
+    };
+  } catch (error: any) {
+    logger.error('Failed to record electronic signature', { error: error.message });
+    return { success: false, message: error.message };
+  }
+};
+
+/**
+ * Get audit statistics for dashboard
+ */
+export const getAuditStats = async (days: number = 30): Promise<any> => {
+  const stats = await getAuditStatistics(days);
+  return {
+    success: true,
+    data: {
+      totalEvents: parseInt(stats.total_events || '0'),
+      uniqueUsers: parseInt(stats.unique_users || '0'),
+      activeDays: parseInt(stats.active_days || '0'),
+      byType: {
+        login: parseInt(stats.login_events || '0'),
+        data: parseInt(stats.data_events || '0'),
+        subject: parseInt(stats.subject_events || '0'),
+        query: parseInt(stats.query_events || '0')
+      }
+    }
+  };
+};
+
+/**
+ * Export audit logs in specified format
+ */
+export const exportAuditLogs = async (
+  params: {
+    studyId?: number;
+    startDate?: string;
+    endDate?: string;
+  },
+  format: 'csv' | 'json' = 'csv'
+): Promise<any> => {
+  if (format === 'csv') {
+    const csv = await exportAuditTrailCSV({
+      studyId: params.studyId || 0,
+      startDate: params.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+      endDate: params.endDate || new Date().toISOString(),
+      format: 'csv'
+    });
+    return { success: true, data: csv, format: 'csv' };
+  } else {
+    const result = await getAuditTrail({
+      studyId: params.studyId,
+      startDate: params.startDate,
+      endDate: params.endDate,
+      limit: 10000
+    });
+    return { success: true, data: result.data, format: 'json' };
+  }
+};
+
 export default {
   getAuditTrail,
   getSubjectAudit,
@@ -554,6 +994,18 @@ export default {
   getAuditableTables,
   getFormAudit,
   getAuditSummary,
-  getComplianceReport
+  getComplianceReport,
+  // New functions for hybrid service
+  recordAuditEvent,
+  getAuditLogs,
+  getSubjectAuditTrail,
+  getFormAuditTrail,
+  recordElectronicSignature,
+  getAuditStats,
+  exportAuditLogs,
+  // User action tracking
+  trackUserAction,
+  trackDocumentAccess,
+  AuditEventTypes
 };
 

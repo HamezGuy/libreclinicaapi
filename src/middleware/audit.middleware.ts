@@ -141,7 +141,12 @@ export const auditMiddleware = async (
 
 /**
  * Log specific audit events to database
- * Used by controllers to log business-level events
+ * Uses LibreClinica's ACTUAL audit_log_event schema:
+ * - audit_id (SERIAL - auto-generated)
+ * - audit_date, audit_table, user_id, entity_id, entity_name
+ * - old_value, new_value, reason_for_change
+ * - audit_log_event_type_id (FK to audit_log_event_type)
+ * - study_id, event_crf_id, study_event_id
  */
 export const logAuditEvent = async (
   eventType: AuditEventType,
@@ -154,15 +159,23 @@ export const logAuditEvent = async (
     newValue?: string;
     reasonForChange?: string;
     studyId?: number;
-    subjectId?: number;
     eventCrfId?: number;
+    studyEventId?: number;
     ipAddress?: string;
   }
 ): Promise<void> => {
   try {
+    // First, get or create the event type ID
+    const eventTypeResult = await pool.query(
+      `SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $1 LIMIT 1`,
+      [`%${eventType.split(' ')[0]}%`]
+    );
+    
+    const eventTypeId = eventTypeResult.rows[0]?.audit_log_event_type_id || 1;
+
+    // Insert using CORRECT column names from LibreClinica schema
     const query = `
       INSERT INTO audit_log_event (
-        audit_id,
         audit_date,
         audit_table,
         user_id,
@@ -170,38 +183,36 @@ export const logAuditEvent = async (
         entity_name,
         old_value,
         new_value,
-        event_type_id,
+        audit_log_event_type_id,
         reason_for_change,
         study_id,
-        subject_id,
-        event_crf_id
+        event_crf_id,
+        study_event_id
       ) VALUES (
-        $1, NOW(), $2, $3, $4, $5, $6, $7, 
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = $8),
-        $9, $10, $11, $12
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
       )
     `;
 
     await pool.query(query, [
-      uuidv4(), // audit_id
-      details.entityName || 'api_request', // audit_table
-      userId,
-      details.entityId || null,
-      details.entityName || null,
-      details.oldValue || null,
-      details.newValue || null,
-      eventType, // event_type_id (lookup by name)
-      details.reasonForChange || null,
-      details.studyId || null,
-      details.subjectId || null,
-      details.eventCrfId || null
+      details.entityName || 'api_request',  // audit_table
+      userId,                                // user_id
+      details.entityId || null,              // entity_id
+      details.entityName || null,            // entity_name
+      details.oldValue || null,              // old_value
+      details.newValue || null,              // new_value
+      eventTypeId,                           // audit_log_event_type_id
+      details.reasonForChange || null,       // reason_for_change
+      details.studyId || null,               // study_id
+      details.eventCrfId || null,            // event_crf_id
+      details.studyEventId || null           // study_event_id
     ]);
 
     logger.info('Audit event logged', {
       eventType,
+      eventTypeId,
       userId,
       username,
-      details
+      entityId: details.entityId
     });
   } catch (error: any) {
     logger.error('Failed to log audit event', {

@@ -2,16 +2,17 @@
  * SOAP Client
  * 
  * Base SOAP client for LibreClinica Web Services
- * - Handles SOAP authentication
+ * - Handles SOAP authentication (WS-Security)
  * - Provides retry logic and error handling
  * - Supports ODM 1.3 standard
  * - Logs all SOAP operations for audit
  * 
- * LibreClinica SOAP Web Services:
+ * LibreClinica SOAP Web Services (at /ws/ - confirmed from web.xml):
  * - Study Service: http://localhost:8080/LibreClinica/ws/study/v1
  * - StudySubject Service: http://localhost:8080/LibreClinica/ws/studySubject/v1
  * - Data Service: http://localhost:8080/LibreClinica/ws/data/v1
- * - Event Service: http://localhost:8080/LibreClinica/ws/studyEventDefinition/v1
+ * - Event Service: http://localhost:8080/LibreClinica/ws/event/v1
+ * - CRF Service: http://localhost:8080/LibreClinica/ws/crf/v1
  */
 
 import * as soap from 'soap';
@@ -59,6 +60,7 @@ export class SoapClient {
 
   constructor() {
     this.config = {
+      // LibreClinica SOAP is at /ws/ (confirmed from web.xml servlet mapping)
       baseUrl: config.libreclinica.soapUrl || 'http://localhost:8080/LibreClinica/ws',
       username: config.libreclinica.soapUsername || 'root',
       password: config.libreclinica.soapPassword || 'root',
@@ -69,21 +71,22 @@ export class SoapClient {
 
   /**
    * Get WSDL URL for a service
-   * LibreClinica SOAP endpoints:
-   * - /ws/subject/v1 - Subject management
-   * - /ws/studySubject/v1 - Study subject management
-   * - /ws/event/v1 - Event management
-   * - /ws/crf/v1 - CRF/Form management
+   * LibreClinica SOAP endpoints (at /ws/ - from web.xml):
+   * - study/v1 - Study metadata
+   * - studySubject/v1 - Subject enrollment
+   * - event/v1 - Event scheduling  
+   * - crf/v1 - CRF/Form data import
    */
   private getWsdlUrl(serviceName: string): string {
     const wsdlUrls: Record<string, string> = {
-      subject: `${this.config.baseUrl}/subject/v1?wsdl`,
+      study: `${this.config.baseUrl}/study/v1?wsdl`,
       studySubject: `${this.config.baseUrl}/studySubject/v1?wsdl`,
       event: `${this.config.baseUrl}/event/v1?wsdl`,
-      crf: `${this.config.baseUrl}/crf/v1?wsdl`,
-      // Aliases for backwards compatibility
-      study: `${this.config.baseUrl}/studySubject/v1?wsdl`,
-      data: `${this.config.baseUrl}/crf/v1?wsdl`
+      data: `${this.config.baseUrl}/data/v1?wsdl`,
+      studyEventDefinition: `${this.config.baseUrl}/studyEventDefinition/v1?wsdl`,
+      // Legacy aliases
+      subject: `${this.config.baseUrl}/studySubject/v1?wsdl`,
+      crf: `${this.config.baseUrl}/data/v1?wsdl`
     };
 
     return wsdlUrls[serviceName] || wsdlUrls.studySubject;
@@ -103,14 +106,20 @@ export class SoapClient {
     try {
       logger.debug(`Creating SOAP client for ${serviceName}`, { wsdlUrl });
 
+      // WSDL fetch requires HTTP Basic Auth
+      const basicAuth = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
+      
       const client = await soap.createClientAsync(wsdlUrl, {
         endpoint: wsdlUrl.replace('?wsdl', ''),
         wsdl_options: {
           timeout: this.config.timeout
+        },
+        wsdl_headers: {
+          Authorization: `Basic ${basicAuth}`
         }
       });
 
-      // Add WS-Security header for authentication
+      // Add WS-Security header for SOAP requests
       const wsSecurity = new soap.WSSecurity(
         this.config.username,
         this.config.password,

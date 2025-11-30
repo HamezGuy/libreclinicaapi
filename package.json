@@ -25,7 +25,11 @@
     "libreclinica:stop": "docker-compose -f docker-compose.libreclinica.yml down",
     "libreclinica:logs": "docker-compose -f docker-compose.libreclinica.yml logs -f libreclinica",
     "libreclinica:test": "npm run libreclinica:start && npm run test:integration:real",
-    "lint": "eslint src/**/*.ts"
+    "lint": "eslint src/**/*.ts",
+    "soap:diagnostics": "npx ts-node scripts/soap-diagnostics.ts",
+    "soap:status": "curl http://localhost:3001/api/soap/status 2>/dev/null || echo 'API not running'",
+    "start:soap": "powershell -File START_WITH_SOAP.ps1",
+    "start:db-only": "powershell -File START_DATABASE_ONLY.ps1"
   },
   "keywords": [
     "libreclinica",

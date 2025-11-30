@@ -39,6 +39,10 @@ import codingRoutes from './routes/coding.routes';
 import dataLocksRoutes from './routes/data-locks.routes';
 // WoundScanner integration
 import woundsRoutes from './routes/wounds.routes';
+// SOAP diagnostics and health
+import soapRoutes from './routes/soap.routes';
+// LibreClinica native API proxy
+import libreclinicaProxyRoutes from './routes/libreclinica-proxy.routes';
 
 const app = express();
 
@@ -137,14 +141,30 @@ app.get('/health', (req: Request, res: Response) => {
   });
 });
 
-app.get('/api/health', (req: Request, res: Response) => {
+app.get('/api/health', async (req: Request, res: Response) => {
+  let soapStatus = 'disabled';
+  
+  if (config.libreclinica.soapEnabled) {
+    try {
+      const { getSoapClient } = await import('./services/soap/soapClient');
+      const soapClient = getSoapClient();
+      const isConnected = await soapClient.testConnection('studySubject');
+      soapStatus = isConnected ? 'connected' : 'unavailable';
+    } catch {
+      soapStatus = 'error';
+    }
+  }
+  
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     services: {
       database: 'connected',
-      soap: 'available'
-    }
+      soap: soapStatus,
+      rest_api: 'active'
+    },
+    mode: config.libreclinica.soapEnabled ? 'hybrid' : 'database_only',
+    soapUrl: config.libreclinica.soapEnabled ? config.libreclinica.soapUrl : null
   });
 });
 
@@ -171,6 +191,10 @@ app.use('/api/coding', codingRoutes);
 app.use('/api/data-locks', dataLocksRoutes);
 // WoundScanner integration
 app.use('/api/wounds', woundsRoutes);
+// SOAP diagnostics and health
+app.use('/api/soap', soapRoutes);
+// LibreClinica native API proxy (forwards to LibreClinica's REST endpoints)
+app.use('/api/libreclinica', libreclinicaProxyRoutes);
 
 // ============================================================================
 // ROOT ENDPOINT
@@ -180,9 +204,12 @@ app.get('/', (req: Request, res: Response) => {
   res.json({
     name: 'LibreClinica REST API',
     version: '1.0.0',
-    description: '21 CFR Part 11 Compliant REST API for LibreClinica',
+    description: '21 CFR Part 11 Compliant REST API for LibreClinica with SOAP support',
     documentation: '/api/docs',
     health: '/health',
+    mode: config.libreclinica.soapEnabled ? 'Hybrid (REST + SOAP)' : 'REST Only (Database Direct)',
+    soapEnabled: config.libreclinica.soapEnabled,
+    soapUrl: config.libreclinica.soapEnabled ? config.libreclinica.soapUrl : null,
     endpoints: {
       auth: '/api/auth',
       subjects: '/api/subjects',
@@ -200,7 +227,24 @@ app.get('/', (req: Request, res: Response) => {
       monitoring: '/api/monitoring',
       coding: '/api/coding',
       dataLocks: '/api/data-locks',
-      wounds: '/api/wounds'
+      wounds: '/api/wounds',
+      soap: '/api/soap - SOAP status, diagnostics, and configuration',
+      libreclinica: '/api/libreclinica - Proxy to LibreClinica native REST APIs'
+    },
+    libreclinicaNativeProxies: {
+      metadata: '/api/libreclinica/metadata/:studyOid - Get study metadata (proxies to LibreClinica)',
+      clinicaldata: '/api/libreclinica/clinicaldata/:studyOid/:subjectId/:eventOid/:formVersionOid - Get form data',
+      openrosa: '/api/libreclinica/openrosa/:studyOid/* - ODK-compatible API',
+      systemStatus: '/api/libreclinica/system/status - LibreClinica system status',
+      available: '/api/libreclinica/available - Check if LibreClinica is reachable'
+    },
+    soapEndpoints: {
+      status: '/api/soap/status - Check SOAP connection status',
+      services: '/api/soap/services - Check individual SOAP services',
+      config: '/api/soap/config - View SOAP configuration (admin)',
+      test: '/api/soap/test - Run SOAP connectivity test (admin)',
+      diagnostics: '/api/soap/diagnostics - Full SOAP diagnostics (admin)',
+      reconnect: '/api/soap/reconnect - Force SOAP reconnection (admin)'
     }
   });
 });

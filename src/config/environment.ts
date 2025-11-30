@@ -4,6 +4,9 @@ dotenv.config();
 
 export const config = {
   server: {
+    // Port configuration:
+    // - Local development: 3000 (default)
+    // - Web deployments: 3001 (set PORT=3001 in environment)
     port: parseInt(process.env.PORT || '3000'),
     env: process.env.NODE_ENV || 'development',
     apiVersion: process.env.API_VERSION || 'v1'
@@ -11,9 +14,12 @@ export const config = {
   
   libreclinica: {
     // LibreClinica Docker container - use existing instance on 8080
+    // SOAP services are at /ws/ path (confirmed from web.xml)
     soapUrl: process.env.LIBRECLINICA_SOAP_URL || 'http://localhost:8080/LibreClinica/ws',
     soapUsername: process.env.SOAP_USERNAME || 'root',
     soapPassword: process.env.SOAP_PASSWORD || 'root',
+    // Enable SOAP by default (set DISABLE_SOAP=true to use direct DB only)
+    soapEnabled: process.env.DISABLE_SOAP !== 'true',
     database: {
       host: process.env.LIBRECLINICA_DB_HOST || 'localhost',
       // LibreClinica Docker database on port 5432

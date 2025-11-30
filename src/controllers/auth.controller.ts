@@ -152,10 +152,16 @@ export const verify = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Logout (client-side token invalidation)
+ * Logout - Record logout in audit trail
  */
 export const logout = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
+  const ipAddress = req.ip || 'unknown';
+
+  // Record logout in audit trail
+  if (user?.userId && user?.username) {
+    await authService.logUserLogout(user.userId, user.username, ipAddress);
+  }
 
   logger.info('User logged out', { userId: user?.userId, username: user?.username });
 

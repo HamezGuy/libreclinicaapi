@@ -5,6 +5,8 @@
  * - CRUD operations
  * - Progress tracking
  * - Events and forms
+ * 
+ * All operations are tracked in the audit trail.
  */
 
 import { Request, Response } from 'express';
@@ -12,9 +14,11 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as subjectService from '../services/hybrid/subject.service';
 import { pool } from '../config/database';
 import { logger } from '../config/logger';
+import { trackUserAction } from '../services/database/audit.service';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, status, page, limit, search } = req.query;
+  const user = (req as any).user;
 
   const result = await subjectService.getSubjectList(
     parseInt(studyId as string),
@@ -25,17 +29,43 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     }
   );
 
+  // Track study access
+  if (user?.userId && studyId) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'STUDY_ACCESSED',
+      entityType: 'study',
+      entityId: parseInt(studyId as string),
+      details: 'Viewed subject list'
+    });
+  }
+
   res.json(result);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const user = (req as any).user;
 
   const result = await subjectService.getSubjectById(parseInt(id));
 
   if (!result) {
     res.status(404).json({ success: false, message: 'Subject not found' });
     return;
+  }
+
+  // Track subject access
+  if (user?.userId) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'SUBJECT_VIEWED',
+      entityType: 'study_subject',
+      entityId: parseInt(id),
+      entityName: (result as any).label || (result as any).studySubjectId,
+      details: `Viewed subject ${(result as any).label || id}`
+    });
   }
 
   res.json({ success: true, data: result });
