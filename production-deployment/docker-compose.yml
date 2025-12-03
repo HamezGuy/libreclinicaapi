@@ -78,9 +78,9 @@ services:
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
       # Core SOAP Connection
-      LIBRECLINICA_SOAP_URL: http://core:8080/LibreClinica/ws
+      LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
       SOAP_USERNAME: root
-      SOAP_PASSWORD: ${SOAP_PASSWORD:-root}
+      SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
       # Security
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
       # CORS - Allow Vercel, localhost, and production domains
