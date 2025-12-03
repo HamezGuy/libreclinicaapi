@@ -11,6 +11,10 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
+// Summary endpoint - returns combined stats (alias for frontend compatibility)
+router.get('/summary', controller.getSummary);
+router.get('/stats', controller.getStats);
+
 router.get('/enrollment', validate({ query: dashboardSchemas.enrollment }), controller.getEnrollment);
 router.get('/completion', validate({ query: dashboardSchemas.completion }), controller.getCompletion);
 router.get('/queries', validate({ query: dashboardSchemas.queries }), controller.getQueries);

@@ -48,6 +48,10 @@ import validationRulesRoutes from './routes/validation-rules.routes';
 
 const app = express();
 
+// Trust proxy - Required when behind nginx/load balancer for correct IP detection
+// This ensures rate limiting and logging work correctly with X-Forwarded-For headers
+app.set('trust proxy', 1);
+
 // ============================================================================
 // SECURITY MIDDLEWARE
 // ============================================================================

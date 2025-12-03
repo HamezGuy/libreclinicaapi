@@ -397,13 +397,13 @@ export const getUserActivityStats = async (
     const activeUsers = parseInt(activeUsersResult.rows[0].active_users) || 0;
 
     // Get login statistics from audit_user_login table
-    // Note: audit_user_login has columns: id, user_name, audit_date, login_attempt_date, login_status, details, version
+    // Note: audit_user_login has columns: id, user_name, user_account_id, login_attempt_date, login_status_code, version, details
     const loginStatsQuery = `
       SELECT 
         COUNT(*) as total_logins
       FROM audit_user_login aul
-      WHERE aul.audit_date >= $1
-        AND aul.login_status = 1
+      WHERE aul.login_attempt_date >= $1
+        AND aul.login_status_code = 1
     `;
 
     const loginStatsResult = await pool.query(loginStatsQuery, [startDate]);

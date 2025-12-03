@@ -224,14 +224,17 @@ export class SoapClient {
       try {
         const soapEnvelope = this.buildSoapEnvelope(serviceName, methodName, parameters);
         
+        // Build the full service URL (e.g., /libreclinica-ws/ws/study/v1)
+        const serviceUrl = `${this.config.baseUrl}/${serviceName}/v1`;
+        
         logger.debug('SOAP Request', { 
-          url: this.config.baseUrl,
+          url: serviceUrl,
           serviceName,
           methodName
         });
 
         const startTime = Date.now();
-        const response = await this.httpClient.post(this.config.baseUrl, soapEnvelope);
+        const response = await this.httpClient.post(serviceUrl, soapEnvelope);
         const duration = Date.now() - startTime;
 
         logger.info('SOAP request successful', {

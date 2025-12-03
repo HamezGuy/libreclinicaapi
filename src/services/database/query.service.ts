@@ -62,18 +62,18 @@ export const getQueries = async (
     const countResult = await pool.query(countQuery, params);
     const total = parseInt(countResult.rows[0].total);
 
-    // Get queries - join through entity relationships to get subject info
+    // Get queries - join through mapping tables to get subject info
+    // Note: discrepancy_note uses mapping tables (dn_study_subject_map, dn_event_crf_map, etc.)
+    // instead of a direct entity_id column
     const dataQuery = `
       SELECT 
         dn.discrepancy_note_id,
         dn.description,
         dn.detailed_notes,
         dn.entity_type,
-        dn.entity_id,
         dnt.name as type_name,
         dnst.name as status_name,
         dn.date_created,
-        dn.thread_number,
         u1.user_name as created_by,
         u2.user_name as assigned_to,
         dn.study_id,
@@ -87,9 +87,8 @@ export const getQueries = async (
       LEFT JOIN user_account u1 ON dn.owner_id = u1.user_id
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
       LEFT JOIN study s ON dn.study_id = s.study_id
-      LEFT JOIN event_crf ec ON dn.entity_type = 'event_crf' AND dn.entity_id = ec.event_crf_id
-      LEFT JOIN study_event se ON ec.study_event_id = se.study_event_id
-      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+      LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
       WHERE ${whereClause}
       ORDER BY dn.date_created DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -139,9 +138,8 @@ export const getQueryById = async (queryId: number): Promise<any> => {
       LEFT JOIN user_account u1 ON dn.owner_id = u1.user_id
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
       LEFT JOIN study s ON dn.study_id = s.study_id
-      LEFT JOIN event_crf ec ON dn.entity_type = 'event_crf' AND dn.entity_id = ec.event_crf_id
-      LEFT JOIN study_event se ON ec.study_event_id = se.study_event_id
-      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+      LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
       WHERE dn.discrepancy_note_id = $1
     `;
 
@@ -739,9 +737,8 @@ export const getOverdueQueries = async (studyId: number, daysThreshold: number =
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
       LEFT JOIN user_account u ON dn.assigned_user_id = u.user_id
-      LEFT JOIN event_crf ec ON dn.entity_type = 'event_crf' AND dn.entity_id = ec.event_crf_id
-      LEFT JOIN study_event se ON ec.study_event_id = se.study_event_id
-      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+      LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
       WHERE dn.study_id = $1
         AND dn.parent_dn_id IS NULL
         AND dnst.name IN ('New', 'Updated', 'Resolution Proposed')
@@ -777,9 +774,8 @@ export const getMyAssignedQueries = async (userId: number, studyId?: number): Pr
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
       LEFT JOIN study s ON dn.study_id = s.study_id
-      LEFT JOIN event_crf ec ON dn.entity_type = 'event_crf' AND dn.entity_id = ec.event_crf_id
-      LEFT JOIN study_event se ON ec.study_event_id = se.study_event_id
-      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+      LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
       WHERE dn.assigned_user_id = $1
         AND dn.parent_dn_id IS NULL
         AND dnst.name NOT IN ('Closed', 'Not Applicable')

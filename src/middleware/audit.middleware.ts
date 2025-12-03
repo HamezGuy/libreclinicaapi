@@ -174,6 +174,7 @@ export const logAuditEvent = async (
     const eventTypeId = eventTypeResult.rows[0]?.audit_log_event_type_id || 1;
 
     // Insert using CORRECT column names from LibreClinica schema
+    // Note: audit_log_event does NOT have study_id column - only study_event_id, event_crf_id
     const query = `
       INSERT INTO audit_log_event (
         audit_date,
@@ -185,11 +186,10 @@ export const logAuditEvent = async (
         new_value,
         audit_log_event_type_id,
         reason_for_change,
-        study_id,
         event_crf_id,
         study_event_id
       ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
       )
     `;
 
@@ -202,7 +202,6 @@ export const logAuditEvent = async (
       details.newValue || null,              // new_value
       eventTypeId,                           // audit_log_event_type_id
       details.reasonForChange || null,       // reason_for_change
-      details.studyId || null,               // study_id
       details.eventCrfId || null,            // event_crf_id
       details.studyEventId || null           // study_event_id
     ]);

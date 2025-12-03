@@ -29,8 +29,9 @@ export class WorkflowController {
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
         JOIN user_account ua ON dn.assigned_user_id = ua.user_id
-        LEFT JOIN study_subject ss ON dn.entity_id = ss.study_subject_id
-        LEFT JOIN study s ON ss.study_id = s.study_id
+        LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+        LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
+        LEFT JOIN study s ON dn.study_id = s.study_id
         WHERE 1=1
       `;
       
@@ -114,8 +115,9 @@ export class WorkflowController {
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
         JOIN user_account ua ON dn.assigned_user_id = ua.user_id
-        LEFT JOIN study_subject ss ON dn.entity_id = ss.study_subject_id
-        LEFT JOIN study s ON ss.study_id = s.study_id
+        LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+        LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
+        LEFT JOIN study s ON dn.study_id = s.study_id
         WHERE ua.user_name = $1
         AND rs.name IN ('New', 'Updated', 'Resolution Proposed')
         ORDER BY dn.date_created DESC
@@ -195,8 +197,9 @@ export class WorkflowController {
         JOIN user_account ua ON dn.assigned_user_id = ua.user_id
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
-        LEFT JOIN study_subject ss ON dn.entity_id = ss.study_subject_id
-        LEFT JOIN study s ON ss.study_id = s.study_id
+        LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+        LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
+        LEFT JOIN study s ON dn.study_id = s.study_id
         WHERE ua.user_name = $1
         AND rs.name IN ('New', 'Updated', 'Resolution Proposed')
         ORDER BY dn.date_created DESC

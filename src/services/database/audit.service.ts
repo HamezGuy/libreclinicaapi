@@ -630,7 +630,8 @@ export const recordAuditEvent = async (data: {
     // LibreClinica's actual audit_log_event columns:
     // audit_id (SERIAL), audit_date, audit_table, user_id, entity_id, entity_name,
     // old_value, new_value, audit_log_event_type_id, reason_for_change,
-    // study_id, event_crf_id, study_event_id
+    // event_crf_id, study_event_id, event_crf_version_id, item_data_repeat_key
+    // NOTE: There is NO study_id column in audit_log_event!
     const query = `
       INSERT INTO audit_log_event (
         audit_date, 
@@ -642,11 +643,10 @@ export const recordAuditEvent = async (data: {
         new_value, 
         audit_log_event_type_id, 
         reason_for_change,
-        study_id,
         event_crf_id,
         study_event_id
       ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
       ) RETURNING audit_id
     `;
 
@@ -659,7 +659,6 @@ export const recordAuditEvent = async (data: {
       data.new_value || null,
       data.audit_log_event_type_id,
       data.reason_for_change || null,
-      data.study_id || null,
       data.event_crf_id || null,
       data.study_event_id || null
     ]);
@@ -742,6 +741,7 @@ export const trackUserAction = async (data: {
     const eventTypeId = (AuditEventTypes as any)[data.action] || 1;
     
     // Use LibreClinica's CORRECT column order
+    // NOTE: There is NO study_id column in audit_log_event!
     const query = `
       INSERT INTO audit_log_event (
         audit_date, 
@@ -753,11 +753,10 @@ export const trackUserAction = async (data: {
         new_value, 
         audit_log_event_type_id,
         reason_for_change,
-        study_id,
         event_crf_id,
         study_event_id
       ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
       ) RETURNING audit_id
     `;
 
@@ -770,7 +769,6 @@ export const trackUserAction = async (data: {
       data.newValue || data.details || null,              // new_value
       eventTypeId,                                        // audit_log_event_type_id
       data.details || `${data.action} by ${data.username}`, // reason_for_change
-      data.studyId || null,                               // study_id
       data.eventCrfId || null,                            // event_crf_id
       data.studyEventId || null                           // study_event_id
     ]);

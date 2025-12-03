@@ -16,6 +16,9 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
+// Root route - returns events filtered by query params (for frontend compatibility)
+router.get('/', controller.listEvents);
+
 // Read operations - all authenticated users
 router.get('/study/:studyId', validate({ params: commonSchemas.idParam }), controller.getStudyEvents);
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.getEvent);

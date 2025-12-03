@@ -8,6 +8,28 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as eventService from '../services/hybrid/event.service';
 
+/**
+ * List events - accepts studyId as query param for frontend compatibility
+ */
+export const listEvents = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, subjectId } = req.query;
+  
+  if (subjectId) {
+    const result = await eventService.getSubjectEvents(parseInt(subjectId as string));
+    res.json({ success: true, data: result, total: result.length });
+    return;
+  }
+  
+  if (studyId) {
+    const result = await eventService.getStudyEvents(parseInt(studyId as string));
+    res.json({ success: true, data: result, total: result.length });
+    return;
+  }
+  
+  // Return empty array if no filters provided
+  res.json({ success: true, data: [], total: 0 });
+});
+
 export const getStudyEvents = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.params;
 
