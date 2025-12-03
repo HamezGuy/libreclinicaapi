@@ -2,6 +2,7 @@
  * Event Routes
  * 
  * Study Event (Phase) management routes
+ * Includes CRF (Template) assignment to events
  */
 
 import express from 'express';
@@ -28,6 +29,28 @@ router.delete('/:id', requireRole('admin'), validate({ params: commonSchemas.idP
 
 // Schedule event - require data entry or coordinator role, use SOAP rate limiter
 router.post('/schedule', requireRole('coordinator', 'data_entry', 'investigator'), soapRateLimiter, validate({ body: eventSchemas.schedule }), controller.scheduleEvent);
+
+// ============================================
+// EVENT CRF ASSIGNMENT ROUTES
+// ============================================
+
+// Get available CRFs that can be assigned to an event
+router.get('/study/:studyId/event/:eventId/available-crfs', controller.getAvailableCrfs);
+
+// Assign CRF to event
+router.post('/:eventId/crfs', requireRole('admin', 'coordinator'), controller.assignCrf);
+
+// Update CRF assignment settings
+router.put('/crf-assignment/:crfAssignmentId', requireRole('admin', 'coordinator'), controller.updateEventCrf);
+
+// Remove CRF from event
+router.delete('/crf-assignment/:crfAssignmentId', requireRole('admin', 'coordinator'), controller.removeCrf);
+
+// Reorder CRFs within an event
+router.put('/:eventId/crfs/reorder', requireRole('admin', 'coordinator'), controller.reorderCrfs);
+
+// Bulk assign CRFs to event
+router.post('/:eventId/crfs/bulk', requireRole('admin', 'coordinator'), controller.bulkAssignCrfs);
 
 export default router;
 

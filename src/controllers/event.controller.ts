@@ -95,6 +95,122 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
   res.json(result);
 });
 
+// ============================================
+// EVENT CRF ASSIGNMENT ENDPOINTS
+// ============================================
+
+/**
+ * Get available CRFs that can be assigned to an event
+ */
+export const getAvailableCrfs = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, eventId } = req.params;
+
+  const result = await eventService.getAvailableCrfsForEvent(
+    parseInt(studyId),
+    parseInt(eventId)
+  );
+
+  res.json({
+    success: true,
+    data: result,
+    total: result.length
+  });
+});
+
+/**
+ * Assign a CRF to a study event
+ */
+export const assignCrf = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventId } = req.params;
+
+  const result = await eventService.assignCrfToEvent(
+    {
+      studyEventDefinitionId: parseInt(eventId),
+      crfId: req.body.crfId,
+      crfVersionId: req.body.crfVersionId,
+      required: req.body.required,
+      doubleEntry: req.body.doubleEntry,
+      hideCrf: req.body.hideCrf,
+      ordinal: req.body.ordinal,
+      electronicSignature: req.body.electronicSignature
+    },
+    user.userId
+  );
+
+  res.status(result.success ? 201 : 400).json(result);
+});
+
+/**
+ * Update CRF settings for an event
+ */
+export const updateEventCrf = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { crfAssignmentId } = req.params;
+
+  const result = await eventService.updateEventCrf(
+    parseInt(crfAssignmentId),
+    {
+      required: req.body.required,
+      doubleEntry: req.body.doubleEntry,
+      hideCrf: req.body.hideCrf,
+      ordinal: req.body.ordinal,
+      defaultVersionId: req.body.defaultVersionId,
+      electronicSignature: req.body.electronicSignature
+    },
+    user.userId
+  );
+
+  res.json(result);
+});
+
+/**
+ * Remove CRF from event
+ */
+export const removeCrf = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { crfAssignmentId } = req.params;
+
+  const result = await eventService.removeCrfFromEvent(
+    parseInt(crfAssignmentId),
+    user.userId
+  );
+
+  res.json(result);
+});
+
+/**
+ * Reorder CRFs within an event
+ */
+export const reorderCrfs = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventId } = req.params;
+
+  const result = await eventService.reorderEventCrfs(
+    parseInt(eventId),
+    req.body.orderedCrfIds,
+    user.userId
+  );
+
+  res.json(result);
+});
+
+/**
+ * Bulk assign CRFs to event
+ */
+export const bulkAssignCrfs = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventId } = req.params;
+
+  const result = await eventService.bulkAssignCrfsToEvent(
+    parseInt(eventId),
+    req.body.crfAssignments,
+    user.userId
+  );
+
+  res.status(result.success ? 201 : 400).json(result);
+});
+
 export default { 
   getStudyEvents, 
   getEvent, 
@@ -103,6 +219,13 @@ export default {
   scheduleEvent, 
   create, 
   update, 
-  remove 
+  remove,
+  // Event CRF assignment
+  getAvailableCrfs,
+  assignCrf,
+  updateEventCrf,
+  removeCrf,
+  reorderCrfs,
+  bulkAssignCrfs
 };
 
