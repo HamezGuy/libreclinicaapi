@@ -152,10 +152,12 @@ export const createUser = async (
     phone?: string;
     institutionalAffiliation?: string;
     userTypeId?: number;
+    role?: string; // Role for default study assignment
+    studyId?: number; // Optional study to assign to
   },
   creatorId: number
 ): Promise<{ success: boolean; userId?: number; message?: string }> => {
-  logger.info('Creating user', { username: data.username, creatorId });
+  logger.info('Creating user', { username: data.username, role: data.role, creatorId });
 
   const client = await pool.connect();
 
@@ -182,8 +184,32 @@ export const createUser = async (
       };
     }
 
+    // Check if email exists
+    const emailExistsQuery = `SELECT user_id FROM user_account WHERE email = $1`;
+    const emailExistsResult = await client.query(emailExistsQuery, [data.email]);
+
+    if (emailExistsResult.rows.length > 0) {
+      return {
+        success: false,
+        message: 'Email already exists'
+      };
+    }
+
     // Hash password
     const hashedPassword = hashPasswordMD5(data.password);
+
+    // Map role to user_type_id
+    let userTypeId = data.userTypeId || 2;
+    if (data.role) {
+      const roleToUserType: Record<string, number> = {
+        'admin': 1,       // tech-admin
+        'coordinator': 2, // user
+        'investigator': 2,
+        'monitor': 2,
+        'data_entry': 2
+      };
+      userTypeId = roleToUserType[data.role.toLowerCase()] || 2;
+    }
 
     // Insert user
     // Note: user_account table uses lock_counter NOT failed_login_attempts
@@ -206,11 +232,35 @@ export const createUser = async (
       hashedPassword,
       data.phone || null,
       data.institutionalAffiliation || null,
-      data.userTypeId || 2, // Default to user type
+      userTypeId,
       creatorId
     ]);
 
     const userId = insertResult.rows[0].user_id;
+
+    // Assign to default study (study_id=1) with the specified role if role is provided
+    if (data.role) {
+      const studyId = data.studyId || 1; // Default to study 1
+      
+      // Map frontend role names to LibreClinica role names
+      const roleNameMap: Record<string, string> = {
+        'admin': 'admin',
+        'coordinator': 'coordinator',
+        'investigator': 'Investigator',
+        'monitor': 'monitor',
+        'data_entry': 'ra'
+      };
+      
+      const lcRoleName = roleNameMap[data.role.toLowerCase()] || data.role;
+
+      await client.query(`
+        INSERT INTO study_user_role (
+          role_name, study_id, status_id, owner_id, date_created, user_name
+        ) VALUES ($1, $2, 1, $3, NOW(), $4)
+      `, [lcRoleName, studyId, creatorId, data.username]);
+
+      logger.info('User assigned to study', { userId, studyId, role: lcRoleName });
+    }
 
     // Log audit event
     await client.query(`

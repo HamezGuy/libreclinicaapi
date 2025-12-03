@@ -53,10 +53,38 @@ export const getLockedRecords = async (filters: {
     params.push(limit, offset);
     const result = await pool.query(query, params);
 
+    // Get total count for pagination
+    let countParams: any[] = [];
+    let countWhereClause = 'ec.status_id = 6';
+    if (studyId) {
+      countWhereClause += ' AND ss.study_id = $1';
+      countParams.push(studyId);
+    }
+    
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      WHERE ${countWhereClause}
+    `;
+    
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0]?.total || '0');
+
     return {
       success: true,
-      data: result.rows,
-      total: result.rows.length
+      data: result.rows.map((row: any) => ({
+        ...row,
+        locked: true,
+        lock_date: row.lock_date,
+        locked_by_name: row.locked_by
+      })),
+      pagination: {
+        page,
+        limit,
+        total
+      }
     };
   } catch (error: any) {
     logger.error('Get locked records error', { error: error.message });

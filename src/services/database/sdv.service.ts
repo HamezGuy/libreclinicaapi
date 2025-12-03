@@ -61,10 +61,34 @@ export const getSDVRecords = async (filters: {
     params.push(limit, offset);
     const result = await pool.query(query, params);
 
+    // Get total count for pagination
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      WHERE ${whereClause.replace(/\$\d+/g, (match) => {
+        const idx = parseInt(match.slice(1));
+        // Adjust for the limit/offset params we added
+        return idx <= params.length - 2 ? match : '';
+      }).replace(/LIMIT.*OFFSET.*/, '')}
+    `;
+    
+    // Build count params (exclude limit and offset)
+    const countParams = params.slice(0, -2);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM event_crf ec
+       INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+       INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+       WHERE ${conditions.join(' AND ')}`,
+      countParams
+    );
+    const total = parseInt(countResult.rows[0]?.total || '0');
+
     return {
       success: true,
       data: result.rows,
-      pagination: { page, limit, total: result.rows.length }
+      pagination: { page, limit, total }
     };
   } catch (error: any) {
     logger.error('Get SDV records error', { error: error.message });
