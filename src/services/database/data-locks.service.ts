@@ -8,21 +8,30 @@ import { logger } from '../../config/logger';
 
 export const getLockedRecords = async (filters: {
   studyId?: number;
+  subjectId?: number;
   page?: number;
   limit?: number;
 }) => {
   logger.info('Getting locked records', filters);
 
   try {
-    const { studyId, page = 1, limit = 20 } = filters;
+    const { studyId, subjectId, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
 
     let whereClause = 'ec.status_id = 6';
     const params: any[] = [];
+    let paramIndex = 1;
 
     if (studyId) {
-      whereClause += ' AND ss.study_id = $1';
+      whereClause += ` AND ss.study_id = $${paramIndex}`;
       params.push(studyId);
+      paramIndex++;
+    }
+
+    if (subjectId) {
+      whereClause += ` AND ss.study_subject_id = $${paramIndex}`;
+      params.push(subjectId);
+      paramIndex++;
     }
 
     const query = `
