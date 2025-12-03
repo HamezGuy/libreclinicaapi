@@ -52,12 +52,25 @@ export const getData = asyncHandler(async (req: Request, res: Response) => {
 
 export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
   const { crfId } = req.params;
+  const user = (req as any).user;
 
   const result = await formService.getFormMetadata(parseInt(crfId));
 
   if (!result) {
     res.status(404).json({ success: false, message: 'Form not found' });
     return;
+  }
+
+  // Track document access (21 CFR Part 11)
+  if (user?.userId) {
+    await trackDocumentAccess(
+      user.userId,
+      user.username || user.userName,
+      'crf',
+      parseInt(crfId),
+      result.crf?.name,
+      'view'
+    );
   }
 
   res.json({ success: true, data: result });

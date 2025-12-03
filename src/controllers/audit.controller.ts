@@ -143,6 +143,42 @@ export const getRecent = asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: result });
 });
 
+/**
+ * Get login history
+ * Returns login/logout/failed login events from audit_user_login
+ * 
+ * 21 CFR Part 11 §11.10(e) - Audit Trail for login events
+ */
+export const getLoginHistory = asyncHandler(async (req: Request, res: Response) => {
+  const { userId, username, startDate, endDate, status, limit, offset } = req.query;
+
+  const result = await auditService.getLoginHistory({
+    userId: userId ? parseInt(userId as string) : undefined,
+    username: username as string,
+    startDate: startDate as string,
+    endDate: endDate as string,
+    status: status as 'success' | 'failed' | 'logout' | 'all',
+    limit: parseInt(limit as string) || 100,
+    offset: parseInt(offset as string) || 0
+  });
+
+  res.json(result);
+});
+
+/**
+ * Get login statistics
+ * Returns login/logout/failed counts and daily breakdown
+ */
+export const getLoginStats = asyncHandler(async (req: Request, res: Response) => {
+  const { days } = req.query;
+
+  const result = await auditService.getLoginStatistics(
+    parseInt(days as string) || 30
+  );
+
+  res.json(result);
+});
+
 export default { 
   get, 
   exportCsv, 
@@ -153,6 +189,8 @@ export default {
   getFormAudit, 
   getSummary, 
   getComplianceReport, 
-  getRecent 
+  getRecent,
+  getLoginHistory,
+  getLoginStats
 };
 

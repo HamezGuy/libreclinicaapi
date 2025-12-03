@@ -19,6 +19,10 @@ router.get('/recent', controller.getRecent);
 router.get('/stats', controller.getStats);
 router.get('/summary', controller.getSummary);
 
+// Login history (21 CFR Part 11 compliance)
+router.get('/login-history', controller.getLoginHistory);
+router.get('/login-stats', controller.getLoginStats);
+
 // Metadata
 router.get('/event-types', controller.getEventTypes);
 router.get('/tables', controller.getTables);

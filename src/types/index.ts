@@ -535,6 +535,7 @@ export interface ApiResponse<T = any> {
   data?: T;
   message?: string;
   errors?: any[];
+  warnings?: any[];
 }
 
 export interface PaginatedResponse<T = any> {

@@ -103,27 +103,31 @@ export const createTestSubject = async (
     statusId?: number;
   }
 ): Promise<number> => {
+  const label = overrides?.label || `SUB-${Date.now().toString(36)}`;
+  const ocOid = `SS_${label.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30)}`;
+
   // First create the subject record
   const subjectResult = await pool.query(`
-    INSERT INTO subject (status_id, date_created, owner_id)
-    VALUES ($1, NOW(), 1)
+    INSERT INTO subject (status_id, date_created, owner_id, unique_identifier)
+    VALUES ($1, NOW(), 1, $2)
     RETURNING subject_id
-  `, [overrides?.statusId || 1]);
+  `, [overrides?.statusId || 1, label]);
 
   const subjectId = subjectResult.rows[0].subject_id;
 
-  // Then create the study_subject record
+  // Then create the study_subject record with required oc_oid
   const result = await pool.query(`
     INSERT INTO study_subject (
-      label, secondary_label, subject_id, study_id, status_id, enrollment_date, date_created
-    ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+      label, secondary_label, subject_id, study_id, status_id, enrollment_date, date_created, oc_oid, owner_id
+    ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), $6, 1)
     RETURNING study_subject_id
   `, [
-    overrides?.label || `SUB-${Date.now()}`,
+    label,
     overrides?.secondaryLabel || null,
     subjectId,
     studyId,
-    overrides?.statusId || 1
+    overrides?.statusId || 1,
+    ocOid
   ]);
 
   return result.rows[0].study_subject_id;

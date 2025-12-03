@@ -39,14 +39,17 @@ services:
       dbName: libreclinica
       dbUser: libreclinica
       dbPass: ${DB_PASSWORD:-libreclinica}
-      sysURL: https://api.accuratrials.com/LibreClinica
+      sysURL: https://api.accuratrials.com/libreclinica
       supportURL: https://www.accuratrials.com
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
+      # IMPORTANT: Mount the patched WAR file with working SOAP web services
+      # The default LibreClinica image has broken SOAP - this fix adds Spring Web Services dependencies
+      - ./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
     networks:
       - lc_network
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/LibreClinica/pages/login/login || exit 0"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/libreclinica/pages/login/login || exit 0"]
       interval: 30s
       timeout: 10s
       retries: 30

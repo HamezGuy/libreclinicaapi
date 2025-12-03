@@ -153,17 +153,20 @@ export const verify = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Logout - Record logout in audit trail
+ * 21 CFR Part 11 §11.10(e) - Audit Trail compliance
  */
 export const logout = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const ipAddress = req.ip || 'unknown';
 
   // Record logout in audit trail
-  if (user?.userId && user?.username) {
-    await authService.logUserLogout(user.userId, user.username, ipAddress);
+  // Note: JWT payload uses userName (not username)
+  const username = user?.userName || user?.username;
+  if (user?.userId && username) {
+    await authService.logUserLogout(user.userId, username, ipAddress);
   }
 
-  logger.info('User logged out', { userId: user?.userId, username: user?.username });
+  logger.info('User logged out', { userId: user?.userId, username });
 
   res.json({
     success: true,

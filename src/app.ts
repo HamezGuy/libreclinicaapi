@@ -43,6 +43,8 @@ import woundsRoutes from './routes/wounds.routes';
 import soapRoutes from './routes/soap.routes';
 // LibreClinica native API proxy
 import libreclinicaProxyRoutes from './routes/libreclinica-proxy.routes';
+// Validation rules
+import validationRulesRoutes from './routes/validation-rules.routes';
 
 const app = express();
 
@@ -195,6 +197,8 @@ app.use('/api/wounds', woundsRoutes);
 app.use('/api/soap', soapRoutes);
 // LibreClinica native API proxy (forwards to LibreClinica's REST endpoints)
 app.use('/api/libreclinica', libreclinicaProxyRoutes);
+// Validation rules management
+app.use('/api/validation-rules', validationRulesRoutes);
 
 // ============================================================================
 // ROOT ENDPOINT

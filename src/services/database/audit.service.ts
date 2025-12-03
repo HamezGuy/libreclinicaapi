@@ -195,8 +195,8 @@ export const getRecentAuditEvents = async (
           aul.user_account_id as entity_id,
           aul.user_name as entity_name,
           CASE 
-            WHEN aul.login_status = 1 THEN 'User Login'
-            WHEN aul.login_status = 2 THEN 'User Logout'
+            WHEN aul.login_status_code = 1 THEN 'User Login'
+            WHEN aul.login_status_code = 2 THEN 'User Logout'
             ELSE 'Failed Login Attempt'
           END as event_type,
           NULL as old_value,
@@ -336,9 +336,9 @@ export const getAuditStatistics = async (
       SELECT 
         COUNT(*) as total_login_events,
         COUNT(DISTINCT user_account_id) as login_unique_users,
-        COUNT(CASE WHEN login_status = 1 THEN 1 END) as successful_logins,
-        COUNT(CASE WHEN login_status = 0 THEN 1 END) as failed_logins,
-        COUNT(CASE WHEN login_status = 2 THEN 1 END) as logouts
+        COUNT(CASE WHEN login_status_code = 1 THEN 1 END) as successful_logins,
+        COUNT(CASE WHEN login_status_code = 0 THEN 1 END) as failed_logins,
+        COUNT(CASE WHEN login_status_code = 2 THEN 1 END) as logouts
       FROM audit_user_login
       WHERE login_attempt_date >= $1
     `;
@@ -984,6 +984,216 @@ export const exportAuditLogs = async (
   }
 };
 
+/**
+ * Get login history from audit_user_login table
+ * Returns all login/logout/failed login events
+ * 
+ * 21 CFR Part 11 §11.10(e) - Audit Trail for login events
+ * 
+ * @param params.userId - Filter by specific user
+ * @param params.startDate - Filter events after this date
+ * @param params.endDate - Filter events before this date
+ * @param params.status - Filter by status: 'success' (1), 'failed' (0), 'logout' (2), or 'all'
+ * @param params.limit - Maximum number of records
+ * @param params.offset - Pagination offset
+ */
+export const getLoginHistory = async (params: {
+  userId?: number;
+  username?: string;
+  startDate?: string;
+  endDate?: string;
+  status?: 'success' | 'failed' | 'logout' | 'all';
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  success: boolean;
+  data: any[];
+  pagination: { total: number; limit: number; offset: number };
+}> => {
+  logger.info('Querying login history', params);
+
+  try {
+    const conditions: string[] = ['1=1'];
+    const queryParams: any[] = [];
+    let paramIndex = 1;
+
+    if (params.userId) {
+      conditions.push(`aul.user_account_id = $${paramIndex++}`);
+      queryParams.push(params.userId);
+    }
+
+    if (params.username) {
+      conditions.push(`aul.user_name ILIKE $${paramIndex++}`);
+      queryParams.push(`%${params.username}%`);
+    }
+
+    if (params.startDate) {
+      conditions.push(`aul.login_attempt_date >= $${paramIndex++}`);
+      queryParams.push(params.startDate);
+    }
+
+    if (params.endDate) {
+      conditions.push(`aul.login_attempt_date <= $${paramIndex++}`);
+      queryParams.push(params.endDate);
+    }
+
+    if (params.status && params.status !== 'all') {
+      const statusMap: Record<string, number> = {
+        'success': 1,
+        'failed': 0,
+        'logout': 2
+      };
+      conditions.push(`aul.login_status_code = $${paramIndex++}`);
+      queryParams.push(statusMap[params.status]);
+    }
+
+    const whereClause = conditions.join(' AND ');
+    const limit = params.limit || 100;
+    const offset = params.offset || 0;
+
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM audit_user_login aul
+      WHERE ${whereClause}
+    `;
+    const countResult = await pool.query(countQuery, queryParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    // Get paginated results
+    // Note: audit_user_login has NO audit_date column, use login_attempt_date
+    const dataQuery = `
+      SELECT 
+        aul.id,
+        aul.user_name as username,
+        aul.user_account_id as user_id,
+        u.first_name,
+        u.last_name,
+        u.first_name || ' ' || u.last_name as user_full_name,
+        u.email,
+        aul.login_attempt_date as audit_date,
+        aul.login_attempt_date,
+        aul.login_status_code as login_status,
+        CASE 
+          WHEN aul.login_status_code = 1 THEN 'success'
+          WHEN aul.login_status_code = 2 THEN 'logout'
+          ELSE 'failed'
+        END as status_text,
+        CASE 
+          WHEN aul.login_status_code = 1 THEN 'User Login'
+          WHEN aul.login_status_code = 2 THEN 'User Logout'
+          ELSE 'Failed Login Attempt'
+        END as event_type,
+        aul.details,
+        aul.version
+      FROM audit_user_login aul
+      LEFT JOIN user_account u ON aul.user_account_id = u.user_id
+      WHERE ${whereClause}
+      ORDER BY aul.login_attempt_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    queryParams.push(limit, offset);
+    const dataResult = await pool.query(dataQuery, queryParams);
+
+    logger.info('Login history query successful', {
+      total,
+      returned: dataResult.rows.length
+    });
+
+    return {
+      success: true,
+      data: dataResult.rows,
+      pagination: { total, limit, offset }
+    };
+  } catch (error: any) {
+    logger.error('Login history query error', { error: error.message });
+    return {
+      success: false,
+      data: [],
+      pagination: { total: 0, limit: params.limit || 100, offset: params.offset || 0 }
+    };
+  }
+};
+
+/**
+ * Get login statistics for compliance reporting
+ * Returns counts of successful logins, failed attempts, and logouts
+ */
+export const getLoginStatistics = async (days: number = 30): Promise<{
+  success: boolean;
+  data: {
+    successfulLogins: number;
+    failedLogins: number;
+    logouts: number;
+    uniqueUsers: number;
+    byDay: Array<{ date: string; success: number; failed: number; logout: number }>;
+  };
+}> => {
+  logger.info('Calculating login statistics', { days });
+
+  try {
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+
+    // Get summary stats
+    // Note: column is login_status_code (not login_status)
+    const summaryQuery = `
+      SELECT 
+        COUNT(CASE WHEN login_status_code = 1 THEN 1 END) as successful_logins,
+        COUNT(CASE WHEN login_status_code = 0 THEN 1 END) as failed_logins,
+        COUNT(CASE WHEN login_status_code = 2 THEN 1 END) as logouts,
+        COUNT(DISTINCT user_account_id) FILTER (WHERE user_account_id IS NOT NULL) as unique_users
+      FROM audit_user_login
+      WHERE login_attempt_date >= $1
+    `;
+    const summaryResult = await pool.query(summaryQuery, [startDate]);
+    const summary = summaryResult.rows[0];
+
+    // Get daily breakdown
+    const dailyQuery = `
+      SELECT 
+        DATE(login_attempt_date) as date,
+        COUNT(CASE WHEN login_status_code = 1 THEN 1 END) as success,
+        COUNT(CASE WHEN login_status_code = 0 THEN 1 END) as failed,
+        COUNT(CASE WHEN login_status_code = 2 THEN 1 END) as logout
+      FROM audit_user_login
+      WHERE login_attempt_date >= $1
+      GROUP BY DATE(login_attempt_date)
+      ORDER BY date DESC
+    `;
+    const dailyResult = await pool.query(dailyQuery, [startDate]);
+
+    return {
+      success: true,
+      data: {
+        successfulLogins: parseInt(summary.successful_logins) || 0,
+        failedLogins: parseInt(summary.failed_logins) || 0,
+        logouts: parseInt(summary.logouts) || 0,
+        uniqueUsers: parseInt(summary.unique_users) || 0,
+        byDay: dailyResult.rows.map(row => ({
+          date: row.date?.toISOString().split('T')[0],
+          success: parseInt(row.success) || 0,
+          failed: parseInt(row.failed) || 0,
+          logout: parseInt(row.logout) || 0
+        }))
+      }
+    };
+  } catch (error: any) {
+    logger.error('Login statistics error', { error: error.message });
+    return {
+      success: false,
+      data: {
+        successfulLogins: 0,
+        failedLogins: 0,
+        logouts: 0,
+        uniqueUsers: 0,
+        byDay: []
+      }
+    };
+  }
+};
+
 export default {
   getAuditTrail,
   getSubjectAudit,
@@ -1006,6 +1216,9 @@ export default {
   // User action tracking
   trackUserAction,
   trackDocumentAccess,
-  AuditEventTypes
+  AuditEventTypes,
+  // Login audit
+  getLoginHistory,
+  getLoginStatistics
 };
 

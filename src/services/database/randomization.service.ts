@@ -37,10 +37,21 @@ export const getRandomizations = async (filters: {
 
     const result = await pool.query(query, [studyId, limit, offset]);
 
+    // Get total count for proper pagination
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM subject_group_map sgm
+      INNER JOIN study_group sg ON sgm.study_group_id = sg.study_group_id
+      INNER JOIN study_group_class sgc ON sg.study_group_class_id = sgc.study_group_class_id
+      WHERE sgc.study_id = $1
+    `;
+    const countResult = await pool.query(countQuery, [studyId]);
+    const total = parseInt(countResult.rows[0]?.total) || result.rows.length;
+
     return {
       success: true,
       data: result.rows,
-      pagination: { page, limit, total: result.rows.length }
+      pagination: { page, limit, total }
     };
   } catch (error: any) {
     logger.error('Get randomizations error', { error: error.message });

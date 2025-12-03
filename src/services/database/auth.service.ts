@@ -453,18 +453,19 @@ async function updateLastVisit(userId: number): Promise<void> {
 /**
  * Log successful login to LibreClinica's native audit_user_login table
  * 
- * CORRECT audit_user_login schema:
- * - id (SERIAL), user_name, user_account_id, audit_date, 
- * - login_attempt_date, login_status, details, version
+ * CORRECT audit_user_login schema (verified from database):
+ * - id (SERIAL), user_name, user_account_id, login_attempt_date, 
+ * - login_status_code (0=failed, 1=success, 2=logout), details, version
  */
 async function logSuccessfulLogin(userId: number, username: string, ipAddress: string): Promise<void> {
   // Insert into audit_user_login (LibreClinica's native login audit table)
-  // Note: column is `login_status` NOT `login_status_code`
+  // Column is `login_status_code` (NOT `login_status`)
+  // No `audit_date` column exists
   const loginAuditQuery = `
     INSERT INTO audit_user_login (
-      user_name, user_account_id, audit_date, login_attempt_date, login_status, details, version
+      user_name, user_account_id, login_attempt_date, login_status_code, details, version
     ) VALUES (
-      $1, $2, NOW(), NOW(), 1, $3, 1
+      $1, $2, NOW(), 1, $3, 1
     )
   `;
   
@@ -484,14 +485,13 @@ async function logSuccessfulLogin(userId: number, username: string, ipAddress: s
  * Log failed login attempt to LibreClinica's native audit_user_login table
  */
 async function logFailedLogin(username: string, ipAddress: string, reason: string): Promise<void> {
-  // Insert into audit_user_login with status 0 (failed)
+  // Insert into audit_user_login with login_status_code 0 (failed)
   const loginAuditQuery = `
     INSERT INTO audit_user_login (
-      user_name, user_account_id, audit_date, login_attempt_date, login_status, details, version
+      user_name, user_account_id, login_attempt_date, login_status_code, details, version
     ) VALUES (
       $1, 
       (SELECT user_id FROM user_account WHERE user_name = $1 LIMIT 1),
-      NOW(),
       NOW(), 
       0, 
       $2, 
@@ -517,9 +517,9 @@ async function logFailedLogin(username: string, ipAddress: string, reason: strin
 export async function logUserLogout(userId: number, username: string, ipAddress: string): Promise<void> {
   const loginAuditQuery = `
     INSERT INTO audit_user_login (
-      user_name, user_account_id, audit_date, login_attempt_date, login_status, details, version
+      user_name, user_account_id, login_attempt_date, login_status_code, details, version
     ) VALUES (
-      $1, $2, NOW(), NOW(), 2, $3, 1
+      $1, $2, NOW(), 2, $3, 1
     )
   `;
   

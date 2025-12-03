@@ -79,18 +79,34 @@ export const getStudies = async (
     const params: any[] = [];
     let paramIndex = 1;
 
-    // Filter by user access OR owner
-    // User can see studies they own OR are assigned to
-    conditions.push(`(
-      s.owner_id = $${paramIndex++}
-      OR EXISTS (
-        SELECT 1 FROM study_user_role sur
-        WHERE sur.study_id = s.study_id
-          AND sur.user_name = (SELECT user_name FROM user_account WHERE user_id = $${paramIndex++})
-          AND sur.status_id = 1
-      )
-    )`);
-    params.push(userId, userId);
+    // Check if user is admin - admins can see all studies
+    const adminCheckQuery = `
+      SELECT u.user_type_id, ut.user_type 
+      FROM user_account u 
+      LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
+      WHERE u.user_id = $1
+    `;
+    const adminCheck = await pool.query(adminCheckQuery, [userId]);
+    const isAdmin = adminCheck.rows[0]?.user_type_id === 1 || 
+                   adminCheck.rows[0]?.user_type_id === 4 ||
+                   adminCheck.rows[0]?.user_type === 'admin' ||
+                   adminCheck.rows[0]?.user_type === 'sysadmin';
+
+    // Only filter by user access for non-admin users
+    if (!isAdmin) {
+      // Filter by user access OR owner
+      // User can see studies they own OR are assigned to
+      conditions.push(`(
+        s.owner_id = $${paramIndex++}
+        OR EXISTS (
+          SELECT 1 FROM study_user_role sur
+          WHERE sur.study_id = s.study_id
+            AND sur.user_name = (SELECT user_name FROM user_account WHERE user_id = $${paramIndex++})
+            AND sur.status_id = 1
+        )
+      )`);
+      params.push(userId, userId);
+    }
 
     // Only show parent studies (not sites which have parent_study_id set)
     conditions.push(`s.parent_study_id IS NULL`);

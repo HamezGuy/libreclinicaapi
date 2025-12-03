@@ -154,13 +154,14 @@ export class WorkflowController {
   }
 
   /**
-   * Get user task summary
+   * Get user task summary with organized task arrays
    */
   async getUserTaskSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { userId } = req.params;
       
-      const query = `
+      // Get counts
+      const countQuery = `
         SELECT 
           COUNT(*) FILTER (WHERE rs.name = 'New') as pending,
           COUNT(*) FILTER (WHERE rs.name = 'Updated') as in_progress,
@@ -173,16 +174,122 @@ export class WorkflowController {
         WHERE ua.user_name = $1
       `;
       
-      const result = await pool.query(query, [userId]);
-      const row = result.rows[0];
+      const countResult = await pool.query(countQuery, [userId]);
+      const counts = countResult.rows[0];
+      
+      // Get all tasks with full details for organization
+      const tasksQuery = `
+        SELECT 
+          dn.discrepancy_note_id as id,
+          dn.description as title,
+          dn.detailed_notes as description,
+          dn.date_created as created_at,
+          dn.date_updated as updated_at,
+          rs.name as status,
+          dnt.name as type,
+          ua.user_name as assigned_to,
+          ua.first_name || ' ' || ua.last_name as assigned_to_name,
+          ss.label as subject_label,
+          s.name as study_name
+        FROM discrepancy_note dn
+        JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+        JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+        LEFT JOIN study_subject ss ON dn.entity_id = ss.study_subject_id
+        LEFT JOIN study s ON ss.study_id = s.study_id
+        WHERE ua.user_name = $1
+        AND rs.name IN ('New', 'Updated', 'Resolution Proposed')
+        ORDER BY dn.date_created DESC
+        LIMIT 100
+      `;
+      
+      const tasksResult = await pool.query(tasksQuery, [userId]);
+      
+      // Map and organize tasks
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      
+      const mappedTasks = tasksResult.rows.map((row: any) => {
+        // Create a due date based on creation date + 7 days (configurable)
+        const createdAt = new Date(row.created_at);
+        const dueDate = new Date(createdAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+        
+        return {
+          id: row.id.toString(),
+          title: row.title || 'Task',
+          description: row.description || '',
+          type: this.mapTypeFromDiscrepancyNote(row.type),
+          status: this.mapStatus(row.status),
+          priority: this.calculatePriority(dueDate, now),
+          assignedTo: [row.assigned_to],
+          assignedToName: row.assigned_to_name,
+          currentOwner: row.assigned_to,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+          dueDate: dueDate,
+          requiredActions: [{ name: 'Review', completed: false }, { name: 'Respond', completed: false }],
+          completedActions: [],
+          relatedEntity: row.subject_label ? {
+            type: 'subject',
+            id: row.subject_label,
+            name: row.subject_label
+          } : undefined
+        };
+      });
+      
+      // Organize tasks into categories
+      const overdue: any[] = [];
+      const dueToday: any[] = [];
+      const inProgress: any[] = [];
+      const pending: any[] = [];
+      
+      mappedTasks.forEach((task: any) => {
+        const taskDue = new Date(task.dueDate);
+        
+        if (taskDue < today) {
+          overdue.push({ ...task, priority: 'critical' });
+        } else if (taskDue.toDateString() === today.toDateString()) {
+          dueToday.push(task);
+        } else if (task.status === 'in_progress') {
+          inProgress.push(task);
+        } else if (task.status === 'pending') {
+          pending.push(task);
+        }
+      });
+      
+      // Count completed today
+      const completedTodayQuery = `
+        SELECT COUNT(*) as count
+        FROM discrepancy_note dn
+        JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+        WHERE ua.user_name = $1 
+        AND rs.name = 'Closed'
+        AND dn.date_updated::date = CURRENT_DATE
+      `;
+      const completedTodayResult = await pool.query(completedTodayQuery, [userId]);
+      const completedToday = parseInt(completedTodayResult.rows[0]?.count) || 0;
       
       const summary = {
-        totalTasks: parseInt(row.total) || 0,
-        pendingTasks: parseInt(row.pending) || 0,
-        inProgressTasks: parseInt(row.in_progress) || 0,
-        awaitingApprovalTasks: parseInt(row.awaiting_approval) || 0,
-        completedTasks: parseInt(row.completed) || 0,
-        overdueTask: 0
+        totalTasks: parseInt(counts.total) || 0,
+        pendingTasks: parseInt(counts.pending) || 0,
+        inProgressTasks: parseInt(counts.in_progress) || 0,
+        awaitingApprovalTasks: parseInt(counts.awaiting_approval) || 0,
+        completedTasks: parseInt(counts.completed) || 0,
+        overdueTasks: overdue.length,
+        statistics: {
+          overdueCount: overdue.length,
+          totalActive: (parseInt(counts.pending) || 0) + (parseInt(counts.in_progress) || 0),
+          completedToday: completedToday,
+          completedThisWeek: parseInt(counts.completed) || 0,
+          avgCompletionTime: 0
+        },
+        tasks: {
+          overdue,
+          dueToday,
+          inProgress,
+          pending
+        }
       };
       
       const response: ApiResponse = {
@@ -195,6 +302,17 @@ export class WorkflowController {
       logger.error('Error fetching user task summary:', error);
       next(error);
     }
+  }
+  
+  /**
+   * Calculate task priority based on due date
+   */
+  private calculatePriority(dueDate: Date, now: Date): string {
+    const diffDays = Math.ceil((dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) return 'critical';
+    if (diffDays === 0) return 'high';
+    if (diffDays <= 3) return 'medium';
+    return 'low';
   }
 
   /**

@@ -188,9 +188,11 @@ export const createQuery = async (
     entityId: number;
     studyId: number;
     studySubjectId?: number;
+    subjectId?: number; // Alias for studySubjectId (frontend compatibility)
     description: string;
     detailedNotes?: string;
     typeId?: number;
+    queryType?: string; // Frontend sends this as string
   },
   userId: number
 ): Promise<{ success: boolean; queryId?: number; message?: string }> => {
@@ -200,6 +202,20 @@ export const createQuery = async (
 
   try {
     await client.query('BEGIN');
+
+    // Map queryType string to typeId
+    const queryTypeMap: Record<string, number> = {
+      'Failed Validation Check': 1,
+      'Annotation': 2,
+      'Query': 3,
+      'Reason for Change': 4
+    };
+    
+    // Use typeId if provided, otherwise map from queryType, default to Query (3)
+    const typeId = data.typeId || (data.queryType ? queryTypeMap[data.queryType] : 3) || 3;
+    
+    // Use studySubjectId or subjectId (alias)
+    const studySubjectId = data.studySubjectId || data.subjectId;
 
     // Validate entity type and get mapping table
     const mappingConfig: Record<string, { table: string; idColumn: string }> = {
@@ -232,7 +248,7 @@ export const createQuery = async (
     const noteResult = await client.query(insertNoteQuery, [
       data.description,
       data.detailedNotes || '',
-      data.typeId || 3, // Default to Query type (3)
+      typeId,
       data.studyId,
       data.entityType,
       userId
@@ -241,19 +257,25 @@ export const createQuery = async (
     const queryId = noteResult.rows[0].discrepancy_note_id;
 
     // Insert into appropriate mapping table
+    // Note: For studySubject entity type, the mapping table already uses study_subject_id
+    // so we don't need to add it again
+    const needsStudySubjectColumn = studySubjectId && 
+      data.entityType !== 'studySubject' && 
+      mapping.idColumn !== 'study_subject_id';
+    
     const insertMapQuery = `
       INSERT INTO ${mapping.table} (
         discrepancy_note_id, ${mapping.idColumn}
-        ${data.studySubjectId ? ', study_subject_id' : ''}
+        ${needsStudySubjectColumn ? ', study_subject_id' : ''}
       ) VALUES (
         $1, $2
-        ${data.studySubjectId ? ', $3' : ''}
+        ${needsStudySubjectColumn ? ', $3' : ''}
       )
     `;
 
     const mapParams = [queryId, data.entityId];
-    if (data.studySubjectId) {
-      mapParams.push(data.studySubjectId);
+    if (needsStudySubjectColumn) {
+      mapParams.push(studySubjectId);
     }
 
     await client.query(insertMapQuery, mapParams);

@@ -39,6 +39,98 @@ async function testDatabaseConnection(): Promise<boolean> {
 }
 
 /**
+ * Verify and initialize audit tables
+ * Ensures audit_user_login table exists for 21 CFR Part 11 compliance
+ */
+async function verifyAuditTables(): Promise<void> {
+  try {
+    // Check if audit_user_login table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'audit_user_login'
+      ) as exists
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      logger.warn('audit_user_login table not found - creating...');
+      
+      // Create the table if it doesn't exist
+      // Note: LibreClinica uses login_status_code (not login_status)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS audit_user_login (
+          id SERIAL PRIMARY KEY,
+          user_name VARCHAR(255),
+          user_account_id INTEGER,
+          login_attempt_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          login_status_code INTEGER,
+          details VARCHAR(500),
+          version INTEGER DEFAULT 1
+        )
+      `);
+      
+      // Create index for performance
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_audit_user_login_date 
+        ON audit_user_login(login_attempt_date)
+      `);
+      
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_audit_user_login_user 
+        ON audit_user_login(user_account_id)
+      `);
+      
+      logger.info('audit_user_login table created successfully');
+    } else {
+      // Verify the table has data
+      const countResult = await pool.query('SELECT COUNT(*) as count FROM audit_user_login');
+      logger.info('audit_user_login table verified', {
+        recordCount: parseInt(countResult.rows[0].count)
+      });
+    }
+    
+    // Also verify audit_user_api_log table
+    const apiLogCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'audit_user_api_log'
+      ) as exists
+    `);
+    
+    if (!apiLogCheck.rows[0].exists) {
+      logger.info('Creating audit_user_api_log table...');
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS audit_user_api_log (
+          id SERIAL PRIMARY KEY,
+          audit_id VARCHAR(36) NOT NULL UNIQUE,
+          user_id INTEGER,
+          username VARCHAR(255) NOT NULL,
+          user_role VARCHAR(50),
+          http_method VARCHAR(10) NOT NULL,
+          endpoint_path VARCHAR(500) NOT NULL,
+          query_params TEXT,
+          request_body TEXT,
+          response_status INTEGER,
+          ip_address VARCHAR(45),
+          user_agent TEXT,
+          duration_ms INTEGER,
+          created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+      `);
+      logger.info('audit_user_api_log table created');
+    }
+    
+  } catch (error: any) {
+    logger.error('Failed to verify audit tables', {
+      error: error.message
+    });
+    // Don't fail startup, but log the error
+  }
+}
+
+/**
  * Test SOAP connection
  */
 async function testSoapConnection(): Promise<boolean> {
@@ -86,6 +178,9 @@ async function startServer() {
       logger.error('Cannot start server: Database connection failed');
       process.exit(1);
     }
+
+    // Verify audit tables exist (21 CFR Part 11 compliance)
+    await verifyAuditTables();
 
     // Test SOAP connection (warning only)
     await testSoapConnection();
