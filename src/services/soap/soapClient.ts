@@ -302,26 +302,30 @@ export class SoapClient {
 
   /**
    * Test SOAP connection
+   * Uses appropriate method for each service type
    */
   public async testConnection(serviceName: string = 'study'): Promise<boolean> {
     try {
       logger.debug('Testing SOAP connection', { serviceName });
       
-      // Try a simple listAll request to test connectivity
+      // Use 'study' service for testing - it has a simple listAll method
+      // studySubject requires study reference which makes it unsuitable for connection testing
+      const testService = 'study';
+      
       const result = await this.executeRequest({
-        serviceName: serviceName as any,
+        serviceName: testService as any,
         methodName: 'listAll',
         parameters: {}
       });
 
       logger.info(`SOAP connection test: ${result.success ? 'SUCCESS' : 'FAILED'}`, {
-        serviceName,
+        serviceName: testService,
         success: result.success
       });
 
       return result.success;
     } catch (error: any) {
-      logger.error(`SOAP connection test failed for ${serviceName}`, {
+      logger.error(`SOAP connection test failed`, {
         error: error.message
       });
       return false;

@@ -104,7 +104,7 @@ export class WorkflowController {
           dn.description as title,
           dn.detailed_notes as description,
           dn.date_created as created_at,
-          dn.date_updated as updated_at,
+          dn.date_created as updated_at,
           rs.name as status,
           dnt.name as type,
           ua.user_name as assigned_to,
@@ -114,11 +114,11 @@ export class WorkflowController {
         FROM discrepancy_note dn
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
-        JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        LEFT JOIN user_account ua ON dn.assigned_user_id = ua.user_id
         LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
         LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
         LEFT JOIN study s ON dn.study_id = s.study_id
-        WHERE ua.user_name = $1
+        WHERE (ua.user_name = $1 OR dn.owner_id = (SELECT user_id FROM user_account WHERE user_name = $1))
         AND rs.name IN ('New', 'Updated', 'Resolution Proposed')
         ORDER BY dn.date_created DESC
       `;
@@ -186,7 +186,7 @@ export class WorkflowController {
           dn.description as title,
           dn.detailed_notes as description,
           dn.date_created as created_at,
-          dn.date_updated as updated_at,
+          dn.date_created as updated_at,
           rs.name as status,
           dnt.name as type,
           ua.user_name as assigned_to,
@@ -194,13 +194,13 @@ export class WorkflowController {
           ss.label as subject_label,
           s.name as study_name
         FROM discrepancy_note dn
-        JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        LEFT JOIN user_account ua ON dn.assigned_user_id = ua.user_id
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
         LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
         LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
         LEFT JOIN study s ON dn.study_id = s.study_id
-        WHERE ua.user_name = $1
+        WHERE (ua.user_name = $1 OR dn.owner_id = (SELECT user_id FROM user_account WHERE user_name = $1))
         AND rs.name IN ('New', 'Updated', 'Resolution Proposed')
         ORDER BY dn.date_created DESC
         LIMIT 100
@@ -260,15 +260,15 @@ export class WorkflowController {
         }
       });
       
-      // Count completed today
+      // Count completed today (using date_created as date_updated doesn't exist in LibreClinica schema)
       const completedTodayQuery = `
         SELECT COUNT(*) as count
         FROM discrepancy_note dn
-        JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        LEFT JOIN user_account ua ON dn.assigned_user_id = ua.user_id
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
-        WHERE ua.user_name = $1 
+        WHERE (ua.user_name = $1 OR dn.owner_id = (SELECT user_id FROM user_account WHERE user_name = $1))
         AND rs.name = 'Closed'
-        AND dn.date_updated::date = CURRENT_DATE
+        AND dn.date_created::date = CURRENT_DATE
       `;
       const completedTodayResult = await pool.query(completedTodayQuery, [userId]);
       const completedToday = parseInt(completedTodayResult.rows[0]?.count) || 0;

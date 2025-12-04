@@ -320,13 +320,26 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
   const roleNames = await getUserRoles(user.user_id);
   const studyIds = await getUserStudies(user.user_id);
 
-  // Determine primary role using LibreClinica role hierarchy
-  // Lower ID = higher privilege (admin=1 is highest)
-  const highestRole = getHighestRole(roleNames);
-  const primaryRole = highestRole.name || 'user';
+  // Check if user is system admin (user_type_id = 1 = ADMIN, 0 = TECH_ADMIN)
+  // This is stored in user_account table
+  let primaryRole = 'user';
+  const userTypeId = (user as any).user_type_id;
+  
+  if (userTypeId === 1 || userTypeId === 0) {
+    // System admin or tech admin - set role to admin
+    primaryRole = 'admin';
+    logger.info('User is system admin', { userId: user.user_id, userTypeId, username: user.user_name });
+  } else if (roleNames.length > 0) {
+    // Determine primary role using LibreClinica role hierarchy
+    // Lower ID = higher privilege (admin=1 is highest)
+    const highestRole = getHighestRole(roleNames);
+    primaryRole = highestRole.name !== 'invalid' ? highestRole.name : 'user';
+  }
 
   // Get user type from database if not already present
   let userType = (user as any).user_type || 'user';
+  
+  logger.info('JWT payload built', { userId: user.user_id, role: primaryRole, studyIds, roleNames });
   
   return {
     userId: user.user_id,

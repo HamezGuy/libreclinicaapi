@@ -18,7 +18,20 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
 import * as studySoap from '../soap/studySoap.service';
-import { Study, StudyMetadata, PaginatedResponse } from '../../types';
+import { 
+  Study, 
+  StudyEventDefinition,
+  CRF,
+  PaginatedResponse,
+  toStudy
+} from '../../types/libreclinica-models';
+
+// Study metadata interface - uses raw database rows for local fallback
+export interface StudyMetadata {
+  study: any;
+  events: any[];
+  crfs: any[];
+}
 
 /**
  * Get studies list - SOAP PRIMARY, DB for stats enrichment
@@ -421,6 +434,42 @@ export const createStudy = async (
     } catch (auditError: any) {
       // Don't fail study creation if audit logging fails
       logger.warn('Audit logging failed for study creation', { error: auditError.message });
+    }
+
+    // Initialize default study parameters
+    try {
+      const defaultParams = [
+        { handle: 'collectDob', value: '1' },        // Full date required
+        { handle: 'genderRequired', value: 'true' },
+        { handle: 'subjectPersonIdRequired', value: 'optional' },
+        { handle: 'subjectIdGeneration', value: 'manual' },
+        { handle: 'subjectIdPrefixSuffix', value: '' },
+        { handle: 'discrepancyManagement', value: 'true' },
+        { handle: 'interviewerNameRequired', value: 'required' },
+        { handle: 'interviewerNameDefault', value: 'blank' },
+        { handle: 'interviewerNameEditable', value: 'true' },
+        { handle: 'interviewDateRequired', value: 'required' },
+        { handle: 'interviewDateDefault', value: 'eventDate' },
+        { handle: 'interviewDateEditable', value: 'true' },
+        { handle: 'personIdShownOnCRF', value: 'false' },
+        { handle: 'secondaryLabelViewable', value: 'false' },
+        { handle: 'adminForcedReasonForChange', value: 'true' },
+        { handle: 'eventLocationRequired', value: 'not_used' },
+        { handle: 'participantPortal', value: 'disabled' },
+        { handle: 'randomization', value: 'disabled' }
+      ];
+
+      for (const param of defaultParams) {
+        await client.query(`
+          INSERT INTO study_parameter_value (study_id, parameter, value)
+          VALUES ($1, $2, $3)
+          ON CONFLICT DO NOTHING
+        `, [studyId, param.handle, param.value]);
+      }
+      logger.info('Study parameters initialized', { studyId, paramCount: defaultParams.length });
+    } catch (paramError: any) {
+      // Don't fail study creation if parameter initialization fails
+      logger.warn('Study parameter initialization warning', { error: paramError.message });
     }
 
     await client.query('COMMIT');

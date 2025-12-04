@@ -19,7 +19,34 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
 import * as subjectSoap from '../soap/subjectSoap.service';
-import { SubjectCreateRequest, SubjectDetails, ApiResponse, PaginatedResponse } from '../../types';
+import { 
+  StudySubject, 
+  StudySubjectWithDetails,
+  SubjectProgress,
+  ApiResponse, 
+  PaginatedResponse,
+  toStudySubject
+} from '../../types/libreclinica-models';
+
+// Request type for creating a subject
+export interface SubjectCreateRequest {
+  studyId: number;
+  studySubjectId: string;  // Label
+  secondaryId?: string;
+  enrollmentDate?: string;
+  gender?: string;
+  dateOfBirth?: string;
+  // Person ID - unique identifier for cross-study linking (unique_identifier in subject table)
+  personId?: string;
+  // Group assignments for randomization
+  groupAssignments?: { studyGroupClassId: number; studyGroupId: number; notes?: string }[];
+  // Optional first event scheduling
+  scheduleEvent?: {
+    studyEventDefinitionId: number;
+    location?: string;
+    startDate?: string;
+  };
+}
 
 /**
  * Create subject via SOAP or direct database (depending on config)
@@ -99,11 +126,13 @@ const createSubjectDirect = async (
     const gender = request.gender === 'Male' || request.gender === 'm' ? 'm' : 
                    request.gender === 'Female' || request.gender === 'f' ? 'f' : '';
     const dobCollected = request.dateOfBirth ? true : false;
+    // Use personId if provided, otherwise use studySubjectId as unique identifier
+    const uniqueIdentifier = request.personId || request.studySubjectId;
     
     const subjectResult = await client.query(subjectQuery, [
       request.dateOfBirth || null,
       gender,
-      request.studySubjectId, // Use studySubjectId as unique identifier
+      uniqueIdentifier,
       userId,
       dobCollected
     ]);
@@ -147,6 +176,59 @@ const createSubjectDirect = async (
       )
     `, [userId, studySubjectId]);
 
+    // 4. Assign to study groups if provided (for randomization)
+    if (request.groupAssignments && request.groupAssignments.length > 0) {
+      for (const assignment of request.groupAssignments) {
+        if (assignment.studyGroupId > 0) {
+          await client.query(`
+            INSERT INTO subject_group_map (
+              study_group_class_id, study_subject_id, study_group_id,
+              status_id, owner_id, date_created, notes
+            ) VALUES ($1, $2, $3, 1, $4, NOW(), $5)
+          `, [
+            assignment.studyGroupClassId,
+            studySubjectId,
+            assignment.studyGroupId,
+            userId,
+            assignment.notes || ''
+          ]);
+        }
+      }
+      logger.info('Subject group assignments created', { 
+        studySubjectId, 
+        assignmentCount: request.groupAssignments.length 
+      });
+    }
+
+    // 5. Schedule first study event if requested
+    let studyEventId = null;
+    if (request.scheduleEvent && request.scheduleEvent.studyEventDefinitionId > 0) {
+      const eventOid = `SE_${studySubjectId}_${request.scheduleEvent.studyEventDefinitionId}`;
+      const startDate = request.scheduleEvent.startDate || request.enrollmentDate || new Date().toISOString().split('T')[0];
+      
+      const eventResult = await client.query(`
+        INSERT INTO study_event (
+          study_event_definition_id, study_subject_id, location,
+          sample_ordinal, date_started, date_ended,
+          owner_id, status_id, subject_event_status_id, date_created
+        ) VALUES (
+          $1, $2, $3, 1, $4, $4, $5, 1, 
+          (SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1),
+          NOW()
+        )
+        RETURNING study_event_id
+      `, [
+        request.scheduleEvent.studyEventDefinitionId,
+        studySubjectId,
+        request.scheduleEvent.location || '',
+        startDate,
+        userId
+      ]);
+      
+      studyEventId = eventResult.rows[0]?.study_event_id;
+      logger.info('First study event scheduled', { studySubjectId, studyEventId });
+    }
+
     await client.query('COMMIT');
 
     logger.info('Subject created successfully via direct database', { 
@@ -164,7 +246,10 @@ const createSubjectDirect = async (
         label: request.studySubjectId,
         studyId: request.studyId,
         enrollmentDate: request.enrollmentDate,
-        ocOid
+        personId: uniqueIdentifier,
+        ocOid,
+        groupAssignments: request.groupAssignments || [],
+        studyEventId: studyEventId
       }
     };
   } catch (error: any) {
@@ -175,7 +260,7 @@ const createSubjectDirect = async (
     if (error.code === '23505') { // Unique violation
       return {
         success: false,
-        message: 'Subject with this ID already exists'
+        message: 'Subject with this ID already exists in this study or another study'
       };
     }
 
@@ -338,7 +423,7 @@ export const getSubjectList = async (
 /**
  * Get subject by ID with full details
  */
-export const getSubjectById = async (subjectId: number): Promise<SubjectDetails | null> => {
+export const getSubjectById = async (subjectId: number): Promise<StudySubjectWithDetails | null> => {
   logger.info('Getting subject details', { subjectId });
 
   try {
@@ -405,21 +490,55 @@ export const getSubjectById = async (subjectId: number): Promise<SubjectDetails 
     // For now, use the subject's date_updated as last activity
     const lastActivity = subject.date_updated || subject.date_created;
 
-    const details: SubjectDetails = {
-      ...subject,
+    // Convert to LibreClinica StudySubject format
+    const studySubject = toStudySubject(subject);
+    
+    const details: StudySubjectWithDetails = {
+      ...studySubject,
       subject: {
-        subject_id: subject.subject_id,
-        unique_identifier: subject.label,
-        gender: subject.gender,
-        date_of_birth: subject.date_of_birth,
-        status_id: subject.status_id,
-        date_created: subject.date_created,
-        owner_id: subject.owner_id,
-        update_id: subject.update_id
+        subjectId: subject.subject_id,
+        uniqueIdentifier: subject.label,
+        gender: subject.gender || '',
+        dateOfBirth: subject.date_of_birth,
+        dobCollected: !!subject.date_of_birth,
+        statusId: subject.status_id,
+        ownerId: subject.owner_id,
+        dateCreated: subject.date_created,
+        dateUpdated: subject.date_updated,
+        updateId: subject.update_id
       },
-      events: eventsResult.rows,
-      completionPercentage,
-      lastActivity
+      study: {
+        studyId: subject.study_id,
+        name: '',  // Would need to join study table
+        identifier: '',
+        type: 'nongenetic',
+        statusId: 1,
+        ownerId: subject.owner_id,
+        dateCreated: subject.date_created
+      },
+      events: eventsResult.rows.map((e: any) => ({
+        studyEventId: e.study_event_id,
+        studyEventDefinitionId: e.study_event_definition_id,
+        studySubjectId: subjectId,
+        location: e.location,
+        sampleOrdinal: e.sample_ordinal || 1,
+        dateStarted: e.date_start,
+        dateEnded: e.date_end,
+        subjectEventStatus: e.status_name || 'scheduled',
+        statusId: e.status_id,
+        ownerId: e.owner_id,
+        dateCreated: e.date_created,
+        dateUpdated: e.date_updated
+      })),
+      progress: {
+        totalEvents: eventsResult.rows.length,
+        completedEvents: eventsResult.rows.filter((e: any) => 
+          ['completed', 'stopped'].includes(e.status_name?.toLowerCase())
+        ).length,
+        totalForms: totalForms,
+        completedForms: completedForms,
+        percentComplete: completionPercentage
+      }
     };
 
     return details;
@@ -432,7 +551,7 @@ export const getSubjectById = async (subjectId: number): Promise<SubjectDetails 
 /**
  * Get subject progress/completion statistics
  */
-export const getSubjectProgress = async (subjectId: number): Promise<any> => {
+export const getSubjectProgress = async (subjectId: number): Promise<SubjectProgress | null> => {
   logger.info('Getting subject progress', { subjectId });
 
   try {
@@ -464,18 +583,19 @@ export const getSubjectProgress = async (subjectId: number): Promise<any> => {
 
     const stats = result.rows[0];
 
+    const totalEvents = parseInt(stats.total_events) || 0;
+    const completedEvents = parseInt(stats.completed_events) || 0;
+    const totalForms = parseInt(stats.total_forms) || 0;
+    const completedForms = parseInt(stats.completed_forms) || 0;
+    
     return {
-      totalEvents: parseInt(stats.total_events) || 0,
-      completedEvents: parseInt(stats.completed_events) || 0,
-      eventCompletionPercentage: stats.total_events > 0
-        ? Math.round((stats.completed_events / stats.total_events) * 100)
-        : 0,
-      totalForms: parseInt(stats.total_forms) || 0,
-      completedForms: parseInt(stats.completed_forms) || 0,
-      formCompletionPercentage: stats.total_forms > 0
-        ? Math.round((stats.completed_forms / stats.total_forms) * 100)
-        : 0,
-      openQueries: parseInt(stats.open_queries) || 0
+      totalEvents,
+      completedEvents,
+      totalForms,
+      completedForms,
+      percentComplete: totalForms > 0
+        ? Math.round((completedForms / totalForms) * 100)
+        : 0
     };
   } catch (error: any) {
     logger.error('Get subject progress error', { error: error.message });

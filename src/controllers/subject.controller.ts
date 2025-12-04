@@ -20,13 +20,28 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, status, page, limit, search } = req.query;
   const user = (req as any).user;
 
+  // Validate studyId
+  const parsedStudyId = parseInt(studyId as string);
+  if (isNaN(parsedStudyId)) {
+    logger.warn('Invalid or missing studyId', { studyId, userId: user?.userId });
+    res.status(400).json({ 
+      success: false, 
+      message: 'Valid studyId is required',
+      data: [],
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 }
+    });
+    return;
+  }
+
   const result = await subjectService.getSubjectList(
-    parseInt(studyId as string),
+    parsedStudyId,
     { 
       status: status as string, 
       page: parseInt(page as string) || 1, 
       limit: parseInt(limit as string) || 20
-    }
+    },
+    user?.userId,
+    user?.username || user?.userName
   );
 
   // Track study access
@@ -36,7 +51,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
       username: user.username || user.userName,
       action: 'STUDY_ACCESSED',
       entityType: 'study',
-      entityId: parseInt(studyId as string),
+      entityId: parsedStudyId,
       details: 'Viewed subject list'
     });
   }

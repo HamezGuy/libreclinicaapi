@@ -11,8 +11,15 @@
 
 import { getSoapClient } from './soapClient';
 import { logger } from '../../config/logger';
-import { ApiResponse, StudyMetadata } from '../../types';
+import { ApiResponse } from '../../types';
 import xml2js from 'xml2js';
+
+// Local interface for SOAP metadata response (uses snake_case to match raw data)
+interface SoapStudyMetadata {
+  study: any;
+  events: any[];
+  crfs: any[];
+}
 
 /**
  * Get study metadata via SOAP
@@ -22,7 +29,7 @@ export const getStudyMetadata = async (
   studyOid: string,
   userId: number,
   username: string
-): Promise<ApiResponse<StudyMetadata>> => {
+): Promise<ApiResponse<SoapStudyMetadata>> => {
   logger.info('Fetching study metadata via SOAP', {
     studyOid,
     userId,
@@ -132,7 +139,7 @@ export const listStudies = async (
 /**
  * Parse ODM metadata XML to structured format
  */
-export const parseOdmMetadata = async (odmXml: string): Promise<StudyMetadata> => {
+export const parseOdmMetadata = async (odmXml: string): Promise<SoapStudyMetadata> => {
   try {
     const parser = new xml2js.Parser({
       explicitArray: false,
@@ -141,7 +148,7 @@ export const parseOdmMetadata = async (odmXml: string): Promise<StudyMetadata> =
 
     const result = await parser.parseStringPromise(odmXml);
 
-    const metadata: StudyMetadata = {
+    const metadata: SoapStudyMetadata = {
       study: {
         study_id: 0,
         unique_identifier: '',

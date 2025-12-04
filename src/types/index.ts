@@ -2,12 +2,18 @@
  * TypeScript Type Definitions
  * 
  * Comprehensive type definitions for LibreClinica API
- * - Database entity types
+ * - Database entity types (from LibreClinica Java beans)
  * - API request/response types
  * - SOAP message types
  * - Business logic types
  * - Wound Scanner types
+ * 
+ * NOTE: Core models are now defined in libreclinica-models.ts
+ * and match the actual LibreClinica Java bean structure.
  */
+
+// Re-export all LibreClinica core models
+export * from './libreclinica-models';
 
 // Re-export Wound Scanner types
 export * from './wound.types';
@@ -16,8 +22,14 @@ export * from './wound.types';
  * ============================================================================
  * USER & AUTHENTICATION TYPES
  * ============================================================================
+ * 
+ * NOTE: Use UserAccount from libreclinica-models.ts for new code.
+ * These snake_case versions are for direct database row mapping.
  */
 
+/**
+ * @deprecated Use UserAccount from libreclinica-models.ts with toUserAccount() converter
+ */
 export interface User {
   user_id: number;
   user_name: string;
@@ -51,7 +63,10 @@ export interface UserRole {
   role_desc?: string;
 }
 
-export interface StudyUserRole {
+/**
+ * @deprecated Use StudyUserRole from libreclinica-models.ts
+ */
+export interface StudyUserRoleDB {
   role_name: string;
   study_id: number;
   status_id: number;
@@ -92,9 +107,15 @@ export interface GoogleAuthRequest {
  * ============================================================================
  * STUDY TYPES
  * ============================================================================
+ * 
+ * NOTE: Use Study from libreclinica-models.ts for new code.
+ * These snake_case versions are for direct database row mapping.
  */
 
-export interface Study {
+/**
+ * @deprecated Use Study from libreclinica-models.ts with toStudy() converter
+ */
+export interface StudyDB {
   study_id: number;
   parent_study_id?: number;
   unique_identifier: string;
@@ -118,11 +139,11 @@ export interface Study {
   principal_investigator?: string;
 }
 
-export interface StudyMetadata {
-  study: Study;
+export interface StudyMetadataDB {
+  study: StudyDB;
   events: StudyEventDefinition[];
-  crfs: CRF[];
-  subjects?: StudySubject[];
+  crfs: CRFDB[];
+  subjects?: StudySubjectDB[];
   enrollmentStats?: EnrollmentStats;
 }
 
@@ -145,9 +166,15 @@ export interface StudyEventDefinition {
  * ============================================================================
  * SUBJECT (PATIENT) TYPES
  * ============================================================================
+ * 
+ * NOTE: Use StudySubject and Subject from libreclinica-models.ts for new code.
+ * These snake_case versions are for direct database row mapping.
  */
 
-export interface StudySubject {
+/**
+ * @deprecated Use StudySubject from libreclinica-models.ts with toStudySubject() converter
+ */
+export interface StudySubjectDB {
   study_subject_id: number;
   label: string;
   secondary_label?: string;
@@ -162,7 +189,10 @@ export interface StudySubject {
   oc_oid?: string;
 }
 
-export interface Subject {
+/**
+ * @deprecated Use Subject from libreclinica-models.ts
+ */
+export interface SubjectDB {
   subject_id: number;
   unique_identifier: string;
   father_id?: number;
@@ -192,9 +222,9 @@ export interface SubjectListQuery {
   limit?: number;
 }
 
-export interface SubjectDetails extends StudySubject {
-  subject: Subject;
-  events: StudyEvent[];
+export interface SubjectDetailsDB extends StudySubjectDB {
+  subject: SubjectDB;
+  events: StudyEventDB[];
   completionPercentage: number;
   lastActivity?: Date;
 }
@@ -203,9 +233,15 @@ export interface SubjectDetails extends StudySubject {
  * ============================================================================
  * EVENT & CRF TYPES
  * ============================================================================
+ * 
+ * NOTE: Use StudyEvent, CRF, EventCRF from libreclinica-models.ts for new code.
+ * These snake_case versions are for direct database row mapping.
  */
 
-export interface StudyEvent {
+/**
+ * @deprecated Use StudyEvent from libreclinica-models.ts with toStudyEvent() converter
+ */
+export interface StudyEventDB {
   study_event_id: number;
   study_event_definition_id: number;
   study_subject_id: number;
@@ -224,7 +260,10 @@ export interface StudyEvent {
   reference_visit_id?: number;
 }
 
-export interface CRF {
+/**
+ * @deprecated Use CRF from libreclinica-models.ts with toCRF() converter
+ */
+export interface CRFDB {
   crf_id: number;
   study_id: number;
   name: string;
@@ -238,7 +277,10 @@ export interface CRF {
   source_data_verification_code?: number;
 }
 
-export interface EventCRF {
+/**
+ * @deprecated Use EventCRF from libreclinica-models.ts with toEventCRF() converter
+ */
+export interface EventCRFDB {
   event_crf_id: number;
   study_event_id: number;
   crf_version_id: number;
@@ -260,7 +302,10 @@ export interface EventCRF {
   sdv_update_id?: number;
 }
 
-export interface ItemData {
+/**
+ * @deprecated Use ItemData from libreclinica-models.ts
+ */
+export interface ItemDataDB {
   item_data_id: number;
   item_id: number;
   event_crf_id: number;
@@ -315,7 +360,10 @@ export interface ValidationError {
  * ============================================================================
  */
 
-export interface DiscrepancyNote {
+/**
+ * @deprecated Use DiscrepancyNote from libreclinica-models.ts
+ */
+export interface DiscrepancyNoteDB {
   discrepancy_note_id: number;
   description: string;
   discrepancy_note_type_id: number;
@@ -363,7 +411,10 @@ export interface QueryListQuery {
  * ============================================================================
  */
 
-export interface AuditLogEvent {
+/**
+ * @deprecated Use AuditLogEvent from libreclinica-models.ts
+ */
+export interface AuditLogEventDB {
   audit_id: number;
   audit_date: Date;
   audit_table: string;

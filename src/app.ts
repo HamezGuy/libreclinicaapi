@@ -45,6 +45,14 @@ import soapRoutes from './routes/soap.routes';
 import libreclinicaProxyRoutes from './routes/libreclinica-proxy.routes';
 // Validation rules
 import validationRulesRoutes from './routes/validation-rules.routes';
+// Electronic Signatures (21 CFR Part 11)
+import esignatureRoutes from './routes/esignature.routes';
+// 21 CFR Part 11 Compliance
+import complianceRoutes from './routes/compliance.routes';
+// Study Parameters (enrollment configuration)
+import studyParametersRoutes from './routes/studyParameters.routes';
+// Study Groups (randomization/treatment arms)
+import studyGroupsRoutes from './routes/studyGroups.routes';
 
 const app = express();
 
@@ -73,46 +81,51 @@ app.use(helmet({
   }
 }));
 
-// CORS - Cross-Origin Resource Sharing with dynamic origin checking
-const corsOptions = {
-  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-    // Allow requests with no origin (like mobile apps or curl)
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
-    
-    // Check configured origins
-    const allowedOrigins = config.security.allowedOrigins.length > 0 
-      ? config.security.allowedOrigins 
-      : ['http://localhost:4200', 'https://www.accuratrials.com'];
-    
-    // Check for exact match or wildcard patterns
-    const isAllowed = allowedOrigins.some(allowed => {
-      if (allowed.includes('*')) {
-        // Convert wildcard to regex: https://*.vercel.app -> https://[^.]+\.vercel\.app
-        const pattern = allowed
-          .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-          .replace(/\*/g, '[^.]+');
-        return new RegExp(`^${pattern}$`).test(origin);
+// CORS - Cross-Origin Resource Sharing
+// In production, nginx handles CORS to avoid duplicate headers
+// Only enable CORS middleware in development
+if (config.server.env !== 'production') {
+  const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) {
+        callback(null, true);
+        return;
       }
-      return allowed === origin;
-    });
-    
-    if (isAllowed) {
-      callback(null, true);
-    } else {
-      logger.warn('CORS blocked request', { origin, allowedOrigins });
-      callback(null, true); // Allow anyway in production for now - can tighten later
-    }
-  },
-  credentials: true,
-  optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
-};
-
-app.use(cors(corsOptions));
+      
+      // Check configured origins
+      const allowedOrigins = config.security.allowedOrigins.length > 0 
+        ? config.security.allowedOrigins 
+        : ['http://localhost:4200', 'http://localhost:3000', 'http://localhost:3001'];
+      
+      // Check for exact match or wildcard patterns
+      const isAllowed = allowedOrigins.some(allowed => {
+        if (allowed.includes('*')) {
+          const pattern = allowed
+            .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '[^.]+');
+          return new RegExp(`^${pattern}$`).test(origin);
+        }
+        return allowed === origin;
+      });
+      
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        logger.warn('CORS blocked request', { origin, allowedOrigins });
+        callback(null, true);
+      }
+    },
+    credentials: true,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+  };
+  app.use(cors(corsOptions));
+  logger.info('CORS middleware enabled (development mode)');
+} else {
+  logger.info('CORS handled by nginx (production mode)');
+}
 
 // ============================================================================
 // BODY PARSING
@@ -203,6 +216,14 @@ app.use('/api/soap', soapRoutes);
 app.use('/api/libreclinica', libreclinicaProxyRoutes);
 // Validation rules management
 app.use('/api/validation-rules', validationRulesRoutes);
+// Electronic Signatures (21 CFR Part 11 compliant)
+app.use('/api/esignature', esignatureRoutes);
+// 21 CFR Part 11 Compliance Status and Audit Trail
+app.use('/api/compliance', complianceRoutes);
+// Study Parameters (enrollment configuration)
+app.use('/api/study-parameters', studyParametersRoutes);
+// Study Groups (randomization/treatment arms)
+app.use('/api/study-groups', studyGroupsRoutes);
 
 // ============================================================================
 // ROOT ENDPOINT
@@ -236,6 +257,7 @@ app.get('/', (req: Request, res: Response) => {
       coding: '/api/coding',
       dataLocks: '/api/data-locks',
       wounds: '/api/wounds',
+      esignature: '/api/esignature - 21 CFR Part 11 compliant electronic signatures',
       soap: '/api/soap - SOAP status, diagnostics, and configuration',
       libreclinica: '/api/libreclinica - Proxy to LibreClinica native REST APIs'
     },

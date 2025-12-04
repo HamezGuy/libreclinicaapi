@@ -44,37 +44,55 @@ const rateLimitHandler = (req: Request, res: Response) => {
 const isTestMode = process.env.NODE_ENV === 'test';
 
 /**
+ * Check if running in development mode
+ */
+const isDevelopment = process.env.NODE_ENV !== 'production';
+
+/**
  * General API rate limiter
  * Applies to all API endpoints
  * 
- * Default: 100 requests per 15 minutes per IP
+ * Default: 1000 requests per 15 minutes per IP (development: 10000)
  */
 export const apiRateLimiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes default
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'), // Limit each IP to 100 requests per windowMs
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || (isDevelopment ? '10000' : '1000')), // Higher limit for development
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false, // Disable `X-RateLimit-*` headers
   handler: rateLimitHandler,
   skip: (req) => {
-    // Skip rate limiting for health check or in test mode
-    return isTestMode || req.path === '/health' || req.path === '/api/health';
+    // Skip rate limiting for health check, test mode, or localhost in development
+    if (isTestMode || req.path === '/health' || req.path === '/api/health') {
+      return true;
+    }
+    // In development, allow localhost more requests
+    if (isDevelopment && (req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1')) {
+      return true;
+    }
+    return false;
   }
 });
 
 /**
- * Authentication rate limiter
+ * Authentication rate limiter for LOGIN only
  * Stricter limits for login endpoints to prevent brute force
  * 
- * Default: 5 login attempts per 15 minutes per IP
+ * Default: 10 login attempts per 15 minutes per IP
  */
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '5'), // Limit each IP to 5 login attempts per windowMs
+  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '10'), // Limit each IP to 10 login attempts per windowMs
   message: 'Too many login attempts. Please try again after 15 minutes.',
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => isTestMode, // Skip rate limiting in test mode
+  skip: (req) => {
+    // Skip rate limiting in test mode
+    if (isTestMode) return true;
+    // Skip rate limiting for refresh token requests (they have their own limiter)
+    if (req.path.includes('/refresh')) return true;
+    return false;
+  },
   handler: (req: Request, res: Response) => {
     const ip = req.ip;
     const username = req.body.username;
@@ -88,6 +106,35 @@ export const authRateLimiter = rateLimit({
     res.status(429).json({
       success: false,
       message: 'Too many login attempts. Account temporarily locked. Please try again after 15 minutes.',
+      retryAfter: res.getHeader('Retry-After')
+    });
+  }
+});
+
+/**
+ * Refresh token rate limiter
+ * More generous limits for refresh tokens (legitimate app behavior)
+ * 
+ * Default: 60 refresh attempts per 15 minutes per IP
+ */
+export const refreshRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: parseInt(process.env.REFRESH_RATE_LIMIT_MAX || '60'), // Limit each IP to 60 refresh attempts
+  message: 'Too many refresh attempts. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => isTestMode,
+  handler: (req: Request, res: Response) => {
+    const ip = req.ip;
+
+    logger.warn('Refresh token rate limit exceeded', {
+      ip,
+      path: req.path
+    });
+
+    res.status(429).json({
+      success: false,
+      message: 'Too many token refresh attempts. Please try again later.',
       retryAfter: res.getHeader('Retry-After')
     });
   }
@@ -207,6 +254,7 @@ export const userCreationRateLimiter = rateLimit({
 export default {
   apiRateLimiter,
   authRateLimiter,
+  refreshRateLimiter,
   passwordResetRateLimiter,
   soapRateLimiter,
   reportRateLimiter,
