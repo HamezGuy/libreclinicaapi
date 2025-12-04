@@ -1067,7 +1067,7 @@ export const createForm = async (
 };
 
 /**
- * Update a form template
+ * Update a form template with fields
  */
 export const updateForm = async (
   crfId: number,
@@ -1075,12 +1075,19 @@ export const updateForm = async (
     name?: string;
     description?: string;
     status?: 'draft' | 'published' | 'archived';
+    fields?: FormField[];
+    category?: string;
   },
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Updating form template', { crfId, data, userId });
+  logger.info('Updating form template', { crfId, data: { ...data, fields: data.fields?.length || 0 }, userId });
+
+  const client = await pool.connect();
 
   try {
+    await client.query('BEGIN');
+
+    // Update basic CRF info
     const updates: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
@@ -1116,13 +1123,258 @@ export const updateForm = async (
 
     params.push(crfId);
 
-    const query = `
-      UPDATE crf
-      SET ${updates.join(', ')}
-      WHERE crf_id = $${paramIndex}
-    `;
+    if (updates.length > 2) { // More than just date_updated and update_id
+      const query = `
+        UPDATE crf
+        SET ${updates.join(', ')}
+        WHERE crf_id = $${paramIndex}
+      `;
+      await client.query(query, params);
+    }
 
-    await pool.query(query, params);
+    // Update fields if provided
+    if (data.fields && data.fields.length > 0) {
+      logger.info('Updating form fields', { crfId, fieldCount: data.fields.length });
+
+      // Get the latest version
+      const versionResult = await client.query(`
+        SELECT crf_version_id FROM crf_version
+        WHERE crf_id = $1
+        ORDER BY crf_version_id DESC
+        LIMIT 1
+      `, [crfId]);
+
+      if (versionResult.rows.length === 0) {
+        throw new Error('No version found for this form');
+      }
+
+      const crfVersionId = versionResult.rows[0].crf_version_id;
+
+      // Get existing section or create one
+      let sectionResult = await client.query(`
+        SELECT section_id FROM section
+        WHERE crf_version_id = $1
+        ORDER BY ordinal
+        LIMIT 1
+      `, [crfVersionId]);
+
+      let sectionId: number;
+      if (sectionResult.rows.length === 0) {
+        // Create section
+        const newSectionResult = await client.query(`
+          INSERT INTO section (
+            crf_version_id, status_id, label, title, ordinal, owner_id, date_created
+          ) VALUES (
+            $1, 1, $2, $3, 1, $4, NOW()
+          )
+          RETURNING section_id
+        `, [crfVersionId, data.category || 'Form Fields', data.name || 'Form', userId]);
+        sectionId = newSectionResult.rows[0].section_id;
+      } else {
+        sectionId = sectionResult.rows[0].section_id;
+      }
+
+      // Get existing item group or create one
+      let itemGroupResult = await client.query(`
+        SELECT ig.item_group_id FROM item_group ig
+        INNER JOIN item_group_metadata igm ON ig.item_group_id = igm.item_group_id
+        WHERE igm.crf_version_id = $1
+        LIMIT 1
+      `, [crfVersionId]);
+
+      let itemGroupId: number;
+      if (itemGroupResult.rows.length === 0) {
+        // Get CRF OID for generating item group OID
+        const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
+        const crfOid = crfOidResult.rows[0]?.oc_oid || `CRF_${crfId}`;
+        const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
+        const groupOid = `IG_${crfOid.substring(2, 16)}_${randomSuffix}`;
+        
+        const newGroupResult = await client.query(`
+          INSERT INTO item_group (
+            name, crf_id, status_id, owner_id, date_created, oc_oid
+          ) VALUES (
+            $1, $2, 1, $3, NOW(), $4
+          )
+          RETURNING item_group_id
+        `, [data.category || 'Form Fields', crfId, userId, groupOid]);
+        itemGroupId = newGroupResult.rows[0].item_group_id;
+      } else {
+        itemGroupId = itemGroupResult.rows[0].item_group_id;
+      }
+
+      // Get existing items for this form
+      const existingItemsResult = await client.query(`
+        SELECT i.item_id, i.name, i.oc_oid
+        FROM item i
+        INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+        WHERE igm.crf_version_id = $1
+      `, [crfVersionId]);
+
+      const existingItems = new Map(existingItemsResult.rows.map(row => [row.name, row]));
+
+      // Get CRF OID for generating item OIDs
+      const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
+      const ocOid = crfOidResult.rows[0]?.oc_oid || `CRF_${crfId}`;
+
+      // Process each field
+      for (let i = 0; i < data.fields.length; i++) {
+        const field = data.fields[i];
+        const fieldName = field.label || field.name || `Field ${i + 1}`;
+        const existingItem = existingItems.get(fieldName);
+        
+        // Serialize extended properties
+        const extendedProps = serializeExtendedProperties(field);
+        let description = field.helpText || field.description || '';
+        if (extendedProps) {
+          description = description ? `${description}\n---EXTENDED_PROPS---\n${extendedProps}` : `---EXTENDED_PROPS---\n${extendedProps}`;
+        }
+
+        const dataTypeId = mapFieldTypeToDataType(field.type);
+
+        let itemId: number;
+
+        if (existingItem) {
+          // Update existing item
+          await client.query(`
+            UPDATE item
+            SET description = $1, units = $2, phi_status = $3, item_data_type_id = $4, date_updated = NOW()
+            WHERE item_id = $5
+          `, [description, field.unit || '', field.isPhiField || false, dataTypeId, existingItem.item_id]);
+          itemId = existingItem.item_id;
+          existingItems.delete(fieldName); // Mark as processed
+        } else {
+          // Create new item
+          const itemRandom = Math.random().toString(36).substring(2, 6).toUpperCase();
+          const itemOid = `I_${ocOid.substring(2, 12)}_${i}_${itemRandom}`;
+
+          const newItemResult = await client.query(`
+            INSERT INTO item (
+              name, description, units, phi_status, item_data_type_id,
+              status_id, owner_id, date_created, oc_oid
+            ) VALUES (
+              $1, $2, $3, $4, $5, 1, $6, NOW(), $7
+            )
+            RETURNING item_id
+          `, [fieldName, description, field.unit || '', field.isPhiField || false, dataTypeId, userId, itemOid]);
+          itemId = newItemResult.rows[0].item_id;
+
+          // Link to item group
+          await client.query(`
+            INSERT INTO item_group_metadata (
+              item_group_id, crf_version_id, item_id, ordinal, show_group, repeating_group
+            ) VALUES (
+              $1, $2, $3, $4, true, false
+            )
+          `, [itemGroupId, crfVersionId, itemId, field.order || (i + 1)]);
+        }
+
+        // Handle response set for options
+        let responseSetId = 1;
+        if (field.options && field.options.length > 0) {
+          const optionsText = field.options.map(o => o.label).join(',');
+          const optionsValues = field.options.map(o => o.value).join(',');
+          const responseTypeId = mapFieldTypeToResponseType(field.type);
+
+          // Check for existing response set
+          const existingRsResult = await client.query(`
+            SELECT response_set_id FROM item_form_metadata
+            WHERE item_id = $1 AND crf_version_id = $2
+          `, [itemId, crfVersionId]);
+
+          if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].response_set_id) {
+            // Update existing
+            await client.query(`
+              UPDATE response_set
+              SET options_text = $1, options_values = $2
+              WHERE response_set_id = $3
+            `, [optionsText, optionsValues, existingRsResult.rows[0].response_set_id]);
+            responseSetId = existingRsResult.rows[0].response_set_id;
+          } else {
+            // Create new
+            const rsResult = await client.query(`
+              INSERT INTO response_set (response_type_id, label, options_text, options_values, version_id)
+              VALUES ($1, $2, $3, $4, $5)
+              RETURNING response_set_id
+            `, [responseTypeId, field.label, optionsText, optionsValues, crfVersionId]);
+            responseSetId = rsResult.rows[0].response_set_id;
+          }
+        }
+
+        // Extract validation pattern
+        let regexpPattern = null;
+        let regexpErrorMsg = null;
+        let widthDecimal = null;
+        
+        if (field.validationRules && field.validationRules.length > 0) {
+          const patternRule = field.validationRules.find(r => r.type === 'pattern');
+          if (patternRule) {
+            regexpPattern = patternRule.value;
+            regexpErrorMsg = patternRule.message || 'Invalid format';
+          }
+          
+          const minRule = field.validationRules.find(r => r.type === 'min');
+          const maxRule = field.validationRules.find(r => r.type === 'max');
+          if (minRule || maxRule) {
+            widthDecimal = `${minRule?.value ?? ''},${maxRule?.value ?? ''}`;
+          }
+        }
+        
+        if (!widthDecimal && (field.min !== undefined || field.max !== undefined)) {
+          widthDecimal = `${field.min ?? ''},${field.max ?? ''}`;
+        }
+
+        // Update or create item_form_metadata
+        const existingMetaResult = await client.query(`
+          SELECT 1 FROM item_form_metadata WHERE item_id = $1 AND crf_version_id = $2
+        `, [itemId, crfVersionId]);
+
+        if (existingMetaResult.rows.length > 0) {
+          await client.query(`
+            UPDATE item_form_metadata
+            SET response_set_id = $1, ordinal = $2, left_item_text = $3, required = $4,
+                default_value = $5, regexp = $6, regexp_error_msg = $7, show_item = $8, width_decimal = $9
+            WHERE item_id = $10 AND crf_version_id = $11
+          `, [
+            responseSetId, field.order || (i + 1), field.placeholder || '',
+            field.required || field.isRequired || false,
+            field.defaultValue !== undefined ? String(field.defaultValue) : null,
+            regexpPattern, regexpErrorMsg,
+            field.hidden !== true && field.isHidden !== true,
+            widthDecimal,
+            itemId, crfVersionId
+          ]);
+        } else {
+          await client.query(`
+            INSERT INTO item_form_metadata (
+              item_id, crf_version_id, section_id, response_set_id, ordinal,
+              left_item_text, required, default_value, regexp, regexp_error_msg, show_item, width_decimal
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          `, [
+            itemId, crfVersionId, sectionId, responseSetId, field.order || (i + 1),
+            field.placeholder || '', field.required || field.isRequired || false,
+            field.defaultValue !== undefined ? String(field.defaultValue) : null,
+            regexpPattern, regexpErrorMsg,
+            field.hidden !== true && field.isHidden !== true,
+            widthDecimal
+          ]);
+        }
+      }
+
+      // Optionally remove items that were deleted (items still in existingItems map)
+      // For safety, we'll just mark them as hidden instead of deleting
+      for (const [name, item] of existingItems) {
+        logger.info('Hiding removed field', { itemId: item.item_id, name });
+        await client.query(`
+          UPDATE item_form_metadata SET show_item = false
+          WHERE item_id = $1 AND crf_version_id = $2
+        `, [item.item_id, crfVersionId]);
+      }
+
+      logger.info('Form fields updated', { crfId, fieldCount: data.fields.length });
+    }
+
+    await client.query('COMMIT');
 
     logger.info('Form template updated successfully', { crfId });
 
@@ -1134,7 +1386,7 @@ export const updateForm = async (
         action: 'FORM_UPDATED',
         entityType: 'crf',
         entityId: crfId,
-        details: `Updated form template: ${Object.keys(data).join(', ')}`
+        details: `Updated form template: ${Object.keys(data).join(', ')}${data.fields ? ` with ${data.fields.length} fields` : ''}`
       });
     } catch (auditError: any) {
       logger.warn('Failed to record form update audit', { error: auditError.message });
@@ -1142,15 +1394,18 @@ export const updateForm = async (
 
     return {
       success: true,
-      message: 'Form template updated successfully'
+      message: `Form template updated successfully${data.fields ? ` with ${data.fields.length} fields` : ''}`
     };
   } catch (error: any) {
+    await client.query('ROLLBACK');
     logger.error('Update form error', { error: error.message });
 
     return {
       success: false,
       message: `Failed to update form: ${error.message}`
     };
+  } finally {
+    client.release();
   }
 };
 
