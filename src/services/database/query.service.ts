@@ -377,7 +377,7 @@ export const addQueryResponse = async (
     if (newStatusId !== oldStatusId) {
       await client.query(`
         UPDATE discrepancy_note
-        SET resolution_status_id = $1, date_updated = NOW(), update_id = $2
+        SET resolution_status_id = $1, update_id = $2
         WHERE discrepancy_note_id = $3
       `, [newStatusId, userId, parentQueryId]);
     }
@@ -470,7 +470,7 @@ export const updateQueryStatus = async (
     // Update the query status
     await client.query(`
       UPDATE discrepancy_note
-      SET resolution_status_id = $1, date_updated = NOW(), update_id = $2
+      SET resolution_status_id = $1, update_id = $2
       WHERE discrepancy_note_id = $3
     `, [statusId, userId, queryId]);
 
@@ -584,7 +584,7 @@ export const closeQueryWithSignature = async (
     // Update query to Closed status (4)
     await client.query(`
       UPDATE discrepancy_note
-      SET resolution_status_id = 4, date_updated = NOW(), update_id = $1
+      SET resolution_status_id = 4, update_id = $1
       WHERE discrepancy_note_id = $2
     `, [userId, queryId]);
 
@@ -821,7 +821,7 @@ export const reassignQuery = async (
     // Update assignment
     await client.query(`
       UPDATE discrepancy_note
-      SET assigned_user_id = $1, date_updated = NOW(), update_id = $2
+      SET assigned_user_id = $1, update_id = $2
       WHERE discrepancy_note_id = $3
     `, [assignedUserId, userId, queryId]);
 

@@ -409,6 +409,249 @@ export const validateCaptureToken = asyncHandler(async (req: Request, res: Respo
   }
 });
 
+/**
+ * Get current user's profile
+ * GET /api/auth/profile
+ */
+export const getProfile = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+
+  if (!user) {
+    res.status(401).json({
+      success: false,
+      message: 'Authentication required'
+    });
+    return;
+  }
+
+  // Get full profile from database
+  const { pool } = await import('../config/database');
+  const result = await pool.query(`
+    SELECT 
+      user_id,
+      user_name,
+      first_name,
+      last_name,
+      email,
+      phone,
+      institutional_affiliation,
+      status_id,
+      user_type_id,
+      time_zone,
+      date_created,
+      date_updated
+    FROM user_account 
+    WHERE user_id = $1
+  `, [user.userId]);
+
+  if (result.rows.length === 0) {
+    res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
+    return;
+  }
+
+  const dbUser = result.rows[0];
+  
+  // Get user type name
+  const typeResult = await pool.query(
+    'SELECT name FROM user_type WHERE user_type_id = $1',
+    [dbUser.user_type_id]
+  );
+  const userTypeName = typeResult.rows.length > 0 ? typeResult.rows[0].name : 'unknown';
+
+  res.json({
+    success: true,
+    data: {
+      userId: dbUser.user_id,
+      username: dbUser.user_name,
+      firstName: dbUser.first_name,
+      lastName: dbUser.last_name,
+      email: dbUser.email,
+      phone: dbUser.phone || '',
+      institutionalAffiliation: dbUser.institutional_affiliation || '',
+      role: userTypeName,
+      timeZone: dbUser.time_zone || 'America/New_York',
+      isActive: dbUser.status_id === 1,
+      createdAt: dbUser.date_created,
+      updatedAt: dbUser.date_updated
+    }
+  });
+});
+
+/**
+ * Update current user's profile (self-service)
+ * PUT /api/auth/profile
+ * 
+ * Users can update their own: firstName, lastName, email, phone, institutionalAffiliation, timeZone
+ * They CANNOT change: username, role, status
+ */
+export const updateProfile = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const ipAddress = req.ip || 'unknown';
+
+  if (!user) {
+    res.status(401).json({
+      success: false,
+      message: 'Authentication required'
+    });
+    return;
+  }
+
+  const { firstName, lastName, email, phone, institutionalAffiliation, timeZone } = req.body;
+
+  // Validate at least one field is provided
+  if (!firstName && !lastName && !email && !phone && institutionalAffiliation === undefined && !timeZone) {
+    res.status(400).json({
+      success: false,
+      message: 'At least one field to update is required'
+    });
+    return;
+  }
+
+  // Validate email format if provided
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({
+      success: false,
+      message: 'Invalid email format'
+    });
+    return;
+  }
+
+  const { pool } = await import('../config/database');
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Build dynamic update query
+    const updates: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (firstName !== undefined) {
+      updates.push(`first_name = $${paramIndex++}`);
+      params.push(firstName);
+    }
+
+    if (lastName !== undefined) {
+      updates.push(`last_name = $${paramIndex++}`);
+      params.push(lastName);
+    }
+
+    if (email !== undefined) {
+      // Check if email is already used by another user
+      const emailCheck = await client.query(
+        'SELECT user_id FROM user_account WHERE email = $1 AND user_id != $2',
+        [email, user.userId]
+      );
+      if (emailCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          success: false,
+          message: 'Email is already in use by another user'
+        });
+        return;
+      }
+      updates.push(`email = $${paramIndex++}`);
+      params.push(email);
+    }
+
+    if (phone !== undefined) {
+      updates.push(`phone = $${paramIndex++}`);
+      params.push(phone);
+    }
+
+    if (institutionalAffiliation !== undefined) {
+      updates.push(`institutional_affiliation = $${paramIndex++}`);
+      params.push(institutionalAffiliation);
+    }
+
+    if (timeZone !== undefined) {
+      updates.push(`time_zone = $${paramIndex++}`);
+      params.push(timeZone);
+    }
+
+    updates.push(`date_updated = NOW()`);
+
+    params.push(user.userId);
+    const updateQuery = `
+      UPDATE user_account 
+      SET ${updates.join(', ')}
+      WHERE user_id = $${paramIndex}
+      RETURNING user_id, user_name, first_name, last_name, email, phone, institutional_affiliation, time_zone
+    `;
+
+    const result = await client.query(updateQuery, params);
+
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+      return;
+    }
+
+    // Create audit log entry
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_log_event_type_id,
+        audit_date,
+        entity_id,
+        entity_name,
+        user_account_id,
+        audit_table,
+        reason_for_change,
+        old_value,
+        new_value,
+        details
+      ) VALUES (
+        44, NOW(), $1, 'Profile Updated', $2, 'user_account', 
+        'User updated their profile', '', $3, $4
+      )
+    `, [
+      user.userId,
+      user.userId,
+      JSON.stringify(result.rows[0]),
+      `Profile updated from ${ipAddress}`
+    ]);
+
+    await client.query('COMMIT');
+
+    const updatedUser = result.rows[0];
+    
+    logger.info('Profile updated', { userId: user.userId, fields: Object.keys(req.body) });
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: {
+        userId: updatedUser.user_id,
+        username: updatedUser.user_name,
+        firstName: updatedUser.first_name,
+        lastName: updatedUser.last_name,
+        email: updatedUser.email,
+        phone: updatedUser.phone || '',
+        institutionalAffiliation: updatedUser.institutional_affiliation || '',
+        timeZone: updatedUser.time_zone || 'America/New_York'
+      }
+    });
+
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Profile update error', { error: error.message, userId: user.userId });
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update profile'
+    });
+  } finally {
+    client.release();
+  }
+});
+
 export default {
   login,
   googleLogin,
@@ -416,6 +659,8 @@ export default {
   verify,
   logout,
   generateCaptureToken,
-  validateCaptureToken
+  validateCaptureToken,
+  getProfile,
+  updateProfile
 };
 

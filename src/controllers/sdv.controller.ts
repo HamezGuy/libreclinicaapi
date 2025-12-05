@@ -1,5 +1,12 @@
 /**
  * SDV (Source Data Verification) Controller
+ * 
+ * Handles SDV operations for LibreClinica:
+ * - List SDV records with filtering
+ * - Get individual SDV record details
+ * - Get form data for SDV preview
+ * - Verify/Unverify operations with audit trail
+ * - Bulk verification
  */
 
 import { Request, Response } from 'express';
@@ -7,10 +14,11 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as sdvService from '../services/database/sdv.service';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const { studyId, status, page, limit } = req.query;
+  const { studyId, subjectId, status, page, limit } = req.query;
 
   const result = await sdvService.getSDVRecords({
     studyId: studyId ? parseInt(studyId as string) : undefined,
+    subjectId: subjectId ? parseInt(subjectId as string) : undefined,
     status: status as string,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 20
@@ -30,6 +38,18 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
   }
 
   res.json({ success: true, data: result });
+});
+
+/**
+ * Get form data for SDV preview
+ * Returns all item_data for the specified event_crf
+ */
+export const getFormData = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  const result = await sdvService.getSDVFormData(parseInt(id));
+
+  res.json(result);
 });
 
 export const verify = asyncHandler(async (req: Request, res: Response) => {

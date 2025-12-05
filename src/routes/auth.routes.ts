@@ -26,6 +26,10 @@ router.post('/validate-token', controller.validateCaptureToken);
 router.get('/verify', authMiddleware, controller.verify);
 router.post('/logout', authMiddleware, controller.logout);
 
+// Profile management (self-service)
+router.get('/profile', authMiddleware, controller.getProfile);
+router.put('/profile', authMiddleware, controller.updateProfile);
+
 // Capture token generation (requires auth)
 router.post('/capture-token', authMiddleware, controller.generateCaptureToken);
 

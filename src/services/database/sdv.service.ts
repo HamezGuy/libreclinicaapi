@@ -8,6 +8,7 @@ import { logger } from '../../config/logger';
 
 export const getSDVRecords = async (filters: {
   studyId?: number;
+  subjectId?: number;
   status?: string;
   page?: number;
   limit?: number;
@@ -15,7 +16,7 @@ export const getSDVRecords = async (filters: {
   logger.info('Getting SDV records', filters);
 
   try {
-    const { studyId, status, page = 1, limit = 20 } = filters;
+    const { studyId, subjectId, status, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
 
     const conditions: string[] = ['ec.status_id != 5'];
@@ -25,6 +26,11 @@ export const getSDVRecords = async (filters: {
     if (studyId) {
       conditions.push(`ss.study_id = $${paramIndex++}`);
       params.push(studyId);
+    }
+
+    if (subjectId) {
+      conditions.push(`ss.study_subject_id = $${paramIndex++}`);
+      params.push(subjectId);
     }
 
     if (status === 'verified') {
@@ -101,19 +107,93 @@ export const getSDVById = async (eventCrfId: number) => {
     SELECT 
       ec.*,
       ss.label as subject_label,
+      ss.study_subject_id,
       sed.name as event_name,
-      c.name as crf_name
+      sed.study_event_definition_id,
+      c.name as crf_name,
+      c.crf_id,
+      cv.name as crf_version_name,
+      verifier.user_name as verified_by,
+      se.date_start as event_start_date,
+      se.date_end as event_end_date,
+      ec.date_completed,
+      ec.date_interviewed,
+      ec.interviewer_name
     FROM event_crf ec
     INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
     INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
     INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
     INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
     INNER JOIN crf c ON cv.crf_id = c.crf_id
+    LEFT JOIN user_account verifier ON ec.sdv_update_id = verifier.user_id
     WHERE ec.event_crf_id = $1
   `;
 
   const result = await pool.query(query, [eventCrfId]);
   return result.rows[0] || null;
+};
+
+/**
+ * Get form data for SDV preview
+ * Returns all item_data for a given event_crf
+ */
+export const getSDVFormData = async (eventCrfId: number) => {
+  logger.info('Getting SDV form data for preview', { eventCrfId });
+
+  try {
+    const query = `
+      SELECT 
+        id.item_data_id,
+        i.item_id,
+        i.name as item_name,
+        i.description as item_description,
+        i.oc_oid as item_oid,
+        idt.name as data_type,
+        id.value,
+        id.status_id,
+        id.date_created,
+        id.date_updated,
+        s.label as section_label,
+        ig.name as group_name,
+        ifm.ordinal,
+        ifm.required
+      FROM item_data id
+      INNER JOIN item i ON id.item_id = i.item_id
+      INNER JOIN item_data_type idt ON i.item_data_type_id = idt.item_data_type_id
+      LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+      LEFT JOIN section s ON ifm.section_id = s.section_id
+      LEFT JOIN item_group_metadata igm ON i.item_id = igm.item_id
+      LEFT JOIN item_group ig ON igm.item_group_id = ig.item_group_id
+      WHERE id.event_crf_id = $1
+        AND id.deleted = false
+      ORDER BY COALESCE(ifm.ordinal, 0), i.name
+    `;
+
+    const result = await pool.query(query, [eventCrfId]);
+
+    return {
+      success: true,
+      data: result.rows.map(row => ({
+        itemDataId: row.item_data_id,
+        itemId: row.item_id,
+        name: row.item_name,
+        description: row.item_description,
+        oid: row.item_oid,
+        dataType: row.data_type,
+        value: row.value,
+        statusId: row.status_id,
+        section: row.section_label,
+        group: row.group_name,
+        ordinal: row.ordinal,
+        required: row.required,
+        dateCreated: row.date_created,
+        dateUpdated: row.date_updated
+      }))
+    };
+  } catch (error: any) {
+    logger.error('Get SDV form data error', { error: error.message });
+    return { success: false, data: [], error: error.message };
+  }
 };
 
 export const verifySDV = async (eventCrfId: number, userId: number) => {

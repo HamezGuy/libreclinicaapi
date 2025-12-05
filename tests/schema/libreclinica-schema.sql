@@ -302,9 +302,12 @@ CREATE TABLE study_group_class (
     study_id INTEGER REFERENCES study(study_id),
     name VARCHAR(255),
     type VARCHAR(255),
+    group_class_type_id INTEGER DEFAULT 1,
     status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
     date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     owner_id INTEGER REFERENCES user_account(user_id),
+    update_id INTEGER,
     subject_assignment VARCHAR(255)
 );
 
@@ -312,14 +315,21 @@ CREATE TABLE study_group (
     study_group_id SERIAL PRIMARY KEY,
     study_group_class_id INTEGER REFERENCES study_group_class(study_group_class_id),
     name VARCHAR(255),
-    description VARCHAR(1000)
+    description VARCHAR(1000),
+    status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
+    date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    owner_id INTEGER REFERENCES user_account(user_id),
+    update_id INTEGER
 );
 
 CREATE TABLE subject_group_map (
     subject_group_map_id SERIAL PRIMARY KEY,
     study_subject_id INTEGER REFERENCES study_subject(study_subject_id),
     study_group_id INTEGER REFERENCES study_group(study_group_id),
+    study_group_class_id INTEGER REFERENCES study_group_class(study_group_class_id),
     notes VARCHAR(255),
+    status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
     owner_id INTEGER REFERENCES user_account(user_id),
     date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

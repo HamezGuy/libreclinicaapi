@@ -38,13 +38,31 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await queryService.createQuery(req.body, user.userId);
 
-  res.status(result.success ? 201 : 400).json(result);
+  // Return proper HTTP status codes
+  let statusCode = 201;
+  if (!result.success) {
+    if (result.message?.includes('not found')) {
+      statusCode = 404;
+    } else if (result.message?.includes('required') || result.message?.includes('invalid')) {
+      statusCode = 400;
+    } else {
+      statusCode = 500; // Server error for database issues
+    }
+  }
+
+  res.status(statusCode).json(result);
 });
 
 export const respond = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { id } = req.params;
   const { response, description, detailedNotes, newStatusId } = req.body;
+
+  // Validate that we have a response/description
+  if (!response && !description) {
+    res.status(400).json({ success: false, message: 'Response text is required' });
+    return;
+  }
 
   const result = await queryService.addQueryResponse(
     parseInt(id), 
@@ -56,13 +74,29 @@ export const respond = asyncHandler(async (req: Request, res: Response) => {
     user.userId
   );
 
-  res.json(result);
+  // Return proper HTTP status codes
+  let statusCode = 200;
+  if (!result.success) {
+    if (result.message?.includes('not found')) {
+      statusCode = 404;
+    } else {
+      statusCode = 500; // Server error for database issues
+    }
+  }
+
+  res.status(statusCode).json(result);
 });
 
 export const updateStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { id } = req.params;
   const { statusId, reason } = req.body;
+
+  // Validate statusId
+  if (statusId === undefined || statusId === null) {
+    res.status(400).json({ success: false, message: 'statusId is required' });
+    return;
+  }
 
   const result = await queryService.updateQueryStatus(
     parseInt(id), 
@@ -71,7 +105,17 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
     { reason }
   );
 
-  res.json(result);
+  // Return proper HTTP status codes
+  let statusCode = 200;
+  if (!result.success) {
+    if (result.message?.includes('not found')) {
+      statusCode = 404;
+    } else {
+      statusCode = 500; // Server error for database issues
+    }
+  }
+
+  res.status(statusCode).json(result);
 });
 
 /**
@@ -99,7 +143,20 @@ export const closeWithSignature = asyncHandler(async (req: Request, res: Respons
     { password, reason, meaning }
   );
 
-  res.status(result.success ? 200 : 401).json(result);
+  // Return 401 ONLY for password/authentication failures, not for other errors
+  // This prevents the frontend interceptor from logging the user out on server errors
+  let statusCode = 200;
+  if (!result.success) {
+    if (result.message?.includes('Invalid password') || result.message?.includes('signature verification failed')) {
+      statusCode = 401; // Authentication failure
+    } else if (result.message?.includes('not found')) {
+      statusCode = 404; // Not found
+    } else {
+      statusCode = 500; // Server error for database issues etc.
+    }
+  }
+
+  res.status(statusCode).json(result);
 });
 
 /**
@@ -172,7 +229,17 @@ export const reassign = asyncHandler(async (req: Request, res: Response) => {
     user.userId
   );
 
-  res.json(result);
+  // Return proper HTTP status codes
+  let statusCode = 200;
+  if (!result.success) {
+    if (result.message?.includes('not found')) {
+      statusCode = 404;
+    } else {
+      statusCode = 500; // Server error for database issues
+    }
+  }
+
+  res.status(statusCode).json(result);
 });
 
 /**

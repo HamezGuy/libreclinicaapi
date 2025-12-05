@@ -87,13 +87,21 @@ export const createRandomization = async (data: {
   try {
     await client.query('BEGIN');
 
+    // Get the study_group_class_id from the study_group
+    const groupQuery = `
+      SELECT study_group_class_id FROM study_group WHERE study_group_id = $1
+    `;
+    const groupResult = await client.query(groupQuery, [data.studyGroupId]);
+    const studyGroupClassId = groupResult.rows[0]?.study_group_class_id;
+
+    // Insert with all required fields including study_group_class_id and status_id
     const insertQuery = `
-      INSERT INTO subject_group_map (study_subject_id, study_group_id, owner_id, date_created)
-      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      INSERT INTO subject_group_map (study_subject_id, study_group_id, study_group_class_id, owner_id, status_id, date_created)
+      VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP)
       RETURNING *
     `;
 
-    const result = await client.query(insertQuery, [data.studySubjectId, data.studyGroupId, userId]);
+    const result = await client.query(insertQuery, [data.studySubjectId, data.studyGroupId, studyGroupClassId, userId]);
 
     // Audit log - audit_log_event requires audit_log_event_type_id (FK to audit_log_event_type)
     await client.query(`
