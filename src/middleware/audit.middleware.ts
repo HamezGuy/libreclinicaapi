@@ -374,7 +374,7 @@ export const electronicSignatureMiddleware = async (
     const authQuery = `
       SELECT user_id, user_name, passwd 
       FROM user_account 
-      WHERE user_name = $1 AND account_non_locked = true
+      WHERE user_name = $1 AND status_id = 1
     `;
     
     const result = await pool.query(authQuery, [username]);

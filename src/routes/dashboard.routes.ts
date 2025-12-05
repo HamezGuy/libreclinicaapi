@@ -30,5 +30,9 @@ router.get('/subject-status-distribution', controller.getSubjectStatusDistributi
 router.get('/activity-feed', controller.getActivityFeed);
 router.get('/health-score', controller.getStudyHealthScore);
 
+// User Analytics endpoints
+router.get('/user-analytics', controller.getUserAnalytics);
+router.get('/top-performers', controller.getTopPerformers);
+
 export default router;
 

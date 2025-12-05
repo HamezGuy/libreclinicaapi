@@ -73,8 +73,7 @@ export const getUsers = async (
         u.email,
         u.institutional_affiliation,
         u.phone,
-        u.enabled,
-        u.account_non_locked,
+        u.status_id,
         u.date_created,
         u.date_lastvisit,
         ut.user_type
@@ -140,20 +139,43 @@ export const getUserById = async (userId: number): Promise<User | null> => {
 };
 
 /**
- * Create new user
+ * Create new user - supports ALL LibreClinica user_account fields
  */
 export const createUser = async (
   data: {
+    // Required fields
     username: string;
     firstName: string;
     lastName: string;
     email: string;
     password: string;
+    
+    // Personal info
     phone?: string;
     institutionalAffiliation?: string;
-    userTypeId?: number;
-    role?: string; // Role for default study assignment
-    studyId?: number; // Optional study to assign to
+    
+    // User type and role
+    userTypeId?: number;     // 1=admin, 2=user, 3=tech-admin
+    role?: string;           // Role for study assignment
+    studyId?: number;        // Study to assign to
+    activeStudyId?: number;  // Default active study
+    
+    // API Access
+    runWebservices?: boolean;
+    enableApiKey?: boolean;
+    apiKey?: string;
+    accessCode?: string;
+    
+    // Two-Factor Auth
+    authtype?: 'STANDARD' | 'MARKED' | 'TWO_FACTOR';
+    authsecret?: string;
+    
+    // Password challenge (for password recovery)
+    passwdChallengeQuestion?: string;
+    passwdChallengeAnswer?: string;
+    
+    // Timezone
+    timeZone?: string;
   },
   creatorId: number
 ): Promise<{ success: boolean; userId?: number; message?: string }> => {
@@ -211,15 +233,14 @@ export const createUser = async (
       userTypeId = roleToUserType[data.role.toLowerCase()] || 2;
     }
 
-    // Insert user
-    // Note: user_account table uses lock_counter NOT failed_login_attempts
+    // Insert user - using only columns that exist in LibreClinica's user_account table
     const insertQuery = `
       INSERT INTO user_account (
         user_name, first_name, last_name, email, passwd, passwd_timestamp,
         phone, institutional_affiliation, user_type_id, status_id, owner_id,
-        date_created, enabled, account_non_locked, lock_counter
+        date_created, active_study, passwd_challenge_question, passwd_challenge_answer
       ) VALUES (
-        $1, $2, $3, $4, $5, NOW(), $6, $7, $8, 1, $9, NOW(), true, true, 0
+        $1, $2, $3, $4, $5, NOW(), $6, $7, $8, 1, $9, NOW(), $10, $11, $12
       )
       RETURNING user_id
     `;
@@ -233,7 +254,10 @@ export const createUser = async (
       data.phone || null,
       data.institutionalAffiliation || null,
       userTypeId,
-      creatorId
+      creatorId,
+      data.activeStudyId || null,
+      data.passwdChallengeQuestion || null,
+      data.passwdChallengeAnswer || null
     ]);
 
     const userId = insertResult.rows[0].user_id;
@@ -296,17 +320,42 @@ export const createUser = async (
 };
 
 /**
- * Update user
+ * Update user - supports ALL LibreClinica user_account fields
  */
 export const updateUser = async (
   userId: number,
   data: {
+    // Personal info
     firstName?: string;
     lastName?: string;
     email?: string;
     phone?: string;
     institutionalAffiliation?: string;
+    
+    // Status
     enabled?: boolean;
+    accountNonLocked?: boolean;
+    
+    // User type
+    userTypeId?: number;
+    activeStudyId?: number;
+    
+    // API Access
+    runWebservices?: boolean;
+    enableApiKey?: boolean;
+    apiKey?: string;
+    accessCode?: string;
+    
+    // Two-Factor Auth
+    authtype?: 'STANDARD' | 'MARKED' | 'TWO_FACTOR';
+    authsecret?: string;
+    
+    // Password challenge
+    passwdChallengeQuestion?: string;
+    passwdChallengeAnswer?: string;
+    
+    // Timezone
+    timeZone?: string;
   },
   updaterId: number
 ): Promise<{ success: boolean; message?: string }> => {
@@ -346,9 +395,35 @@ export const updateUser = async (
       params.push(data.institutionalAffiliation);
     }
 
+    // Use status_id for enabled/locked state (1 = active, 5 = locked)
     if (data.enabled !== undefined) {
-      updates.push(`enabled = $${paramIndex++}`);
-      params.push(data.enabled);
+      updates.push(`status_id = $${paramIndex++}`);
+      params.push(data.enabled ? 1 : 5);
+    }
+
+    if (data.accountNonLocked !== undefined) {
+      updates.push(`status_id = $${paramIndex++}`);
+      params.push(data.accountNonLocked ? 1 : 5);
+    }
+
+    if (data.userTypeId !== undefined) {
+      updates.push(`user_type_id = $${paramIndex++}`);
+      params.push(data.userTypeId);
+    }
+
+    if (data.activeStudyId !== undefined) {
+      updates.push(`active_study = $${paramIndex++}`);
+      params.push(data.activeStudyId);
+    }
+
+    if (data.passwdChallengeQuestion !== undefined) {
+      updates.push(`passwd_challenge_question = $${paramIndex++}`);
+      params.push(data.passwdChallengeQuestion);
+    }
+
+    if (data.passwdChallengeAnswer !== undefined) {
+      updates.push(`passwd_challenge_answer = $${paramIndex++}`);
+      params.push(data.passwdChallengeAnswer);
     }
 
     if (updates.length === 0) {

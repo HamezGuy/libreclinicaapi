@@ -381,11 +381,11 @@ export const userSchemas = {
     institutionalAffiliation: Joi.string().optional().max(255),
     phone: Joi.string().optional().max(40),
     password: Joi.string().required()
-      .min(12)
-      .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/)
+      .min(8)
+      .pattern(/.*[@$!%*?&#^()_+=\-].*/)
       .messages({
-        'string.min': 'Password must be at least 12 characters',
-        'string.pattern.base': 'Password must contain uppercase, lowercase, number, and special character'
+        'string.min': 'Password must be at least 8 characters',
+        'string.pattern.base': 'Password must contain at least one special character'
       }),
     role: Joi.string().required().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry')
   }),

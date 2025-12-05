@@ -339,18 +339,87 @@ export const getStudySites = async (studyId: number): Promise<any[]> => {
 /**
  * Create new study
  */
+/**
+ * Create study - supports ALL LibreClinica database fields
+ * 
+ * Database columns in study table:
+ * - Identification: name, unique_identifier, secondary_identifier, official_title, oc_oid
+ * - Description: summary, protocol_description
+ * - Timeline: date_planned_start, date_planned_end, date_created, date_updated
+ * - Classification: protocol_type, phase, type_id
+ * - Enrollment: expected_total_enrollment
+ * - Team: principal_investigator, sponsor, collaborators
+ * - Facility: facility_name, facility_city, facility_state, facility_zip, facility_country,
+ *             facility_recruitment_status, facility_contact_name, facility_contact_degree,
+ *             facility_contact_phone, facility_contact_email
+ * - Protocol: protocol_date_verification, medline_identifier, url, url_description, results_reference
+ * - Eligibility: conditions, keywords, eligibility, gender, age_min, age_max, healthy_volunteer_accepted
+ * - Design: purpose, allocation, masking, control, assignment, endpoint, interventions, duration, selection, timing
+ */
 export const createStudy = async (
   data: {
+    // Required
     name: string;
     uniqueIdentifier: string;
-    description?: string;
+    
+    // Identification
+    secondaryIdentifier?: string;
+    officialTitle?: string;
+    summary?: string;
+    
+    // Team
     principalInvestigator?: string;
     sponsor?: string;
+    collaborators?: string;
+    
+    // Classification
     phase?: string;
+    protocolType?: string;
     expectedTotalEnrollment?: number;
     datePlannedStart?: string;
     datePlannedEnd?: string;
     parentStudyId?: number;
+    
+    // Facility
+    facilityName?: string;
+    facilityCity?: string;
+    facilityState?: string;
+    facilityZip?: string;
+    facilityCountry?: string;
+    facilityRecruitmentStatus?: string;
+    facilityContactName?: string;
+    facilityContactDegree?: string;
+    facilityContactPhone?: string;
+    facilityContactEmail?: string;
+    
+    // Protocol
+    protocolDescription?: string;
+    protocolDateVerification?: string;
+    medlineIdentifier?: string;
+    url?: string;
+    urlDescription?: string;
+    resultsReference?: boolean;
+    conditions?: string;
+    keywords?: string;
+    interventions?: string;
+    
+    // Eligibility
+    eligibility?: string;
+    gender?: string;
+    ageMin?: string;
+    ageMax?: string;
+    healthyVolunteerAccepted?: boolean;
+    
+    // Study Design
+    purpose?: string;
+    allocation?: string;
+    masking?: string;
+    control?: string;
+    assignment?: string;
+    endpoint?: string;
+    duration?: string;
+    selection?: string;
+    timing?: string;
   },
   userId: number
 ): Promise<{ success: boolean; studyId?: number; message?: string }> => {
@@ -375,33 +444,81 @@ export const createStudy = async (
     // Generate OC OID
     const ocOid = `S_${data.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
-    // Insert study
-    // Note: study table does NOT have type_id column - using protocol_type instead
+    // Insert study with ALL supported database fields
     const insertQuery = `
       INSERT INTO study (
-        parent_study_id, unique_identifier, name, summary, principal_investigator,
-        sponsor, protocol_description, date_planned_start, date_planned_end,
+        parent_study_id, unique_identifier, secondary_identifier, name, official_title,
+        summary, principal_investigator, sponsor, collaborators,
+        protocol_description, date_planned_start, date_planned_end,
         expected_total_enrollment, status_id, owner_id, date_created,
-        oc_oid, protocol_type
+        oc_oid, protocol_type, phase,
+        facility_name, facility_city, facility_state, facility_zip, facility_country,
+        facility_recruitment_status, facility_contact_name, facility_contact_degree,
+        facility_contact_phone, facility_contact_email,
+        protocol_date_verification, medline_identifier, url, url_description, results_reference,
+        conditions, keywords, eligibility, gender, age_min, age_max, healthy_volunteer_accepted,
+        purpose, allocation, masking, control, assignment, endpoint, interventions,
+        duration, selection, timing
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, NOW(), $12, 'interventional'
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, 1, $14, NOW(), $15, $16, $17,
+        $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
+        $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39,
+        $40, $41, $42, $43, $44, $45, $46, $47, $48, $49
       )
       RETURNING study_id
     `;
 
     const insertResult = await client.query(insertQuery, [
-      data.parentStudyId || null,
-      data.uniqueIdentifier,
-      data.name,
-      data.description || '',
-      data.principalInvestigator || '',
-      data.sponsor || '',
-      data.description || '',
-      data.datePlannedStart || null,
-      data.datePlannedEnd || null,
-      data.expectedTotalEnrollment || 0,
-      userId,
-      ocOid
+      data.parentStudyId || null,                                    // $1
+      data.uniqueIdentifier,                                          // $2
+      data.secondaryIdentifier || null,                               // $3
+      data.name,                                                       // $4
+      data.officialTitle || null,                                     // $5
+      data.summary || '',                                              // $6
+      data.principalInvestigator || '',                               // $7
+      data.sponsor || '',                                              // $8
+      data.collaborators || null,                                     // $9
+      data.protocolDescription || data.summary || '',                 // $10
+      data.datePlannedStart || null,                                  // $11
+      data.datePlannedEnd || null,                                    // $12
+      data.expectedTotalEnrollment || 0,                              // $13
+      userId,                                                          // $14
+      ocOid,                                                           // $15
+      data.protocolType || 'interventional',                          // $16
+      data.phase || null,                                              // $17
+      data.facilityName || null,                                      // $18
+      data.facilityCity || null,                                      // $19
+      data.facilityState || null,                                     // $20
+      data.facilityZip || null,                                       // $21
+      data.facilityCountry || null,                                   // $22
+      data.facilityRecruitmentStatus || null,                         // $23
+      data.facilityContactName || null,                               // $24
+      data.facilityContactDegree || null,                             // $25
+      data.facilityContactPhone || null,                              // $26
+      data.facilityContactEmail || null,                              // $27
+      data.protocolDateVerification || null,                          // $28
+      data.medlineIdentifier || null,                                 // $29
+      data.url || null,                                                // $30
+      data.urlDescription || null,                                    // $31
+      data.resultsReference || null,                                  // $32
+      data.conditions || null,                                        // $33
+      data.keywords || null,                                          // $34
+      data.eligibility || null,                                       // $35
+      data.gender || null,                                             // $36
+      data.ageMin || null,                                             // $37
+      data.ageMax || null,                                             // $38
+      data.healthyVolunteerAccepted || null,                          // $39
+      data.purpose || null,                                            // $40
+      data.allocation || null,                                        // $41
+      data.masking || null,                                            // $42
+      data.control || null,                                            // $43
+      data.assignment || null,                                        // $44
+      data.endpoint || null,                                          // $45
+      data.interventions || null,                                     // $46
+      data.duration || null,                                          // $47
+      data.selection || null,                                         // $48
+      data.timing || null                                              // $49
     ]);
 
     const studyId = insertResult.rows[0].study_id;
@@ -470,6 +587,83 @@ export const createStudy = async (
     } catch (paramError: any) {
       // Don't fail study creation if parameter initialization fails
       logger.warn('Study parameter initialization warning', { error: paramError.message });
+    }
+
+    // Create event definitions (phases) if provided
+    if ((data as any).eventDefinitions && Array.isArray((data as any).eventDefinitions)) {
+      const eventDefs = (data as any).eventDefinitions;
+      logger.info('Creating study event definitions', { studyId, count: eventDefs.length });
+      
+      for (const eventDef of eventDefs) {
+        if (!eventDef.name) continue;
+        
+        // Generate OC OID for event
+        const eventOid = `SE_${studyId}_${eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)}`;
+        
+        // Insert study_event_definition
+        const eventResult = await client.query(`
+          INSERT INTO study_event_definition (
+            study_id, name, description, ordinal, type, repeating, category,
+            status_id, owner_id, date_created, oc_oid
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+          RETURNING study_event_definition_id
+        `, [
+          studyId,
+          eventDef.name,
+          eventDef.description || '',
+          eventDef.ordinal || 1,
+          eventDef.type || 'scheduled',
+          eventDef.repeating || false,
+          eventDef.category || 'Study Event',
+          userId,
+          eventOid
+        ]);
+        
+        const eventDefId = eventResult.rows[0].study_event_definition_id;
+        logger.info('Created study event definition', { eventDefId, name: eventDef.name });
+        
+        // Assign CRFs to this event if provided
+        if (eventDef.crfAssignments && Array.isArray(eventDef.crfAssignments)) {
+          for (const crfAssign of eventDef.crfAssignments) {
+            if (!crfAssign.crfId) continue;
+            
+            // Get default version if not specified
+            let defaultVersionId = crfAssign.crfVersionId;
+            if (!defaultVersionId) {
+              const versionResult = await client.query(`
+                SELECT crf_version_id FROM crf_version
+                WHERE crf_id = $1 AND status_id = 1
+                ORDER BY crf_version_id DESC LIMIT 1
+              `, [crfAssign.crfId]);
+              if (versionResult.rows.length > 0) {
+                defaultVersionId = versionResult.rows[0].crf_version_id;
+              }
+            }
+            
+            // Insert event_definition_crf
+            await client.query(`
+              INSERT INTO event_definition_crf (
+                study_event_definition_id, study_id, crf_id, required_crf,
+                double_entry, hide_crf, ordinal, status_id, owner_id,
+                date_created, default_version_id, electronic_signature
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9, $10)
+            `, [
+              eventDefId,
+              studyId,
+              crfAssign.crfId,
+              crfAssign.required ?? false,
+              crfAssign.doubleDataEntry ?? false,
+              crfAssign.hideCrf ?? false,
+              crfAssign.ordinal || 1,
+              userId,
+              defaultVersionId,
+              crfAssign.electronicSignature ?? false
+            ]);
+            
+            logger.info('Assigned CRF to event', { eventDefId, crfId: crfAssign.crfId });
+          }
+        }
+      }
     }
 
     await client.query('COMMIT');

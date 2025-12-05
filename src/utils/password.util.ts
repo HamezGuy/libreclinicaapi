@@ -37,16 +37,16 @@ export interface PasswordPolicy {
 }
 
 /**
- * Default password policy (21 CFR Part 11 compliant)
+ * Default password policy - 8 chars + 1 special character
  */
 const DEFAULT_POLICY: PasswordPolicy = {
-  minLength: config.part11.passwordMinLength || 12,
-  requireUppercase: true,
-  requireLowercase: true,
-  requireNumber: true,
-  requireSpecialChar: true,
-  expirationDays: config.part11.passwordExpiryDays || 90,
-  preventReuse: 5
+  minLength: config.part11.passwordMinLength || 8,
+  requireUppercase: false,
+  requireLowercase: false,
+  requireNumber: false,
+  requireSpecialChar: true,  // Require at least 1 special character
+  expirationDays: config.part11.passwordExpiryDays || 365,
+  preventReuse: 0
 };
 
 /**
@@ -100,6 +100,7 @@ export const comparePasswordBcrypt = async (
 /**
  * Validate password against policy
  * Returns validation result with specific error messages
+ * SIMPLIFIED - Only basic length check by default
  */
 export const validatePassword = (
   password: string,
@@ -107,49 +108,26 @@ export const validatePassword = (
 ): PasswordValidationResult => {
   const errors: string[] = [];
 
-  // Check minimum length
+  // Check minimum length only
   if (password.length < policy.minLength) {
     errors.push(`Password must be at least ${policy.minLength} characters long`);
   }
 
-  // Check for uppercase letters
+  // Optional checks - only if enabled in policy
   if (policy.requireUppercase && !/[A-Z]/.test(password)) {
     errors.push('Password must contain at least one uppercase letter');
   }
 
-  // Check for lowercase letters
   if (policy.requireLowercase && !/[a-z]/.test(password)) {
     errors.push('Password must contain at least one lowercase letter');
   }
 
-  // Check for numbers
   if (policy.requireNumber && !/\d/.test(password)) {
     errors.push('Password must contain at least one number');
   }
 
-  // Check for special characters
-  if (policy.requireSpecialChar && !/[@$!%*?&]/.test(password)) {
-    errors.push('Password must contain at least one special character (@$!%*?&)');
-  }
-
-  // Check for common weak passwords
-  const commonPasswords = [
-    'password', 'password123', '12345678', 'qwerty', 'abc123',
-    'password1', 'admin', 'letmein', 'welcome', 'monkey'
-  ];
-
-  if (commonPasswords.includes(password.toLowerCase())) {
-    errors.push('Password is too common. Please choose a stronger password');
-  }
-
-  // Check for sequential characters
-  if (/(?:abc|bcd|cde|def|efg|fgh|ghi|hij|ijk|jkl|klm|lmn|mno|nop|opq|pqr|qrs|rst|stu|tuv|uvw|vwx|wxy|xyz)/i.test(password)) {
-    errors.push('Password should not contain sequential characters');
-  }
-
-  // Check for repeated characters
-  if (/(.)\1{2,}/.test(password)) {
-    errors.push('Password should not contain repeated characters');
+  if (policy.requireSpecialChar && !/[@$!%*?&#^()_+=\-]/.test(password)) {
+    errors.push('Password must contain at least one special character');
   }
 
   return {

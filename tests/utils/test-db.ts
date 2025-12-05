@@ -235,7 +235,10 @@ class TestDatabase {
           (7, 'Query Updated'),
           (8, 'SDV Verified'),
           (9, 'Data Locked'),
-          (10, 'Data Unlocked')
+          (10, 'Data Unlocked'),
+          (11, 'User Created'),
+          (12, 'User Updated'),
+          (13, 'User Deleted')
         ON CONFLICT (audit_log_event_type_id) DO NOTHING
       `);
 

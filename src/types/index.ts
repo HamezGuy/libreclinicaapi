@@ -43,17 +43,13 @@ export interface User {
   passwd_challenge_question?: string;
   passwd_challenge_answer?: string;
   phone?: string;
-  owner_id: number;
-  date_created: Date;
+  owner_id?: number;
+  date_created?: Date;
   date_updated?: Date;
   date_lastvisit?: Date;
-  enabled: boolean;
-  account_non_locked: boolean;
-  lockout_time?: Date;
-  failed_login_attempts: number;
-  user_type_id: number;
-  status_id: number;
-  update_id: number;
+  user_type_id?: number;
+  status_id?: number;  // 1 = active, 5 = locked
+  update_id?: number;
 }
 
 export interface UserRole {

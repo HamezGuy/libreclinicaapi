@@ -313,12 +313,15 @@ export const createQuery = async (
 
 /**
  * Add response to query
+ * Creates a child discrepancy_note with parent_dn_id pointing to the parent query.
+ * Optionally updates the parent status (e.g., to "Updated" when responding).
  */
 export const addQueryResponse = async (
   parentQueryId: number,
   data: {
     description: string;
     detailedNotes?: string;
+    newStatusId?: number;  // Optional: update parent status (2=Updated, 3=Resolution Proposed)
   },
   userId: number
 ): Promise<{ success: boolean; responseId?: number; message?: string }> => {
@@ -343,15 +346,16 @@ export const addQueryResponse = async (
     }
 
     const parent = parentResult.rows[0];
+    const oldStatusId = parent.resolution_status_id;
 
-    // Insert response
+    // Insert response as child discrepancy_note
     const insertQuery = `
       INSERT INTO discrepancy_note (
         parent_dn_id, description, detailed_notes,
         discrepancy_note_type_id, resolution_status_id,
-        study_id, owner_id, date_created
+        study_id, entity_type, owner_id, date_created
       ) VALUES (
-        $1, $2, $3, 3, $4, $5, $6, NOW()
+        $1, $2, $3, 3, $4, $5, $6, $7, NOW()
       )
       RETURNING discrepancy_note_id
     `;
@@ -360,16 +364,46 @@ export const addQueryResponse = async (
       parentQueryId,
       data.description,
       data.detailedNotes || '',
-      parent.resolution_status_id, // Keep same status
+      data.newStatusId || 2, // Default to Updated status for responses
       parent.study_id,
+      parent.entity_type,
       userId
     ]);
 
     const responseId = insertResult.rows[0].discrepancy_note_id;
 
+    // Update parent status if specified, or set to Updated (2) by default
+    const newStatusId = data.newStatusId || 2;
+    if (newStatusId !== oldStatusId) {
+      await client.query(`
+        UPDATE discrepancy_note
+        SET resolution_status_id = $1, date_updated = NOW(), update_id = $2
+        WHERE discrepancy_note_id = $3
+      `, [newStatusId, userId, parentQueryId]);
+    }
+
+    // Log audit event for the response
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Query Response',
+        $3, $4, $5,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%updated%' LIMIT 1)
+      )
+    `, [
+      userId, 
+      parentQueryId, 
+      `Status: ${oldStatusId}`,
+      `Status: ${newStatusId}, Response: ${data.description.substring(0, 200)}`,
+      'Query response added'
+    ]);
+
     await client.query('COMMIT');
 
-    logger.info('Query response added successfully', { responseId });
+    logger.info('Query response added successfully', { responseId, parentQueryId });
 
     return {
       success: true,
@@ -390,44 +424,93 @@ export const addQueryResponse = async (
 };
 
 /**
- * Update query status
+ * Update query status with full audit trail
+ * 
+ * Resolution Status IDs:
+ * 1 = New, 2 = Updated, 3 = Resolution Proposed, 4 = Closed, 5 = Not Applicable
  */
 export const updateQueryStatus = async (
   queryId: number,
   statusId: number,
-  userId: number
+  userId: number,
+  options?: {
+    reason?: string;
+    signature?: boolean;  // Whether this is a signed action (e.g., closing a query)
+  }
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Updating query status', { queryId, statusId, userId });
+  logger.info('Updating query status', { queryId, statusId, userId, options });
 
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
+    // Get current status for audit
+    const currentResult = await client.query(
+      `SELECT resolution_status_id, description FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+
+    if (currentResult.rows.length === 0) {
+      throw new Error('Query not found');
+    }
+
+    const oldStatusId = currentResult.rows[0].resolution_status_id;
+    const queryDescription = currentResult.rows[0].description;
+
+    // Get status names for audit trail
+    const statusNames: Record<number, string> = {
+      1: 'New',
+      2: 'Updated',
+      3: 'Resolution Proposed',
+      4: 'Closed',
+      5: 'Not Applicable'
+    };
+
+    // Update the query status
     await client.query(`
       UPDATE discrepancy_note
       SET resolution_status_id = $1, date_updated = NOW(), update_id = $2
       WHERE discrepancy_note_id = $3
     `, [statusId, userId, queryId]);
 
-    // Log audit event
+    // Determine action type for audit
+    let actionName = 'Query status changed';
+    if (statusId === 4) {
+      actionName = options?.signature ? 'Query closed with signature' : 'Query closed';
+    } else if (statusId === 1 && oldStatusId === 4) {
+      actionName = 'Query reopened';
+    } else if (statusId === 3) {
+      actionName = 'Resolution proposed';
+    }
+
+    // Log comprehensive audit event
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change,
         audit_log_event_type_id
       ) VALUES (
-        NOW(), 'discrepancy_note', $1, $2, 'Query',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Query Updated' LIMIT 1)
+        NOW(), 'discrepancy_note', $1, $2, $3,
+        $4, $5, $6,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%updated%' LIMIT 1)
       )
-    `, [userId, queryId]);
+    `, [
+      userId, 
+      queryId, 
+      actionName,
+      `Status: ${statusNames[oldStatusId] || oldStatusId}`,
+      `Status: ${statusNames[statusId] || statusId}${options?.signature ? ' (Signed)' : ''}`,
+      options?.reason || `Status changed from ${statusNames[oldStatusId]} to ${statusNames[statusId]}`
+    ]);
 
     await client.query('COMMIT');
 
-    logger.info('Query status updated successfully', { queryId });
+    logger.info('Query status updated successfully', { queryId, oldStatusId, newStatusId: statusId });
 
     return {
       success: true,
-      message: 'Query status updated successfully'
+      message: `Query ${actionName.toLowerCase()} successfully`
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -439,6 +522,160 @@ export const updateQueryStatus = async (
     };
   } finally {
     client.release();
+  }
+};
+
+/**
+ * Close query with electronic signature (password verification)
+ * 21 CFR Part 11 compliant - requires password re-authentication
+ */
+export const closeQueryWithSignature = async (
+  queryId: number,
+  userId: number,
+  data: {
+    password: string;
+    reason: string;
+    meaning?: string;  // Signature meaning (e.g., "I have reviewed this data")
+  }
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Closing query with signature', { queryId, userId });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Verify password (get user's password hash)
+    const userResult = await client.query(
+      `SELECT passwd, user_name, first_name, last_name FROM user_account WHERE user_id = $1`,
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      throw new Error('User not found');
+    }
+
+    const user = userResult.rows[0];
+    
+    // LibreClinica uses MD5 hash for passwords
+    const crypto = require('crypto');
+    const passwordHash = crypto.createHash('md5').update(data.password).digest('hex');
+
+    if (passwordHash !== user.passwd) {
+      logger.warn('Invalid password for query signature', { queryId, userId });
+      return {
+        success: false,
+        message: 'Invalid password. Electronic signature verification failed.'
+      };
+    }
+
+    // Get current query status
+    const queryResult = await client.query(
+      `SELECT resolution_status_id, description FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+
+    if (queryResult.rows.length === 0) {
+      throw new Error('Query not found');
+    }
+
+    const oldStatusId = queryResult.rows[0].resolution_status_id;
+
+    // Update query to Closed status (4)
+    await client.query(`
+      UPDATE discrepancy_note
+      SET resolution_status_id = 4, date_updated = NOW(), update_id = $1
+      WHERE discrepancy_note_id = $2
+    `, [userId, queryId]);
+
+    // Add closing note as a child discrepancy_note
+    await client.query(`
+      INSERT INTO discrepancy_note (
+        parent_dn_id, description, detailed_notes,
+        discrepancy_note_type_id, resolution_status_id,
+        study_id, entity_type, owner_id, date_created
+      )
+      SELECT 
+        $1, $2, $3, 3, 4, study_id, entity_type, $4, NOW()
+      FROM discrepancy_note WHERE discrepancy_note_id = $1
+    `, [
+      queryId, 
+      `[SIGNED] ${data.reason}`, 
+      data.meaning || 'Electronic signature applied',
+      userId
+    ]);
+
+    // Log comprehensive audit event with signature details
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Query Closed with Electronic Signature',
+        $3, $4, $5,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%complete%password%' LIMIT 1)
+      )
+    `, [
+      userId,
+      queryId,
+      `Status: ${oldStatusId}`,
+      `Status: Closed (Signed by ${user.first_name} ${user.last_name})`,
+      `${data.reason}. Signature meaning: ${data.meaning || 'Query resolved'}`
+    ]);
+
+    await client.query('COMMIT');
+
+    logger.info('Query closed with signature successfully', { queryId, userId, userName: user.user_name });
+
+    return {
+      success: true,
+      message: 'Query closed with electronic signature successfully'
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Close query with signature error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to close query: ${error.message}`
+    };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Get query audit trail
+ */
+export const getQueryAuditTrail = async (queryId: number): Promise<any[]> => {
+  logger.info('Getting query audit trail', { queryId });
+
+  try {
+    const query = `
+      SELECT 
+        ale.audit_id,
+        ale.audit_date,
+        ale.entity_name as action,
+        ale.old_value,
+        ale.new_value,
+        ale.reason_for_change,
+        u.user_name,
+        u.first_name || ' ' || u.last_name as user_full_name,
+        alet.name as event_type
+      FROM audit_log_event ale
+      LEFT JOIN user_account u ON ale.user_id = u.user_id
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      WHERE ale.audit_table = 'discrepancy_note'
+        AND ale.entity_id = $1
+      ORDER BY ale.audit_date DESC
+    `;
+
+    const result = await pool.query(query, [queryId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get query audit trail error', { error: error.message });
+    return [];
   }
 };
 
@@ -804,6 +1041,8 @@ export default {
   createQuery,
   addQueryResponse,
   updateQueryStatus,
+  closeQueryWithSignature,
+  getQueryAuditTrail,
   getQueryStats,
   getQueryTypes,
   getResolutionStatuses,

@@ -28,12 +28,16 @@ router.get('/form/:eventCrfId', controller.getFormQueries);
 // Single query operations
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/thread', controller.getThread);
+router.get('/:id/audit-trail', controller.getAuditTrail);
 
 // Create and update operations
 router.post('/', requireRole('data_entry', 'investigator', 'monitor'), validate({ body: querySchemas.create }), controller.create);
 router.post('/:id/respond', validate({ params: commonSchemas.idParam, body: querySchemas.respond }), controller.respond);
 router.put('/:id/status', requireRole('monitor', 'coordinator', 'admin'), validate({ params: commonSchemas.idParam, body: querySchemas.updateStatus }), controller.updateStatus);
 router.put('/:id/reassign', requireRole('coordinator', 'admin'), controller.reassign);
+
+// Close with electronic signature (21 CFR Part 11 compliant)
+router.post('/:id/close-with-signature', requireRole('monitor', 'coordinator', 'admin', 'investigator'), controller.closeWithSignature);
 
 export default router;
 

@@ -276,7 +276,7 @@ export const verifyPasswordForCompliance = async (
 ): Promise<{ success: boolean; message?: string }> => {
   try {
     const query = `
-      SELECT passwd, enabled, account_non_locked 
+      SELECT passwd, status_id 
       FROM user_account 
       WHERE user_id = $1
     `;
@@ -289,12 +289,9 @@ export const verifyPasswordForCompliance = async (
 
     const user = result.rows[0];
 
-    if (!user.enabled) {
-      return { success: false, message: 'Account is disabled' };
-    }
-
-    if (!user.account_non_locked) {
-      return { success: false, message: 'Account is locked' };
+    // status_id: 1 = active, 5 = locked
+    if (user.status_id !== 1) {
+      return { success: false, message: 'Account is not active' };
     }
 
     // Hash password using MD5 (LibreClinica compatibility)

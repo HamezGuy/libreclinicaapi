@@ -255,6 +255,36 @@ export const getStudyHealthScore = asyncHandler(async (req: Request, res: Respon
   res.json({ success: true, data: result });
 });
 
+/**
+ * Get detailed user analytics
+ * Includes: login patterns, activity metrics, role breakdown, top performers
+ */
+export const getUserAnalytics = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, days } = req.query;
+
+  const result = await dashboardService.getUserAnalytics(
+    parseInt(studyId as string) || 1,
+    parseInt(days as string) || 30
+  );
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get top performers (most active users)
+ */
+export const getTopPerformers = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, days, limit } = req.query;
+
+  const result = await dashboardService.getTopPerformers(
+    parseInt(studyId as string) || 1,
+    parseInt(days as string) || 30,
+    parseInt(limit as string) || 10
+  );
+
+  res.json({ success: true, data: result });
+});
+
 export default { 
   getSummary,
   getStats,
@@ -269,6 +299,8 @@ export default {
   getDataQualityMetrics,
   getSubjectStatusDistribution,
   getActivityFeed,
-  getStudyHealthScore
+  getStudyHealthScore,
+  getUserAnalytics,
+  getTopPerformers
 };
 

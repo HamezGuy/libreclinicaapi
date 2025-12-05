@@ -12,6 +12,9 @@ export const config = {
     apiVersion: process.env.API_VERSION || 'v1'
   },
   
+  // Demo mode - allows any credentials to login (for testing/demos)
+  demoMode: process.env.DEMO_MODE === 'true',
+  
   libreclinica: {
     // LibreClinica Docker container - Docker setup uses port 8090
     // SOAP services at /ws/{serviceName}/v1 path

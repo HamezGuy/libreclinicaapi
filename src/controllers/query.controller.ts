@@ -44,10 +44,15 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 export const respond = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { id } = req.params;
+  const { response, description, detailedNotes, newStatusId } = req.body;
 
   const result = await queryService.addQueryResponse(
     parseInt(id), 
-    req.body, 
+    {
+      description: response || description,
+      detailedNotes,
+      newStatusId
+    }, 
     user.userId
   );
 
@@ -57,15 +62,55 @@ export const respond = asyncHandler(async (req: Request, res: Response) => {
 export const updateStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { id } = req.params;
-  const { statusId } = req.body;
+  const { statusId, reason } = req.body;
 
   const result = await queryService.updateQueryStatus(
     parseInt(id), 
     statusId, 
-    user.userId
+    user.userId,
+    { reason }
   );
 
   res.json(result);
+});
+
+/**
+ * Close query with electronic signature (password verification)
+ * 21 CFR Part 11 compliant
+ */
+export const closeWithSignature = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+  const { password, reason, meaning } = req.body;
+
+  if (!password) {
+    res.status(400).json({ success: false, message: 'Password is required for electronic signature' });
+    return;
+  }
+
+  if (!reason) {
+    res.status(400).json({ success: false, message: 'Reason is required for closing a query' });
+    return;
+  }
+
+  const result = await queryService.closeQueryWithSignature(
+    parseInt(id),
+    user.userId,
+    { password, reason, meaning }
+  );
+
+  res.status(result.success ? 200 : 401).json(result);
+});
+
+/**
+ * Get query audit trail
+ */
+export const getAuditTrail = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  const result = await queryService.getQueryAuditTrail(parseInt(id));
+
+  res.json({ success: true, data: result });
 });
 
 export const stats = asyncHandler(async (req: Request, res: Response) => {
@@ -213,6 +258,8 @@ export default {
   create, 
   respond, 
   updateStatus, 
+  closeWithSignature,
+  getAuditTrail,
   stats, 
   getQueryTypes, 
   getResolutionStatuses, 

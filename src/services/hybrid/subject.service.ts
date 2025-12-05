@@ -19,6 +19,7 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
 import * as subjectSoap from '../soap/subjectSoap.service';
+import { logAuditEvent, AuditEventType } from '../../middleware/audit.middleware';
 import { 
   StudySubject, 
   StudySubjectWithDetails,
@@ -28,19 +29,45 @@ import {
   toStudySubject
 } from '../../types/libreclinica-models';
 
-// Request type for creating a subject
+/**
+ * Request type for creating a subject
+ * 
+ * Database Schema Reference:
+ * ═══════════════════════════════════════════════════════════════════
+ * SUBJECT TABLE (12 columns):
+ *   - subject_id (PK), father_id (FK), mother_id (FK), status_id
+ *   - date_of_birth, gender (char 1: 'm', 'f', '')
+ *   - unique_identifier (varchar 255) - Person ID for cross-study linking
+ *   - date_created, owner_id, date_updated, update_id, dob_collected
+ * 
+ * STUDY_SUBJECT TABLE (13 columns):
+ *   - study_subject_id (PK), label (varchar 30), secondary_label (varchar 30)
+ *   - subject_id (FK), study_id (FK), status_id, enrollment_date
+ *   - date_created, date_updated, owner_id, update_id
+ *   - oc_oid (varchar 40), time_zone (varchar 255)
+ * ═══════════════════════════════════════════════════════════════════
+ */
 export interface SubjectCreateRequest {
+  // === STUDY_SUBJECT TABLE FIELDS ===
   studyId: number;
-  studySubjectId: string;  // Label
-  secondaryId?: string;
-  enrollmentDate?: string;
-  gender?: string;
-  dateOfBirth?: string;
-  // Person ID - unique identifier for cross-study linking (unique_identifier in subject table)
-  personId?: string;
-  // Group assignments for randomization
+  studySubjectId: string;             // label column (varchar 30)
+  secondaryId?: string;               // secondary_label column (varchar 30)
+  enrollmentDate?: string;            // enrollment_date column
+  timeZone?: string;                  // time_zone column (varchar 255)
+  
+  // === SUBJECT TABLE FIELDS (demographics) ===
+  gender?: string;                    // gender column (char 1: 'm', 'f', '')
+  dateOfBirth?: string;               // date_of_birth column
+  personId?: string;                  // unique_identifier column (varchar 255)
+  
+  // === FAMILY/GENETIC STUDY FIELDS (subject table) ===
+  fatherId?: number;                  // father_id column (FK to subject)
+  motherId?: number;                  // mother_id column (FK to subject)
+  
+  // === GROUP ASSIGNMENTS (subject_group_map table) ===
   groupAssignments?: { studyGroupClassId: number; studyGroupId: number; notes?: string }[];
-  // Optional first event scheduling
+  
+  // === OPTIONAL FIRST EVENT SCHEDULING ===
   scheduleEvent?: {
     studyEventDefinitionId: number;
     location?: string;
@@ -112,46 +139,60 @@ const createSubjectDirect = async (
   try {
     await client.query('BEGIN');
 
-    // 1. Create subject record first
+    // 1. Create subject record first (demographics table)
+    // Includes: date_of_birth, gender, unique_identifier, father_id, mother_id
     const subjectQuery = `
       INSERT INTO subject (
-        date_of_birth, gender, unique_identifier, date_created, date_updated, 
+        date_of_birth, gender, unique_identifier, 
+        father_id, mother_id,
+        date_created, date_updated, 
         owner_id, update_id, dob_collected, status_id
       ) VALUES (
-        $1, $2, $3, NOW(), NOW(), $4, $4, $5, 1
+        $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, $7, 1
       )
       RETURNING subject_id
     `;
     
+    // Normalize gender value
     const gender = request.gender === 'Male' || request.gender === 'm' ? 'm' : 
                    request.gender === 'Female' || request.gender === 'f' ? 'f' : '';
     const dobCollected = request.dateOfBirth ? true : false;
     // Use personId if provided, otherwise use studySubjectId as unique identifier
     const uniqueIdentifier = request.personId || request.studySubjectId;
     
+    // Handle family links (for genetic studies)
+    const fatherId = request.fatherId && request.fatherId > 0 ? request.fatherId : null;
+    const motherId = request.motherId && request.motherId > 0 ? request.motherId : null;
+    
     const subjectResult = await client.query(subjectQuery, [
       request.dateOfBirth || null,
       gender,
       uniqueIdentifier,
+      fatherId,
+      motherId,
       userId,
       dobCollected
     ]);
 
     const subjectId = subjectResult.rows[0].subject_id;
 
-    // 2. Create study_subject record
+    // 2. Create study_subject record (enrollment table)
+    // Includes: label, secondary_label, enrollment_date, time_zone, oc_oid
     const studySubjectQuery = `
       INSERT INTO study_subject (
         label, secondary_label, subject_id, study_id, status_id, 
-        enrollment_date, date_created, date_updated, owner_id, oc_oid
+        enrollment_date, time_zone, date_created, date_updated, owner_id, oc_oid
       ) VALUES (
-        $1, $2, $3, $4, 1, $5, NOW(), NOW(), $6, $7
+        $1, $2, $3, $4, 1, $5, $6, NOW(), NOW(), $7, $8
       )
       RETURNING study_subject_id
     `;
 
-    // Generate OC OID
+    // Generate OC OID (OpenClinica Object ID)
     const ocOid = `SS_${request.studySubjectId.replace(/[^a-zA-Z0-9]/g, '')}`.substring(0, 40);
+    
+    // Handle timezone (defaults to empty string if not provided)
+    const timeZone = request.timeZone || '';
 
     const studySubjectResult = await client.query(studySubjectQuery, [
       request.studySubjectId,
@@ -159,6 +200,7 @@ const createSubjectDirect = async (
       subjectId,
       request.studyId,
       request.enrollmentDate || new Date().toISOString().split('T')[0],
+      timeZone,
       userId,
       ocOid
     ]);
@@ -231,6 +273,26 @@ const createSubjectDirect = async (
 
     await client.query('COMMIT');
 
+    // Log Part 11 compliant audit event
+    await logAuditEvent(
+      AuditEventType.SUBJECT_CREATED,
+      userId,
+      username,
+      {
+        entityName: 'study_subject',
+        entityId: studySubjectId,
+        newValue: JSON.stringify({
+          label: request.studySubjectId,
+          studyId: request.studyId,
+          enrollmentDate: request.enrollmentDate || new Date().toISOString().split('T')[0],
+          gender: request.gender,
+          dateOfBirth: request.dateOfBirth
+        }),
+        reasonForChange: 'Subject enrolled via API (direct database)',
+        studyEventId: studyEventId || undefined
+      }
+    );
+
     logger.info('Subject created successfully via direct database', { 
       subjectId, 
       studySubjectId, 
@@ -241,14 +303,31 @@ const createSubjectDirect = async (
       success: true,
       message: 'Subject created successfully',
       data: {
+        // Primary IDs
         subjectId,
         studySubjectId,
+        
+        // Study Subject fields
         label: request.studySubjectId,
+        secondaryLabel: request.secondaryId || '',
         studyId: request.studyId,
         enrollmentDate: request.enrollmentDate,
-        personId: uniqueIdentifier,
+        timeZone: timeZone,
         ocOid,
+        
+        // Subject demographics
+        personId: uniqueIdentifier,
+        gender: gender,
+        dateOfBirth: request.dateOfBirth || null,
+        
+        // Family links (genetic studies)
+        fatherId: fatherId,
+        motherId: motherId,
+        
+        // Group assignments
         groupAssignments: request.groupAssignments || [],
+        
+        // First event (if scheduled)
         studyEventId: studyEventId
       }
     };

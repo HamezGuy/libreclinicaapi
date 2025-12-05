@@ -53,6 +53,14 @@ import complianceRoutes from './routes/compliance.routes';
 import studyParametersRoutes from './routes/studyParameters.routes';
 // Study Groups (randomization/treatment arms)
 import studyGroupsRoutes from './routes/studyGroups.routes';
+// Unified Tasks (aggregates queries, visits, forms, SDV, signatures)
+import tasksRoutes from './routes/tasks.routes';
+// Data Export (CSV, ODM XML) - Part 11 compliant via SOAP
+import exportRoutes from './routes/export.routes';
+// Data Import (CSV, ODM XML) - Part 11 compliant via SOAP
+import importRoutes from './routes/import.routes';
+// Adverse Event (AE/SAE) Tracking - Part 11 compliant via SOAP
+import aeRoutes from './routes/ae.routes';
 
 const app = express();
 
@@ -224,6 +232,14 @@ app.use('/api/compliance', complianceRoutes);
 app.use('/api/study-parameters', studyParametersRoutes);
 // Study Groups (randomization/treatment arms)
 app.use('/api/study-groups', studyGroupsRoutes);
+// Unified Tasks (aggregates real LibreClinica work items)
+app.use('/api/tasks', tasksRoutes);
+// Data Export (Part 11 compliant - uses LibreClinica SOAP)
+app.use('/api/export', exportRoutes);
+// Data Import (Part 11 compliant - uses LibreClinica SOAP)
+app.use('/api/import', importRoutes);
+// Adverse Events (Part 11 compliant - AEs are CRF forms)
+app.use('/api/ae', aeRoutes);
 
 // ============================================================================
 // ROOT ENDPOINT
@@ -259,7 +275,10 @@ app.get('/', (req: Request, res: Response) => {
       wounds: '/api/wounds',
       esignature: '/api/esignature - 21 CFR Part 11 compliant electronic signatures',
       soap: '/api/soap - SOAP status, diagnostics, and configuration',
-      libreclinica: '/api/libreclinica - Proxy to LibreClinica native REST APIs'
+      libreclinica: '/api/libreclinica - Proxy to LibreClinica native REST APIs',
+      export: '/api/export - Data export (CSV, ODM XML) via LibreClinica SOAP',
+      import: '/api/import - Data import (CSV, ODM XML) via LibreClinica SOAP',
+      ae: '/api/ae - Adverse Event tracking (SAE/AE) via LibreClinica SOAP'
     },
     libreclinicaNativeProxies: {
       metadata: '/api/libreclinica/metadata/:studyOid - Get study metadata (proxies to LibreClinica)',

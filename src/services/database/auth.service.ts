@@ -32,6 +32,8 @@ const googleClient = new OAuth2Client(config.google.clientId);
 /**
  * Authenticate user with username and password
  * Uses LibreClinica's MD5 password hashing
+ * 
+ * Demo Mode: If DEMO_MODE=true, allows any credentials to login as admin
  */
 export const authenticateUser = async (
   username: string,
@@ -40,8 +42,41 @@ export const authenticateUser = async (
 ): Promise<ApiResponse<User>> => {
   logger.info('Authenticating user', { username, ipAddress });
 
+  // Demo mode - allow any credentials
+  const isDemoMode = process.env.DEMO_MODE === 'true' || config.demoMode === true;
+  
+  if (isDemoMode) {
+    logger.info('Demo mode - authenticating with demo credentials', { username });
+    
+    // Return a demo admin user
+    const demoUser = {
+      user_id: 1,
+      user_name: username || 'demo',
+      first_name: 'Demo',
+      last_name: 'User',
+      email: `${username || 'demo'}@demo.local`,
+      passwd: '',
+      passwd_timestamp: new Date(),
+      date_lastvisit: new Date(),
+      user_type_id: 1, // Admin type
+      user_type: 'admin',
+      owner_id: 1,
+      date_created: new Date(),
+      status_id: 1,
+      update_id: 1
+    } as User;
+    
+    return {
+      success: true,
+      data: demoUser,
+      message: 'Demo authentication successful'
+    };
+  }
+
   try {
     // Query user from database
+    // Note: LibreClinica's user_account table doesn't have enabled/account_non_locked columns
+    // All users in the table are considered active. Status is determined by status_id.
     const query = `
       SELECT 
         u.user_id,
@@ -51,9 +86,8 @@ export const authenticateUser = async (
         u.email,
         u.passwd,
         u.passwd_timestamp,
-        u.account_non_locked,
-        u.enabled,
         u.date_lastvisit,
+        u.status_id,
         ut.user_type_id,
         ut.user_type
       FROM user_account u
@@ -77,21 +111,12 @@ export const authenticateUser = async (
 
     const user = result.rows[0];
 
-    // Check if user is enabled
-    if (!user.enabled) {
-      logger.warn('Authentication failed - user disabled', { username });
+    // Check if user is active via status_id (1 = active, other = inactive)
+    if (user.status_id !== 1) {
+      logger.warn('Authentication failed - user not active', { username, statusId: user.status_id });
       return {
         success: false,
-        message: 'User account is disabled'
-      };
-    }
-
-    // Check account lockout (simplified - LibreClinica doesn't have lockout_time field)
-    if (!user.account_non_locked) {
-      logger.warn('Authentication failed - account locked', { username });
-      return {
-        success: false,
-        message: 'Account is locked. Please contact administrator.'
+        message: 'User account is not active'
       };
     }
 
@@ -206,12 +231,12 @@ export const authenticateWithGoogle = async (
       });
     }
 
-    // Check if user is enabled
-    if (!user.enabled) {
-      logger.warn('Google OAuth failed - user disabled', { email });
+    // Check if user is active (status_id = 1 means active)
+    if (user.status_id !== 1) {
+      logger.warn('Google OAuth failed - user not active', { email, statusId: user.status_id });
       return {
         success: false,
-        message: 'User account is disabled'
+        message: 'User account is not active'
       };
     }
 
@@ -431,11 +456,11 @@ async function resetLockCounter(userId: number): Promise<void> {
 }
 
 async function lockAccount(userId: number): Promise<void> {
-  // Note: LibreClinica user_account does NOT have lockout_time column
-  // We only set account_non_locked to false
+  // LibreClinica doesn't have account_non_locked column
+  // We use status_id to indicate account status (5 = locked)
   const query = `
     UPDATE user_account
-    SET account_non_locked = false
+    SET status_id = 5
     WHERE user_id = $1
   `;
   
@@ -443,10 +468,10 @@ async function lockAccount(userId: number): Promise<void> {
 }
 
 async function unlockAccount(userId: number): Promise<void> {
+  // Set status back to active (1)
   const query = `
     UPDATE user_account
-    SET account_non_locked = true,
-        lock_counter = 0
+    SET status_id = 1
     WHERE user_id = $1
   `;
   
@@ -563,14 +588,13 @@ async function createGoogleUser(data: {
 }): Promise<User> {
   const username = data.email.split('@')[0];
   
-  // Note: user_account table uses lock_counter NOT failed_login_attempts
+  // LibreClinica user_account - minimal required columns
   const query = `
     INSERT INTO user_account (
-      user_name, first_name, last_name, email, passwd, enabled,
-      account_non_locked, lock_counter, user_type_id, status_id, owner_id,
-      date_created
+      user_name, first_name, last_name, email, passwd,
+      user_type_id, status_id, owner_id, date_created
     ) VALUES (
-      $1, $2, $3, $4, '', true, true, 0, 2, 1, 1, NOW()
+      $1, $2, $3, $4, '', 2, 1, 1, NOW()
     )
     RETURNING *
   `;

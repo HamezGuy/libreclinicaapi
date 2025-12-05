@@ -71,6 +71,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      # Demo mode - DISABLED for production (only enable for testing)
+      # DEMO_MODE: "true"
       # Database Connection
       LIBRECLINICA_DB_HOST: postgres
       LIBRECLINICA_DB_PORT: 5432
