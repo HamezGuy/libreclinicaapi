@@ -323,47 +323,112 @@ export class WorkflowController {
    */
   async createWorkflow(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { title, description, studyId, entityType, entityId, assignedTo } = req.body;
+      const { title, description, studyId, entityType, entityId, assignedTo, type, priority } = req.body;
       const userId = (req as any).user.userId;
       
-      // Get assigned user ID
-      const userResult = await pool.query(
-        'SELECT user_id FROM user_account WHERE user_name = $1',
-        [assignedTo[0] || assignedTo]
-      );
+      // Get assigned user ID - handle array or string
+      const assigneeUsername = Array.isArray(assignedTo) ? assignedTo[0] : assignedTo;
       
-      if (userResult.rows.length === 0) {
-        res.status(400).json({ success: false, message: 'Assigned user not found' });
-        return;
+      let assignedUserId = userId; // Default to current user
+      if (assigneeUsername) {
+        const userResult = await pool.query(
+          'SELECT user_id FROM user_account WHERE user_name = $1',
+          [assigneeUsername]
+        );
+        
+        if (userResult.rows.length > 0) {
+          assignedUserId = userResult.rows[0].user_id;
+        }
       }
       
-      const assignedUserId = userResult.rows[0].user_id;
+      // Map workflow type to discrepancy_note_type_id
+      const typeMap: Record<string, number> = {
+        'data_query': 3,           // Query
+        'form_review': 2,          // Annotation
+        'change_request': 4,       // Reason for Change
+        'protocol_deviation': 1,   // Failed Validation Check
+        'adverse_event': 3,        // Query
+        'visit_completion': 2,     // Annotation
+        'patient_enrollment': 2,   // Annotation
+        'electronic_signature': 2, // Annotation
+        'study_milestone': 2,      // Annotation
+        'custom': 3                // Query
+      };
       
-      // Create discrepancy note
+      const discrepancyNoteTypeId = typeMap[type] || 3;
+      
+      // Map entity type to LibreClinica format
+      const entityTypeMap: Record<string, string> = {
+        'patient': 'studySub',
+        'subject': 'studySub',
+        'form': 'itemData',
+        'event': 'studyEvent',
+        'study': 'study'
+      };
+      
+      const lcEntityType = entityTypeMap[entityType] || 'studySub';
+      
+      // Create discrepancy note (without entity_id - that's handled via mapping tables)
       const insertQuery = `
         INSERT INTO discrepancy_note (
           description, detailed_notes, discrepancy_note_type_id,
           resolution_status_id, study_id, assigned_user_id,
-          owner_id, entity_type, entity_id, date_created
+          owner_id, entity_type, date_created
         )
-        VALUES ($1, $2, 3, 1, $3, $4, $5, $6, $7, NOW())
+        VALUES ($1, $2, $3, 1, $4, $5, $6, $7, NOW())
         RETURNING discrepancy_note_id
       `;
       
       const result = await pool.query(insertQuery, [
         title,
-        description,
+        description || '',
+        discrepancyNoteTypeId,
         studyId || 1,
         assignedUserId,
         userId,
-        entityType || 'studySub',
-        entityId || 0
+        lcEntityType
       ]);
+      
+      const discrepancyNoteId = result.rows[0].discrepancy_note_id;
+      
+      // If entityId provided and it's a subject, link via mapping table
+      if (entityId && (entityType === 'patient' || entityType === 'subject')) {
+        try {
+          // Try to parse entityId as a number or find by label
+          let subjectId = parseInt(entityId);
+          
+          if (isNaN(subjectId)) {
+            // Try to find by label
+            const subjectResult = await pool.query(
+              'SELECT study_subject_id FROM study_subject WHERE label = $1 LIMIT 1',
+              [entityId]
+            );
+            if (subjectResult.rows.length > 0) {
+              subjectId = subjectResult.rows[0].study_subject_id;
+            }
+          }
+          
+          if (!isNaN(subjectId) && subjectId > 0) {
+            await pool.query(
+              'INSERT INTO dn_study_subject_map (discrepancy_note_id, study_subject_id, column_name) VALUES ($1, $2, $3)',
+              [discrepancyNoteId, subjectId, 'label']
+            );
+          }
+        } catch (mapError) {
+          logger.warn('Could not link workflow to subject', { entityId, error: mapError });
+        }
+      }
       
       const response: ApiResponse = {
         success: true,
-        data: { id: result.rows[0].discrepancy_note_id },
-        message: 'Workflow created successfully'
+        data: { 
+          id: discrepancyNoteId,
+          title,
+          type: type || 'custom',
+          status: 'pending',
+          assignedTo: assigneeUsername
+        },
+        message: 'Workflow task created successfully'
       };
       
       res.status(201).json(response);
