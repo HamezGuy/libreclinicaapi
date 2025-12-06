@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # ==========================================
   # 1. Database (PostgreSQL)
@@ -21,7 +23,7 @@ services:
       retries: 10
 
   # ==========================================
-  # 2. LibreClinica Core (Java/Tomcat) - Using LibreClinica 1.4.0 WARs
+  # 2. LibreClinica Core (Java/Tomcat)
   # ==========================================
   core:
     image: jaspersnel/libreclinica:latest
@@ -41,9 +43,10 @@ services:
       supportURL: https://www.accuratrials.com
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
-      # Mount LibreClinica 1.4.0 WAR files (overwriting the old ones from base image)
-      - ./LibreClinica-web-1.4.0.war:/usr/local/tomcat/webapps/libreclinica.war
-      - ./LibreClinica-ws-1.4.0.war:/usr/local/tomcat/webapps/libreclinica-ws.war
+      # Mount the FIXED WAR with proper Linux paths (NOT read-only so Tomcat can expand it)
+      - ./LibreClinica-soap-fixed-linux.war:/usr/local/tomcat/webapps/libreclinica.war
+      # Block the broken libreclinica-ws.war from base image
+      - /dev/null:/usr/local/tomcat/webapps/libreclinica-ws.war
     networks:
       - lc_network
     healthcheck:
@@ -51,7 +54,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 30
-      start_period: 120s
+      start_period: 60s
 
   # ==========================================
   # 3. LibreClinica API (Node.js)
@@ -69,16 +72,19 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      # Database Connection
       LIBRECLINICA_DB_HOST: postgres
       LIBRECLINICA_DB_PORT: 5432
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
-      # SOAP endpoint - LibreClinica 1.4.0
-      LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
+      # Core SOAP Connection - SOAP is at /libreclinica/ws (embedded in main app)
+      LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica/ws
       SOAP_USERNAME: root
       SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
+      # Security
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
+      # CORS
       ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
     networks:
       - lc_network
@@ -121,3 +127,4 @@ volumes:
 networks:
   lc_network:
     driver: bridge
+

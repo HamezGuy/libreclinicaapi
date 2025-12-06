@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # ==========================================
   # 1. Database (PostgreSQL)
@@ -21,7 +23,7 @@ services:
       retries: 10
 
   # ==========================================
-  # 2. LibreClinica Core (Java/Tomcat) - Using LibreClinica 1.4.0 WARs
+  # 2. LibreClinica Core (Java/Tomcat)
   # ==========================================
   core:
     image: jaspersnel/libreclinica:latest
@@ -41,9 +43,8 @@ services:
       supportURL: https://www.accuratrials.com
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
-      # Mount LibreClinica 1.4.0 WAR files (overwriting the old ones from base image)
-      - ./LibreClinica-web-1.4.0.war:/usr/local/tomcat/webapps/libreclinica.war
-      - ./LibreClinica-ws-1.4.0.war:/usr/local/tomcat/webapps/libreclinica-ws.war
+      # Mount the FIXED WAR with working SOAP - NOT read-only so Tomcat can expand it
+      - ./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war
     networks:
       - lc_network
     healthcheck:
@@ -51,7 +52,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 30
-      start_period: 120s
+      start_period: 60s
 
   # ==========================================
   # 3. LibreClinica API (Node.js)
@@ -74,7 +75,7 @@ services:
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
-      # SOAP endpoint - LibreClinica 1.4.0
+      # SOAP endpoint - use libreclinica-ws for separate SOAP WAR
       LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
       SOAP_USERNAME: root
       SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
@@ -121,3 +122,4 @@ volumes:
 networks:
   lc_network:
     driver: bridge
+

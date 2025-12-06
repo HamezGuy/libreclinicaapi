@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # ==========================================
   # 1. Database (PostgreSQL)
@@ -15,13 +17,13 @@ services:
     networks:
       - lc_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U libreclinica -d libreclinica"]
+      test: ["CMD-SHELL", "pg_isready -U clinica -d libreclinica"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   # ==========================================
-  # 2. LibreClinica Core (Java/Tomcat) - Using LibreClinica 1.4.0 WARs
+  # 2. LibreClinica Core (Java/Tomcat)
   # ==========================================
   core:
     image: jaspersnel/libreclinica:latest
@@ -41,9 +43,9 @@ services:
       supportURL: https://www.accuratrials.com
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
-      # Mount LibreClinica 1.4.0 WAR files (overwriting the old ones from base image)
-      - ./LibreClinica-web-1.4.0.war:/usr/local/tomcat/webapps/libreclinica.war
-      - ./LibreClinica-ws-1.4.0.war:/usr/local/tomcat/webapps/libreclinica-ws.war
+      # IMPORTANT: Mount the patched WAR file with working SOAP web services
+      # The default LibreClinica image has broken SOAP - this fix adds Spring Web Services dependencies
+      - ./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
     networks:
       - lc_network
     healthcheck:
@@ -51,7 +53,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 30
-      start_period: 120s
+      start_period: 60s
 
   # ==========================================
   # 3. LibreClinica API (Node.js)
@@ -65,20 +67,25 @@ services:
       - postgres
       - core
     ports:
-      - "3000:3000"
+      - "3000:3000"  # Expose for direct access and debugging
     environment:
       NODE_ENV: production
       PORT: 3000
+      # Demo mode - DISABLED for production (only enable for testing)
+      # DEMO_MODE: "true"
+      # Database Connection
       LIBRECLINICA_DB_HOST: postgres
       LIBRECLINICA_DB_PORT: 5432
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
-      # SOAP endpoint - LibreClinica 1.4.0
-      LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
+      # Core SOAP Connection - CHANGED: Use /libreclinica/ws (embedded in main app, not separate libreclinica-ws)
+      LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica/ws
       SOAP_USERNAME: root
       SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
+      # Security
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
+      # CORS - Allow Vercel, localhost, and production domains
       ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
     networks:
       - lc_network
@@ -91,8 +98,8 @@ services:
     container_name: libreclinica_nginx
     restart: always
     ports:
-      - "0.0.0.0:80:80"
-      - "0.0.0.0:443:443"
+      - "0.0.0.0:80:80"   # Explicit IPv4 binding
+      - "0.0.0.0:443:443" # Explicit IPv4 binding
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certbot/conf:/etc/letsencrypt
@@ -112,6 +119,7 @@ services:
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
+    # Check for renewal every 12 hours
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
 
 volumes:
@@ -121,3 +129,4 @@ volumes:
 networks:
   lc_network:
     driver: bridge
+

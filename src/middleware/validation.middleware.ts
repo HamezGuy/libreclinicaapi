@@ -200,20 +200,40 @@ export const subjectSchemas = {
  */
 export const formSchemas = {
   saveData: Joi.object({
+    // Study ID - required
     studyId: Joi.number().integer().positive().required(),
+    
+    // Subject ID - required
     subjectId: Joi.number().integer().positive().required(),
-    studyEventDefinitionId: Joi.number().integer().positive().required(),
-    crfId: Joi.number().integer().positive().required(),
-    formData: Joi.object().required()
-      .messages({
-        'object.base': 'Form data must be an object'
-      }),
+    
+    // Event ID - accept both frontend and backend naming conventions
+    eventId: Joi.number().integer().positive().optional(),
+    studyEventDefinitionId: Joi.number().integer().positive().optional(),
+    studyEventId: Joi.number().integer().positive().optional(),
+    eventCrfId: Joi.number().integer().positive().optional(),
+    
+    // Form ID - accept both frontend and backend naming conventions
+    formId: Joi.number().integer().positive().optional(),
+    crfId: Joi.number().integer().positive().optional(),
+    crfVersionId: Joi.number().integer().positive().optional(),
+    
+    // Form data - accept both frontend and backend naming conventions
+    data: Joi.object().optional(),
+    formData: Joi.object().optional(),
+    
+    // Interview information
+    interviewDate: Joi.string().isoDate().optional().allow('', null),
+    interviewerName: Joi.string().optional().allow('', null),
+    
+    // Electronic signature
     electronicSignature: Joi.object({
       username: Joi.string().required(),
       password: Joi.string().required(),
       meaning: Joi.string().required().valid('Data Entry', 'Review', 'Approval')
     }).optional()
-  }),
+  }).or('eventId', 'studyEventDefinitionId', 'studyEventId', 'eventCrfId') // At least one event identifier
+   .or('formId', 'crfId', 'crfVersionId') // At least one form identifier
+   .or('data', 'formData'), // At least one data object
 
   getData: Joi.object({
     subjectId: Joi.number().integer().positive().required(),
@@ -250,13 +270,23 @@ export const studySchemas = {
       .messages({
         'string.pattern.base': 'Study identifier can only contain letters, numbers, hyphens, and underscores'
       }),
-    description: Joi.string().optional().max(2000),
-    principalInvestigator: Joi.string().optional().max(255),
-    sponsor: Joi.string().optional().max(255),
-    phase: Joi.string().optional().valid('I', 'II', 'III', 'IV', 'N/A'),
+    // Allow common field name variations from frontend
+    description: Joi.string().optional().max(2000).allow(''),
+    summary: Joi.string().optional().max(2000).allow(''),
+    principalInvestigator: Joi.string().optional().max(255).allow(''),
+    sponsor: Joi.string().optional().max(255).allow(''),
+    phase: Joi.string().optional().valid('I', 'II', 'III', 'IV', 'N/A', 'i', 'ii', 'iii', 'iv', 'phase_i', 'phase_ii', 'phase_iii', 'phase_iv'),
+    protocolType: Joi.string().optional().valid('interventional', 'observational'),
     expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
-    datePlannedStart: Joi.date().iso().optional(),
-    datePlannedEnd: Joi.date().iso().optional(),
+    targetEnrollment: Joi.number().integer().min(0).optional(), // Allow frontend variation
+    datePlannedStart: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().allow('')
+    ).optional(),
+    datePlannedEnd: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().allow('')
+    ).optional(),
     parentStudyId: Joi.number().integer().positive().optional()
   }),
 

@@ -239,6 +239,7 @@ export const parseOdmMetadata = async (odmXml: string): Promise<SoapStudyMetadat
 
 /**
  * Parse study list from SOAP response
+ * LibreClinica 1.4: Now includes child studies/sites for monitor users
  */
 function parseStudyList(responseData: any): any[] {
   try {
@@ -250,12 +251,36 @@ function parseStudyList(responseData: any): any[] {
         : [responseData.studies.study];
 
       for (const study of studyList) {
-        studies.push({
+        // Parse main study
+        const parsedStudy: any = {
           oid: study.oid || study.OID,
           identifier: study.identifier,
           name: study.name,
-          status: study.status
-        });
+          status: study.status,
+          parentStudyOid: study.parentStudyOID || study.parentStudyOid || null,
+          isParent: !study.parentStudyOID && !study.parentStudyOid
+        };
+
+        studies.push(parsedStudy);
+
+        // LibreClinica 1.4: Parse child sites if present (for monitors)
+        if (study.sites?.site) {
+          const siteList = Array.isArray(study.sites.site)
+            ? study.sites.site
+            : [study.sites.site];
+
+          for (const site of siteList) {
+            studies.push({
+              oid: site.oid || site.OID,
+              identifier: site.identifier,
+              name: site.name,
+              status: site.status,
+              parentStudyOid: parsedStudy.oid,
+              isParent: false,
+              isSite: true
+            });
+          }
+        }
       }
     }
 

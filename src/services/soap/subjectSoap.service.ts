@@ -6,12 +6,13 @@
  * - List subjects via SOAP
  * - Check subject existence
  * 
- * SOAP Endpoint: http://localhost:8090/libreclinica-ws/ws
+ * SOAP Endpoint: http://localhost:8090/libreclinica-ws/ws/studySubject/v1
  * Service: studySubject (v1)
  * 
  * CRITICAL: LibreClinica requires:
  * - WS-Security UsernameToken with MD5-hashed password
  * - Specific XML element structure for studySubject service
+ * - Full service path including /studySubject/v1
  */
 
 import axios from 'axios';
@@ -56,19 +57,23 @@ function buildSubjectSoapEnvelope(methodName: string, bodyContent: string): stri
 }
 
 /**
- * Execute SOAP request to LibreClinica
+ * Execute SOAP request to LibreClinica studySubject service
+ * FIXED: Now includes the correct service path /studySubject/v1
  */
 async function executeSoapRequest(envelope: string): Promise<any> {
   const baseUrl = config.libreclinica.soapUrl || 'http://localhost:8090/libreclinica-ws/ws';
+  // CRITICAL FIX: Append the studySubject service path
+  const serviceUrl = `${baseUrl}/studySubject/v1`;
   
-  logger.debug('Executing SOAP request', { url: baseUrl });
+  logger.debug('Executing SOAP request to studySubject service', { url: serviceUrl });
   
-  const response = await axios.post(baseUrl, envelope, {
+  // LibreClinica 1.4: WS-Security improved, reduced timeout works better
+  const response = await axios.post(serviceUrl, envelope, {
     headers: {
       'Content-Type': 'text/xml;charset=UTF-8',
       'Accept': 'text/xml, application/xml'
     },
-    timeout: 30000
+    timeout: 15000
   });
   
   // Parse XML response

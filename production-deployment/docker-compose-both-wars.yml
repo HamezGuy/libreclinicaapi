@@ -21,7 +21,7 @@ services:
       retries: 10
 
   # ==========================================
-  # 2. LibreClinica Core (Java/Tomcat) - Using LibreClinica 1.4.0 WARs
+  # 2. LibreClinica Core (Java/Tomcat) - BOTH WARS
   # ==========================================
   core:
     image: jaspersnel/libreclinica:latest
@@ -41,9 +41,7 @@ services:
       supportURL: https://www.accuratrials.com
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
-      # Mount LibreClinica 1.4.0 WAR files (overwriting the old ones from base image)
-      - ./LibreClinica-web-1.4.0.war:/usr/local/tomcat/webapps/libreclinica.war
-      - ./LibreClinica-ws-1.4.0.war:/usr/local/tomcat/webapps/libreclinica-ws.war
+      # NO blocking - let both WARs run (database should be initialized now)
     networks:
       - lc_network
     healthcheck:
@@ -74,7 +72,7 @@ services:
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
-      # SOAP endpoint - LibreClinica 1.4.0
+      # SOAP endpoint - use libreclinica-ws for SOAP
       LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
       SOAP_USERNAME: root
       SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
@@ -121,3 +119,4 @@ volumes:
 networks:
   lc_network:
     driver: bridge
+

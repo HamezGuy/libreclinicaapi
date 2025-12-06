@@ -22,18 +22,47 @@ import * as validationRulesService from '../database/validation-rules.service';
  * - Hard edits (severity: 'error') will BLOCK the save
  * - Soft edits (severity: 'warning') will be returned but allow save
  * 
+ * Supports both frontend and backend naming conventions:
+ * - Frontend: studyId, subjectId, eventId, formId, data
+ * - Backend: studyId, subjectId, studyEventDefinitionId, crfId, formData
+ * 
  * 21 CFR Part 11 §11.10(h) - Device checks to determine validity
  */
 export const saveFormData = async (
-  request: FormDataRequest & { formId?: number; data?: Record<string, any> },
+  request: FormDataRequest & { 
+    formId?: number; 
+    data?: Record<string, any>;
+    eventId?: number;  // Frontend naming
+  },
   userId: number,
   username: string
 ): Promise<ApiResponse<any>> => {
-  logger.info('Saving form data', { request, userId });
+  logger.info('Saving form data', { 
+    studyId: request.studyId,
+    subjectId: request.subjectId,
+    eventId: request.studyEventDefinitionId || (request as any).eventId,
+    crfId: request.crfId || (request as any).formId,
+    userId 
+  });
 
-  // Handle both naming conventions (frontend uses formId/data, backend uses crfId/formData)
-  const crfId = request.crfId || request.formId;
-  const formData = request.formData || request.data;
+  // Handle both naming conventions (frontend uses formId/data/eventId, backend uses crfId/formData/studyEventDefinitionId)
+  const crfId = request.crfId || (request as any).formId;
+  const formData = request.formData || (request as any).data;
+  const eventDefId = request.studyEventDefinitionId || (request as any).eventId;
+
+  // Validate required fields
+  if (!request.studyId || !request.subjectId || !eventDefId || !crfId) {
+    logger.warn('Missing required fields for form save', {
+      studyId: request.studyId,
+      subjectId: request.subjectId,
+      eventDefId,
+      crfId
+    });
+    return {
+      success: false,
+      message: 'Missing required fields: studyId, subjectId, eventId/studyEventDefinitionId, formId/crfId'
+    };
+  }
 
   // Apply validation rules BEFORE saving
   if (crfId && formData) {
@@ -46,7 +75,7 @@ export const saveFormData = async (
       // If there are hard edit errors, block the save
       if (!validationResult.valid && validationResult.errors.length > 0) {
         logger.warn('Form data validation failed', { 
-          crfId: request.crfId, 
+          crfId, 
           errors: validationResult.errors 
         });
         
@@ -61,7 +90,7 @@ export const saveFormData = async (
       // Log warnings but continue with save
       if (validationResult.warnings.length > 0) {
         logger.info('Form data validation warnings', { 
-          crfId: request.crfId, 
+          crfId, 
           warnings: validationResult.warnings 
         });
       }
@@ -73,8 +102,17 @@ export const saveFormData = async (
     }
   }
 
+  // Normalize request for SOAP service
+  const normalizedRequest: FormDataRequest = {
+    studyId: request.studyId,
+    subjectId: request.subjectId,
+    studyEventDefinitionId: eventDefId,
+    crfId: crfId,
+    formData: formData || {}
+  };
+
   // Use SOAP service for GxP-compliant data entry
-  return await dataSoap.importData(request, userId, username);
+  return await dataSoap.importData(normalizedRequest, userId, username);
 };
 
 /**

@@ -72,12 +72,13 @@ export class SoapClient {
 
   constructor() {
     // Configuration with MD5-hashed password for WS-Security
+    // LibreClinica 1.4: WS-Security improved, reduced timeout/retries needed
     this.config = {
       baseUrl: config.libreclinica.soapUrl || 'http://localhost:8090/libreclinica-ws/ws',
       username: config.libreclinica.soapUsername || 'root',
       password: config.libreclinica.soapPassword || '25d55ad283aa400af464c76d713c07ad',
-      timeout: 30000,
-      maxRetries: 3
+      timeout: 15000,  // Reduced - LC 1.4 is more responsive with fixed WS-Security
+      maxRetries: 2    // Reduced - LC 1.4 WS-Security works reliably now
     };
 
     // Create HTTP client
