@@ -1307,34 +1307,46 @@ export const updateForm = async (
           `, [itemGroupId, crfVersionId, itemId, field.order || (i + 1)]);
         }
 
-        // Handle response set for options
-        let responseSetId = 1;
-        if (field.options && field.options.length > 0) {
-          const optionsText = field.options.map(o => o.label).join(',');
-          const optionsValues = field.options.map(o => o.value).join(',');
-          const responseTypeId = mapFieldTypeToResponseType(field.type);
+        // Handle response set - ALWAYS create one for every field
+        let responseSetId: number;
+        const responseTypeId = mapFieldTypeToResponseType(field.type);
+        
+        // Check for existing response set from item_form_metadata
+        const existingRsResult = await client.query(`
+          SELECT response_set_id FROM item_form_metadata
+          WHERE item_id = $1 AND crf_version_id = $2
+        `, [itemId, crfVersionId]);
 
-          // Check for existing response set
-          const existingRsResult = await client.query(`
-            SELECT response_set_id FROM item_form_metadata
-            WHERE item_id = $1 AND crf_version_id = $2
-          `, [itemId, crfVersionId]);
-
-          if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].response_set_id) {
-            // Update existing
+        if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].response_set_id) {
+          // Update existing response set
+          if (field.options && field.options.length > 0) {
+            const optionsText = field.options.map((o: any) => o.label).join(',');
+            const optionsValues = field.options.map((o: any) => o.value).join(',');
             await client.query(`
               UPDATE response_set
-              SET options_text = $1, options_values = $2
-              WHERE response_set_id = $3
-            `, [optionsText, optionsValues, existingRsResult.rows[0].response_set_id]);
-            responseSetId = existingRsResult.rows[0].response_set_id;
-          } else {
-            // Create new
+              SET options_text = $1, options_values = $2, response_type_id = $3
+              WHERE response_set_id = $4
+            `, [optionsText, optionsValues, responseTypeId, existingRsResult.rows[0].response_set_id]);
+          }
+          responseSetId = existingRsResult.rows[0].response_set_id;
+        } else {
+          // Create new response set (required for all fields, not just option fields)
+          if (field.options && field.options.length > 0) {
+            const optionsText = field.options.map((o: any) => o.label).join(',');
+            const optionsValues = field.options.map((o: any) => o.value).join(',');
             const rsResult = await client.query(`
               INSERT INTO response_set (response_type_id, label, options_text, options_values, version_id)
               VALUES ($1, $2, $3, $4, $5)
               RETURNING response_set_id
             `, [responseTypeId, field.label, optionsText, optionsValues, crfVersionId]);
+            responseSetId = rsResult.rows[0].response_set_id;
+          } else {
+            // Create basic response set for non-option fields
+            const rsResult = await client.query(`
+              INSERT INTO response_set (response_type_id, label, version_id)
+              VALUES ($1, $2, $3)
+              RETURNING response_set_id
+            `, [responseTypeId, field.label || 'Field', crfVersionId]);
             responseSetId = rsResult.rows[0].response_set_id;
           }
         }
