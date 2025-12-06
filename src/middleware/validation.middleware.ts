@@ -187,7 +187,8 @@ export const subjectSchemas = {
     studyId: Joi.number().integer().positive().required(),
     status: Joi.string().valid('available', 'enrolled', 'completed', 'withdrawn').optional(),
     page: Joi.number().integer().min(1).default(1),
-    limit: Joi.number().integer().min(1).max(100).default(20)
+    limit: Joi.number().integer().min(1).max(1000).default(20),
+    search: Joi.string().optional().allow('')
   }),
 
   getById: Joi.object({
