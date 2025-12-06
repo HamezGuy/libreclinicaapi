@@ -22,17 +22,21 @@ export class WorkflowController {
           dnt.name as type,
           'medium' as priority,
           ua.user_name as assigned_to,
-          ua.first_name || ' ' || last_name as assigned_to_name,
+          COALESCE(ua.first_name || ' ' || ua.last_name, ua.user_name, 'Unassigned') as assigned_to_name,
+          owner.user_name as created_by,
           s.name as study_name,
-          ss.label as subject_label
+          ss.label as subject_label,
+          dn.owner_id,
+          dn.assigned_user_id
         FROM discrepancy_note dn
         JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
-        JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        LEFT JOIN user_account ua ON dn.assigned_user_id = ua.user_id
+        LEFT JOIN user_account owner ON dn.owner_id = owner.user_id
         LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
         LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id
         LEFT JOIN study s ON dn.study_id = s.study_id
-        WHERE 1=1
+        WHERE dn.parent_dn_id IS NULL
       `;
       
       const params: any[] = [];
@@ -59,18 +63,22 @@ export class WorkflowController {
       
       const workflows = result.rows.map((row: any) => ({
         id: row.id.toString(),
-        title: row.title,
-        description: row.description,
+        title: row.title || 'Untitled Workflow',
+        description: row.description || '',
         type: this.mapTypeFromDiscrepancyNote(row.type),
         status: this.mapStatus(row.status),
-        priority: row.priority,
-        assignedTo: [row.assigned_to],
-        assignedToName: row.assigned_to_name,
-        currentOwner: row.assigned_to,
+        priority: row.priority || 'medium',
+        assignedTo: row.assigned_to ? [row.assigned_to] : [],
+        assignedToName: row.assigned_to_name || 'Unassigned',
+        assignedUserId: row.assigned_user_id,
+        currentOwner: row.assigned_to || row.created_by,
+        createdBy: row.created_by,
+        ownerId: row.owner_id,
         createdAt: row.created_at,
-        dueDate: null,
+        dueDate: row.created_at ? new Date(new Date(row.created_at).getTime() + 7 * 24 * 60 * 60 * 1000) : null,
         requiredActions: [],
         completedActions: [],
+        studyName: row.study_name,
         relatedEntity: row.subject_label ? {
           type: 'subject',
           id: row.subject_label,
@@ -379,6 +387,17 @@ export class WorkflowController {
         RETURNING discrepancy_note_id
       `;
       
+      logger.info('Creating workflow with params', {
+        title,
+        description: description || '',
+        discrepancyNoteTypeId,
+        studyId: studyId || 1,
+        assignedUserId,
+        ownerId: userId,
+        entityType: lcEntityType,
+        assigneeUsername
+      });
+      
       const result = await pool.query(insertQuery, [
         title,
         description || '',
@@ -390,6 +409,8 @@ export class WorkflowController {
       ]);
       
       const discrepancyNoteId = result.rows[0].discrepancy_note_id;
+      
+      logger.info('Workflow created successfully', { discrepancyNoteId, assignedUserId, ownerId: userId });
       
       // If entityId provided and it's a subject, link via mapping table
       if (entityId && (entityType === 'patient' || entityType === 'subject')) {
