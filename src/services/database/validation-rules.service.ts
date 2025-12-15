@@ -64,6 +64,33 @@ export interface CreateValidationRuleRequest {
 let tableInitialized = false;
 
 /**
+ * Map LibreClinica rule action_type to our rule_type
+ * 
+ * LibreClinica action types:
+ * - DISCREPANCY_NRS: Non-resolvable discrepancy (warning)
+ * - DISCREPANCY_RS: Resolvable discrepancy (error)
+ * - EMAIL: Send email notification
+ * - HIDE: Hide an item
+ * - SHOW: Show an item  
+ * - INSERT: Insert data
+ * - RANDOMIZATION: Trigger randomization
+ * - STRATIFICATION_FACTOR: Calculate stratification
+ */
+const mapActionTypeToRuleType = (actionType: string): string => {
+  const typeMap: Record<string, string> = {
+    'DISCREPANCY_NRS': 'business_logic',
+    'DISCREPANCY_RS': 'business_logic',
+    'EMAIL': 'notification',
+    'HIDE': 'consistency',
+    'SHOW': 'consistency',
+    'INSERT': 'calculation',
+    'RANDOMIZATION': 'business_logic',
+    'STRATIFICATION_FACTOR': 'calculation'
+  };
+  return typeMap[actionType] || 'business_logic';
+};
+
+/**
  * Initialize the validation_rules table if it doesn't exist
  * Uses simple columns without foreign key constraints to avoid dependency issues
  */
@@ -226,6 +253,67 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
     const itemRules = itemResult.rows
       .filter(row => row.rule_type !== null)
       .map(mapDbRowToRule);
+    
+    // Also get rules from LibreClinica's native rule/rule_expression/rule_action tables
+    // These are the advanced rules created in LibreClinica's Rules Module
+    let nativeRules: ValidationRule[] = [];
+    try {
+      const nativeRulesQuery = `
+        SELECT 
+          r.id,
+          r.name,
+          r.description,
+          r.oc_oid,
+          r.enabled,
+          r.study_id,
+          re.value as expression,
+          re.context as expression_context,
+          rs.target as target_oid,
+          rs.study_event_definition_id,
+          rs.crf_id,
+          rs.crf_version_id,
+          rs.item_id,
+          rs.item_group_id,
+          ra.action_type,
+          ra.message as action_message,
+          ra.expression_evaluates_to
+        FROM rule r
+        INNER JOIN rule_expression re ON r.rule_expression_id = re.id
+        INNER JOIN rule_set rs ON rs.study_id = r.study_id
+        INNER JOIN rule_set_rule rsr ON rsr.rule_set_id = rs.id AND rsr.rule_id = r.id
+        LEFT JOIN rule_action ra ON ra.rule_set_rule_id = rsr.id
+        WHERE rs.crf_id = $1 AND r.enabled = true
+        ORDER BY r.name
+      `;
+      
+      const nativeResult = await pool.query(nativeRulesQuery, [crfId]);
+      
+      nativeRules = nativeResult.rows.map(row => ({
+        id: row.id + 100000, // Offset to avoid ID conflicts with custom rules
+        crfId: row.crf_id,
+        crfVersionId: row.crf_version_id,
+        itemId: row.item_id,
+        name: row.name || 'LibreClinica Rule',
+        description: row.description || '',
+        ruleType: mapActionTypeToRuleType(row.action_type) as ValidationRule['ruleType'],
+        fieldPath: row.target_oid || '',
+        severity: row.action_type === 'DISCREPANCY_NRS' ? 'warning' : 'error' as ValidationRule['severity'],
+        errorMessage: row.action_message || 'Validation failed',
+        warningMessage: row.action_type === 'DISCREPANCY_NRS' ? row.action_message : undefined,
+        active: row.enabled || true,
+        customExpression: row.expression,
+        dateCreated: new Date(),
+        createdBy: row.owner_id || 1, // Required field
+        // Store reference to native rule for advanced use
+        nativeRuleId: row.id,
+        nativeOcOid: row.oc_oid,
+        expressionContext: row.expression_context
+      }));
+      
+    } catch (e: any) {
+      // Native rules tables might not be available or might have no data
+      logger.debug('LibreClinica native rules not available:', e.message);
+    }
 
     // Combine and deduplicate (custom rules take precedence)
     const allRules = [...customRules];
@@ -233,6 +321,14 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
       const exists = customRules.some(r => r.fieldPath === itemRule.fieldPath && r.ruleType === itemRule.ruleType);
       if (!exists) {
         allRules.push(itemRule);
+      }
+    }
+    
+    // Add native LibreClinica rules
+    for (const nativeRule of nativeRules) {
+      const exists = allRules.some(r => r.customExpression === nativeRule.customExpression);
+      if (!exists) {
+        allRules.push(nativeRule);
       }
     }
 

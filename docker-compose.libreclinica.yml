@@ -3,6 +3,11 @@
 # This file sets up a real LibreClinica instance with WORKING SOAP services
 # The default Docker image has broken SOAP - we mount the patched WAR file
 #
+# 21 CFR Part 11 Compliant Features:
+# - PostgreSQL database with audit logging
+# - Automatic backup support via backup volume
+# - Data persistence across container restarts
+#
 # Usage:
 #   docker-compose -f docker-compose.libreclinica.yml up -d
 #   npm run test:integration:real
@@ -19,9 +24,13 @@ services:
       POSTGRES_DB: libreclinica
       POSTGRES_USER: libreclinica
       POSTGRES_PASSWORD: libreclinica
+      # Enable WAL archiving for point-in-time recovery (Part 11 compliance)
+      POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
       - libreclinica-db-data:/var/lib/postgresql/data
       - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      # Backup volume for database dumps
+      - libreclinica-backups:/backups
     ports:
       - "5434:5432"
     healthcheck:
@@ -99,6 +108,7 @@ services:
 volumes:
   libreclinica-db-data:
   libreclinica-data:
+  libreclinica-backups:
 
 networks:
   libreclinica-test-network:

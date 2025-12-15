@@ -31,7 +31,7 @@ export const getQueries = async (
     const conditions: string[] = ['dn.parent_dn_id IS NULL']; // Only parent queries
     const params: any[] = [];
     let paramIndex = 1;
-
+    
     if (studyId) {
       conditions.push(`dn.study_id = $${paramIndex++}`);
       params.push(studyId);

@@ -13,6 +13,7 @@ import { config } from './config/environment';
 import { pool } from './config/database';
 import { logger } from './config/logger';
 import { getSoapClient } from './services/soap/soapClient';
+import { initializeScheduler } from './services/backup/backup-scheduler.service';
 
 const PORT = config.server.port || 3000;
 const HOST = '0.0.0.0';
@@ -166,6 +167,20 @@ async function testSoapConnection(): Promise<boolean> {
 }
 
 /**
+ * Initialize backup scheduler
+ */
+async function initializeBackupScheduler(): Promise<void> {
+  try {
+    await initializeScheduler();
+  } catch (error: any) {
+    logger.error('Failed to initialize backup scheduler', {
+      error: error.message
+    });
+    // Don't fail startup, but log the error
+  }
+}
+
+/**
  * Start the server
  */
 async function startServer() {
@@ -184,6 +199,9 @@ async function startServer() {
 
     // Test SOAP connection (warning only)
     await testSoapConnection();
+
+    // Initialize backup scheduler (21 CFR Part 11 compliant automated backups)
+    await initializeBackupScheduler();
 
     // Start Express server
     const server = app.listen(PORT, HOST, () => {

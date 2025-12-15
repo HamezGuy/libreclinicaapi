@@ -244,6 +244,40 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
     `;
     const itemsResult = await pool.query(itemsQuery, [versionId]);
 
+    // Get Simple Conditional Display (SCD) metadata - LibreClinica's skip logic
+    // scd_item_metadata stores show/hide conditions based on other field values
+    const scdQuery = `
+      SELECT 
+        scd.id as scd_id,
+        scd.scd_item_form_metadata_id,    -- The item to show/hide
+        scd.control_item_form_metadata_id, -- The controlling item
+        scd.control_item_name,             -- Name of the controlling item
+        scd.option_value,                  -- Value that triggers showing
+        scd.message,
+        ifm_target.item_id as target_item_id,
+        ifm_control.item_id as control_item_id,
+        i_control.name as control_field_name
+      FROM scd_item_metadata scd
+      INNER JOIN item_form_metadata ifm_target ON scd.scd_item_form_metadata_id = ifm_target.item_form_metadata_id
+      LEFT JOIN item_form_metadata ifm_control ON scd.control_item_form_metadata_id = ifm_control.item_form_metadata_id
+      LEFT JOIN item i_control ON ifm_control.item_id = i_control.item_id
+      WHERE ifm_target.crf_version_id = $1
+    `;
+    const scdResult = await pool.query(scdQuery, [versionId]);
+    
+    // Build a map of item_id -> SCD conditions for quick lookup
+    const scdByItemId = new Map<number, any[]>();
+    for (const scd of scdResult.rows) {
+      const conditions = scdByItemId.get(scd.target_item_id) || [];
+      conditions.push({
+        fieldId: scd.control_field_name || scd.control_item_name,
+        operator: 'equals',  // SCD uses simple equality check
+        value: scd.option_value,
+        message: scd.message
+      });
+      scdByItemId.set(scd.target_item_id, conditions);
+    }
+
     // Parse items with all properties including extended props
     const items = itemsResult.rows.map(item => {
       // Parse options
@@ -372,23 +406,136 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         calculationFormula: extendedProps.calculationFormula,
         dependsOn: extendedProps.dependsOn,
         
-        // Conditional Logic
-        showWhen: extendedProps.showWhen,
+        // Conditional Logic - merge from scd_item_metadata (LibreClinica skip logic) and extended props
+        showWhen: scdByItemId.get(item.item_id) || extendedProps.showWhen || [],
         requiredWhen: extendedProps.requiredWhen,
         conditionalLogic: extendedProps.conditionalLogic,
         visibilityConditions: extendedProps.visibilityConditions,
+        // Flag to indicate if using LibreClinica native SCD
+        hasNativeScd: scdByItemId.has(item.item_id),
         
         // Custom
         customAttributes: extendedProps.customAttributes
       };
     });
 
+    // Get decision conditions (forking/branching) from LibreClinica
+    // decision_condition table handles form/section branching based on values
+    let decisionConditions: any[] = [];
+    try {
+      const dcQuery = `
+        SELECT 
+          dc.decision_condition_id,
+          dc.crf_version_id,
+          dc.label,
+          dc.comments,
+          dc.quantity,
+          dc.type,
+          -- Get dc_primitive conditions
+          dcp.dc_primitive_id,
+          dcp.item_id,
+          dcp.comparison_operator,
+          dcp.value as comparison_value,
+          dcp.dynamic_value_item_id,
+          i.name as item_name,
+          i.oc_oid as item_oid,
+          -- Get dc_event actions
+          dce.dc_event_id,
+          -- Section events
+          dcse.section_id,
+          s.label as section_label,
+          -- Computed events (calculations)
+          dcce.dc_summary_event_id,
+          dcce.item_target_id,
+          -- Substitution events
+          dcsu.item_id as substitution_item_id,
+          dcsu.replacement_value
+        FROM decision_condition dc
+        LEFT JOIN dc_primitive dcp ON dc.decision_condition_id = dcp.decision_condition_id
+        LEFT JOIN item i ON dcp.item_id = i.item_id
+        LEFT JOIN dc_event dce ON dc.decision_condition_id = dce.decision_condition_id
+        LEFT JOIN dc_section_event dcse ON dce.dc_event_id = dcse.dc_event_id
+        LEFT JOIN section s ON dcse.section_id = s.section_id
+        LEFT JOIN dc_computed_event dcce ON dce.dc_event_id = dcce.dc_event_id
+        LEFT JOIN dc_substitution_event dcsu ON dce.dc_event_id = dcsu.dc_event_id
+        WHERE dc.crf_version_id = $1 AND dc.status_id = 1
+        ORDER BY dc.decision_condition_id
+      `;
+      
+      const dcResult = await pool.query(dcQuery, [versionId]);
+      
+      // Group by decision_condition_id
+      const dcMap = new Map<number, any>();
+      for (const row of dcResult.rows) {
+        if (!dcMap.has(row.decision_condition_id)) {
+          dcMap.set(row.decision_condition_id, {
+            id: row.decision_condition_id,
+            label: row.label,
+            comments: row.comments,
+            quantity: row.quantity,
+            type: row.type,
+            conditions: [],
+            actions: []
+          });
+        }
+        
+        const dc = dcMap.get(row.decision_condition_id)!;
+        
+        // Add condition primitive
+        if (row.dc_primitive_id && !dc.conditions.some((c: any) => c.primitiveId === row.dc_primitive_id)) {
+          dc.conditions.push({
+            primitiveId: row.dc_primitive_id,
+            itemId: row.item_id,
+            itemName: row.item_name,
+            itemOid: row.item_oid,
+            operator: row.comparison_operator,
+            value: row.comparison_value,
+            dynamicValueItemId: row.dynamic_value_item_id
+          });
+        }
+        
+        // Add action - section show/hide
+        if (row.section_id && !dc.actions.some((a: any) => a.sectionId === row.section_id)) {
+          dc.actions.push({
+            type: 'section',
+            sectionId: row.section_id,
+            sectionLabel: row.section_label
+          });
+        }
+        
+        // Add action - computed/calculation
+        if (row.dc_summary_event_id && !dc.actions.some((a: any) => a.summaryEventId === row.dc_summary_event_id)) {
+          dc.actions.push({
+            type: 'calculation',
+            summaryEventId: row.dc_summary_event_id,
+            targetItemId: row.item_target_id
+          });
+        }
+        
+        // Add action - substitution
+        if (row.substitution_item_id && !dc.actions.some((a: any) => a.substitutionItemId === row.substitution_item_id)) {
+          dc.actions.push({
+            type: 'substitution',
+            substitutionItemId: row.substitution_item_id,
+            replacementValue: row.replacement_value
+          });
+        }
+      }
+      
+      decisionConditions = Array.from(dcMap.values());
+    } catch (dcError: any) {
+      // Decision condition tables might not exist in all installations
+      logger.debug('Decision conditions query failed (optional):', dcError.message);
+    }
+
     return {
       crf,
       version: versionResult.rows[0],
       sections: sectionsResult.rows,
       itemGroups: itemGroupsResult.rows,
-      items
+      items,
+      // LibreClinica decision conditions for forking/branching
+      decisionConditions
     };
   } catch (error: any) {
     logger.error('Get form metadata error', { error: error.message });
@@ -764,17 +911,68 @@ const serializeExtendedProperties = (field: FormField): string => {
 };
 
 /**
- * Map field type to response_type_id
+ * Map field type to LibreClinica response_type_id
+ * 
+ * LibreClinica Response Types:
+ * 1 = text
+ * 2 = textarea
+ * 3 = checkbox
+ * 4 = file upload
+ * 5 = radio
+ * 6 = single-select (dropdown)
+ * 7 = multi-select
+ * 8 = calculation (auto-calculated field)
+ * 9 = group-calculation (calculation across repeating groups)
+ * 10 = instant-calculation / barcode
  */
 const mapFieldTypeToResponseType = (fieldType: string): number => {
   const typeMap: Record<string, number> = {
-    'text': 1,       // text
-    'textarea': 2,   // textarea
-    'checkbox': 3,   // checkbox
-    'file': 4,       // file
-    'radio': 5,      // radio
-    'select': 6,     // single-select
-    'multiselect': 7 // multi-select
+    // Basic types (1-7)
+    'text': 1,
+    'textarea': 2,
+    'checkbox': 3,
+    'file': 4,
+    'image': 4,        // images also use file response type
+    'radio': 5,
+    'select': 6,
+    'dropdown': 6,
+    'multiselect': 7,
+    'multi-select': 7,
+    
+    // Calculated types (8-9)
+    'calculation': 8,
+    'calculated': 8,
+    'bmi': 8,          // BMI is a calculated field
+    'bsa': 8,          // Body Surface Area
+    'egfr': 8,         // eGFR calculation
+    'age': 8,          // Age calculation
+    'group_calculation': 9,
+    'group-calculation': 9,
+    'sum': 9,          // Sum across repeating group
+    'average': 9,      // Average across group
+    
+    // Instant/Barcode (10)
+    'instant': 10,
+    'barcode': 10,
+    'qrcode': 10,
+    
+    // Clinical field aliases map to appropriate types
+    'integer': 1,
+    'decimal': 1,
+    'number': 1,
+    'date': 1,
+    'datetime': 1,
+    'time': 1,
+    'email': 1,
+    'phone': 1,
+    'height': 1,
+    'weight': 1,
+    'temperature': 1,
+    'heart_rate': 1,
+    'blood_pressure': 1,
+    'oxygen_saturation': 1,
+    'respiration_rate': 1,
+    'yesno': 5         // Yes/No uses radio type
   };
   return typeMap[fieldType?.toLowerCase()] || 1;
 };
@@ -1055,6 +1253,66 @@ export const createForm = async (
           hasOptions: field.options?.length || 0,
           hasValidation: field.validationRules?.length || 0
         });
+      }
+
+      // Second pass: Create scd_item_metadata (skip logic) for fields with showWhen conditions
+      // This must happen after all fields are created so we can reference them
+      for (let i = 0; i < data.fields.length; i++) {
+        const field = data.fields[i];
+        
+        // Check if field has showWhen conditions
+        if (field.showWhen && Array.isArray(field.showWhen) && field.showWhen.length > 0) {
+          // Get the target item_form_metadata_id for this field
+          const targetIfmResult = await client.query(`
+            SELECT ifm.item_form_metadata_id
+            FROM item_form_metadata ifm
+            INNER JOIN item i ON ifm.item_id = i.item_id
+            WHERE ifm.crf_version_id = $1 AND i.name = $2
+            LIMIT 1
+          `, [crfVersionId, field.label || field.name]);
+          
+          if (targetIfmResult.rows.length > 0) {
+            const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
+            
+            for (const condition of field.showWhen) {
+              // Find the control item's item_form_metadata_id by field name
+              const controlIfmResult = await client.query(`
+                SELECT ifm.item_form_metadata_id, i.name
+                FROM item_form_metadata ifm
+                INNER JOIN item i ON ifm.item_id = i.item_id
+                WHERE ifm.crf_version_id = $1 AND i.name = $2
+                LIMIT 1
+              `, [crfVersionId, condition.fieldId]);
+              
+              const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
+              const controlItemName = condition.fieldId || '';
+              
+              // Insert into scd_item_metadata (LibreClinica skip logic table)
+              await client.query(`
+                INSERT INTO scd_item_metadata (
+                  scd_item_form_metadata_id, 
+                  control_item_form_metadata_id, 
+                  control_item_name, 
+                  option_value, 
+                  message, 
+                  version
+                ) VALUES ($1, $2, $3, $4, $5, 1)
+              `, [
+                targetIfmId,
+                controlIfmId,
+                controlItemName,
+                condition.value || '',
+                (condition as any).message || ''
+              ]);
+              
+              logger.debug('Created SCD skip logic', {
+                targetField: field.label,
+                controlField: condition.fieldId,
+                triggerValue: condition.value
+              });
+            }
+          }
+        }
       }
 
       logger.info('Created form fields with full metadata', { 

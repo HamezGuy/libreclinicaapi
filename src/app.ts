@@ -61,6 +61,24 @@ import exportRoutes from './routes/export.routes';
 import importRoutes from './routes/import.routes';
 // Adverse Event (AE/SAE) Tracking - Part 11 compliant via SOAP
 import aeRoutes from './routes/ae.routes';
+// File Uploads for CRF fields (response_type = 4)
+import filesRoutes from './routes/files.routes';
+// Backup and Recovery (21 CFR Part 11 compliant)
+import backupRoutes from './routes/backup.routes';
+// Print/PDF Generation (21 CFR Part 11 compliant)
+import printRoutes from './routes/print.routes';
+// Email Notifications (21 CFR Part 11 compliant)
+import emailRoutes from './routes/email.routes';
+// Subject Transfer (21 CFR Part 11 compliant)
+import transferRoutes from './routes/transfer.routes';
+// Double Data Entry (21 CFR Part 11 compliant)
+import ddeRoutes from './routes/dde.routes';
+// eConsent Module (21 CFR Part 11 compliant)
+import consentRoutes from './routes/consent.routes';
+// ePRO / Patient Portal (21 CFR Part 11 compliant)
+import eproRoutes from './routes/epro.routes';
+// RTSM/IRT (Randomization and Trial Supply Management)
+import rtsmRoutes from './routes/rtsm.routes';
 
 const app = express();
 
@@ -240,6 +258,24 @@ app.use('/api/export', exportRoutes);
 app.use('/api/import', importRoutes);
 // Adverse Events (Part 11 compliant - AEs are CRF forms)
 app.use('/api/ae', aeRoutes);
+// File Uploads (Part 11 compliant - for CRF file fields)
+app.use('/api/files', filesRoutes);
+// Backup and Recovery (Part 11 compliant - database backups)
+app.use('/api/backup', backupRoutes);
+// Print/PDF Generation (Part 11 compliant - form printing, casebooks, audit trails)
+app.use('/api/print', printRoutes);
+// Email Notifications (Part 11 compliant - queue-based email system)
+app.use('/api/email', emailRoutes);
+// Subject Transfer (Part 11 compliant - site transfer with e-signatures)
+app.use('/api/transfers', transferRoutes);
+// Double Data Entry (Part 11 compliant - dual entry with discrepancy resolution)
+app.use('/api/dde', ddeRoutes);
+// eConsent (Part 11 compliant - electronic informed consent)
+app.use('/api/consent', consentRoutes);
+// ePRO / Patient Portal (Part 11 compliant - patient-reported outcomes)
+app.use('/api/epro', eproRoutes);
+// RTSM/IRT (Part 11 compliant - trial supply management)
+app.use('/api/rtsm', rtsmRoutes);
 
 // ============================================================================
 // ROOT ENDPOINT
@@ -278,7 +314,13 @@ app.get('/', (req: Request, res: Response) => {
       libreclinica: '/api/libreclinica - Proxy to LibreClinica native REST APIs',
       export: '/api/export - Data export (CSV, ODM XML) via LibreClinica SOAP',
       import: '/api/import - Data import (CSV, ODM XML) via LibreClinica SOAP',
-      ae: '/api/ae - Adverse Event tracking (SAE/AE) via LibreClinica SOAP'
+      ae: '/api/ae - Adverse Event tracking (SAE/AE) via LibreClinica SOAP',
+      backup: '/api/backup - Database backup and recovery (21 CFR Part 11 compliant)',
+      print: '/api/print - PDF generation for forms, casebooks, and audit trails',
+      email: '/api/email - Email notifications and user preferences',
+      transfers: '/api/transfers - Subject transfer between sites',
+      dde: '/api/dde - Double data entry workflow',
+      consent: '/api/consent - Electronic consent management'
     },
     libreclinicaNativeProxies: {
       metadata: '/api/libreclinica/metadata/:studyOid - Get study metadata (proxies to LibreClinica)',
