@@ -20,10 +20,10 @@ router.use(authMiddleware);
 router.get('/', controller.listEvents);
 
 // Read operations - all authenticated users
-router.get('/study/:studyId', validate({ params: commonSchemas.idParam }), controller.getStudyEvents);
+router.get('/study/:studyId', validate({ params: commonSchemas.studyIdParam }), controller.getStudyEvents);
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.getEvent);
 router.get('/:id/crfs', validate({ params: commonSchemas.idParam }), controller.getEventCRFs);
-router.get('/subject/:subjectId', validate({ params: commonSchemas.idParam }), controller.getSubjectEvents);
+router.get('/subject/:subjectId', validate({ params: commonSchemas.subjectIdParam }), controller.getSubjectEvents);
 
 // Create/Update/Delete - require coordinator or admin role
 router.post('/', requireRole('admin', 'coordinator'), validate({ body: eventSchemas.create }), controller.create);

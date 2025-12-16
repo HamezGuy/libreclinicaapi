@@ -516,6 +516,24 @@ export const commonSchemas = {
       })
   }),
 
+  studyIdParam: Joi.object({
+    studyId: Joi.number().integer().positive().required()
+      .messages({
+        'number.base': 'Study ID must be a number',
+        'number.positive': 'Study ID must be positive',
+        'any.required': 'Study ID is required'
+      })
+  }),
+
+  subjectIdParam: Joi.object({
+    subjectId: Joi.number().integer().positive().required()
+      .messages({
+        'number.base': 'Subject ID must be a number',
+        'number.positive': 'Subject ID must be positive',
+        'any.required': 'Subject ID is required'
+      })
+  }),
+
   pagination: Joi.object({
     page: Joi.number().integer().min(1).default(1),
     limit: Joi.number().integer().min(1).max(100).default(20),
