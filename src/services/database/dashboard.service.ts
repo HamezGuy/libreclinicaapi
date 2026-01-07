@@ -719,7 +719,7 @@ export const getDataQualityMetrics = async (studyId: number): Promise<any> => {
       resolvedQueries: parseInt(row.resolved_queries) || 0,
       queryResolutionRate: row.total_queries > 0 
         ? Math.round((parseInt(row.resolved_queries) / parseInt(row.total_queries)) * 100) 
-        : 100,
+        : 0, // No queries = no resolution data
       sdvVerified: parseInt(row.sdv_verified) || 0,
       totalCRFs: parseInt(row.total_crfs) || 0,
       sdvRate: row.total_crfs > 0 
@@ -828,20 +828,27 @@ export const getStudyHealthScore = async (studyId: number): Promise<any> => {
 
     const queryResolutionScore = queries.totalQueries > 0
       ? Math.round((queries.closedQueries / queries.totalQueries) * 100)
-      : 100;
+      : 0; // No queries = no resolution score (not 100%)
 
-    // Protocol compliance estimated from query rate
-    const protocolComplianceScore = queries.queryRate < 0.5 
-      ? 90 
-      : queries.queryRate < 1 ? 75 : 60;
+    // Protocol compliance: Calculate from actual protocol deviation queries
+    // Only count if there are protocol-related queries in the discrepancy notes
+    // For now, we calculate based on the ratio of completed forms without queries
+    let protocolComplianceScore = 0;
+    if (completion.totalCRFs > 0 && queries.totalQueries >= 0) {
+      // Protocol compliance = forms without protocol deviation queries / total forms
+      // If query rate is low (<0.1 queries per form), compliance is high
+      const queriesPerForm = completion.totalCRFs > 0 ? queries.totalQueries / completion.totalCRFs : 0;
+      protocolComplianceScore = Math.max(0, Math.round((1 - queriesPerForm) * 100));
+    }
 
-    // Overall score is weighted average
-    const overallScore = Math.round(
+    // Overall score is weighted average (only if we have data)
+    const hasData = enrollment.totalSubjects > 0 || completion.totalCRFs > 0 || queries.totalQueries > 0;
+    const overallScore = hasData ? Math.round(
       (enrollmentScore * 0.25) +
       (dataCompletionScore * 0.35) +
       (queryResolutionScore * 0.25) +
       (protocolComplianceScore * 0.15)
-    );
+    ) : 0;
 
     return {
       score: overallScore,

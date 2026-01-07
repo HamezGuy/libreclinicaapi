@@ -4,13 +4,14 @@
  * Tests for rules integration with LibreClinica's rule, rule_expression, rule_action tables
  */
 
+import { describe, it, test, expect, beforeAll, afterAll, beforeEach, afterEach, jest } from '@jest/globals';
 import { pool } from '../../src/config/database';
 import * as validationRulesService from '../../src/services/database/validation-rules.service';
 
 // Mock database
 jest.mock('../../src/config/database', () => ({
   pool: {
-    query: jest.fn()
+    query: (jest.fn() as any)
   }
 }));
 
@@ -33,7 +34,7 @@ describe('Validation Rules Service', () => {
   describe('getRulesForCrf', () => {
     test('should combine custom rules, item rules, and native LibreClinica rules', async () => {
       // Mock custom rules query
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ 
           rows: [
             {
@@ -104,7 +105,7 @@ describe('Validation Rules Service', () => {
     });
 
     test('should handle database errors gracefully', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [] }) // Custom rules empty
         .mockResolvedValueOnce({ rows: [] }) // Item rules empty
         .mockRejectedValueOnce(new Error('Native rules table not available'));
@@ -118,7 +119,7 @@ describe('Validation Rules Service', () => {
 
   describe('validateFormData', () => {
     test('should validate against all rule types', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({ 
           rows: [
@@ -167,7 +168,7 @@ describe('Validation Rules Service', () => {
       expect(validResult.errors.length).toBe(0);
 
       // Invalid data - reset mocks
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({ 
           rows: [
@@ -194,7 +195,7 @@ describe('Validation Rules Service', () => {
     });
 
     test('should separate errors and warnings by severity', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({ 
           rows: [
@@ -233,7 +234,7 @@ describe('Validation Rules Service', () => {
   describe('CRUD operations', () => {
     test('should create a new validation rule', async () => {
       // Mock table check
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [{ exists: true }] }) // Table exists check
         .mockResolvedValueOnce({ 
           rows: [{ validation_rule_id: 1 }] 
@@ -257,7 +258,7 @@ describe('Validation Rules Service', () => {
     });
 
     test('should update an existing rule', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [{ exists: true }] })
         .mockResolvedValueOnce({ rows: [{ validation_rule_id: 1 }] });
 
@@ -270,7 +271,7 @@ describe('Validation Rules Service', () => {
     });
 
     test('should delete a rule', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [{ validation_rule_id: 1 }] });
 
       const result = await validationRulesService.deleteRule(1);

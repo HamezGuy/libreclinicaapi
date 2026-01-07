@@ -6,6 +6,11 @@
  * - CRUD operations
  * - Progress tracking
  * - Events and forms
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Subject enrollment requires electronic signature (§11.50)
+ * - Subject modifications require electronic signature (§11.50)
+ * - All changes are logged to audit trail (§11.10(e))
  */
 
 import express, { Request, Response } from 'express';
@@ -14,6 +19,7 @@ import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, subjectSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
+import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
 import * as studyParamsService from '../services/database/studyParameters.service';
 import * as studyGroupsService from '../services/database/studyGroups.service';
 import { logger } from '../config/logger';
@@ -79,20 +85,41 @@ router.get('/enrollment-config/:studyId', async (req: Request, res: Response) =>
   }
 });
 
-// Read operations
+// Read operations (no signature required)
 router.get('/', validate({ query: subjectSchemas.list }), controller.list);
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/progress', validate({ params: commonSchemas.idParam }), controller.getProgress);
 router.get('/:id/events', validate({ params: commonSchemas.idParam }), controller.getEvents);
 router.get('/:id/forms', validate({ params: commonSchemas.idParam }), controller.getForms);
 
-// Create/Update operations - require coordinator or investigator role
-router.post('/', requireRole('coordinator', 'investigator'), soapRateLimiter, validate({ body: subjectSchemas.create }), controller.create);
-router.put('/:id', requireRole('coordinator', 'investigator'), validate({ params: commonSchemas.idParam }), controller.update);
-router.put('/:id/status', requireRole('coordinator', 'investigator'), validate({ params: commonSchemas.idParam }), controller.updateStatus);
+// Create/Update operations - require coordinator or investigator role + signature
+router.post('/', 
+  requireRole('coordinator', 'investigator'), 
+  soapRateLimiter, 
+  validate({ body: subjectSchemas.create }), 
+  requireSignatureFor(SignatureMeanings.SUBJECT_ENROLL),
+  controller.create
+);
+router.put('/:id', 
+  requireRole('coordinator', 'investigator'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor(SignatureMeanings.SUBJECT_UPDATE),
+  controller.update
+);
+router.put('/:id/status', 
+  requireRole('coordinator', 'investigator'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor(SignatureMeanings.SUBJECT_WITHDRAW),
+  controller.updateStatus
+);
 
-// Delete operation - require admin role (soft delete)
-router.delete('/:id', requireRole('admin', 'coordinator'), validate({ params: commonSchemas.idParam }), controller.remove);
+// Delete operation - require admin role (soft delete) + signature
+router.delete('/:id', 
+  requireRole('admin', 'coordinator'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor(SignatureMeanings.SUBJECT_DELETE),
+  controller.remove
+);
 
 export default router;
 

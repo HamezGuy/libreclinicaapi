@@ -50,6 +50,11 @@ export interface User {
   user_type_id?: number;
   status_id?: number;  // 1 = active, 5 = locked
   update_id?: number;
+  enabled?: boolean;
+  // Aggregated fields from getUserById
+  study_ids?: number[];
+  roles?: string[];
+  user_type?: string;
 }
 
 export interface UserRole {
@@ -261,7 +266,7 @@ export interface StudyEventDB {
  */
 export interface CRFDB {
   crf_id: number;
-  study_id: number;
+  source_study_id?: number;  // Correct column name - CRF table uses source_study_id, NOT study_id
   name: string;
   description?: string;
   oc_oid?: string;
@@ -270,7 +275,6 @@ export interface CRFDB {
   date_updated?: Date;
   update_id: number;
   status_id: number;
-  source_data_verification_code?: number;
 }
 
 /**
@@ -438,10 +442,10 @@ export interface AuditQuery {
 }
 
 export interface AuditExportRequest {
-  studyId: number;
+  studyId?: number;
   startDate: string;
   endDate: string;
-  format: 'csv' | 'pdf' | 'json';
+  format?: 'csv' | 'pdf' | 'json';
 }
 
 /**

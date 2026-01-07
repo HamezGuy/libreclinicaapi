@@ -67,18 +67,26 @@ import filesRoutes from './routes/files.routes';
 import backupRoutes from './routes/backup.routes';
 // Print/PDF Generation (21 CFR Part 11 compliant)
 import printRoutes from './routes/print.routes';
-// Email Notifications (21 CFR Part 11 compliant)
-import emailRoutes from './routes/email.routes';
-// Subject Transfer (21 CFR Part 11 compliant)
-import transferRoutes from './routes/transfer.routes';
-// Double Data Entry (21 CFR Part 11 compliant)
+// Double Data Entry (21 CFR Part 11 compliant) - Uses NATIVE LibreClinica tables
 import ddeRoutes from './routes/dde.routes';
-// eConsent Module (21 CFR Part 11 compliant)
-import consentRoutes from './routes/consent.routes';
-// ePRO / Patient Portal (21 CFR Part 11 compliant)
-import eproRoutes from './routes/epro.routes';
-// RTSM/IRT (Randomization and Trial Supply Management)
-import rtsmRoutes from './routes/rtsm.routes';
+// Organization management, invite codes, access requests
+import organizationRoutes from './routes/organization.routes';
+
+// ============================================================================
+// FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
+// ============================================================================
+// The following features use custom acc_* tables that extend LibreClinica.
+// These tables have been migrated and are available in the database.
+// Set environment variables to 'false' to disable specific features if needed.
+// ============================================================================
+const ENABLE_EMAIL_NOTIFICATIONS = process.env.ENABLE_EMAIL_NOTIFICATIONS !== 'false';
+const ENABLE_SUBJECT_TRANSFERS = process.env.ENABLE_SUBJECT_TRANSFERS !== 'false';
+const ENABLE_ECONSENT = process.env.ENABLE_ECONSENT !== 'false';
+const ENABLE_EPRO = process.env.ENABLE_EPRO !== 'false';
+const ENABLE_RTSM = process.env.ENABLE_RTSM !== 'false';
+
+// Conditionally import routes only when enabled
+let emailRoutes: any, transferRoutes: any, consentRoutes: any, eproRoutes: any, rtsmRoutes: any;
 
 const app = express();
 
@@ -264,18 +272,88 @@ app.use('/api/files', filesRoutes);
 app.use('/api/backup', backupRoutes);
 // Print/PDF Generation (Part 11 compliant - form printing, casebooks, audit trails)
 app.use('/api/print', printRoutes);
-// Email Notifications (Part 11 compliant - queue-based email system)
-app.use('/api/email', emailRoutes);
-// Subject Transfer (Part 11 compliant - site transfer with e-signatures)
-app.use('/api/transfers', transferRoutes);
-// Double Data Entry (Part 11 compliant - dual entry with discrepancy resolution)
+// Double Data Entry (Part 11 compliant - uses NATIVE LibreClinica tables)
 app.use('/api/dde', ddeRoutes);
-// eConsent (Part 11 compliant - electronic informed consent)
-app.use('/api/consent', consentRoutes);
-// ePRO / Patient Portal (Part 11 compliant - patient-reported outcomes)
-app.use('/api/epro', eproRoutes);
-// RTSM/IRT (Part 11 compliant - trial supply management)
-app.use('/api/rtsm', rtsmRoutes);
+// Organization management, invite codes, access requests
+app.use('/api/organizations', organizationRoutes);
+
+// ============================================================================
+// CONDITIONAL ROUTES - Require custom acc_* tables
+// ============================================================================
+// These routes are DISABLED by default. To enable:
+// 1. Run the corresponding migration script from /migrations/
+// 2. Set the environment variable to 'true'
+// ============================================================================
+
+if (ENABLE_EMAIL_NOTIFICATIONS) {
+  const emailRoutes = require('./routes/email.routes').default;
+  app.use('/api/email', emailRoutes);
+  logger.info('✅ Email Notifications enabled (acc_email_* tables required)');
+} else {
+  app.use('/api/email', (req: Request, res: Response) => {
+    res.status(503).json({
+      success: false,
+      error: 'Email Notifications feature is disabled',
+      message: 'This feature requires custom database tables. Set ENABLE_EMAIL_NOTIFICATIONS=true and run migrations/email_notifications.sql'
+    });
+  });
+}
+
+if (ENABLE_SUBJECT_TRANSFERS) {
+  const transferRoutes = require('./routes/transfer.routes').default;
+  app.use('/api/transfers', transferRoutes);
+  logger.info('✅ Subject Transfers enabled (acc_transfer_log table required)');
+} else {
+  app.use('/api/transfers', (req: Request, res: Response) => {
+    res.status(503).json({
+      success: false,
+      error: 'Subject Transfers feature is disabled',
+      message: 'This feature requires custom database tables. Set ENABLE_SUBJECT_TRANSFERS=true and run migrations/subject_transfer.sql'
+    });
+  });
+}
+
+if (ENABLE_ECONSENT) {
+  const consentRoutes = require('./routes/consent.routes').default;
+  app.use('/api/consent', consentRoutes);
+  logger.info('✅ eConsent enabled (acc_consent_* tables required)');
+} else {
+  app.use('/api/consent', (req: Request, res: Response) => {
+    res.status(503).json({
+      success: false,
+      error: 'eConsent feature is disabled',
+      message: 'This feature requires custom database tables. Set ENABLE_ECONSENT=true and run migrations/econsent.sql'
+    });
+  });
+}
+
+if (ENABLE_EPRO) {
+  const eproRoutes = require('./routes/epro.routes').default;
+  app.use('/api/epro', eproRoutes);
+  logger.info('✅ ePRO/Patient Portal enabled (acc_pro_* tables required)');
+} else {
+  app.use('/api/epro', (req: Request, res: Response) => {
+    res.status(503).json({
+      success: false,
+      error: 'ePRO/Patient Portal feature is disabled',
+      message: 'This feature requires custom database tables. Set ENABLE_EPRO=true and run migrations/epro_patient_portal.sql'
+    });
+  });
+}
+
+if (ENABLE_RTSM) {
+  const rtsmRoutes = require('./routes/rtsm.routes').default;
+  app.use('/api/rtsm', rtsmRoutes);
+  logger.info('✅ RTSM/IRT enabled (acc_kit_* tables required)');
+} else {
+  app.use('/api/rtsm', (req: Request, res: Response) => {
+    res.status(503).json({
+      success: false,
+      error: 'RTSM/IRT feature is disabled',
+      message: 'This feature requires custom database tables. Set ENABLE_RTSM=true and run migrations/rtsm_irt.sql'
+    });
+  });
+}
 
 // ============================================================================
 // ROOT ENDPOINT
@@ -317,10 +395,21 @@ app.get('/', (req: Request, res: Response) => {
       ae: '/api/ae - Adverse Event tracking (SAE/AE) via LibreClinica SOAP',
       backup: '/api/backup - Database backup and recovery (21 CFR Part 11 compliant)',
       print: '/api/print - PDF generation for forms, casebooks, and audit trails',
-      email: '/api/email - Email notifications and user preferences',
-      transfers: '/api/transfers - Subject transfer between sites',
-      dde: '/api/dde - Double data entry workflow',
-      consent: '/api/consent - Electronic consent management'
+      dde: '/api/dde - Double data entry workflow (uses native LibreClinica tables)',
+      organizations: '/api/organizations - Organization management, invite codes, access requests',
+      // Conditional features - require custom tables
+      email: ENABLE_EMAIL_NOTIFICATIONS ? '/api/email - Email notifications (ENABLED)' : '/api/email - DISABLED (requires acc_email_* tables)',
+      transfers: ENABLE_SUBJECT_TRANSFERS ? '/api/transfers - Subject transfers (ENABLED)' : '/api/transfers - DISABLED (requires acc_transfer_log table)',
+      consent: ENABLE_ECONSENT ? '/api/consent - eConsent (ENABLED)' : '/api/consent - DISABLED (requires acc_consent_* tables)',
+      epro: ENABLE_EPRO ? '/api/epro - ePRO/Patient Portal (ENABLED)' : '/api/epro - DISABLED (requires acc_pro_* tables)',
+      rtsm: ENABLE_RTSM ? '/api/rtsm - RTSM/IRT (ENABLED)' : '/api/rtsm - DISABLED (requires acc_kit_* tables)'
+    },
+    featureFlags: {
+      email_notifications: ENABLE_EMAIL_NOTIFICATIONS,
+      subject_transfers: ENABLE_SUBJECT_TRANSFERS,
+      econsent: ENABLE_ECONSENT,
+      epro: ENABLE_EPRO,
+      rtsm: ENABLE_RTSM
     },
     libreclinicaNativeProxies: {
       metadata: '/api/libreclinica/metadata/:studyOid - Get study metadata (proxies to LibreClinica)',

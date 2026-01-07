@@ -114,7 +114,7 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
 };
 
 /**
- * Get CRFs for a study event
+ * Get CRFs for a study event definition (template level)
  */
 export const getEventCRFs = async (eventDefinitionId: number): Promise<any[]> => {
   logger.info('Getting event CRFs', { eventDefinitionId });
@@ -150,7 +150,60 @@ export const getEventCRFs = async (eventDefinitionId: number): Promise<any[]> =>
 };
 
 /**
- * Schedule subject event (via SOAP for GxP compliance)
+ * Get patient's event_crfs for a specific study_event (instance level)
+ * These are the editable copies of templates for this patient's phase
+ */
+export const getPatientEventCRFs = async (studyEventId: number): Promise<any[]> => {
+  logger.info('Getting patient event CRFs', { studyEventId });
+
+  try {
+    const query = `
+      SELECT 
+        ec.event_crf_id,
+        ec.study_event_id,
+        ec.crf_version_id,
+        ec.study_subject_id,
+        cv.crf_id,
+        c.name as crf_name,
+        c.description as crf_description,
+        cv.name as version_name,
+        ec.completion_status_id,
+        cs.name as completion_status,
+        ec.status_id,
+        s.name as status_name,
+        ec.date_created,
+        ec.date_updated,
+        ec.date_completed,
+        ec.date_validate,
+        ec.sdv_status,
+        u.user_name as owner_name,
+        -- Count of filled fields
+        (SELECT COUNT(*) FROM item_data id WHERE id.event_crf_id = ec.event_crf_id AND id.deleted = false) as filled_fields,
+        -- Total fields in this CRF version
+        (SELECT COUNT(DISTINCT i.item_id) 
+         FROM item i 
+         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id 
+         WHERE igm.crf_version_id = ec.crf_version_id) as total_fields
+      FROM event_crf ec
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      INNER JOIN status s ON ec.status_id = s.status_id
+      LEFT JOIN user_account u ON ec.owner_id = u.user_id
+      WHERE ec.study_event_id = $1
+      ORDER BY c.name
+    `;
+
+    const result = await pool.query(query, [studyEventId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get patient event CRFs error', { error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Schedule subject event (via SOAP for GxP compliance, with direct SQL fallback)
  */
 export const scheduleSubjectEvent = async (
   data: {
@@ -167,7 +220,7 @@ export const scheduleSubjectEvent = async (
 
   try {
     // Get study ID from subject
-    const subjectQuery = `SELECT study_id FROM study_subject WHERE study_subject_id = $1`;
+    const subjectQuery = `SELECT study_id, oc_oid as subject_oid FROM study_subject WHERE study_subject_id = $1`;
     const subjectResult = await pool.query(subjectQuery, [data.studySubjectId]);
     
     if (subjectResult.rows.length === 0) {
@@ -179,17 +232,191 @@ export const scheduleSubjectEvent = async (
 
     const studyId = subjectResult.rows[0].study_id;
 
-    // Use SOAP service for GxP-compliant event scheduling
-    const result = await eventSoap.scheduleEvent({
-      studyId,
-      subjectId: data.studySubjectId,
-      studyEventDefinitionId: data.studyEventDefinitionId,
-      startDate: data.startDate,
-      endDate: data.endDate,
-      location: data.location
-    }, userId, username);
+    // Try SOAP service first for GxP-compliant event scheduling
+    try {
+      const result = await eventSoap.scheduleEvent({
+        studyId,
+        subjectId: data.studySubjectId,
+        studyEventDefinitionId: data.studyEventDefinitionId,
+        startDate: data.startDate,
+        endDate: data.endDate,
+        location: data.location
+      }, userId, username);
+      
+      if (result.success) {
+        return result;
+      }
+      logger.warn('SOAP scheduling failed, falling back to direct SQL', { error: result.message });
+    } catch (soapError: any) {
+      logger.warn('SOAP service unavailable, using direct SQL fallback', { error: soapError.message });
+    }
+
+    // Direct SQL fallback for development/testing when SOAP is not available
+    logger.info('Using direct SQL to schedule event');
     
-    return result;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check if event definition exists and get study_id
+      const eventDefQuery = `SELECT study_event_definition_id, study_id, oc_oid, repeating FROM study_event_definition WHERE study_event_definition_id = $1`;
+      const eventDefResult = await client.query(eventDefQuery, [data.studyEventDefinitionId]);
+      
+      if (eventDefResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return {
+          success: false,
+          message: 'Event definition not found'
+        };
+      }
+
+      const eventDef = eventDefResult.rows[0];
+
+      // Get the next sample_ordinal for repeating events
+      let sampleOrdinal = 1;
+      if (eventDef.repeating) {
+        const ordinalQuery = `
+          SELECT COALESCE(MAX(sample_ordinal), 0) + 1 as next_ordinal
+          FROM study_event
+          WHERE study_subject_id = $1 AND study_event_definition_id = $2
+        `;
+        const ordinalResult = await client.query(ordinalQuery, [data.studySubjectId, data.studyEventDefinitionId]);
+        sampleOrdinal = ordinalResult.rows[0].next_ordinal;
+      }
+
+      // Insert study_event record
+      const insertQuery = `
+        INSERT INTO study_event (
+          study_subject_id, study_event_definition_id, location,
+          sample_ordinal, date_start, date_end, owner_id, status_id,
+          date_created, subject_event_status_id, start_time_flag,
+          end_time_flag
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, 1, NOW(), 1, false, false
+        )
+        RETURNING study_event_id
+      `;
+
+      const startDate = data.startDate ? new Date(data.startDate) : new Date();
+      const endDate = data.endDate ? new Date(data.endDate) : null;
+
+      const insertResult = await client.query(insertQuery, [
+        data.studySubjectId,
+        data.studyEventDefinitionId,
+        data.location || '',
+        sampleOrdinal,
+        startDate,
+        endDate,
+        userId
+      ]);
+
+      const studyEventId = insertResult.rows[0].study_event_id;
+
+      // Create event_crf records for all CRFs assigned to this event definition
+      // These are the editable copies of form templates for this patient's phase
+      const crfAssignmentQuery = `
+        SELECT edc.crf_id, edc.default_version_id, cv.crf_version_id, c.name as crf_name
+        FROM event_definition_crf edc
+        LEFT JOIN crf_version cv ON cv.crf_version_id = edc.default_version_id
+        LEFT JOIN crf c ON edc.crf_id = c.crf_id
+        WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
+        ORDER BY edc.ordinal
+      `;
+      const crfAssignments = await client.query(crfAssignmentQuery, [data.studyEventDefinitionId]);
+
+      if (crfAssignments.rows.length === 0) {
+        logger.warn('No CRFs assigned to this event definition', { 
+          studyEventDefinitionId: data.studyEventDefinitionId 
+        });
+      }
+
+      let createdCrfCount = 0;
+      for (const crf of crfAssignments.rows) {
+        // Get the latest CRF version if no default is set
+        let crfVersionId = crf.crf_version_id || crf.default_version_id;
+        if (!crfVersionId) {
+          const latestVersionQuery = `
+            SELECT crf_version_id FROM crf_version
+            WHERE crf_id = $1 AND status_id = 1
+            ORDER BY crf_version_id DESC LIMIT 1
+          `;
+          const latestVersion = await client.query(latestVersionQuery, [crf.crf_id]);
+          if (latestVersion.rows.length > 0) {
+            crfVersionId = latestVersion.rows[0].crf_version_id;
+          } else {
+            logger.warn('No CRF version found for CRF', { 
+              crfId: crf.crf_id, 
+              crfName: crf.crf_name 
+            });
+          }
+        }
+
+        if (crfVersionId) {
+          // CRITICAL: Include study_subject_id for proper foreign key reference
+          const insertEventCrfQuery = `
+            INSERT INTO event_crf (
+              study_event_id, crf_version_id, study_subject_id,
+              status_id, owner_id, date_created, completion_status_id, sdv_status
+            ) VALUES (
+              $1, $2, $3, 1, $4, NOW(), 1, false
+            )
+          `;
+          await client.query(insertEventCrfQuery, [
+            studyEventId, 
+            crfVersionId, 
+            data.studySubjectId,  // Added: study_subject_id
+            userId
+          ]);
+          createdCrfCount++;
+          logger.debug('Created event_crf for patient phase', {
+            studyEventId,
+            crfId: crf.crf_id,
+            crfName: crf.crf_name,
+            studySubjectId: data.studySubjectId
+          });
+        }
+      }
+      
+      logger.info('Event CRFs created for scheduled event', {
+        studyEventId,
+        studySubjectId: data.studySubjectId,
+        crfAssignmentsFound: crfAssignments.rows.length,
+        crfsCreated: createdCrfCount
+      });
+
+      // Log audit trail
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_id, audit_log_event_type_id, audit_date, user_id,
+          audit_table, entity_id, entity_name, old_value, new_value
+        ) VALUES (
+          nextval('audit_log_event_audit_id_seq'), 31, NOW(), $1,
+          'study_event', $2, 'Event Scheduled', NULL, $3
+        )
+      `, [userId, studyEventId, `Scheduled event ${eventDef.oc_oid} for subject`]);
+
+      await client.query('COMMIT');
+
+      logger.info('Event scheduled successfully via direct SQL', { studyEventId });
+
+      return {
+        success: true,
+        data: {
+          studyEventId,
+          studySubjectId: data.studySubjectId,
+          studyEventDefinitionId: data.studyEventDefinitionId,
+          startDate: startDate.toISOString(),
+          location: data.location
+        },
+        message: 'Event scheduled successfully'
+      };
+    } catch (dbError: any) {
+      await client.query('ROLLBACK');
+      logger.error('Direct SQL event scheduling failed', { error: dbError.message });
+      throw dbError;
+    } finally {
+      client.release();
+    }
   } catch (error: any) {
     logger.error('Schedule subject event error', { error: error.message });
     return {

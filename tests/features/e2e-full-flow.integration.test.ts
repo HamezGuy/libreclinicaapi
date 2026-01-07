@@ -15,6 +15,7 @@
  * 9. Delete form
  */
 
+import { describe, it, test, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
 import request from 'supertest';
 import { pool } from '../../src/config/database';
 import { logger } from '../../src/config/logger';
@@ -26,7 +27,7 @@ beforeAll(async () => {
   // Dynamic import to avoid circular dependencies
   try {
     const appModule = await import('../../src/app');
-    app = appModule.default || appModule.app;
+    app = appModule.default;
     logger.info('E2E tests starting');
   } catch (error: any) {
     console.error('Failed to import app:', error.message);

@@ -25,11 +25,11 @@ describe('Query Service', () => {
     await testDb.pool.query('SELECT NOW()');
 
     // Create test study and subject
-    testStudyId = await createTestStudy(pool, rootUserId, {
+    testStudyId = await createTestStudy(testDb.pool, rootUserId, {
       uniqueIdentifier: `QUERY-TEST-${Date.now()}`
     });
 
-    testSubjectId = await createTestSubject(pool, testStudyId, {
+    testSubjectId = await createTestSubject(testDb.pool, testStudyId, {
       label: `QUERY-SUB-${Date.now()}`
     });
   });
@@ -62,7 +62,7 @@ describe('Query Service', () => {
     beforeEach(async () => {
       // Create test queries
       for (let i = 0; i < 3; i++) {
-        const queryId = await createTestQuery(pool, testStudyId, rootUserId, {
+        const queryId = await createTestQuery(testDb.pool, testStudyId, rootUserId, {
           description: `Test Query ${i}`
         });
         testQueryIds.push(queryId);
@@ -150,7 +150,7 @@ describe('Query Service', () => {
     let singleQueryId: number;
 
     beforeEach(async () => {
-      singleQueryId = await createTestQuery(pool, testStudyId, rootUserId, {
+      singleQueryId = await createTestQuery(testDb.pool, testStudyId, rootUserId, {
         description: 'Single Query Test'
       });
       testQueryIds.push(singleQueryId);
@@ -268,7 +268,7 @@ describe('Query Service', () => {
     let parentQueryId: number;
 
     beforeEach(async () => {
-      parentQueryId = await createTestQuery(pool, testStudyId, rootUserId, {
+      parentQueryId = await createTestQuery(testDb.pool, testStudyId, rootUserId, {
         description: 'Parent Query for Response Test'
       });
       testQueryIds.push(parentQueryId);
@@ -336,7 +336,7 @@ describe('Query Service', () => {
     let statusQueryId: number;
 
     beforeEach(async () => {
-      statusQueryId = await createTestQuery(pool, testStudyId, rootUserId, {
+      statusQueryId = await createTestQuery(testDb.pool, testStudyId, rootUserId, {
         description: 'Status Update Test Query'
       });
       testQueryIds.push(statusQueryId);
@@ -374,12 +374,12 @@ describe('Query Service', () => {
   describe('getQueryStats', () => {
     beforeEach(async () => {
       // Create queries with different statuses
-      const queryId1 = await createTestQuery(pool, testStudyId, rootUserId, {
+      const queryId1 = await createTestQuery(testDb.pool, testStudyId, rootUserId, {
         description: 'Stats Query 1'
       });
       testQueryIds.push(queryId1);
 
-      const queryId2 = await createTestQuery(pool, testStudyId, rootUserId, {
+      const queryId2 = await createTestQuery(testDb.pool, testStudyId, rootUserId, {
         description: 'Stats Query 2'
       });
       testQueryIds.push(queryId2);

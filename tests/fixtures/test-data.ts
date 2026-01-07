@@ -57,14 +57,20 @@ export const createTestStudy = async (
     statusId?: number;
   }
 ): Promise<number> => {
-  const uniqueId = overrides?.uniqueIdentifier || `TEST-STUDY-${Date.now()}`;
+  // Use timestamp + random to ensure uniqueness
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  const uniqueId = overrides?.uniqueIdentifier || `TEST-STUDY-${timestamp}-${random}`;
+  const ocOid = `S_${uniqueId.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 35)}`;
 
   // Note: study table does NOT have type_id column - using protocol_type instead
+  // Use ON CONFLICT to handle potential duplicates gracefully
   const result = await pool.query(`
     INSERT INTO study (
       unique_identifier, name, summary, principal_investigator, sponsor,
       status_id, owner_id, date_created, oc_oid, protocol_type
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, 'interventional')
+    ON CONFLICT (oc_oid) DO UPDATE SET date_updated = NOW()
     RETURNING study_id
   `, [
     uniqueId,
@@ -74,17 +80,18 @@ export const createTestStudy = async (
     overrides?.sponsor || 'Test Sponsor',
     overrides?.statusId || 1,
     userId,
-    `S_${uniqueId.replace(/[^a-zA-Z0-9]/g, '_')}`
+    ocOid
   ]);
 
   const studyId = result.rows[0].study_id;
 
-  // Assign user to study with admin role
+  // Assign user to study with admin role (use ON CONFLICT to avoid duplicates)
   const userResult = await pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [userId]);
   if (userResult.rows.length > 0) {
     await pool.query(`
       INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, user_name, date_created)
       VALUES ('admin', $1, 1, $2, $3, NOW())
+      ON CONFLICT DO NOTHING
     `, [studyId, userId, userResult.rows[0].user_name]);
   }
 
@@ -178,7 +185,7 @@ export const createTestCRF = async (
 ): Promise<number> => {
   const result = await pool.query(`
     INSERT INTO crf (
-      study_id, name, description, owner_id, date_created, status_id, oc_oid
+      source_study_id, name, description, owner_id, date_created, status_id, oc_oid
     ) VALUES ($1, $2, $3, 1, NOW(), 1, $4)
     RETURNING crf_id
   `, [

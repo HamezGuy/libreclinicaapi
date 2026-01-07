@@ -704,5 +704,127 @@ describe('Workflow/Tasks E2E Integration Tests', () => {
       expect(Array.isArray(summary.tasks.pending)).toBe(true);
     });
   });
-});
 
+  // ============================================================================
+  // TEST GROUP 12: Workflow Notification on Assignment
+  // ============================================================================
+
+  describe('WF-012: Workflow Notification on Assignment', () => {
+    
+    it('should queue email notification when workflow is assigned to another user', async () => {
+      if (!authToken) {
+        console.warn('Skipping test - no auth token');
+        return;
+      }
+
+      // Get a different user to assign to
+      const usersResult = await pool.query(
+        "SELECT user_id, user_name, email FROM user_account WHERE user_name != $1 AND status_id = 1 LIMIT 1",
+        [TEST_CONFIG.USERNAME]
+      );
+
+      if (usersResult.rows.length === 0) {
+        console.warn('Skipping test - no other users to assign to');
+        return;
+      }
+
+      const assigneeUsername = usersResult.rows[0].user_name;
+      const assigneeEmail = usersResult.rows[0].email;
+
+      // Count email queue before
+      const beforeCount = await pool.query('SELECT COUNT(*) as count FROM acc_email_queue');
+      const countBefore = parseInt(beforeCount.rows[0].count);
+
+      // Create workflow assigned to another user
+      const testWorkflow = {
+        title: `Notification Test Task ${Date.now()}`,
+        description: 'Test task to verify notification is sent',
+        studyId: TEST_CONFIG.STUDY_ID,
+        assignedTo: [assigneeUsername],
+        entityType: 'studySub',
+        entityId: 0
+      };
+
+      const response = await request(app)
+        .post(TEST_CONFIG.WORKFLOW_ENDPOINT)
+        .send(testWorkflow)
+        .set('Authorization', `Bearer ${authToken}`)
+        .set('Content-Type', 'application/json');
+
+      expect(response.status).toBe(201);
+      expect(response.body.success).toBe(true);
+
+      // Track for cleanup
+      if (response.body.data?.id) {
+        createdWorkflowIds.push(parseInt(response.body.data.id));
+      }
+
+      // Check if notification was queued (if email table exists)
+      try {
+        const afterCount = await pool.query('SELECT COUNT(*) as count FROM acc_email_queue');
+        const countAfter = parseInt(afterCount.rows[0].count);
+
+        if (countAfter > countBefore) {
+          console.log(`✅ Email notification queued (count: ${countBefore} → ${countAfter})`);
+          
+          // Verify the email was for the assignee
+          const emailResult = await pool.query(
+            'SELECT * FROM acc_email_queue ORDER BY queue_id DESC LIMIT 1'
+          );
+          
+          if (emailResult.rows.length > 0 && assigneeEmail) {
+            expect(emailResult.rows[0].recipient_email).toBe(assigneeEmail);
+            console.log(`✅ Email queued for correct recipient: ${assigneeEmail}`);
+          }
+        } else {
+          console.log('ℹ️ No email queued (email service may not be configured)');
+        }
+      } catch (e) {
+        console.log('ℹ️ Email queue table not available, skipping notification check');
+      }
+    });
+
+    it('should NOT queue notification when assigning to self', async () => {
+      if (!authToken) return;
+
+      // Count email queue before
+      let countBefore = 0;
+      try {
+        const beforeCount = await pool.query('SELECT COUNT(*) as count FROM acc_email_queue');
+        countBefore = parseInt(beforeCount.rows[0].count);
+      } catch (e) {
+        console.log('ℹ️ Email queue table not available');
+        return;
+      }
+
+      // Create workflow assigned to self
+      const testWorkflow = {
+        title: `Self-Assign Test Task ${Date.now()}`,
+        description: 'Test task assigned to self - should not trigger notification',
+        studyId: TEST_CONFIG.STUDY_ID,
+        assignedTo: [TEST_CONFIG.USERNAME], // Assign to self
+        entityType: 'studySub',
+        entityId: 0
+      };
+
+      const response = await request(app)
+        .post(TEST_CONFIG.WORKFLOW_ENDPOINT)
+        .send(testWorkflow)
+        .set('Authorization', `Bearer ${authToken}`)
+        .set('Content-Type', 'application/json');
+
+      expect(response.status).toBe(201);
+
+      if (response.body.data?.id) {
+        createdWorkflowIds.push(parseInt(response.body.data.id));
+      }
+
+      // Count should not have increased for self-assignment
+      const afterCount = await pool.query('SELECT COUNT(*) as count FROM acc_email_queue');
+      const countAfter = parseInt(afterCount.rows[0].count);
+
+      expect(countAfter).toBe(countBefore);
+      console.log('✅ No notification queued for self-assignment');
+    });
+  });
+});

@@ -4,17 +4,18 @@
  * Tests for scd_item_metadata and dyn_item_form_metadata integration
  */
 
+import { describe, it, test, expect, beforeAll, afterAll, beforeEach, afterEach, jest } from '@jest/globals';
 import { pool } from '../../src/config/database';
 import * as formService from '../../src/services/hybrid/form.service';
 
 // Mock the database pool for unit tests
 jest.mock('../../src/config/database', () => ({
   pool: {
-    query: jest.fn(),
-    connect: jest.fn(() => ({
+    query: (jest.fn() as any),
+    connect: (jest.fn() as any).mockReturnValue({
       query: jest.fn(),
       release: jest.fn()
-    }))
+    })
   }
 }));
 
@@ -37,7 +38,7 @@ describe('Skip Logic Service', () => {
   describe('getFormMetadata with SCD', () => {
     test('should parse scd_item_metadata entries into showWhen conditions', async () => {
       // Mock CRF query
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [{ crf_id: 1, name: 'Test Form' }] }) // CRF
         .mockResolvedValueOnce({ rows: [{ crf_version_id: 1 }] }) // Version
         .mockResolvedValueOnce({ rows: [{ section_id: 1, label: 'Main' }] }) // Sections
@@ -84,7 +85,7 @@ describe('Skip Logic Service', () => {
     });
 
     test('should handle fields without skip logic', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [{ crf_id: 1, name: 'Test' }] })
         .mockResolvedValueOnce({ rows: [{ crf_version_id: 1 }] })
         .mockResolvedValueOnce({ rows: [] })
@@ -104,7 +105,7 @@ describe('Skip Logic Service', () => {
     });
 
     test('should merge SCD conditions with extended properties showWhen', async () => {
-      (mockPool.query as jest.Mock)
+      (pool as any).query
         .mockResolvedValueOnce({ rows: [{ crf_id: 1, name: 'Test' }] })
         .mockResolvedValueOnce({ rows: [{ crf_version_id: 1 }] })
         .mockResolvedValueOnce({ rows: [] })
@@ -183,7 +184,7 @@ describe('Skip Logic Service', () => {
 
       // Verify SCD insert was called
       const scdInsertCall = mockClient.query.mock.calls.find(
-        call => call[0]?.includes?.('INSERT INTO scd_item_metadata')
+        (call: any) => call[0]?.includes?.('INSERT INTO scd_item_metadata')
       );
       
       expect(scdInsertCall).toBeDefined();

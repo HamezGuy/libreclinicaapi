@@ -169,6 +169,36 @@ export type Role =
   | 'data_entry_person'       // 8
   | 'guest';                  // 9
 
+/**
+ * Maps database role names (as stored in study_user_role.role_name) to display names.
+ * The Role type above uses canonical names, but the database may store shorter versions.
+ */
+export const ROLE_DISPLAY_MAP: Record<string, string> = {
+  'admin': 'System Administrator',
+  'system_administrator': 'System Administrator',
+  'coordinator': 'Clinical Research Coordinator',
+  'clinical_research_coordinator': 'Clinical Research Coordinator',
+  'director': 'Study Director',
+  'study_director': 'Study Director',
+  'Investigator': 'Investigator',
+  'investigator': 'Investigator',
+  'ra': 'Research Assistant',
+  'ra2': 'Data Entry Person',
+  'monitor': 'Monitor',
+  'data_specialist': 'Data Specialist',
+  'data_entry_person': 'Data Entry Person',
+  'guest': 'Guest'
+};
+
+/**
+ * Gets the display name for a role.
+ * @param roleCode The role code from the database
+ * @returns Human-readable role name
+ */
+export function getRoleDisplayName(roleCode: string): string {
+  return ROLE_DISPLAY_MAP[roleCode] || roleCode;
+}
+
 // =============================================================================
 // STUDY TYPES (from StudyBean.java)
 // =============================================================================
@@ -279,7 +309,29 @@ export interface Study {
 /**
  * Study Type - matches StudyType.java
  */
-export type StudyType = 'genetic' | 'nongenetic';
+/**
+ * Study Type - maps to study_type table
+ * Database values: 1='genetic', 2='observational', 3='interventional', 4='other'
+ * 'nongenetic' is a legacy alias for non-genetic studies
+ */
+export type StudyType = 'genetic' | 'nongenetic' | 'observational' | 'interventional' | 'other';
+
+/**
+ * Maps study_type_id to StudyType
+ */
+export const STUDY_TYPE_MAP: Record<number, StudyType> = {
+  1: 'genetic',
+  2: 'observational',
+  3: 'interventional',
+  4: 'other'
+};
+
+/**
+ * Get study type from type_id
+ */
+export function getStudyType(typeId: number): StudyType {
+  return STUDY_TYPE_MAP[typeId] || 'other';
+}
 
 /**
  * Study Parameter Config - matches StudyParameterConfig.java
@@ -389,12 +441,85 @@ export interface SubjectGroupMap {
 }
 
 // =============================================================================
+// STUDY PHASE TYPES (StudyEventDefinition = Phase Template)
+// =============================================================================
+
+/**
+ * Study Phase (Study Event Definition) - matches StudyEventDefinitionBean.java
+ * 
+ * In LibreClinica, a "Study Event Definition" defines a phase/visit in the study protocol.
+ * This is the TEMPLATE that defines what phases exist in a study.
+ * When a patient is enrolled, study_event records are created based on these definitions.
+ * 
+ * Database Table: study_event_definition
+ */
+export interface StudyPhase {
+  studyEventDefinitionId: number;  // Maps to study_event_definition_id (PK)
+  studyId: number;                  // Maps to study_id (FK)
+  
+  // Phase Definition
+  name: string;                     // Phase name (e.g., "Screening", "Week 4", "End of Study")
+  description?: string;             // Detailed description
+  category?: string;                // Category grouping (e.g., "Baseline", "Treatment", "Follow-up")
+  type: 'scheduled' | 'unscheduled' | 'common';  // Event type
+  
+  // Ordering and Behavior
+  ordinal: number;                  // Order in study (1, 2, 3...)
+  repeating: boolean;               // Can this phase be repeated? (e.g., multiple visits)
+  
+  // Status & Audit
+  statusId: number;
+  ownerId: number;
+  dateCreated: Date | string;
+  dateUpdated?: Date | string;
+  updateId?: number;
+  
+  // OID
+  oid?: string;                     // OC OID (e.g., "SE_SCREENING_123")
+  
+  // Computed/Joined fields (not in DB)
+  crfCount?: number;                // Number of CRFs assigned to this phase
+  usageCount?: number;              // Number of patients scheduled for this phase
+  statusName?: string;              // Human-readable status
+  assignedCrfs?: EventDefinitionCRF[]; // CRFs assigned to this phase
+}
+
+/**
+ * Convert database row (snake_case) to StudyPhase (camelCase)
+ */
+export function toStudyPhase(row: any): StudyPhase {
+  return {
+    studyEventDefinitionId: row.study_event_definition_id,
+    studyId: row.study_id,
+    name: row.name || '',
+    description: row.description,
+    category: row.category,
+    type: row.type || 'scheduled',
+    ordinal: row.ordinal || 1,
+    repeating: row.repeating || false,
+    statusId: row.status_id || 1,
+    ownerId: row.owner_id,
+    dateCreated: row.date_created,
+    dateUpdated: row.date_updated,
+    updateId: row.update_id,
+    oid: row.oc_oid,
+    crfCount: parseInt(row.crf_count) || 0,
+    usageCount: parseInt(row.usage_count) || 0,
+    statusName: row.status_name
+  };
+}
+
+// =============================================================================
 // STUDY EVENT TYPES (from StudyEventBean.java)
 // =============================================================================
 
 /**
  * Study Event - matches StudyEventBean.java
- * An instance of a study event for a subject
+ * 
+ * An INSTANCE of a study phase for a specific subject.
+ * Created when a patient is scheduled for a phase.
+ * 
+ * Database Table: study_event
  */
 export interface StudyEvent {
   studyEventId: number;
@@ -495,9 +620,17 @@ export interface StudyEventDefinition {
  * CRF - matches CRFBean.java
  * Case Report Form template
  */
+/**
+ * CRF - matches CRFBean.java
+ * Case Report Form template
+ * 
+ * NOTE: The studyId field maps to the 'source_study_id' column in the database,
+ * which represents the study the CRF was originally created for. The database
+ * also has a 'study_id' column which may be different or null.
+ */
 export interface CRF {
   crfId: number;
-  studyId?: number;
+  studyId?: number;  // Maps to source_study_id in database
   
   // CRF Details
   name: string;
@@ -671,12 +804,38 @@ export const DATA_ENTRY_STAGE_MAP: Record<number, DataEntryStage> = {
 };
 
 /**
- * Completion Status - matches CompletionStatus.java
+ * Completion Status - matches CompletionStatus.java and database completion_status table
+ * 
+ * Database values (completion_status table):
+ *   1 = 'not_started'
+ *   2 = 'initial_data_entry' 
+ *   3 = 'data_entry_started'
+ *   4 = 'complete'
+ *   5 = 'signed'
  */
 export type CompletionStatus =
-  | 'not_started'   // 0
-  | 'in_progress'   // 1
-  | 'complete';     // 2
+  | 'not_started'           // 1
+  | 'initial_data_entry'    // 2
+  | 'data_entry_started'    // 3
+  | 'complete'              // 4
+  | 'signed';               // 5
+
+export const COMPLETION_STATUS_MAP: Record<number, CompletionStatus> = {
+  1: 'not_started',
+  2: 'initial_data_entry',
+  3: 'data_entry_started',
+  4: 'complete',
+  5: 'signed'
+};
+
+export function getCompletionStatusFromId(completionStatusId: number): CompletionStatus {
+  return COMPLETION_STATUS_MAP[completionStatusId] || 'not_started';
+}
+
+export function getCompletionStatusId(status: CompletionStatus): number {
+  const entry = Object.entries(COMPLETION_STATUS_MAP).find(([_, v]) => v === status);
+  return entry ? parseInt(entry[0]) : 1;
+}
 
 // =============================================================================
 // ITEM DATA TYPES (from ItemDataBean.java)
@@ -791,32 +950,123 @@ export type ResolutionStatus =
   | 'Not Applicable'; // 5
 
 // =============================================================================
+// STUDY GROUP TYPES (from StudyGroupBean.java, StudyGroupClassBean.java)
+// =============================================================================
+
+/**
+ * Study Group Class - matches StudyGroupClassBean.java
+ * Defines a category of groups (e.g., "Treatment Arm", "Cohort", "Stratum")
+ */
+export interface StudyGroupClass {
+  studyGroupClassId: number;
+  studyId: number;
+  
+  // Group Class Details
+  name: string;
+  groupClassTypeId: number;  // 1=Arm, 2=Family/Pedigree, 3=Dynamic Group, 4=Subject Groups
+  subjectAssignment?: string;  // 'required', 'optional', 'not_applicable'
+  
+  // Status & Audit
+  statusId: number;
+  ownerId: number;
+  dateCreated: Date | string;
+  dateUpdated?: Date | string;
+  updateId?: number;
+  
+  // Computed/Joined
+  groups?: StudyGroup[];
+}
+
+/**
+ * Study Group - matches StudyGroupBean.java
+ * An individual group within a class (e.g., "Placebo", "Drug A 10mg", "Drug A 20mg")
+ */
+export interface StudyGroup {
+  studyGroupId: number;
+  studyGroupClassId: number;
+  
+  // Group Details
+  name: string;
+  description?: string;
+  
+  // Status & Audit
+  statusId: number;
+  ownerId: number;
+  dateCreated: Date | string;
+  dateUpdated?: Date | string;
+  updateId?: number;
+  
+  // Display
+  subjectCount?: number;
+}
+
+/**
+ * Group Class Types - from LibreClinica
+ */
+export type GroupClassType = 'arm' | 'family' | 'dynamic' | 'subject_groups';
+
+export const GROUP_CLASS_TYPE_MAP: Record<number, GroupClassType> = {
+  1: 'arm',
+  2: 'family',
+  3: 'dynamic',
+  4: 'subject_groups'
+};
+
+// =============================================================================
 // AUDIT LOG TYPES (from AuditLogEvent.java)
 // =============================================================================
 
 /**
  * Audit Log Event - matches AuditLogEvent.java
+ * Extended with computed/joined fields for complete audit trail display
+ * 21 CFR Part 11 §11.10(e) - Complete Audit Trail
  */
 export interface AuditLogEvent {
+  // Primary identifier
   auditId: number;
   auditDate: Date | string;
-  auditTable: string;
+  
+  // User who performed the action
   userId: number;
+  userName?: string;
+  userFullName?: string;
+  userEmail?: string;
+  userRole?: string;
   
-  // Entity Info
-  entityId?: number;
-  entityName?: string;
+  // What was changed
+  auditTable: string;           // Table name (study_subject, item_data, event_crf, etc.)
+  entityId?: number;            // ID of the affected entity
+  entityName?: string;          // Name/label of the entity
   
-  // Change Details
-  oldValue?: string;
-  newValue?: string;
-  eventTypeId: number;
-  reasonForChange?: string;
+  // Change details - CRITICAL for 21 CFR Part 11
+  oldValue?: string;            // Previous value
+  newValue?: string;            // New value
+  eventTypeId: number;          // Type of audit event
+  eventTypeName?: string;       // Human-readable event type name
+  reasonForChange?: string;     // User-provided reason (required for edits)
   
-  // Context
+  // Context - links to related records
   studyId?: number;
+  studyName?: string;
   subjectId?: number;
+  subjectLabel?: string;
   eventCrfId?: number;
+  crfName?: string;
+  studyEventId?: number;
+  studyEventName?: string;
+  
+  // Item-level context for data changes
+  itemId?: number;
+  itemName?: string;
+  itemDataRepeatKey?: number;
+  
+  // Session info for compliance
+  sessionId?: string;
+  ipAddress?: string;
+  userAgent?: string;
+  
+  // Category for filtering/display
+  eventCategory?: 'data' | 'login' | 'query' | 'signature' | 'access' | 'system';
 }
 
 // =============================================================================
@@ -839,8 +1089,11 @@ export interface StudySubjectWithDetails extends StudySubject {
 export interface SubjectProgress {
   totalEvents: number;
   completedEvents: number;
+  eventCompletionPercentage?: number;
   totalForms: number;
   completedForms: number;
+  formCompletionPercentage?: number;
+  openQueries?: number;
   percentComplete: number;
 }
 
@@ -938,7 +1191,7 @@ export function toStudy(row: any): Study {
     protocolDescription: row.protocol_description,
     datePlannedStart: row.date_planned_start,
     datePlannedEnd: row.date_planned_end,
-    type: row.type_id === 2 ? 'genetic' : 'nongenetic',
+    type: getStudyType(row.type_id),
     protocolType: row.protocol_type,
     phase: row.phase,
     expectedTotalEnrollment: row.expected_total_enrollment,
@@ -1230,11 +1483,15 @@ export default {
   STATUS_MAP,
   SUBJECT_EVENT_STATUS_MAP,
   DATA_ENTRY_STAGE_MAP,
+  COMPLETION_STATUS_MAP,
   getStatusFromId,
   getStatusId,
+  getCompletionStatusFromId,
+  getCompletionStatusId,
   toStudySubject,
   toStudy,
   toStudyEvent,
+  toStudyPhase,
   toEventCRF,
   toCRF,
   toUserAccount

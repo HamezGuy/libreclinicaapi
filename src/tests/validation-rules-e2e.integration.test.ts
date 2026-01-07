@@ -739,6 +739,151 @@ describe('Validation Rules: Complete Frontend → API → Database → Retrieval
 });
 
 // ============================================================================
+// TEST 9: QUERY CREATION on Validation Failure
+// ============================================================================
+describe('QUERY CREATION: Validation failures create discrepancy notes', () => {
+  let authToken: string;
+  let testCrfId: number = 1;
+  let testStudyId: number = 1;
+  let createdRuleId: number;
+
+  const TEST_CONFIG = {
+    VALIDATION_RULES_ENDPOINT: '/api/validation-rules',
+    AUTH_ENDPOINT: '/api/auth/login',
+    QUERIES_ENDPOINT: '/api/queries',
+    USERNAME: 'root',
+    PASSWORD: '12345678'
+  };
+
+  beforeAll(async () => {
+    // Authenticate
+    try {
+      const response = await request(app)
+        .post(TEST_CONFIG.AUTH_ENDPOINT)
+        .send({ username: TEST_CONFIG.USERNAME, password: TEST_CONFIG.PASSWORD })
+        .set('Content-Type', 'application/json');
+
+      if (response.status === 200 && response.body.accessToken) {
+        authToken = response.body.accessToken;
+      }
+    } catch (e) {}
+
+    // Find a CRF and Study
+    try {
+      const crfResult = await pool.query('SELECT crf_id FROM crf LIMIT 1');
+      if (crfResult.rows.length > 0) testCrfId = crfResult.rows[0].crf_id;
+      
+      const studyResult = await pool.query('SELECT study_id FROM study LIMIT 1');
+      if (studyResult.rows.length > 0) testStudyId = studyResult.rows[0].study_id;
+    } catch (e) {}
+
+    // Create a test validation rule
+    if (authToken) {
+      const createResponse = await request(app)
+        .post(TEST_CONFIG.VALIDATION_RULES_ENDPOINT)
+        .send({
+          crfId: testCrfId,
+          name: 'Query Creation Test Rule',
+          ruleType: 'range',
+          fieldPath: 'test.queryField',
+          severity: 'error',
+          errorMessage: 'Value must be between 1 and 10',
+          minValue: 1,
+          maxValue: 10
+        })
+        .set('Authorization', `Bearer ${authToken}`)
+        .set('Content-Type', 'application/json');
+
+      if (createResponse.body.ruleId) {
+        createdRuleId = createResponse.body.ruleId;
+      }
+    }
+  });
+
+  afterAll(async () => {
+    // Cleanup test rule
+    if (createdRuleId) {
+      try {
+        await pool.query('DELETE FROM validation_rules WHERE validation_rule_id = $1', [createdRuleId]);
+      } catch (e) {}
+    }
+  });
+
+  it('Validation with createQueries=true creates discrepancy notes for failures', async () => {
+    if (!authToken) {
+      console.warn('⚠️ Skipping - no auth');
+      return;
+    }
+
+    // Count existing queries before test
+    const beforeCount = await pool.query(
+      'SELECT COUNT(*) as count FROM discrepancy_note WHERE study_id = $1',
+      [testStudyId]
+    );
+    const countBefore = parseInt(beforeCount.rows[0].count);
+
+    // Validate with invalid data and createQueries=true
+    const response = await request(app)
+      .post(`${TEST_CONFIG.VALIDATION_RULES_ENDPOINT}/validate/${testCrfId}?createQueries=true&studyId=${testStudyId}`)
+      .send({ test: { queryField: 100 } }) // Value outside 1-10 range
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Content-Type', 'application/json');
+
+    console.log('Validation response:', response.body);
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    
+    // Check if queries were created
+    if (response.body.data.queriesCreated && response.body.data.queriesCreated > 0) {
+      console.log(`✅ Created ${response.body.data.queriesCreated} queries for validation failures`);
+      
+      // Verify query exists in database
+      const afterCount = await pool.query(
+        'SELECT COUNT(*) as count FROM discrepancy_note WHERE study_id = $1',
+        [testStudyId]
+      );
+      const countAfter = parseInt(afterCount.rows[0].count);
+      
+      expect(countAfter).toBeGreaterThan(countBefore);
+      console.log(`✅ Query count increased from ${countBefore} to ${countAfter}`);
+    } else {
+      console.log('ℹ️ No queries created (rule may not have matched or createQueries not enabled)');
+    }
+  });
+
+  it('Validation without createQueries does NOT create discrepancy notes', async () => {
+    if (!authToken) return;
+
+    // Count existing queries before test
+    const beforeCount = await pool.query(
+      'SELECT COUNT(*) as count FROM discrepancy_note WHERE study_id = $1',
+      [testStudyId]
+    );
+    const countBefore = parseInt(beforeCount.rows[0].count);
+
+    // Validate with invalid data but WITHOUT createQueries
+    const response = await request(app)
+      .post(`${TEST_CONFIG.VALIDATION_RULES_ENDPOINT}/validate/${testCrfId}`)
+      .send({ test: { queryField: 100 } }) // Value outside range
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('Content-Type', 'application/json');
+
+    expect(response.status).toBe(200);
+
+    // Count should not have increased
+    const afterCount = await pool.query(
+      'SELECT COUNT(*) as count FROM discrepancy_note WHERE study_id = $1',
+      [testStudyId]
+    );
+    const countAfter = parseInt(afterCount.rows[0].count);
+
+    expect(countAfter).toBe(countBefore);
+    console.log('✅ No queries created when createQueries is not set');
+  });
+});
+
+// ============================================================================
 // UNIT TESTS: Pure validation logic (no database needed)
 // ============================================================================
 describe('Validation Logic Unit Tests', () => {

@@ -3,11 +3,23 @@
  * 
  * Endpoints for managing investigational product kits, shipments, and dispensing.
  * Integrates with LibreClinica's randomization and subject data.
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Full audit trail for all kit, shipment, and dispensing operations
+ * - §11.10(k): UTC timestamps for all events
+ * - §11.50: Electronic signature required for dispensing (GxP critical)
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { logger } from '../config/logger';
+import {
+  Part11EventTypes,
+  recordPart11Audit,
+  Part11Request,
+  requireSignature,
+  formatPart11Timestamp
+} from '../middleware/part11.middleware';
 
 const router = Router();
 
@@ -152,21 +164,24 @@ router.get('/kits', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { studyId, siteId, status, kitTypeId, search } = req.query;
 
+    // Note: LibreClinica doesn't have a separate study_site table
+    // Sites are studies with parent_study_id pointing to the main study
     let query = `
       SELECT 
         k.*,
         kt.name as kit_type_name,
-        s.name as site_name
+        kt.study_id as study_id,
+        site.name as site_name
       FROM acc_kit k
       LEFT JOIN acc_kit_type kt ON k.kit_type_id = kt.kit_type_id
-      LEFT JOIN study_site s ON k.current_site_id = s.study_site_id
+      LEFT JOIN study site ON k.current_site_id = site.study_id
       WHERE 1=1
     `;
     const params: any[] = [];
 
     if (studyId) {
       params.push(studyId);
-      query += ` AND k.study_id = $${params.length}`;
+      query += ` AND kt.study_id = $${params.length}`;
     }
 
     if (siteId) {
@@ -205,7 +220,7 @@ router.get('/kits', async (req: Request, res: Response, next: NextFunction) => {
         siteName: row.site_name,
         lotNumber: row.lot_number,
         expirationDate: row.expiration_date,
-        manufacturingDate: row.manufacturing_date
+        manufactureDate: row.manufacture_date
       }))
     });
   } catch (error) {
@@ -217,11 +232,16 @@ router.get('/kits', async (req: Request, res: Response, next: NextFunction) => {
 /**
  * POST /api/rtsm/kits
  * Register new kits
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for each kit registration
+ * - Captures kit details, lot numbers, and expiration dates
  */
-router.post('/kits', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/kits', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { studyId, kitTypeId, kits } = req.body;
-    const userId = (req as any).user?.id || 1;
+    const userId = req.user?.userId || 1;
+    const userName = req.user?.userName || 'system';
 
     const client = await pool.connect();
     try {
@@ -229,15 +249,39 @@ router.post('/kits', async (req: Request, res: Response, next: NextFunction) => 
 
       const insertedKits = [];
       for (const kit of kits) {
+        // Note: acc_kit table uses manufacture_date (not manufacturing_date), created_by (not registered_by)
+        // and doesn't have a study_id column - study is determined via kit_type_id FK
         const result = await client.query(`
           INSERT INTO acc_kit (
-            study_id, kit_type_id, kit_number, lot_number, 
-            manufacturing_date, expiration_date, status,
-            registered_by, date_created, date_updated
-          ) VALUES ($1, $2, $3, $4, $5, $6, 'available', $7, NOW(), NOW())
+            kit_type_id, kit_number, lot_number, 
+            manufacture_date, expiration_date, status,
+            created_by, date_created, date_updated
+          ) VALUES ($1, $2, $3, $4, $5, 'available', $6, NOW(), NOW())
           RETURNING *
-        `, [studyId, kitTypeId, kit.kitNumber, kit.lotNumber, kit.manufacturingDate, kit.expirationDate, userId]);
-        insertedKits.push(result.rows[0]);
+        `, [kitTypeId, kit.kitNumber, kit.lotNumber, kit.manufactureDate || kit.manufacturingDate, kit.expirationDate, userId]);
+        
+        const insertedKit = result.rows[0];
+        insertedKits.push(insertedKit);
+
+        // Part 11 Audit: Record kit registration (§11.10(e))
+        await recordPart11Audit(
+          userId,
+          userName,
+          Part11EventTypes.KIT_REGISTERED,
+          'acc_kit',
+          insertedKit.kit_id,
+          kit.kitNumber,
+          null,
+          {
+            kitNumber: kit.kitNumber,
+            kitTypeId,
+            lotNumber: kit.lotNumber,
+            expirationDate: kit.expirationDate,
+            status: 'available'
+          },
+          'Kit registered in inventory',
+          { ipAddress: req.ip }
+        );
       }
 
       await client.query('COMMIT');
@@ -266,17 +310,18 @@ router.post('/kits', async (req: Request, res: Response, next: NextFunction) => 
 router.post('/kits/:id/reserve', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const { subjectId, notes } = req.body;
+    const { subjectId } = req.body;
 
+    // Note: acc_kit doesn't have reserved_for_subject_id or notes columns
+    // We use dispensed_to_subject_id to track the subject reservation
     const result = await pool.query(`
       UPDATE acc_kit 
       SET status = 'reserved',
-          reserved_for_subject_id = $2,
-          notes = $3,
+          dispensed_to_subject_id = $2,
           date_updated = NOW()
       WHERE kit_id = $1 AND status = 'available'
       RETURNING *
-    `, [id, subjectId, notes]);
+    `, [id, subjectId]);
 
     if (result.rows.length === 0) {
       return res.status(400).json({ success: false, message: 'Kit not available for reservation' });
@@ -304,13 +349,14 @@ router.get('/shipments', async (req: Request, res: Response, next: NextFunction)
   try {
     const { studyId, siteId, status } = req.query;
 
+    // Note: acc_shipment uses destination_id (not destination_site_id), shipped_at, expected_delivery, delivered_at
     let query = `
       SELECT 
         s.*,
         site.name as site_name,
-        (SELECT COUNT(*) FROM acc_kit k WHERE k.shipment_id = s.shipment_id) as kit_count
+        (SELECT COUNT(*) FROM acc_kit k WHERE k.current_shipment_id = s.shipment_id) as kit_count
       FROM acc_shipment s
-      LEFT JOIN study_site site ON s.destination_site_id = site.study_site_id
+      LEFT JOIN study site ON s.destination_id = site.study_id
       WHERE 1=1
     `;
     const params: any[] = [];
@@ -322,7 +368,7 @@ router.get('/shipments', async (req: Request, res: Response, next: NextFunction)
 
     if (siteId) {
       params.push(siteId);
-      query += ` AND s.destination_site_id = $${params.length}`;
+      query += ` AND s.destination_id = $${params.length}`;
     }
 
     if (status) {
@@ -339,14 +385,15 @@ router.get('/shipments', async (req: Request, res: Response, next: NextFunction)
       data: result.rows.map(row => ({
         shipmentId: row.shipment_id,
         shipmentNumber: row.shipment_number,
-        siteId: row.destination_site_id,
-        siteName: row.site_name,
+        destinationId: row.destination_id,
+        destinationName: row.destination_name || row.site_name,
         status: row.status,
         kitCount: parseInt(row.kit_count || 0),
-        shipDate: row.ship_date,
-        expectedDelivery: row.expected_delivery_date,
-        actualDelivery: row.actual_delivery_date,
-        trackingNumber: row.tracking_number
+        shippedAt: row.shipped_at,
+        expectedDelivery: row.expected_delivery,
+        deliveredAt: row.delivered_at,
+        trackingNumber: row.tracking_number,
+        carrier: row.carrier
       }))
     });
   } catch (error) {
@@ -358,11 +405,16 @@ router.get('/shipments', async (req: Request, res: Response, next: NextFunction)
 /**
  * POST /api/rtsm/shipments
  * Create a new shipment
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Full audit trail of shipment creation
+ * - Records all kits assigned to shipment
  */
-router.post('/shipments', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/shipments', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { studyId, destinationSiteId, kitIds, shipDate, expectedDeliveryDate, trackingNumber } = req.body;
-    const userId = (req as any).user?.id || 1;
+    const userId = req.user?.userId || 1;
+    const userName = req.user?.userName || 'system';
 
     const client = await pool.connect();
     try {
@@ -374,8 +426,8 @@ router.post('/shipments', async (req: Request, res: Response, next: NextFunction
       // Create shipment
       const shipmentResult = await client.query(`
         INSERT INTO acc_shipment (
-          study_id, shipment_number, destination_site_id, status,
-          ship_date, expected_delivery_date, tracking_number,
+          study_id, shipment_number, destination_id, status,
+          shipped_at, expected_delivery, tracking_number,
           created_by, date_created, date_updated
         ) VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, NOW(), NOW())
         RETURNING *
@@ -387,10 +439,32 @@ router.post('/shipments', async (req: Request, res: Response, next: NextFunction
       if (kitIds && kitIds.length > 0) {
         await client.query(`
           UPDATE acc_kit 
-          SET shipment_id = $1, status = 'in_transit', date_updated = NOW()
+          SET current_shipment_id = $1, status = 'in_transit', date_updated = NOW()
           WHERE kit_id = ANY($2::int[])
         `, [shipmentId, kitIds]);
       }
+
+      // Part 11 Audit: Record shipment creation (§11.10(e))
+      await recordPart11Audit(
+        userId,
+        userName,
+        Part11EventTypes.SHIPMENT_CREATED,
+        'acc_shipment',
+        shipmentId,
+        shipmentNumber,
+        null,
+        {
+          shipmentNumber,
+          studyId,
+          destinationSiteId,
+          kitCount: kitIds?.length || 0,
+          kitIds: kitIds || [],
+          expectedDeliveryDate,
+          status: 'pending'
+        },
+        'Shipment created for kit distribution',
+        { ipAddress: req.ip }
+      );
 
       await client.query('COMMIT');
 
@@ -442,22 +516,35 @@ router.post('/shipments/:id/ship', async (req: Request, res: Response, next: Nex
 /**
  * POST /api/rtsm/shipments/:id/confirm
  * Confirm shipment receipt
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Full audit trail of receipt confirmation
+ * - Records who received shipment and when
  */
-router.post('/shipments/:id/confirm', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/shipments/:id/confirm', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
     const { receivedKitIds, notes } = req.body;
-    const userId = (req as any).user?.id || 1;
+    const userId = req.user?.userId || 1;
+    const userName = req.user?.userName || 'system';
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
+      // Get shipment details before update
+      const shipmentBefore = await client.query(
+        'SELECT * FROM acc_shipment WHERE shipment_id = $1',
+        [id]
+      );
+      const oldStatus = shipmentBefore.rows[0]?.status;
+      const shipmentNumber = shipmentBefore.rows[0]?.shipment_number;
+
       // Update shipment
       await client.query(`
         UPDATE acc_shipment 
         SET status = 'confirmed',
-            actual_delivery_date = NOW(),
+            delivered_at = NOW(),
             received_by = $2,
             notes = $3,
             date_updated = NOW()
@@ -467,10 +554,10 @@ router.post('/shipments/:id/confirm', async (req: Request, res: Response, next: 
       // Update kits - move to site inventory
       if (receivedKitIds && receivedKitIds.length > 0) {
         const shipmentResult = await client.query(
-          'SELECT destination_site_id FROM acc_shipment WHERE shipment_id = $1',
+          'SELECT destination_id FROM acc_shipment WHERE shipment_id = $1',
           [id]
         );
-        const siteId = shipmentResult.rows[0]?.destination_site_id;
+        const siteId = shipmentResult.rows[0]?.destination_id;
 
         await client.query(`
           UPDATE acc_kit 
@@ -480,6 +567,26 @@ router.post('/shipments/:id/confirm', async (req: Request, res: Response, next: 
           WHERE kit_id = ANY($1::int[])
         `, [receivedKitIds, siteId]);
       }
+
+      // Part 11 Audit: Record shipment receipt confirmation (§11.10(e))
+      await recordPart11Audit(
+        userId,
+        userName,
+        Part11EventTypes.SHIPMENT_RECEIVED,
+        'acc_shipment',
+        parseInt(id),
+        shipmentNumber,
+        { status: oldStatus },
+        {
+          status: 'confirmed',
+          receivedKitCount: receivedKitIds?.length || 0,
+          receivedKitIds: receivedKitIds || [],
+          receivedAt: formatPart11Timestamp(),
+          notes
+        },
+        'Shipment receipt confirmed',
+        { ipAddress: req.ip }
+      );
 
       await client.query('COMMIT');
 
@@ -506,15 +613,32 @@ router.post('/shipments/:id/confirm', async (req: Request, res: Response, next: 
 /**
  * POST /api/rtsm/dispense
  * Dispense a kit to a subject
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.50: REQUIRES electronic signature (password verification) for dispensing
+ * - §11.10(e): Full audit trail of dispensing event
+ * - GxP Critical Operation: Drug dispensing to human subjects
+ * 
+ * Request body must include:
+ * - password: User's password for electronic signature
+ * - signatureMeaning: "Authorized dispensing of investigational product"
  */
-router.post('/dispense', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/dispense', requireSignature, async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { kitId, subjectId, visitId, notes } = req.body;
-    const userId = (req as any).user?.id || 1;
+    const userId = req.user?.userId || 1;
+    const userName = req.user?.userName || 'system';
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Get kit details before dispensing
+      const kitBefore = await client.query(
+        'SELECT * FROM acc_kit WHERE kit_id = $1',
+        [kitId]
+      );
+      const oldKitData = kitBefore.rows[0];
 
       // Update kit status
       const kitResult = await client.query(`
@@ -531,20 +655,47 @@ router.post('/dispense', async (req: Request, res: Response, next: NextFunction)
         return res.status(400).json({ success: false, message: 'Kit not available for dispensing' });
       }
 
+      const dispensedKit = kitResult.rows[0];
+
       // Create dispensation record
-      await client.query(`
-        INSERT INTO acc_dispensation (
-          kit_id, study_subject_id, visit_id, dispensed_by,
-          dispensed_date, notes, date_created
+      // Note: Table is acc_kit_dispensing, uses study_event_id (not visit_id), dispensed_at (not dispensed_date)
+      const dispensingResult = await client.query(`
+        INSERT INTO acc_kit_dispensing (
+          kit_id, study_subject_id, study_event_id, dispensed_by,
+          dispensed_at, notes, date_created
         ) VALUES ($1, $2, $3, $4, NOW(), $5, NOW())
+        RETURNING dispensing_id
       `, [kitId, subjectId, visitId, userId, notes]);
+
+      // Part 11 Audit: Record kit dispensing with electronic signature (§11.10(e), §11.50)
+      await recordPart11Audit(
+        userId,
+        userName,
+        Part11EventTypes.KIT_DISPENSED,
+        'acc_kit_dispensing',
+        dispensingResult.rows[0].dispensing_id,
+        dispensedKit.kit_number,
+        { status: oldKitData?.status || 'available' },
+        {
+          kitId,
+          kitNumber: dispensedKit.kit_number,
+          subjectId,
+          visitId,
+          status: 'dispensed',
+          dispensedAt: formatPart11Timestamp(),
+          electronicSignature: true,
+          signatureMeaning: req.body.signatureMeaning || 'Authorized dispensing of investigational product'
+        },
+        'Kit dispensed to subject with electronic signature verification',
+        { ipAddress: req.ip, signatureMeaning: req.body.signatureMeaning }
+      );
 
       await client.query('COMMIT');
 
       res.json({
         success: true,
         data: kitResult.rows[0],
-        message: 'Kit dispensed successfully'
+        message: 'Kit dispensed successfully with electronic signature'
       });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -566,6 +717,8 @@ router.get('/dispensations', async (req: Request, res: Response, next: NextFunct
   try {
     const { studyId, siteId, subjectId, limit = 50 } = req.query;
 
+    // Note: Table is acc_kit_dispensing (not acc_dispensation)
+    // Uses dispensing_id, dispensed_at (not dispensed_date)
     let query = `
       SELECT 
         d.*,
@@ -573,7 +726,7 @@ router.get('/dispensations', async (req: Request, res: Response, next: NextFunct
         kt.name as kit_type_name,
         ss.label as subject_label,
         ua.user_name as dispensed_by_name
-      FROM acc_dispensation d
+      FROM acc_kit_dispensing d
       LEFT JOIN acc_kit k ON d.kit_id = k.kit_id
       LEFT JOIN acc_kit_type kt ON k.kit_type_id = kt.kit_type_id
       LEFT JOIN study_subject ss ON d.study_subject_id = ss.study_subject_id
@@ -584,7 +737,7 @@ router.get('/dispensations', async (req: Request, res: Response, next: NextFunct
 
     if (studyId) {
       params.push(studyId);
-      query += ` AND k.study_id = $${params.length}`;
+      query += ` AND kt.study_id = $${params.length}`;
     }
 
     if (siteId) {
@@ -598,22 +751,23 @@ router.get('/dispensations', async (req: Request, res: Response, next: NextFunct
     }
 
     params.push(limit);
-    query += ` ORDER BY d.dispensed_date DESC LIMIT $${params.length}`;
+    query += ` ORDER BY d.dispensed_at DESC LIMIT $${params.length}`;
 
     const result = await pool.query(query, params);
 
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        dispensationId: row.dispensation_id,
+        dispensingId: row.dispensing_id,
         kitId: row.kit_id,
         kitNumber: row.kit_number,
         kitType: row.kit_type_name,
         subjectId: row.study_subject_id,
         subjectLabel: row.subject_label,
         dispensedBy: row.dispensed_by_name,
-        dispensedDate: row.dispensed_date,
-        visitId: row.visit_id
+        dispensedAt: row.dispensed_at,
+        quantityDispensed: row.quantity_dispensed,
+        notes: row.notes
       }))
     });
   } catch (error) {

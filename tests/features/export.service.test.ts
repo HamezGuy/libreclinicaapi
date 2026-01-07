@@ -4,26 +4,27 @@
  * Tests for CDISC/ODM export using LibreClinica's dataset_* tables
  */
 
+import { describe, it, test, expect, beforeAll, afterAll, beforeEach, afterEach, jest } from '@jest/globals';
 import { pool } from '../../src/config/database';
 import * as exportService from '../../src/services/export/export.service';
 
 // Mock database and SOAP
 jest.mock('../../src/config/database', () => ({
   pool: {
-    query: jest.fn()
+    query: (jest.fn() as any)
   }
 }));
 
 jest.mock('../../src/services/soap/soapClient', () => ({
-  getSoapClient: jest.fn(() => ({
-    executeRequest: jest.fn().mockResolvedValue({
+  getSoapClient: (jest.fn() as any).mockReturnValue({
+    executeRequest: (jest.fn() as any).mockResolvedValue({
       success: true,
       data: {
         study: { name: 'Test Study' },
         subjects: []
       }
     })
-  }))
+  })
 }));
 
 jest.mock('../../src/config/logger', () => ({
@@ -36,7 +37,7 @@ jest.mock('../../src/config/logger', () => ({
 }));
 
 describe('Export Service', () => {
-  const mockPool = pool as jest.Mocked<typeof pool>;
+  const mockPool = pool as any;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -45,7 +46,7 @@ describe('Export Service', () => {
   describe('createDataset', () => {
     test('should create a dataset in LibreClinica dataset table', async () => {
       // Mock study lookup
-      (mockPool.query as jest.Mock)
+      mockPool.query
         .mockResolvedValueOnce({ rows: [{ study_id: 1 }] }) // Study lookup
         .mockResolvedValueOnce({ rows: [{ dataset_id: 1 }] }); // Dataset insert
 
@@ -64,12 +65,12 @@ describe('Export Service', () => {
 
       // Verify the insert query was called with correct parameters
       expect(mockPool.query).toHaveBeenCalledTimes(2);
-      const insertCall = (mockPool.query as jest.Mock).mock.calls[1];
+      const insertCall = mockPool.query.mock.calls[1];
       expect(insertCall[0]).toContain('INSERT INTO dataset');
     });
 
     test('should create dataset_crf_version_map entries for CRF OIDs', async () => {
-      (mockPool.query as jest.Mock)
+      mockPool.query
         .mockResolvedValueOnce({ rows: [{ study_id: 1 }] })
         .mockResolvedValueOnce({ rows: [{ dataset_id: 1 }] })
         .mockResolvedValueOnce({ rows: [{ event_definition_crf_id: 1, crf_version_id: 1 }] })
@@ -86,14 +87,14 @@ describe('Export Service', () => {
       expect(result.success).toBe(true);
       
       // Verify CRF map insert
-      const mapCall = (mockPool.query as jest.Mock).mock.calls.find(
-        call => call[0]?.includes?.('dataset_crf_version_map')
+      const mapCall = mockPool.query.mock.calls.find(
+        (call: any) => call[0]?.includes?.('dataset_crf_version_map')
       );
       expect(mapCall).toBeDefined();
     });
 
     test('should handle study not found error', async () => {
-      (mockPool.query as jest.Mock)
+      mockPool.query
         .mockResolvedValueOnce({ rows: [] }); // No study found
 
       const result = await exportService.createDataset({
@@ -108,7 +109,7 @@ describe('Export Service', () => {
 
   describe('getDatasets', () => {
     test('should retrieve datasets for a study', async () => {
-      (mockPool.query as jest.Mock).mockResolvedValueOnce({
+      mockPool.query.mockResolvedValueOnce({
         rows: [
           {
             dataset_id: 1,
@@ -139,7 +140,7 @@ describe('Export Service', () => {
     });
 
     test('should return empty array on error', async () => {
-      (mockPool.query as jest.Mock).mockRejectedValueOnce(new Error('DB Error'));
+      mockPool.query.mockRejectedValueOnce(new Error('DB Error'));
 
       const datasets = await exportService.getDatasets('S_TEST');
 
@@ -149,7 +150,7 @@ describe('Export Service', () => {
 
   describe('archiveExportedFile', () => {
     test('should archive file in archived_dataset_file table', async () => {
-      (mockPool.query as jest.Mock)
+      mockPool.query
         .mockResolvedValueOnce({ rows: [{ export_format_id: 1 }] }) // Format lookup
         .mockResolvedValueOnce({ rows: [] }); // Insert
 
@@ -164,14 +165,14 @@ describe('Export Service', () => {
       expect(result).toBe(true);
 
       // Verify insert call
-      const insertCall = (mockPool.query as jest.Mock).mock.calls.find(
-        call => call[0]?.includes?.('archived_dataset_file')
+      const insertCall = mockPool.query.mock.calls.find(
+        (call: any) => call[0]?.includes?.('archived_dataset_file')
       );
       expect(insertCall).toBeDefined();
     });
 
     test('should handle archive failure gracefully', async () => {
-      (mockPool.query as jest.Mock).mockRejectedValueOnce(new Error('DB Error'));
+      mockPool.query.mockRejectedValueOnce(new Error('DB Error'));
 
       const result = await exportService.archiveExportedFile(
         1, 'test.xml', '/path', 'odm', 1
@@ -183,7 +184,7 @@ describe('Export Service', () => {
 
   describe('getArchivedExports', () => {
     test('should retrieve archived exports for a dataset', async () => {
-      (mockPool.query as jest.Mock).mockResolvedValueOnce({
+      mockPool.query.mockResolvedValueOnce({
         rows: [
           {
             archived_dataset_file_id: 1,
@@ -250,7 +251,7 @@ describe('Export Service', () => {
   describe('buildFullOdmExport', () => {
     test('should include full clinical data in ODM export', async () => {
       // Mock all the database queries for full export
-      (mockPool.query as jest.Mock)
+      mockPool.query
         .mockResolvedValueOnce({ 
           rows: [{ study_id: 1, name: 'Test Study', oc_oid: 'S_TEST', unique_identifier: 'TEST01' }] 
         }) // Study

@@ -13,6 +13,7 @@
  * Tests full flow: Frontend → API → Database → Retrieval
  */
 
+import { describe, it, test, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
 import { pool } from '../../src/config/database';
 import * as formService from '../../src/services/hybrid/form.service';
 import * as validationRulesService from '../../src/services/database/validation-rules.service';

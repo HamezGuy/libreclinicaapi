@@ -89,8 +89,8 @@ describe('Audit Service', () => {
       const endDate = new Date();
 
       const result = await auditService.getAuditTrail({
-        startDate,
-        endDate,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
         page: 1,
         limit: 100
       });
@@ -169,7 +169,7 @@ describe('Audit Service', () => {
       const events = await auditService.getRecentAuditEvents(5);
 
       if (events.length > 0) {
-        const event = events[0];
+        const event = events[0] as any; // Raw SQL result
         expect(event.audit_id).toBeDefined();
         expect(event.audit_date).toBeDefined();
         expect(event.audit_table).toBeDefined();
@@ -181,8 +181,8 @@ describe('Audit Service', () => {
 
       if (events.length > 1) {
         for (let i = 0; i < events.length - 1; i++) {
-          const current = new Date(events[i].audit_date);
-          const next = new Date(events[i + 1].audit_date);
+          const current = new Date((events[i] as any).audit_date);
+          const next = new Date((events[i + 1] as any).audit_date);
           expect(current.getTime()).toBeGreaterThanOrEqual(next.getTime());
         }
       }

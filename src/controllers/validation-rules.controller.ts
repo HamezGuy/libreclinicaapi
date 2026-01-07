@@ -196,13 +196,54 @@ export const deleteRule = async (req: Request, res: Response, next: NextFunction
 
 /**
  * Validate form data against rules
+ * 
+ * Accepts options from query params OR request body:
+ * - createQueries: If true, creates queries (discrepancy notes) for validation failures
+ * - studyId: Required if createQueries is true
+ * - subjectId: Optional, links query to subject
+ * - eventCrfId: Optional, links query to event CRF
+ * 
+ * Request body can contain:
+ * - formData: The actual form data to validate (if separate from other fields)
+ * - Or: form fields directly in the body
  */
 export const validateData = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
+    const user = (req as any).user;
     const { crfId } = req.params;
-    const formData = req.body;
+    
+    // Support options from both query params and body for flexibility
+    const createQueriesQuery = req.query.createQueries;
+    const createQueriesBody = req.body.createQueries;
+    
+    const options = {
+      createQueries: createQueriesQuery === 'true' || createQueriesBody === true,
+      studyId: req.body.studyId || (req.query.studyId ? parseInt(req.query.studyId as string) : undefined),
+      subjectId: req.body.subjectId || (req.query.subjectId ? parseInt(req.query.subjectId as string) : undefined),
+      eventCrfId: req.body.eventCrfId || (req.query.eventCrfId ? parseInt(req.query.eventCrfId as string) : undefined),
+      userId: user?.userId
+    };
 
-    const result = await validationRulesService.validateFormData(parseInt(crfId), formData);
+    // Support formData as nested object or form fields directly in body
+    const formData = req.body.formData || (() => {
+      // Extract form fields by removing metadata fields
+      const { createQueries, studyId, subjectId, eventCrfId, formData: _, ...fields } = req.body;
+      return fields;
+    })();
+
+    const result = await validationRulesService.validateFormData(parseInt(crfId), formData, options);
+
+    // Audit trail if queries were created
+    if (result.queriesCreated && result.queriesCreated > 0) {
+      await trackUserAction({
+        userId: user.userId,
+        username: user.username || user.userName,
+        action: 'VALIDATION_QUERIES_CREATED',
+        entityType: 'validation',
+        entityId: parseInt(crfId),
+        details: `Created ${result.queriesCreated} queries from validation failures`
+      });
+    }
 
     const response: ApiResponse = {
       success: true,

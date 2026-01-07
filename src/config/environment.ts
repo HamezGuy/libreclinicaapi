@@ -16,25 +16,59 @@ export const config = {
   demoMode: process.env.DEMO_MODE === 'true',
   
   libreclinica: {
-    // LibreClinica Docker container - Docker setup uses port 8090
-    // SOAP services at /ws/{serviceName}/v1 path
-    // IMPORTANT: Password must be MD5 hash for WS-Security!
-    // Default "12345678" -> MD5: "25d55ad283aa400af464c76d713c07ad"
+    // ==========================================================================
+    // LibreClinica Integration Configuration
+    // ==========================================================================
+    // 
+    // ARCHITECTURE: This API acts as an intermediary between the Angular frontend
+    // and LibreClinica. We use LibreClinica's established channels:
+    //
+    // 1. SOAP Services (PRIMARY for GxP compliance):
+    //    - Study Subject management
+    //    - Event scheduling
+    //    - Data import/export
+    //    URL: http://localhost:8090/libreclinica-ws/ws/{service}/v1
+    //
+    // 2. Direct Database (for operations not exposed via SOAP):
+    //    - User authentication (LibreClinica's user_account table)
+    //    - Study metadata queries
+    //    - Audit log access
+    //    - Discrepancy notes/workflows
+    //
+    // DATABASE: We connect to the SAME database that LibreClinica uses.
+    // There is only ONE production database - the one created by the 
+    // LibreClinica Tomcat application. Port 5434 maps to this database.
+    // (Port 5433 is ONLY for isolated unit tests - not used in production)
+    // ==========================================================================
+    
+    // SOAP Configuration
     soapUrl: process.env.LIBRECLINICA_SOAP_URL || 'http://localhost:8090/libreclinica-ws/ws',
     soapUsername: process.env.SOAP_USERNAME || 'root',
+    // IMPORTANT: Password must be MD5 hash for WS-Security!
+    // Default "12345678" -> MD5: "25d55ad283aa400af464c76d713c07ad"
     soapPassword: process.env.SOAP_PASSWORD || '25d55ad283aa400af464c76d713c07ad',
     // Enable SOAP by default for GxP compliance (set DISABLE_SOAP=true to use direct DB only)
     soapEnabled: process.env.DISABLE_SOAP !== 'true',
+    
+    // Database Configuration - connects to LibreClinica's PostgreSQL database
     database: {
       host: process.env.LIBRECLINICA_DB_HOST || 'localhost',
-      // LibreClinica Docker database maps 5434:5432
+      // Port 5434 = LibreClinica's production database (libreclinica-postgres container)
+      // Port 5433 = Test database for unit tests only (api-test-db container) - DO NOT USE IN PROD
       port: parseInt(process.env.LIBRECLINICA_DB_PORT || '5434'),
       database: process.env.LIBRECLINICA_DB_NAME || 'libreclinica',
       user: process.env.LIBRECLINICA_DB_USER || 'libreclinica',
       password: process.env.LIBRECLINICA_DB_PASSWORD || 'libreclinica',
       max: parseInt(process.env.LIBRECLINICA_DB_MAX_CONNECTIONS || '20'),
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000
+      connectionTimeoutMillis: parseInt(process.env.LIBRECLINICA_DB_CONNECTION_TIMEOUT || '10000'),
+      // 21 CFR Part 11 §11.10(a) - SSL/TLS for data in transit
+      ssl: process.env.DB_SSL === 'true' ? {
+        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+        ca: process.env.DB_SSL_CA || undefined,
+        cert: process.env.DB_SSL_CERT || undefined,
+        key: process.env.DB_SSL_KEY || undefined
+      } : false
     }
   },
   
@@ -82,6 +116,19 @@ export const config = {
     s3Bucket: process.env.WOUND_IMAGES_S3_BUCKET || '',
     s3Region: process.env.WOUND_IMAGES_S3_REGION || 'us-east-1',
     enableAuditChain: process.env.WOUND_ENABLE_AUDIT_CHAIN !== 'false'
+  },
+  
+  // 21 CFR Part 11 §11.10(a) - Data-at-Rest Encryption
+  encryption: {
+    // Master encryption key - MUST be set in production!
+    // Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+    masterKey: process.env.ENCRYPTION_MASTER_KEY || 'change-me-in-production',
+    // Salt for key derivation - should be unique per deployment
+    salt: process.env.ENCRYPTION_SALT || 'libreclinica-default-salt-change-me',
+    // Enable field-level encryption for PHI/PII
+    enableFieldEncryption: process.env.ENABLE_FIELD_ENCRYPTION === 'true',
+    // List of tables to encrypt (comma-separated)
+    encryptedTables: (process.env.ENCRYPTED_TABLES || 'item_data,study_subject').split(',')
   }
 };
 

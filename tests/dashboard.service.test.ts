@@ -23,7 +23,7 @@ describe('Dashboard Service', () => {
     await testDb.pool.query('SELECT NOW()');
 
     // Create test study
-    testStudyId = await createTestStudy(pool, rootUserId, {
+    testStudyId = await createTestStudy(testDb.pool, rootUserId, {
       uniqueIdentifier: `DASHBOARD-TEST-${Date.now()}`,
       name: 'Dashboard Test Study'
     });
@@ -44,7 +44,7 @@ describe('Dashboard Service', () => {
   beforeEach(async () => {
     // Create test subjects for each test
     for (let i = 0; i < 3; i++) {
-      const subjectId = await createTestSubject(pool, testStudyId, {
+      const subjectId = await createTestSubject(testDb.pool, testStudyId, {
         label: `DASH-SUB-${Date.now()}-${i}`
       });
       testSubjectIds.push(subjectId);
@@ -151,7 +151,7 @@ describe('Dashboard Service', () => {
 
     it('should handle study with no CRFs', async () => {
       // Create a new empty study
-      const emptyStudyId = await createTestStudy(pool, rootUserId, {
+      const emptyStudyId = await createTestStudy(testDb.pool, rootUserId, {
         uniqueIdentifier: `EMPTY-${Date.now()}`
       });
 

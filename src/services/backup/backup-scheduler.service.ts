@@ -64,6 +64,9 @@ const schedulerStatus: SchedulerStatus = {
 
 /**
  * Record scheduler audit event directly to database
+ * Uses only columns that exist in native LibreClinica audit_log_event table:
+ * - audit_log_event_type_id, audit_date, audit_table, entity_id, entity_name, 
+ * - user_id, old_value, new_value, reason_for_change, event_crf_id
  */
 const recordSchedulerAudit = async (
   action: string,
@@ -74,13 +77,23 @@ const recordSchedulerAudit = async (
       INSERT INTO audit_log_event (
         audit_log_event_type_id,
         audit_date,
+        audit_table,
         entity_id,
         entity_name,
         user_id,
-        user_name,
-        new_value,
-        version
-      ) VALUES (1, NOW(), 0, $1, 0, 'scheduler', $2, 1)
+        new_value
+      ) VALUES (
+        COALESCE(
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%system%' OR name ILIKE '%other%' LIMIT 1),
+          1
+        ), 
+        NOW(), 
+        'backup_scheduler', 
+        0, 
+        $1, 
+        0, 
+        $2
+      )
     `, [action, JSON.stringify(details)]);
   } catch (error: any) {
     logger.warn('Could not record scheduler audit', { error: error.message, action });

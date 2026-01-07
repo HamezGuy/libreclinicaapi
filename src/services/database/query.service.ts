@@ -377,9 +377,9 @@ export const addQueryResponse = async (
     if (newStatusId !== oldStatusId) {
       await client.query(`
         UPDATE discrepancy_note
-        SET resolution_status_id = $1, update_id = $2
-        WHERE discrepancy_note_id = $3
-      `, [newStatusId, userId, parentQueryId]);
+        SET resolution_status_id = $1
+        WHERE discrepancy_note_id = $2
+      `, [newStatusId, parentQueryId]);
     }
 
     // Log audit event for the response
@@ -470,9 +470,9 @@ export const updateQueryStatus = async (
     // Update the query status
     await client.query(`
       UPDATE discrepancy_note
-      SET resolution_status_id = $1, update_id = $2
-      WHERE discrepancy_note_id = $3
-    `, [statusId, userId, queryId]);
+      SET resolution_status_id = $1
+      WHERE discrepancy_note_id = $2
+    `, [statusId, queryId]);
 
     // Determine action type for audit
     let actionName = 'Query status changed';
@@ -584,9 +584,9 @@ export const closeQueryWithSignature = async (
     // Update query to Closed status (4)
     await client.query(`
       UPDATE discrepancy_note
-      SET resolution_status_id = 4, update_id = $1
-      WHERE discrepancy_note_id = $2
-    `, [userId, queryId]);
+      SET resolution_status_id = 4
+      WHERE discrepancy_note_id = $1
+    `, [queryId]);
 
     // Add closing note as a child discrepancy_note
     await client.query(`
@@ -821,9 +821,9 @@ export const reassignQuery = async (
     // Update assignment
     await client.query(`
       UPDATE discrepancy_note
-      SET assigned_user_id = $1, update_id = $2
-      WHERE discrepancy_note_id = $3
-    `, [assignedUserId, userId, queryId]);
+      SET assigned_user_id = $1
+      WHERE discrepancy_note_id = $2
+    `, [assignedUserId, queryId]);
 
     // Log audit event
     await client.query(`

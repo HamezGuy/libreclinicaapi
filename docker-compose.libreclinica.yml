@@ -1,7 +1,27 @@
-# LibreClinica Docker Compose for Integration Testing
-# 
-# This file sets up a real LibreClinica instance with WORKING SOAP services
-# The default Docker image has broken SOAP - we mount the patched WAR file
+# ═══════════════════════════════════════════════════════════════════════════════
+# LibreClinica Docker Compose
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ARCHITECTURE:
+# ─────────────────────────────────────────────────────────────────────────────
+# This file sets up the complete LibreClinica stack:
+#
+# 1. libreclinica-postgres (Port 5434) - PRODUCTION DATABASE
+#    └── The ONLY database used by both LibreClinica and our API
+#    └── Schema created automatically by LibreClinica Tomcat app
+#    └── All SOAP/API operations use this database
+#
+# 2. libreclinica-test-app (Port 8090) - LibreClinica Web UI + SOAP Services
+#    └── http://localhost:8090/libreclinica/ - Web UI
+#    └── http://localhost:8090/libreclinica-ws/ws/{service}/v1 - SOAP
+#
+# 3. api-test-db (Port 5433) - ISOLATED UNIT TESTS ONLY
+#    └── Separate database for unit tests that need to reset data
+#    └── Uses our schema files, NOT the production schema
+#    └── NEVER used in production or integration tests
+#
+# IMPORTANT: The default jaspersnel/libreclinica image has BROKEN SOAP!
+# We mount a patched WAR file that includes Spring Web Services dependencies.
 #
 # 21 CFR Part 11 Compliant Features:
 # - PostgreSQL database with audit logging
@@ -12,6 +32,7 @@
 #   docker-compose -f docker-compose.libreclinica.yml up -d
 #   npm run test:integration:real
 #   docker-compose -f docker-compose.libreclinica.yml down
+# ═══════════════════════════════════════════════════════════════════════════════
 
 services:
   # ==========================================================================
@@ -83,7 +104,14 @@ services:
       - ../libreclinica-fix/LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
 
   # ==========================================================================
-  # Test Database (for API tests - separate from LibreClinica)
+  # UNIT TEST DATABASE ONLY - DO NOT USE FOR PRODUCTION/INTEGRATION
+  # ==========================================================================
+  # This database is ONLY for isolated unit tests that need to:
+  # - Reset data between tests
+  # - Test against a known schema state
+  # - Run without LibreClinica running
+  #
+  # Production and integration tests should use libreclinica-postgres (5434)
   # ==========================================================================
   test-db:
     image: postgres:14-alpine
@@ -104,6 +132,8 @@ services:
       retries: 10
     networks:
       - libreclinica-test-network
+    profiles:
+      - testing  # Only start with: docker-compose --profile testing up
 
 volumes:
   libreclinica-db-data:

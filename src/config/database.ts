@@ -19,6 +19,15 @@ class DatabaseConnection {
       }
     }
     
+    // Log the database configuration for debugging
+    logger.info('Database configuration', {
+      host: config.libreclinica.database.host,
+      port: config.libreclinica.database.port,
+      database: config.libreclinica.database.database,
+      user: config.libreclinica.database.user,
+      connectionTimeoutMillis: config.libreclinica.database.connectionTimeoutMillis
+    });
+    
     this.pool = new Pool(config.libreclinica.database);
     
     // Test connection on startup

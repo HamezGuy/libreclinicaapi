@@ -1,5 +1,11 @@
 /**
  * Query Routes
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Query creation requires electronic signature (§11.50)
+ * - Query responses require electronic signature (§11.50)
+ * - Query closure requires electronic signature (§11.50)
+ * - All changes are logged to audit trail (§11.10(e))
  */
 
 import express from 'express';
@@ -7,12 +13,13 @@ import * as controller from '../controllers/query.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, querySchemas, commonSchemas } from '../middleware/validation.middleware';
+import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
 
 const router = express.Router();
 
 router.use(authMiddleware);
 
-// List and statistics
+// List and statistics (no signature required)
 router.get('/', validate({ query: querySchemas.list }), controller.list);
 router.get('/stats', controller.stats);
 router.get('/types', controller.getQueryTypes);
@@ -22,22 +29,44 @@ router.get('/count-by-type', controller.countByType);
 router.get('/overdue', controller.getOverdue);
 router.get('/my-assigned', controller.getMyAssigned);
 
-// Form-specific queries
+// Form-specific queries (no signature required for reading)
 router.get('/form/:eventCrfId', controller.getFormQueries);
 
-// Single query operations
+// Single query operations (no signature required for reading)
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/thread', controller.getThread);
 router.get('/:id/audit-trail', controller.getAuditTrail);
 
-// Create and update operations
-router.post('/', requireRole('data_entry', 'investigator', 'monitor'), validate({ body: querySchemas.create }), controller.create);
-router.post('/:id/respond', validate({ params: commonSchemas.idParam, body: querySchemas.respond }), controller.respond);
-router.put('/:id/status', requireRole('monitor', 'coordinator', 'admin'), validate({ params: commonSchemas.idParam, body: querySchemas.updateStatus }), controller.updateStatus);
-router.put('/:id/reassign', requireRole('coordinator', 'admin'), controller.reassign);
+// Create and update operations (signature required per §11.50)
+router.post('/', 
+  requireRole('admin', 'coordinator', 'data_entry', 'investigator', 'monitor'), 
+  validate({ body: querySchemas.create }), 
+  requireSignatureFor(SignatureMeanings.QUERY_CREATE),
+  controller.create
+);
+router.post('/:id/respond', 
+  validate({ params: commonSchemas.idParam, body: querySchemas.respond }), 
+  requireSignatureFor(SignatureMeanings.QUERY_RESPOND),
+  controller.respond
+);
+router.put('/:id/status', 
+  requireRole('monitor', 'coordinator', 'admin'), 
+  validate({ params: commonSchemas.idParam, body: querySchemas.updateStatus }), 
+  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
+  controller.updateStatus
+);
+router.put('/:id/reassign', 
+  requireRole('coordinator', 'admin'), 
+  requireSignatureFor(SignatureMeanings.AUTHORIZE),
+  controller.reassign
+);
 
 // Close with electronic signature (21 CFR Part 11 compliant)
-router.post('/:id/close-with-signature', requireRole('monitor', 'coordinator', 'admin', 'investigator'), controller.closeWithSignature);
+router.post('/:id/close-with-signature', 
+  requireRole('monitor', 'coordinator', 'admin', 'investigator'), 
+  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
+  controller.closeWithSignature
+);
 
 export default router;
 

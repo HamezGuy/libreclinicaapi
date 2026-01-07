@@ -13,6 +13,7 @@
  * These tests verify end-to-end functionality from API to database
  */
 
+import { describe, it, test, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
 import request from 'supertest';
 import app from '../../src/app';
 import { pool } from '../../src/config/database';

@@ -17,11 +17,14 @@ import { OAuth2Client } from 'google-auth-library';
 import { config } from '../../config/environment';
 import {
   comparePasswordMD5,
+  verifyAndUpgrade,
+  hashPasswordBcrypt,
   isPasswordExpired,
   getDaysUntilPasswordExpires,
   shouldLockAccount,
   calculateLockoutDuration,
-  isLockoutExpired
+  isLockoutExpired,
+  PasswordHashType
 } from '../../utils/password.util';
 import { JwtPayload } from '../../utils/jwt.util';
 import { User, ApiResponse, LoginResponse } from '../../types';
@@ -77,23 +80,59 @@ export const authenticateUser = async (
     // Query user from database
     // Note: LibreClinica's user_account table doesn't have enabled/account_non_locked columns
     // All users in the table are considered active. Status is determined by status_id.
-    const query = `
-      SELECT 
-        u.user_id,
-        u.user_name,
-        u.first_name,
-        u.last_name,
-        u.email,
-        u.passwd,
-        u.passwd_timestamp,
-        u.date_lastvisit,
-        u.status_id,
-        ut.user_type_id,
-        ut.user_type
-      FROM user_account u
-      LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
-      WHERE u.user_name = $1
-    `;
+    // Also fetch bcrypt hash from extended table if available (for upgraded passwords)
+    
+    // First check if user_account_extended table exists to avoid query errors
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'user_account_extended'
+      ) as table_exists
+    `);
+    const hasExtendedTable = tableCheck.rows[0]?.table_exists === true;
+    
+    // Use appropriate query based on table existence
+    const query = hasExtendedTable 
+      ? `
+        SELECT 
+          u.user_id,
+          u.user_name,
+          u.first_name,
+          u.last_name,
+          u.email,
+          u.passwd,
+          u.passwd_timestamp,
+          u.date_lastvisit,
+          u.status_id,
+          ut.user_type_id,
+          ut.user_type,
+          uae.bcrypt_passwd,
+          uae.password_version
+        FROM user_account u
+        LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
+        LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
+        WHERE u.user_name = $1
+      `
+      : `
+        SELECT 
+          u.user_id,
+          u.user_name,
+          u.first_name,
+          u.last_name,
+          u.email,
+          u.passwd,
+          u.passwd_timestamp,
+          u.date_lastvisit,
+          u.status_id,
+          ut.user_type_id,
+          ut.user_type,
+          NULL as bcrypt_passwd,
+          NULL as password_version
+        FROM user_account u
+        LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
+        WHERE u.user_name = $1
+      `;
 
     const result = await pool.query(query, [username]);
 
@@ -120,10 +159,15 @@ export const authenticateUser = async (
       };
     }
 
-    // Verify password
-    const isValidPassword = comparePasswordMD5(password, user.passwd);
+    // Verify password with dual-auth support (MD5 legacy + bcrypt secure)
+    // This allows transparent migration from MD5 to bcrypt
+    const verification = await verifyAndUpgrade(
+      password,
+      user.passwd,           // MD5 hash from LibreClinica
+      user.bcrypt_passwd     // bcrypt hash if available (from our extended table)
+    );
 
-    if (!isValidPassword) {
+    if (!verification.valid) {
       // Log failed login
       await logFailedLogin(username, ipAddress, 'Invalid password');
 
@@ -133,6 +177,20 @@ export const authenticateUser = async (
         success: false,
         message: 'Invalid username or password'
       };
+    }
+    
+    // If password was verified via MD5 and needs upgrade to bcrypt
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      try {
+        await upgradeToBcrypt(user.user_id, verification.upgradedBcryptHash);
+        logger.info('Password upgraded from MD5 to bcrypt', { userId: user.user_id });
+      } catch (upgradeError: any) {
+        // Don't fail login if upgrade fails - just log it
+        logger.warn('Failed to upgrade password hash', { 
+          userId: user.user_id, 
+          error: upgradeError.message 
+        });
+      }
     }
 
     // Skip password expiration check for now (LibreClinica manages this internally)
@@ -486,6 +544,49 @@ async function updateLastVisit(userId: number): Promise<void> {
   `;
   
   await pool.query(query, [userId]);
+}
+
+/**
+ * Upgrade user password from MD5 to bcrypt
+ * Stores bcrypt hash in extended user table while keeping MD5 for SOAP compatibility
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - MD5 kept for LibreClinica SOAP WS-Security (legacy requirement)
+ * - bcrypt used for API authentication (secure)
+ * - Both hashes represent the same password
+ */
+async function upgradeToBcrypt(userId: number, bcryptHash: string): Promise<void> {
+  // First, check if the extended table exists, create if not
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_account_extended (
+        user_id INTEGER PRIMARY KEY REFERENCES user_account(user_id),
+        bcrypt_passwd VARCHAR(255),
+        passwd_upgraded_at TIMESTAMP DEFAULT NOW(),
+        password_version INTEGER DEFAULT 2,
+        CONSTRAINT fk_user_account FOREIGN KEY (user_id) 
+          REFERENCES user_account(user_id) ON DELETE CASCADE
+      )
+    `);
+  } catch (tableError: any) {
+    // Table might already exist or FK might fail - continue anyway
+    logger.debug('Extended table check', { message: tableError.message });
+  }
+  
+  // Upsert the bcrypt hash
+  const query = `
+    INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
+    VALUES ($1, $2, NOW(), 2)
+    ON CONFLICT (user_id) 
+    DO UPDATE SET 
+      bcrypt_passwd = EXCLUDED.bcrypt_passwd,
+      passwd_upgraded_at = NOW(),
+      password_version = 2
+  `;
+  
+  await pool.query(query, [userId, bcryptHash]);
+  
+  logger.info('Password hash upgraded to bcrypt', { userId });
 }
 
 /**

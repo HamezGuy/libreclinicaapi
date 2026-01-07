@@ -3,6 +3,11 @@
  * 
  * API endpoints for subject transfer between sites.
  * Includes e-signature requirements for 21 CFR Part 11 compliance.
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Full audit trail for all transfer operations
+ * - §11.50: Electronic signature required for transfer approval
+ * - §11.10(k): UTC timestamps for all events
  */
 
 import { Router, Request, Response } from 'express';
@@ -19,6 +24,13 @@ import {
   hasPendingTransfer,
   getAvailableSites
 } from '../services/database/transfer.service';
+import {
+  Part11EventTypes,
+  recordPart11Audit,
+  Part11Request,
+  requireSignature,
+  formatPart11Timestamp
+} from '../middleware/part11.middleware';
 
 const router = Router();
 
@@ -50,11 +62,15 @@ const requireTransferRole = async (req: Request, res: Response, next: Function) 
 /**
  * POST /api/transfers/initiate
  * Initiate a subject transfer
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Records transfer initiation with full audit trail
  */
-router.post('/initiate', authMiddleware, requireTransferRole, async (req: Request, res: Response) => {
+router.post('/initiate', authMiddleware, requireTransferRole, async (req: Part11Request, res: Response) => {
   try {
     const { studySubjectId, destinationSiteId, reasonForTransfer, notes, requiresApprovals } = req.body;
-    const userId = (req as any).user?.userId;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
 
     if (!studySubjectId || !destinationSiteId || !reasonForTransfer) {
       return res.status(400).json({
@@ -72,6 +88,26 @@ router.post('/initiate', authMiddleware, requireTransferRole, async (req: Reques
       requiresApprovals: requiresApprovals !== false
     });
 
+    // Part 11 Audit: Record transfer initiation (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.TRANSFER_INITIATED,
+      'acc_transfer_log',
+      transfer.transferId,
+      `Transfer for subject ${studySubjectId}`,
+      null,
+      {
+        studySubjectId,
+        destinationSiteId,
+        reasonForTransfer,
+        status: 'pending',
+        initiatedAt: formatPart11Timestamp()
+      },
+      reasonForTransfer,
+      { ipAddress: req.ip }
+    );
+
     res.json({ success: true, data: transfer });
   } catch (error: any) {
     logger.error('Error initiating transfer', { error: error.message });
@@ -82,17 +118,22 @@ router.post('/initiate', authMiddleware, requireTransferRole, async (req: Reques
 /**
  * POST /api/transfers/:transferId/approve
  * Approve a transfer (source or destination site)
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.50: REQUIRES electronic signature (password verification)
+ * - §11.10(e): Records approval with signature details
  */
-router.post('/:transferId/approve', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:transferId/approve', authMiddleware, requireSignature, async (req: Part11Request, res: Response) => {
   try {
     const transferId = parseInt(req.params.transferId);
-    const { approvalType, password } = req.body;
-    const userId = (req as any).user?.userId;
+    const { approvalType } = req.body;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
 
-    if (!approvalType || !password) {
+    if (!approvalType) {
       return res.status(400).json({
         success: false,
-        message: 'approvalType and password are required'
+        message: 'approvalType is required'
       });
     }
 
@@ -103,12 +144,35 @@ router.post('/:transferId/approve', authMiddleware, async (req: Request, res: Re
       });
     }
 
+    // Get transfer details before approval
+    const transferBefore = await getTransferDetails(transferId);
+
     const transfer = await approveTransfer({
       transferId,
       approvalType,
       approvedBy: userId,
-      password
+      password: req.body.password // Already verified by requireSignature middleware
     });
+
+    // Part 11 Audit: Record transfer approval with e-signature (§11.10(e), §11.50)
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.TRANSFER_APPROVED,
+      'acc_transfer_log',
+      transferId,
+      `Transfer ${transferId} - ${approvalType} approval`,
+      { status: transferBefore?.transferStatus },
+      {
+        status: transfer.transferStatus,
+        approvalType,
+        approvedAt: formatPart11Timestamp(),
+        electronicSignature: true,
+        signatureMeaning: req.body.signatureMeaning || `Approved ${approvalType} site transfer`
+      },
+      `${approvalType} site approved transfer with electronic signature`,
+      { ipAddress: req.ip, signatureMeaning: req.body.signatureMeaning }
+    );
 
     res.json({ success: true, data: transfer });
   } catch (error: any) {
@@ -120,13 +184,39 @@ router.post('/:transferId/approve', authMiddleware, async (req: Request, res: Re
 /**
  * POST /api/transfers/:transferId/complete
  * Complete a transfer (move subject to new site)
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Records transfer completion with full audit trail
  */
-router.post('/:transferId/complete', authMiddleware, requireTransferRole, async (req: Request, res: Response) => {
+router.post('/:transferId/complete', authMiddleware, requireTransferRole, async (req: Part11Request, res: Response) => {
   try {
     const transferId = parseInt(req.params.transferId);
-    const userId = (req as any).user?.userId;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
+
+    // Get transfer details before completion
+    const transferBefore = await getTransferDetails(transferId);
 
     const transfer = await completeTransfer(transferId, userId);
+
+    // Part 11 Audit: Record transfer completion (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.TRANSFER_COMPLETED,
+      'acc_transfer_log',
+      transferId,
+      `Transfer ${transferId} completed`,
+      { status: transferBefore?.transferStatus },
+      {
+        status: 'completed',
+        completedAt: formatPart11Timestamp(),
+        studySubjectId: transfer.studySubjectId,
+        newSiteId: transfer.destinationSiteId
+      },
+      'Subject transfer completed - subject moved to new site',
+      { ipAddress: req.ip }
+    );
 
     res.json({ success: true, data: transfer });
   } catch (error: any) {
@@ -138,12 +228,16 @@ router.post('/:transferId/complete', authMiddleware, requireTransferRole, async 
 /**
  * POST /api/transfers/:transferId/cancel
  * Cancel a pending transfer
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Records transfer cancellation with reason
  */
-router.post('/:transferId/cancel', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:transferId/cancel', authMiddleware, async (req: Part11Request, res: Response) => {
   try {
     const transferId = parseInt(req.params.transferId);
     const { cancelReason } = req.body;
-    const userId = (req as any).user?.userId;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
 
     if (!cancelReason) {
       return res.status(400).json({
@@ -152,11 +246,32 @@ router.post('/:transferId/cancel', authMiddleware, async (req: Request, res: Res
       });
     }
 
+    // Get transfer details before cancellation
+    const transferBefore = await getTransferDetails(transferId);
+
     const transfer = await cancelTransfer({
       transferId,
       cancelledBy: userId,
       cancelReason
     });
+
+    // Part 11 Audit: Record transfer cancellation (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.TRANSFER_CANCELLED,
+      'acc_transfer_log',
+      transferId,
+      `Transfer ${transferId} cancelled`,
+      { status: transferBefore?.transferStatus },
+      {
+        status: 'cancelled',
+        cancelledAt: formatPart11Timestamp(),
+        cancelReason
+      },
+      cancelReason,
+      { ipAddress: req.ip }
+    );
 
     res.json({ success: true, data: transfer });
   } catch (error: any) {

@@ -341,34 +341,86 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
 
 /**
  * Get all validation rules for a study (all CRFs)
+ * 
+ * Returns unique CRFs associated with the study through:
+ * 1. Event definitions (edc -> sed -> study)
+ * 2. Source study ID
+ * 3. Fallback to all available CRFs if none found
+ * 
+ * Uses UNION to combine sources and GROUP BY to deduplicate
  */
 export const getRulesForStudy = async (studyId: number): Promise<{ crfId: number; crfName: string; rules: ValidationRule[] }[]> => {
   logger.info('Getting validation rules for study', { studyId });
 
   try {
-    // Get all CRFs for the study
-    const crfsQuery = `
-      SELECT DISTINCT c.crf_id, c.name
-      FROM crf c
-      INNER JOIN crf_version cv ON c.crf_id = cv.crf_id
-      INNER JOIN event_definition_crf edc ON cv.crf_id = edc.crf_id
-      INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
-      WHERE sed.study_id = $1
-      ORDER BY c.name
+    // Combined query using UNION to get unique CRFs from multiple sources
+    // This ensures no duplicates while checking all possible associations
+    const combinedCrfsQuery = `
+      WITH study_crfs AS (
+        -- CRFs assigned to study event definitions
+        SELECT DISTINCT c.crf_id, c.name, 1 as priority
+        FROM crf c
+        INNER JOIN crf_version cv ON c.crf_id = cv.crf_id
+        INNER JOIN event_definition_crf edc ON cv.crf_id = edc.crf_id
+        INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
+        WHERE sed.study_id = $1
+          AND c.status_id = 1
+        
+        UNION
+        
+        -- CRFs created for this study (source_study_id)
+        SELECT DISTINCT c.crf_id, c.name, 2 as priority
+        FROM crf c
+        WHERE c.source_study_id = $1
+          AND c.status_id = 1
+      )
+      SELECT DISTINCT ON (crf_id) crf_id, name
+      FROM study_crfs
+      ORDER BY crf_id, priority
     `;
 
-    const crfsResult = await pool.query(crfsQuery, [studyId]);
+    let crfsResult = await pool.query(combinedCrfsQuery, [studyId]);
+    logger.info('Study CRFs (combined query)', { studyId, count: crfsResult.rows.length });
 
-    const results = [];
+    // Fallback: Get ALL available CRFs if none found for this study
+    if (crfsResult.rows.length === 0) {
+      const allCrfsQuery = `
+        SELECT DISTINCT crf_id, name
+        FROM crf
+        WHERE status_id = 1
+        ORDER BY name
+        LIMIT 50
+      `;
+      crfsResult = await pool.query(allCrfsQuery);
+      logger.info('All available CRFs (fallback)', { count: crfsResult.rows.length });
+    }
+
+    // Use Map to ensure uniqueness by crf_id
+    const crfMap = new Map<number, { crfId: number; crfName: string }>();
     for (const crf of crfsResult.rows) {
-      const rules = await getRulesForCrf(crf.crf_id);
+      if (!crfMap.has(crf.crf_id)) {
+        crfMap.set(crf.crf_id, {
+          crfId: crf.crf_id,
+          crfName: crf.name
+        });
+      }
+    }
+
+    // Convert to array and fetch rules for each unique CRF
+    const results = [];
+    for (const crf of crfMap.values()) {
+      const rules = await getRulesForCrf(crf.crfId);
       results.push({
-        crfId: crf.crf_id,
-        crfName: crf.name,
+        crfId: crf.crfId,
+        crfName: crf.crfName,
         rules
       });
     }
 
+    // Sort by name for consistent ordering
+    results.sort((a, b) => a.crfName.localeCompare(b.crfName));
+
+    logger.info('Returning unique CRFs for study', { studyId, uniqueCount: results.length });
     return results;
   } catch (error: any) {
     logger.error('Get study validation rules error', { error: error.message });
@@ -451,6 +503,9 @@ export const createRule = async (
       RETURNING validation_rule_id
     `;
 
+    // Support both fieldPath and fieldName for API compatibility
+    const fieldPath = rule.fieldPath || (rule as any).fieldName || '';
+    
     const result = await client.query(insertQuery, [
       rule.crfId,
       rule.crfVersionId || null,
@@ -458,7 +513,7 @@ export const createRule = async (
       rule.name,
       rule.description || '',
       rule.ruleType,
-      rule.fieldPath,
+      fieldPath,
       rule.severity || 'error',
       rule.errorMessage,
       rule.warningMessage || null,
@@ -605,20 +660,38 @@ export const deleteRule = async (
 
 /**
  * Validate form data against rules
+ * 
+ * @param crfId - The CRF ID to validate against
+ * @param formData - The form data to validate
+ * @param options - Optional parameters for query creation
+ * @param options.createQueries - If true, creates queries for validation failures
+ * @param options.studyId - Study ID for query creation
+ * @param options.subjectId - Subject ID for query creation
+ * @param options.eventCrfId - Event CRF ID for query creation
+ * @param options.userId - User ID who triggered validation
  */
 export const validateFormData = async (
   crfId: number,
-  formData: Record<string, any>
+  formData: Record<string, any>,
+  options?: {
+    createQueries?: boolean;
+    studyId?: number;
+    subjectId?: number;
+    eventCrfId?: number;
+    userId?: number;
+  }
 ): Promise<{
   valid: boolean;
-  errors: { fieldPath: string; message: string; severity: string }[];
+  errors: { fieldPath: string; message: string; severity: string; queryId?: number }[];
   warnings: { fieldPath: string; message: string }[];
+  queriesCreated?: number;
 }> => {
   logger.info('Validating form data', { crfId, fieldsCount: Object.keys(formData).length });
 
   const rules = await getRulesForCrf(crfId);
-  const errors: { fieldPath: string; message: string; severity: string }[] = [];
+  const errors: { fieldPath: string; message: string; severity: string; queryId?: number }[] = [];
   const warnings: { fieldPath: string; message: string }[] = [];
+  let queriesCreated = 0;
 
   for (const rule of rules) {
     if (!rule.active) continue;
@@ -628,11 +701,35 @@ export const validateFormData = async (
 
     if (!validationResult.valid) {
       if (rule.severity === 'error') {
-        errors.push({
+        const error: { fieldPath: string; message: string; severity: string; queryId?: number } = {
           fieldPath: rule.fieldPath,
           message: rule.errorMessage,
           severity: 'error'
-        });
+        };
+
+        // Create query for validation failure if requested
+        if (options?.createQueries && options.studyId && options.userId) {
+          try {
+            const queryId = await createValidationQuery({
+              studyId: options.studyId,
+              subjectId: options.subjectId,
+              eventCrfId: options.eventCrfId,
+              fieldPath: rule.fieldPath,
+              ruleName: rule.name,
+              errorMessage: rule.errorMessage,
+              value: value,
+              userId: options.userId
+            });
+            if (queryId) {
+              error.queryId = queryId;
+              queriesCreated++;
+            }
+          } catch (e: any) {
+            logger.error('Failed to create validation query:', e.message);
+          }
+        }
+
+        errors.push(error);
       } else {
         warnings.push({
           fieldPath: rule.fieldPath,
@@ -645,9 +742,67 @@ export const validateFormData = async (
   return {
     valid: errors.length === 0,
     errors,
-    warnings
+    warnings,
+    queriesCreated
   };
 };
+
+/**
+ * Create a query (discrepancy note) for a validation failure
+ */
+async function createValidationQuery(params: {
+  studyId: number;
+  subjectId?: number;
+  eventCrfId?: number;
+  fieldPath: string;
+  ruleName: string;
+  errorMessage: string;
+  value: any;
+  userId: number;
+}): Promise<number | null> {
+  try {
+    const description = `Validation Error: ${params.ruleName}`;
+    const detailedNotes = `Field: ${params.fieldPath}\nValue: ${JSON.stringify(params.value)}\nError: ${params.errorMessage}`;
+
+    const result = await pool.query(`
+      INSERT INTO discrepancy_note (
+        description,
+        detailed_notes,
+        discrepancy_note_type_id,
+        resolution_status_id,
+        study_id,
+        owner_id,
+        date_created,
+        entity_type
+      ) VALUES ($1, $2, 1, 1, $3, $4, CURRENT_TIMESTAMP, 'itemData')
+      RETURNING discrepancy_note_id
+    `, [description, detailedNotes, params.studyId, params.userId]);
+
+    const queryId = result.rows[0]?.discrepancy_note_id;
+
+    // Link to study subject if provided
+    if (queryId && params.subjectId) {
+      await pool.query(`
+        INSERT INTO dn_study_subject_map (discrepancy_note_id, study_subject_id, column_name)
+        VALUES ($1, $2, $3)
+      `, [queryId, params.subjectId, params.fieldPath]);
+    }
+
+    // Link to event CRF if provided
+    if (queryId && params.eventCrfId) {
+      await pool.query(`
+        INSERT INTO dn_event_crf_map (discrepancy_note_id, event_crf_id, column_name)
+        VALUES ($1, $2, $3)
+      `, [queryId, params.eventCrfId, params.fieldPath]);
+    }
+
+    logger.info('Created validation query', { queryId, fieldPath: params.fieldPath });
+    return queryId;
+  } catch (error: any) {
+    logger.error('Error creating validation query:', error.message);
+    return null;
+  }
+}
 
 /**
  * Apply a single validation rule to a value

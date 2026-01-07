@@ -209,6 +209,7 @@ CREATE TABLE study (
     status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
     protocol_type VARCHAR(30),
     protocol_description VARCHAR(1000),
+    protocol_date_verification DATE,  -- Added to match real LibreClinica schema
     phase VARCHAR(30),
     expected_total_enrollment INTEGER,
     sponsor VARCHAR(255),
@@ -225,6 +226,7 @@ CREATE TABLE study (
     healthy_volunteer_accepted BOOLEAN,
     purpose VARCHAR(64),
     allocation VARCHAR(64),
+    masking VARCHAR(30),  -- Added to match real LibreClinica schema
     control VARCHAR(64),
     assignment VARCHAR(64),
     endpoint VARCHAR(64),
@@ -275,7 +277,8 @@ CREATE TABLE subject (
     update_id INTEGER,
     gender CHAR(1),
     unique_identifier VARCHAR(255),
-    date_of_birth DATE
+    date_of_birth DATE,
+    dob_collected BOOLEAN DEFAULT false
 );
 
 CREATE TABLE study_subject (
@@ -290,7 +293,8 @@ CREATE TABLE study_subject (
     date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     owner_id INTEGER REFERENCES user_account(user_id),
     update_id INTEGER,
-    oc_oid VARCHAR(255)
+    oc_oid VARCHAR(255),
+    time_zone VARCHAR(100) DEFAULT ''
 );
 
 -- ============================================================================
@@ -459,6 +463,55 @@ CREATE TABLE event_crf (
 );
 
 -- ============================================================================
+-- RESPONSE SETS (for select/radio/checkbox options)
+-- ============================================================================
+
+CREATE TABLE response_type (
+    response_type_id SERIAL PRIMARY KEY,
+    name VARCHAR(255),
+    description VARCHAR(1000)
+);
+
+INSERT INTO response_type (response_type_id, name, description) VALUES
+(1, 'text', 'Free text input'),
+(2, 'textarea', 'Multi-line text input'),
+(3, 'checkbox', 'Checkbox input'),
+(4, 'file', 'File upload'),
+(5, 'radio', 'Radio button selection'),
+(6, 'single-select', 'Single select dropdown'),
+(7, 'multi-select', 'Multi-select dropdown'),
+(8, 'calculation', 'Calculated field'),
+(9, 'group-calculation', 'Group calculation'),
+(10, 'instant-calculation', 'Instant calculation');
+
+CREATE TABLE response_set (
+    response_set_id SERIAL PRIMARY KEY,
+    response_type_id INTEGER REFERENCES response_type(response_type_id),
+    label VARCHAR(255),
+    options_text TEXT,
+    options_values TEXT,
+    version_id INTEGER
+);
+
+CREATE TABLE item_data_type (
+    item_data_type_id SERIAL PRIMARY KEY,
+    code VARCHAR(20),
+    name VARCHAR(255),
+    description VARCHAR(1000)
+);
+
+INSERT INTO item_data_type (item_data_type_id, code, name, description) VALUES
+(1, 'ST', 'String', 'Character string'),
+(2, 'INT', 'Integer', 'Integer number'),
+(3, 'REAL', 'Real', 'Real number'),
+(4, 'DATE', 'Date', 'Date value'),
+(5, 'PDATE', 'Partial Date', 'Partial date'),
+(6, 'FILE', 'File', 'File attachment'),
+(7, 'BL', 'Boolean', 'Boolean value'),
+(8, 'CODE', 'Code', 'Coded value'),
+(9, 'SET', 'Set', 'Set of values');
+
+-- ============================================================================
 -- ITEM/QUESTION MANAGEMENT
 -- ============================================================================
 
@@ -597,6 +650,136 @@ CREATE TABLE audit_user_api_log (
     user_agent TEXT,
     duration_ms INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================================
+-- STUDY PARAMETERS
+-- ============================================================================
+
+CREATE TABLE study_parameter_value (
+    study_parameter_value_id SERIAL PRIMARY KEY,
+    study_id INTEGER NOT NULL REFERENCES study(study_id),
+    parameter VARCHAR(255) NOT NULL,
+    value VARCHAR(255),
+    UNIQUE(study_id, parameter)
+);
+
+-- ============================================================================
+-- CRF SECTIONS AND ITEMS
+-- ============================================================================
+
+CREATE TABLE section (
+    section_id SERIAL PRIMARY KEY,
+    crf_version_id INTEGER REFERENCES crf_version(crf_version_id),
+    label VARCHAR(2000),
+    title VARCHAR(2000),
+    subtitle VARCHAR(2000),
+    instructions TEXT,
+    page_number_label VARCHAR(5),
+    ordinal INTEGER,
+    parent_id INTEGER,
+    borders INTEGER DEFAULT 0,
+    status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
+    owner_id INTEGER REFERENCES user_account(user_id),
+    date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_id INTEGER
+);
+
+CREATE TABLE item_group (
+    item_group_id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    crf_id INTEGER REFERENCES crf(crf_id),
+    status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
+    owner_id INTEGER REFERENCES user_account(user_id),
+    date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_id INTEGER,
+    oc_oid VARCHAR(255)
+);
+
+CREATE TABLE item_group_metadata (
+    item_group_metadata_id SERIAL PRIMARY KEY,
+    item_group_id INTEGER REFERENCES item_group(item_group_id),
+    header VARCHAR(2000),
+    subheader VARCHAR(2000),
+    layout VARCHAR(100),
+    repeat_number INTEGER DEFAULT 1,
+    repeat_max INTEGER DEFAULT 40,
+    repeat_array VARCHAR(255),
+    row_start_number INTEGER,
+    crf_version_id INTEGER REFERENCES crf_version(crf_version_id),
+    item_id INTEGER REFERENCES item(item_id),
+    ordinal INTEGER,
+    borders INTEGER DEFAULT 0,
+    show_group BOOLEAN DEFAULT true,
+    repeating_group BOOLEAN DEFAULT false,
+    section_id INTEGER REFERENCES section(section_id)
+);
+
+CREATE TABLE item_form_metadata (
+    item_form_metadata_id SERIAL PRIMARY KEY,
+    item_id INTEGER REFERENCES item(item_id),
+    crf_version_id INTEGER REFERENCES crf_version(crf_version_id),
+    header VARCHAR(2000),
+    subheader VARCHAR(2000),
+    parent_id INTEGER,
+    parent_label VARCHAR(120),
+    column_number INTEGER,
+    page_number_label VARCHAR(5),
+    question_number_label VARCHAR(20),
+    left_item_text VARCHAR(4000),
+    right_item_text VARCHAR(2000),
+    section_id INTEGER REFERENCES section(section_id),
+    response_set_id INTEGER,
+    regexp VARCHAR(1000),
+    regexp_error_msg VARCHAR(255),
+    ordinal INTEGER,
+    required BOOLEAN DEFAULT false,
+    default_value VARCHAR(4000),
+    response_layout VARCHAR(255),
+    width_decimal VARCHAR(10),
+    show_item BOOLEAN DEFAULT true
+);
+
+-- ============================================================================
+-- SKIP LOGIC (SCD - Simple Conditional Display)
+-- ============================================================================
+
+CREATE TABLE scd_item_metadata (
+    id SERIAL PRIMARY KEY,
+    scd_item_form_metadata_id INTEGER REFERENCES item_form_metadata(item_form_metadata_id),
+    control_item_form_metadata_id INTEGER REFERENCES item_form_metadata(item_form_metadata_id),
+    control_item_name VARCHAR(255),
+    option_value VARCHAR(255),
+    message VARCHAR(255),
+    version INTEGER DEFAULT 1
+);
+
+-- ============================================================================
+-- VALIDATION RULES
+-- ============================================================================
+
+CREATE TABLE acc_validation_rule (
+    id SERIAL PRIMARY KEY,
+    crf_id INTEGER REFERENCES crf(crf_id),
+    crf_version_id INTEGER REFERENCES crf_version(crf_version_id),
+    item_id INTEGER REFERENCES item(item_id),
+    field_name VARCHAR(255),
+    rule_type VARCHAR(50) NOT NULL,
+    expression TEXT,
+    error_message VARCHAR(1000),
+    severity VARCHAR(20) DEFAULT 'error',
+    enabled BOOLEAN DEFAULT true,
+    min_value NUMERIC,
+    max_value NUMERIC,
+    allowed_values TEXT,
+    regex_pattern VARCHAR(500),
+    comparison_field VARCHAR(255),
+    comparison_operator VARCHAR(20),
+    owner_id INTEGER REFERENCES user_account(user_id),
+    date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================================

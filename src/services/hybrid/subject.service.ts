@@ -28,6 +28,7 @@ import {
   PaginatedResponse,
   toStudySubject
 } from '../../types/libreclinica-models';
+import * as workflowService from '../database/workflow.service';
 
 /**
  * Request type for creating a subject
@@ -90,6 +91,28 @@ export const createSubject = async (
     return createSubjectDirect(request, userId, username);
   }
 
+  // First, check if subject already exists using SOAP (GxP compliant)
+  try {
+    const studyOid = `S_${request.studyId}`;
+    const subjectExists = await subjectSoap.isSubjectExists(
+      studyOid,
+      request.studySubjectId,
+      userId,
+      username
+    );
+    
+    if (subjectExists) {
+      logger.warn('Subject already exists (SOAP check)', { label: request.studySubjectId });
+      return {
+        success: false,
+        message: `Subject with label '${request.studySubjectId}' already exists in this study`
+      };
+    }
+    logger.info('Subject does not exist, proceeding with creation');
+  } catch (checkError: any) {
+    logger.warn('SOAP subject existence check failed, proceeding with creation', { error: checkError.message });
+  }
+
   // Use SOAP service for GxP-compliant creation
   const result = await subjectSoap.createSubject(request, userId, username);
 
@@ -140,23 +163,9 @@ const createSubjectDirect = async (
     await client.query('BEGIN');
 
     // 1. Create subject record first (demographics table)
-    // Includes: date_of_birth, gender, unique_identifier, father_id, mother_id
-    const subjectQuery = `
-      INSERT INTO subject (
-        date_of_birth, gender, unique_identifier, 
-        father_id, mother_id,
-        date_created, date_updated, 
-        owner_id, update_id, dob_collected, status_id
-      ) VALUES (
-        $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, $7, 1
-      )
-      RETURNING subject_id
-    `;
-    
     // Normalize gender value
     const gender = request.gender === 'Male' || request.gender === 'm' ? 'm' : 
                    request.gender === 'Female' || request.gender === 'f' ? 'f' : '';
-    const dobCollected = request.dateOfBirth ? true : false;
     // Use personId if provided, otherwise use studySubjectId as unique identifier
     const uniqueIdentifier = request.personId || request.studySubjectId;
     
@@ -164,15 +173,62 @@ const createSubjectDirect = async (
     const fatherId = request.fatherId && request.fatherId > 0 ? request.fatherId : null;
     const motherId = request.motherId && request.motherId > 0 ? request.motherId : null;
     
-    const subjectResult = await client.query(subjectQuery, [
-      request.dateOfBirth || null,
-      gender,
-      uniqueIdentifier,
-      fatherId,
-      motherId,
-      userId,
-      dobCollected
-    ]);
+    // Try full schema first, fall back to minimal schema if columns don't exist
+    // Use SAVEPOINT to handle schema differences without aborting the transaction
+    let subjectResult;
+    await client.query('SAVEPOINT subject_insert');
+    try {
+      const subjectQuery = `
+        INSERT INTO subject (
+          date_of_birth, gender, unique_identifier, 
+          father_id, mother_id,
+          date_created, date_updated, 
+          owner_id, update_id, dob_collected, status_id
+        ) VALUES (
+          $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, $7, 1
+        )
+        RETURNING subject_id
+      `;
+      const dobCollected = request.dateOfBirth ? true : false;
+      subjectResult = await client.query(subjectQuery, [
+        request.dateOfBirth || null,
+        gender,
+        uniqueIdentifier,
+        fatherId,
+        motherId,
+        userId,
+        dobCollected
+      ]);
+      await client.query('RELEASE SAVEPOINT subject_insert');
+    } catch (schemaError: any) {
+      // Roll back to savepoint and try minimal schema
+      await client.query('ROLLBACK TO SAVEPOINT subject_insert');
+      
+      if (schemaError.message.includes('dob_collected')) {
+        logger.info('Using minimal subject schema (dob_collected not available)');
+        const minimalSubjectQuery = `
+          INSERT INTO subject (
+            date_of_birth, gender, unique_identifier, 
+            father_id, mother_id,
+            date_created, date_updated, 
+            owner_id, update_id, status_id
+          ) VALUES (
+            $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, 1
+          )
+          RETURNING subject_id
+        `;
+        subjectResult = await client.query(minimalSubjectQuery, [
+          request.dateOfBirth || null,
+          gender,
+          uniqueIdentifier,
+          fatherId,
+          motherId,
+          userId
+        ]);
+      } else {
+        throw schemaError;
+      }
+    }
 
     const subjectId = subjectResult.rows[0].subject_id;
 
@@ -208,13 +264,19 @@ const createSubjectDirect = async (
     const studySubjectId = studySubjectResult.rows[0].study_subject_id;
 
     // 3. Create audit log entry
+    // Use COALESCE to ensure we get a valid audit event type ID
+    // Priority: 'Entity Created' (1) > first available
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
         audit_log_event_type_id
       ) VALUES (
         NOW(), 'study_subject', $1, $2, 'Subject',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Create%' OR name LIKE '%Insert%' LIMIT 1)
+        COALESCE(
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Created' LIMIT 1),
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE audit_log_event_type_id = 1 LIMIT 1),
+          1
+        )
       )
     `, [userId, studySubjectId]);
 
@@ -242,33 +304,149 @@ const createSubjectDirect = async (
       });
     }
 
-    // 5. Schedule first study event if requested
-    let studyEventId = null;
-    if (request.scheduleEvent && request.scheduleEvent.studyEventDefinitionId > 0) {
-      const eventOid = `SE_${studySubjectId}_${request.scheduleEvent.studyEventDefinitionId}`;
-      const startDate = request.scheduleEvent.startDate || request.enrollmentDate || new Date().toISOString().split('T')[0];
+    // 5. Schedule ALL study events for this subject (auto-schedule all phases)
+    // This implements the COPY PHASES TO PATIENT requirement
+    let scheduledEventIds: number[] = [];
+    let totalFormsCreated = 0;
+    const enrollmentDate = request.enrollmentDate || new Date().toISOString().split('T')[0];
+    const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
+    
+    // Get all study event definitions for this study
+    const eventDefsResult = await client.query(`
+      SELECT study_event_definition_id, name, ordinal, type, repeating
+      FROM study_event_definition
+      WHERE study_id = $1 AND status_id = 1
+      ORDER BY ordinal
+    `, [request.studyId]);
+    
+    if (eventDefsResult.rows.length > 0) {
+      logger.info('🗓️ Auto-scheduling study phases for patient enrollment', { 
+        studySubjectId, 
+        label: request.studySubjectId,
+        phaseCount: eventDefsResult.rows.length,
+        phases: eventDefsResult.rows.map((e: any) => e.name)
+      });
       
-      const eventResult = await client.query(`
-        INSERT INTO study_event (
-          study_event_definition_id, study_subject_id, location,
-          sample_ordinal, date_started, date_ended,
-          owner_id, status_id, subject_event_status_id, date_created
-        ) VALUES (
-          $1, $2, $3, 1, $4, $4, $5, 1, 
-          (SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1),
-          NOW()
-        )
-        RETURNING study_event_id
-      `, [
-        request.scheduleEvent.studyEventDefinitionId,
+      for (const eventDef of eventDefsResult.rows) {
+        try {
+          // Calculate start date based on ordinal (each phase starts 7 days after previous)
+          const daysOffset = (eventDef.ordinal - 1) * 7;
+          const eventStartDate = new Date(enrollmentDate);
+          eventStartDate.setDate(eventStartDate.getDate() + daysOffset);
+          
+          const eventResult = await client.query(`
+            INSERT INTO study_event (
+              study_event_definition_id, study_subject_id, location,
+              sample_ordinal, date_start, date_end,
+              owner_id, status_id, subject_event_status_id, date_created
+            ) VALUES (
+              $1, $2, $3, 1, $4, $4, $5, 1, 
+              (SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1),
+              NOW()
+            )
+            RETURNING study_event_id
+          `, [
+            eventDef.study_event_definition_id,
+            studySubjectId,
+            request.scheduleEvent?.location || '',
+            eventStartDate.toISOString().split('T')[0],
+            userId
+          ]);
+          
+          if (eventResult.rows[0]?.study_event_id) {
+            const studyEventId = eventResult.rows[0].study_event_id;
+            scheduledEventIds.push(studyEventId);
+            let phaseFormsCreated = 0;
+            
+            // Create event_crf records for all CRFs assigned to this phase
+            // This implements the COPY FORM TEMPLATES (eCRFs) requirement
+            const crfAssignments = await client.query(`
+              SELECT edc.crf_id, edc.default_version_id, c.name as crf_name
+              FROM event_definition_crf edc
+              INNER JOIN crf c ON edc.crf_id = c.crf_id
+              WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
+              ORDER BY edc.ordinal
+            `, [eventDef.study_event_definition_id]);
+            
+            if (crfAssignments.rows.length === 0) {
+              logger.warn(`⚠️ Phase "${eventDef.name}" has no forms assigned`, {
+                studyEventDefinitionId: eventDef.study_event_definition_id
+              });
+            }
+            
+            for (const crfAssign of crfAssignments.rows) {
+              try {
+                // Get the CRF version to use
+                let crfVersionId = crfAssign.default_version_id;
+                if (!crfVersionId) {
+                  const versionResult = await client.query(`
+                    SELECT crf_version_id FROM crf_version 
+                    WHERE crf_id = $1 AND status_id = 1 
+                    ORDER BY crf_version_id DESC LIMIT 1
+                  `, [crfAssign.crf_id]);
+                  if (versionResult.rows.length > 0) {
+                    crfVersionId = versionResult.rows[0].crf_version_id;
+                  } else {
+                    logger.warn(`⚠️ Form "${crfAssign.crf_name}" has no available versions`, {
+                      crfId: crfAssign.crf_id
+                    });
+                  }
+                }
+                
+                if (crfVersionId) {
+                  // Create event_crf - the editable copy of the template for this patient
+                  await client.query(`
+                    INSERT INTO event_crf (
+                      study_event_id, crf_version_id, study_subject_id,
+                      completion_status_id, status_id, owner_id, date_created
+                    ) VALUES ($1, $2, $3, 1, 1, $4, NOW())
+                  `, [studyEventId, crfVersionId, studySubjectId, userId]);
+                  
+                  phaseFormsCreated++;
+                  totalFormsCreated++;
+                  
+                  logger.debug('📋 Created event_crf for patient phase', {
+                    studyEventId,
+                    crfId: crfAssign.crf_id,
+                    crfName: crfAssign.crf_name,
+                    studySubjectId
+                  });
+                }
+              } catch (crfError: any) {
+                logger.warn('❌ Failed to create event_crf', {
+                  crfId: crfAssign.crf_id,
+                  crfName: crfAssign.crf_name,
+                  error: crfError.message
+                });
+              }
+            }
+            
+            phaseDetails.push({
+              name: eventDef.name,
+              eventId: studyEventId,
+              formsCreated: phaseFormsCreated
+            });
+          }
+        } catch (eventError: any) {
+          logger.warn('❌ Failed to schedule phase', { 
+            eventDefId: eventDef.study_event_definition_id, 
+            phaseName: eventDef.name,
+            error: eventError.message 
+          });
+        }
+      }
+      
+      logger.info('✅ Patient enrollment complete - phases and forms copied', { 
         studySubjectId,
-        request.scheduleEvent.location || '',
-        startDate,
-        userId
-      ]);
-      
-      studyEventId = eventResult.rows[0]?.study_event_id;
-      logger.info('First study event scheduled', { studySubjectId, studyEventId });
+        label: request.studySubjectId, 
+        phasesScheduled: scheduledEventIds.length,
+        totalFormsCreated,
+        phaseDetails
+      });
+    } else {
+      logger.warn('⚠️ No study phases defined - patient enrolled without phases', { 
+        studyId: request.studyId 
+      });
     }
 
     await client.query('COMMIT');
@@ -289,7 +467,7 @@ const createSubjectDirect = async (
           dateOfBirth: request.dateOfBirth
         }),
         reasonForChange: 'Subject enrolled via API (direct database)',
-        studyEventId: studyEventId || undefined
+        studyEventId: scheduledEventIds.length > 0 ? scheduledEventIds[0] : undefined
       }
     );
 
@@ -298,6 +476,21 @@ const createSubjectDirect = async (
       studySubjectId, 
       label: request.studySubjectId 
     });
+
+    // AUTO-TRIGGER WORKFLOW: Create enrollment verification workflow
+    // This is a real EDC pattern - new enrollments need verification
+    try {
+      await workflowService.triggerSubjectEnrolledWorkflow(
+        studySubjectId,
+        request.studyId,
+        request.studySubjectId,
+        userId
+      );
+      logger.info('Auto-triggered enrollment verification workflow', { studySubjectId, label: request.studySubjectId });
+    } catch (workflowError: any) {
+      // Don't fail enrollment if workflow creation fails
+      logger.warn('Failed to auto-create enrollment workflow', { error: workflowError.message });
+    }
 
     return {
       success: true,
@@ -327,8 +520,17 @@ const createSubjectDirect = async (
         // Group assignments
         groupAssignments: request.groupAssignments || [],
         
-        // First event (if scheduled)
-        studyEventId: studyEventId
+        // Scheduled phases and forms (CRITICAL for phase/form copy verification)
+        scheduledPhases: {
+          count: scheduledEventIds.length,
+          eventIds: scheduledEventIds,
+          details: phaseDetails  // { name, eventId, formsCreated }[]
+        },
+        totalFormsCreated,
+        
+        // Legacy fields for backward compatibility
+        studyEventIds: scheduledEventIds,
+        studyEventId: scheduledEventIds.length > 0 ? scheduledEventIds[0] : null
       }
     };
   } catch (error: any) {
@@ -448,6 +650,7 @@ export const getSubjectList = async (
     const dataQuery = `
       SELECT 
         ss.study_subject_id,
+        ss.study_id,
         ss.label,
         ss.secondary_label,
         ss.enrollment_date,
@@ -666,15 +869,26 @@ export const getSubjectProgress = async (subjectId: number): Promise<SubjectProg
     const completedEvents = parseInt(stats.completed_events) || 0;
     const totalForms = parseInt(stats.total_forms) || 0;
     const completedForms = parseInt(stats.completed_forms) || 0;
+    const openQueries = parseInt(stats.open_queries) || 0;
+    
+    // Calculate completion percentages
+    const eventCompletionPercentage = totalEvents > 0
+      ? Math.round((completedEvents / totalEvents) * 100)
+      : 0;
+    
+    const formCompletionPercentage = totalForms > 0
+      ? Math.round((completedForms / totalForms) * 100)
+      : 0;
     
     return {
       totalEvents,
       completedEvents,
+      eventCompletionPercentage,
       totalForms,
       completedForms,
-      percentComplete: totalForms > 0
-        ? Math.round((completedForms / totalForms) * 100)
-        : 0
+      formCompletionPercentage,
+      openQueries,
+      percentComplete: formCompletionPercentage // Use form completion as overall percentage
     };
   } catch (error: any) {
     logger.error('Get subject progress error', { error: error.message });
@@ -713,6 +927,7 @@ async function enrichSubjectsWithStats(soapSubjects: any, studyId: number): Prom
     const statsQuery = `
       SELECT 
         ss.study_subject_id,
+        ss.study_id,
         ss.label,
         ss.secondary_label,
         ss.enrollment_date,

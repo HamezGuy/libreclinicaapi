@@ -79,6 +79,22 @@ export const getEventCRFs = asyncHandler(async (req: Request, res: Response) => 
   });
 });
 
+/**
+ * Get patient's event_crfs for a specific study_event instance
+ * These are the editable copies of templates for this patient's phase
+ */
+export const getPatientEventCRFs = asyncHandler(async (req: Request, res: Response) => {
+  const { studyEventId } = req.params;
+
+  const result = await eventService.getPatientEventCRFs(parseInt(studyEventId));
+
+  res.json({ 
+    success: true, 
+    data: result,
+    total: result.length 
+  });
+});
+
 export const scheduleEvent = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
 

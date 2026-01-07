@@ -23,12 +23,12 @@ describe('Data Locks Service', () => {
     await testDb.pool.query('SELECT NOW()');
 
     // Create test study
-    testStudyId = await createTestStudy(pool, rootUserId, {
+    testStudyId = await createTestStudy(testDb.pool, rootUserId, {
       uniqueIdentifier: `LOCK-TEST-${Date.now()}`
     });
 
     // Create test subject
-    testSubjectId = await createTestSubject(pool, testStudyId, {
+    testSubjectId = await createTestSubject(testDb.pool, testStudyId, {
       label: `LOCK-SUB-${Date.now()}`
     });
   });
@@ -76,7 +76,7 @@ describe('Data Locks Service', () => {
 
     // Create CRF and version
     const crfResult = await testDb.pool.query(`
-      INSERT INTO crf (study_id, name, status_id, owner_id, date_created, oc_oid)
+      INSERT INTO crf (source_study_id, name, status_id, owner_id, date_created, oc_oid)
       VALUES ($1, 'Lock Test CRF', 1, $2, NOW(), $3)
       RETURNING crf_id
     `, [testStudyId, rootUserId, `F_LOCK_${Date.now()}`]);
@@ -174,7 +174,8 @@ describe('Data Locks Service', () => {
         limit: 5
       });
 
-      expect(result.total).toBeDefined();
+      expect(result.pagination).toBeDefined();
+      expect(result.pagination.total).toBeDefined();
     });
   });
 

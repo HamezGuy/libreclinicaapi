@@ -3,6 +3,11 @@
  * 
  * API endpoints for email management and notification preferences.
  * Uses LibreClinica database for user preferences and audit logging.
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Full audit trail for template changes and email operations
+ * - §11.10(k): UTC timestamps for all email events
+ * - Template versioning for change tracking
  */
 
 import { Router, Request, Response } from 'express';
@@ -22,6 +27,12 @@ import {
 } from '../services/email/email.service';
 import { UpdatePreferenceRequest, NotificationType } from '../services/email/email.types';
 import { pool } from '../config/database';
+import {
+  Part11EventTypes,
+  recordPart11Audit,
+  Part11Request,
+  formatPart11Timestamp
+} from '../middleware/part11.middleware';
 
 const router = Router();
 
@@ -83,12 +94,24 @@ router.get('/templates/:name', authMiddleware, requireAdmin, async (req: Request
 /**
  * PUT /api/email/templates/:id
  * Update an email template
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Records old and new values for template changes
+ * - Template versioning provides change history
  */
-router.put('/templates/:id', authMiddleware, requireAdmin, async (req: Request, res: Response) => {
+router.put('/templates/:id', authMiddleware, requireAdmin, async (req: Part11Request, res: Response) => {
   try {
     const templateId = parseInt(req.params.id);
     const { subject, htmlBody, textBody, description } = req.body;
-    const userId = (req as any).user?.userId;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
+
+    // Get old values before update
+    const oldResult = await pool.query(
+      'SELECT template_name, subject, version FROM acc_email_template WHERE template_id = $1',
+      [templateId]
+    );
+    const oldData = oldResult.rows[0];
 
     // Update template in database (increment version for audit trail)
     const query = `
@@ -115,14 +138,30 @@ router.put('/templates/:id', authMiddleware, requireAdmin, async (req: Request, 
       return res.status(404).json({ success: false, message: 'Template not found' });
     }
 
-    // Log audit event
-    logger.info('Email template updated', { 
+    const newData = result.rows[0];
+
+    // Part 11 Audit: Record template update (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.EMAIL_TEMPLATE_UPDATED,
+      'acc_email_template',
+      templateId,
+      oldData?.template_name || `Template ${templateId}`,
+      { subject: oldData?.subject, version: oldData?.version },
+      { subject: newData.subject, version: newData.version },
+      'Email template updated',
+      { ipAddress: req.ip }
+    );
+
+    logger.info('Email template updated with Part 11 audit', { 
       templateId, 
       userId,
-      version: result.rows[0].version 
+      oldVersion: oldData?.version,
+      newVersion: newData.version 
     });
 
-    res.json({ success: true, data: result.rows[0] });
+    res.json({ success: true, data: newData });
   } catch (error: any) {
     logger.error('Error updating template', { error: error.message });
     res.status(500).json({ success: false, message: 'Failed to update template' });

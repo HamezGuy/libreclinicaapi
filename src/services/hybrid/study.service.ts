@@ -1,17 +1,40 @@
 /**
  * Study Service (Hybrid)
  * 
- * RESPONSIBILITY SEPARATION:
- * ═══════════════════════════════════════════════════════════════
- * SOAP (Part 11 Compliant):
- *   - listStudies() - Get official study list from LibreClinica
- *   - getStudyMetadata() - Get ODM metadata
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * LibreClinica Integration Architecture
+ * ═══════════════════════════════════════════════════════════════════════════════
  * 
- * Database (Stats/Enrichment Only):
- *   - Add statistics (enrollment counts, completion rates)
- *   - User access filtering (study_user_role)
- *   - Pagination
- * ═══════════════════════════════════════════════════════════════
+ * This service integrates with LibreClinica using established channels:
+ * 
+ * SOAP API (PRIMARY for clinical operations - Part 11 Compliant):
+ * ─────────────────────────────────────────────────────────────────
+ *   ✓ listStudies()       - Get study list via SOAP study/listAll
+ *   ✓ getStudyMetadata()  - Get ODM metadata via SOAP study/getMetadata
+ *   
+ *   LibreClinica SOAP endpoints:
+ *   - studySubject: create, isStudySubject, listAllByStudy
+ *   - event: schedule, create  
+ *   - data: import (ODM-XML format)
+ *   - study: listAll, getMetadata
+ *   - crf: listAll
+ * 
+ * DIRECT DATABASE (for admin operations NOT exposed via SOAP):
+ * ─────────────────────────────────────────────────────────────────
+ *   ✓ createStudy()       - Study creation (not available in SOAP API)
+ *   ✓ updateStudy()       - Study updates (not available in SOAP API)
+ *   ✓ getStudyStats()     - Enrollment stats, query counts
+ *   ✓ getStudyUsers()     - User role assignments
+ *   ✓ Audit logging       - audit_log_event table
+ * 
+ * NOTE: LibreClinica's SOAP API is designed for clinical data operations
+ * (subjects, events, CRF data). Administrative operations like study
+ * creation/modification are done via the LibreClinica web UI or database.
+ * 
+ * DATABASE: We connect to the SAME PostgreSQL database that LibreClinica uses.
+ * Port 5434 = LibreClinica's production database (libreclinica-postgres)
+ * Port 5433 = Unit test database only (api-test-db) - NOT for production
+ * ═══════════════════════════════════════════════════════════════════════════════
  */
 
 import { pool } from '../../config/database';
@@ -292,7 +315,7 @@ async function getStudyMetadataFromDb(studyId: number): Promise<StudyMetadata> {
 
   const crfsQuery = `
     SELECT * FROM crf
-    WHERE study_id = $1
+    WHERE source_study_id = $1
     ORDER BY name
   `;
   const crfsResult = await pool.query(crfsQuery, [studyId]);
@@ -444,98 +467,126 @@ export const createStudy = async (
     // Generate OC OID
     const ocOid = `S_${data.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
-    // Insert study with ALL supported database fields
+    // Insert study with ALL database fields that exist in the LibreClinica schema
+    // Verified against study table schema (libreclinica-full-schema.sql lines 3477-3544)
     const insertQuery = `
       INSERT INTO study (
-        parent_study_id, unique_identifier, secondary_identifier, name, official_title,
-        summary, principal_investigator, sponsor, collaborators,
-        protocol_description, date_planned_start, date_planned_end,
+        parent_study_id, unique_identifier, secondary_identifier, name,
+        official_title, summary, protocol_description, protocol_date_verification,
+        date_planned_start, date_planned_end,
         expected_total_enrollment, status_id, owner_id, date_created,
-        oc_oid, protocol_type, phase,
+        protocol_type, phase, sponsor, collaborators,
+        principal_investigator,
         facility_name, facility_city, facility_state, facility_zip, facility_country,
         facility_recruitment_status, facility_contact_name, facility_contact_degree,
         facility_contact_phone, facility_contact_email,
-        protocol_date_verification, medline_identifier, url, url_description, results_reference,
+        medline_identifier, url, url_description, results_reference,
         conditions, keywords, eligibility, gender, age_min, age_max, healthy_volunteer_accepted,
-        purpose, allocation, masking, control, assignment, endpoint, interventions,
-        duration, selection, timing
+        purpose, allocation, masking, control, assignment, endpoint, interventions, duration, selection, timing,
+        oc_oid
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, 1, $14, NOW(), $15, $16, $17,
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(),
+        $13, $14, $15, $16, $17,
         $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-        $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39,
-        $40, $41, $42, $43, $44, $45, $46, $47, $48, $49
+        $28, $29, $30, $31,
+        $32, $33, $34, $35, $36, $37, $38,
+        $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
+        $49
       )
       RETURNING study_id
     `;
 
     const insertResult = await client.query(insertQuery, [
-      data.parentStudyId || null,                                    // $1
-      data.uniqueIdentifier,                                          // $2
-      data.secondaryIdentifier || null,                               // $3
-      data.name,                                                       // $4
-      data.officialTitle || null,                                     // $5
-      data.summary || '',                                              // $6
-      data.principalInvestigator || '',                               // $7
-      data.sponsor || '',                                              // $8
-      data.collaborators || null,                                     // $9
-      data.protocolDescription || data.summary || '',                 // $10
-      data.datePlannedStart || null,                                  // $11
-      data.datePlannedEnd || null,                                    // $12
-      data.expectedTotalEnrollment || 0,                              // $13
-      userId,                                                          // $14
-      ocOid,                                                           // $15
-      data.protocolType || 'interventional',                          // $16
-      data.phase || null,                                              // $17
-      data.facilityName || null,                                      // $18
-      data.facilityCity || null,                                      // $19
-      data.facilityState || null,                                     // $20
-      data.facilityZip || null,                                       // $21
-      data.facilityCountry || null,                                   // $22
-      data.facilityRecruitmentStatus || null,                         // $23
-      data.facilityContactName || null,                               // $24
-      data.facilityContactDegree || null,                             // $25
-      data.facilityContactPhone || null,                              // $26
-      data.facilityContactEmail || null,                              // $27
-      data.protocolDateVerification || null,                          // $28
-      data.medlineIdentifier || null,                                 // $29
-      data.url || null,                                                // $30
-      data.urlDescription || null,                                    // $31
-      data.resultsReference || null,                                  // $32
-      data.conditions || null,                                        // $33
-      data.keywords || null,                                          // $34
-      data.eligibility || null,                                       // $35
-      data.gender || null,                                             // $36
-      data.ageMin || null,                                             // $37
-      data.ageMax || null,                                             // $38
-      data.healthyVolunteerAccepted || null,                          // $39
-      data.purpose || null,                                            // $40
-      data.allocation || null,                                        // $41
-      data.masking || null,                                            // $42
-      data.control || null,                                            // $43
-      data.assignment || null,                                        // $44
-      data.endpoint || null,                                          // $45
-      data.interventions || null,                                     // $46
-      data.duration || null,                                          // $47
-      data.selection || null,                                         // $48
-      data.timing || null                                              // $49
+      // Identification
+      data.parentStudyId || null,                                    // $1  parent_study_id
+      data.uniqueIdentifier,                                          // $2  unique_identifier
+      data.secondaryIdentifier || null,                               // $3  secondary_identifier
+      data.name,                                                       // $4  name
+      data.officialTitle || null,                                     // $5  official_title
+      data.summary || '',                                              // $6  summary
+      data.protocolDescription || null,                               // $7  protocol_description
+      data.protocolDateVerification || null,                          // $8  protocol_date_verification
+      
+      // Timeline
+      data.datePlannedStart || null,                                  // $9  date_planned_start
+      data.datePlannedEnd || null,                                    // $10 date_planned_end
+      data.expectedTotalEnrollment || 0,                              // $11 expected_total_enrollment
+      userId,                                                          // $12 owner_id
+      
+      // Classification
+      data.protocolType || 'interventional',                          // $13 protocol_type
+      data.phase || null,                                              // $14 phase
+      data.sponsor || '',                                              // $15 sponsor
+      data.collaborators || null,                                     // $16 collaborators
+      data.principalInvestigator || null,                             // $17 principal_investigator
+      
+      // Facility
+      data.facilityName || null,                                      // $18 facility_name
+      data.facilityCity || null,                                      // $19 facility_city
+      data.facilityState || null,                                     // $20 facility_state
+      data.facilityZip || null,                                       // $21 facility_zip
+      data.facilityCountry || null,                                   // $22 facility_country
+      data.facilityRecruitmentStatus || null,                         // $23 facility_recruitment_status
+      data.facilityContactName || null,                               // $24 facility_contact_name
+      data.facilityContactDegree || null,                             // $25 facility_contact_degree
+      data.facilityContactPhone || null,                              // $26 facility_contact_phone
+      data.facilityContactEmail || null,                              // $27 facility_contact_email
+      
+      // Protocol
+      data.medlineIdentifier || null,                                 // $28 medline_identifier
+      data.url || null,                                                // $29 url
+      data.urlDescription || null,                                    // $30 url_description
+      data.resultsReference || null,                                  // $31 results_reference
+      
+      // Eligibility
+      data.conditions || null,                                        // $32 conditions
+      data.keywords || null,                                          // $33 keywords
+      data.eligibility || null,                                       // $34 eligibility
+      data.gender || null,                                             // $35 gender
+      data.ageMin || null,                                             // $36 age_min
+      data.ageMax || null,                                             // $37 age_max
+      data.healthyVolunteerAccepted || null,                          // $38 healthy_volunteer_accepted
+      
+      // Study Design
+      data.purpose || null,                                            // $39 purpose
+      data.allocation || null,                                        // $40 allocation
+      data.masking || null,                                           // $41 masking
+      data.control || null,                                            // $42 control
+      data.assignment || null,                                        // $43 assignment
+      data.endpoint || null,                                          // $44 endpoint
+      data.interventions || null,                                     // $45 interventions
+      data.duration || null,                                          // $46 duration
+      data.selection || null,                                         // $47 selection
+      data.timing || null,                                            // $48 timing
+      
+      // OID
+      ocOid                                                           // $49 oc_oid
     ]);
 
     const studyId = insertResult.rows[0].study_id;
 
-    // Assign creator to study with admin role
-    const username = await client.query(`SELECT user_name FROM user_account WHERE user_id = $1`, [userId]);
-    
-    if (username.rows.length > 0) {
-      await client.query(`
-        INSERT INTO study_user_role (
-          role_name, study_id, status_id, owner_id, date_created, user_name
-        ) VALUES ('admin', $1, 1, $2, NOW(), $3)
-      `, [studyId, userId, username.rows[0].user_name]);
+    // Assign creator to study with admin role (using SAVEPOINT for Part 11 compliance)
+    // SAVEPOINT allows this optional operation to fail without aborting the main transaction
+    try {
+      await client.query('SAVEPOINT assign_role');
+      const username = await client.query(`SELECT user_name FROM user_account WHERE user_id = $1`, [userId]);
+      
+      if (username.rows.length > 0) {
+        await client.query(`
+          INSERT INTO study_user_role (
+            role_name, study_id, status_id, owner_id, date_created, user_name
+          ) VALUES ('admin', $1, 1, $2, NOW(), $3)
+        `, [studyId, userId, username.rows[0].user_name]);
+      }
+      await client.query('RELEASE SAVEPOINT assign_role');
+    } catch (roleError: any) {
+      await client.query('ROLLBACK TO SAVEPOINT assign_role');
+      logger.warn('Study role assignment warning', { error: roleError.message });
     }
 
-    // Log audit event - audit_log_event does NOT have study_id column
+    // Log audit event for Part 11 compliance (21 CFR Part 11 requires audit trail)
     try {
+      await client.query('SAVEPOINT audit_log');
       await client.query(`
         INSERT INTO audit_log_event (
           audit_date, audit_table, user_id, entity_id, entity_name, new_value,
@@ -548,15 +599,17 @@ export const createStudy = async (
           )
         )
       `, [userId, studyId, data.name]);
+      await client.query('RELEASE SAVEPOINT audit_log');
     } catch (auditError: any) {
-      // Don't fail study creation if audit logging fails
+      await client.query('ROLLBACK TO SAVEPOINT audit_log');
       logger.warn('Audit logging failed for study creation', { error: auditError.message });
     }
 
-    // Initialize default study parameters
+    // Initialize default study parameters (optional - uses SAVEPOINT)
     try {
+      await client.query('SAVEPOINT init_params');
       const defaultParams = [
-        { handle: 'collectDob', value: '1' },        // Full date required
+        { handle: 'collectDob', value: '1' },
         { handle: 'genderRequired', value: 'true' },
         { handle: 'subjectPersonIdRequired', value: 'optional' },
         { handle: 'subjectIdGeneration', value: 'manual' },
@@ -583,9 +636,10 @@ export const createStudy = async (
           ON CONFLICT DO NOTHING
         `, [studyId, param.handle, param.value]);
       }
+      await client.query('RELEASE SAVEPOINT init_params');
       logger.info('Study parameters initialized', { studyId, paramCount: defaultParams.length });
     } catch (paramError: any) {
-      // Don't fail study creation if parameter initialization fails
+      await client.query('ROLLBACK TO SAVEPOINT init_params');
       logger.warn('Study parameter initialization warning', { error: paramError.message });
     }
 
@@ -689,23 +743,74 @@ export const createStudy = async (
 };
 
 /**
- * Update study
+ * Update study - supports ALL LibreClinica database fields
  */
 export const updateStudy = async (
   studyId: number,
   data: {
+    // Basic Info
     name?: string;
+    officialTitle?: string;
+    secondaryIdentifier?: string;
+    summary?: string;
     description?: string;
+    
+    // Team
     principalInvestigator?: string;
     sponsor?: string;
+    collaborators?: string;
+    
+    // Timeline
     phase?: string;
+    protocolType?: string;
     expectedTotalEnrollment?: number;
     datePlannedStart?: string;
     datePlannedEnd?: string;
+    
+    // Facility
+    facilityName?: string;
+    facilityCity?: string;
+    facilityState?: string;
+    facilityZip?: string;
+    facilityCountry?: string;
+    facilityRecruitmentStatus?: string;
+    facilityContactName?: string;
+    facilityContactDegree?: string;
+    facilityContactPhone?: string;
+    facilityContactEmail?: string;
+    
+    // Protocol
+    protocolDescription?: string;
+    protocolDateVerification?: string;
+    medlineIdentifier?: string;
+    url?: string;
+    urlDescription?: string;
+    resultsReference?: boolean;
+    conditions?: string;
+    keywords?: string;
+    interventions?: string;
+    
+    // Eligibility
+    eligibility?: string;
+    gender?: string;
+    ageMin?: string;
+    ageMax?: string;
+    healthyVolunteerAccepted?: boolean;
+    
+    // Design
+    purpose?: string;
+    allocation?: string;
+    masking?: string;
+    control?: string;
+    assignment?: string;
+    endpoint?: string;
+    duration?: string;
+    selection?: string;
+    timing?: string;
   },
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Updating study', { studyId, userId });
+  logger.info('Updating study', { studyId, userId, fields: Object.keys(data) });
 
   const client = await pool.connect();
 
@@ -716,39 +821,77 @@ export const updateStudy = async (
     const params: any[] = [];
     let paramIndex = 1;
 
-    if (data.name !== undefined) {
-      updates.push(`name = $${paramIndex++}`);
-      params.push(data.name);
-    }
+    // Field mapping: frontend name -> database column
+    // This mapping covers ALL columns in the LibreClinica study table (see libreclinica-full-schema.sql)
+    const fieldMapping: Record<string, string> = {
+      // Basic identification
+      name: 'name',
+      officialTitle: 'official_title',
+      secondaryIdentifier: 'secondary_identifier',
+      summary: 'summary',
+      description: 'summary',  // Map description to summary column (alias)
+      
+      // Team
+      principalInvestigator: 'principal_investigator',
+      sponsor: 'sponsor',
+      collaborators: 'collaborators',
+      
+      // Classification & Timeline
+      phase: 'phase',
+      protocolType: 'protocol_type',
+      expectedTotalEnrollment: 'expected_total_enrollment',
+      datePlannedStart: 'date_planned_start',
+      datePlannedEnd: 'date_planned_end',
+      
+      // Facility
+      facilityName: 'facility_name',
+      facilityCity: 'facility_city',
+      facilityState: 'facility_state',
+      facilityZip: 'facility_zip',
+      facilityCountry: 'facility_country',
+      facilityRecruitmentStatus: 'facility_recruitment_status',
+      facilityContactName: 'facility_contact_name',
+      facilityContactDegree: 'facility_contact_degree',
+      facilityContactPhone: 'facility_contact_phone',
+      facilityContactEmail: 'facility_contact_email',
+      
+      // Protocol details
+      protocolDescription: 'protocol_description',
+      protocolDateVerification: 'protocol_date_verification',
+      medlineIdentifier: 'medline_identifier',
+      url: 'url',
+      urlDescription: 'url_description',
+      resultsReference: 'results_reference',
+      conditions: 'conditions',
+      keywords: 'keywords',
+      interventions: 'interventions',
+      
+      // Eligibility
+      eligibility: 'eligibility',
+      gender: 'gender',
+      ageMin: 'age_min',
+      ageMax: 'age_max',
+      healthyVolunteerAccepted: 'healthy_volunteer_accepted',
+      
+      // Study Design
+      purpose: 'purpose',
+      allocation: 'allocation',
+      masking: 'masking',
+      control: 'control',
+      assignment: 'assignment',
+      endpoint: 'endpoint',
+      duration: 'duration',
+      selection: 'selection',
+      timing: 'timing'
+    };
 
-    if (data.description !== undefined) {
-      updates.push(`summary = $${paramIndex++}`);
-      params.push(data.description);
-    }
-
-    if (data.principalInvestigator !== undefined) {
-      updates.push(`principal_investigator = $${paramIndex++}`);
-      params.push(data.principalInvestigator);
-    }
-
-    if (data.sponsor !== undefined) {
-      updates.push(`sponsor = $${paramIndex++}`);
-      params.push(data.sponsor);
-    }
-
-    if (data.expectedTotalEnrollment !== undefined) {
-      updates.push(`expected_total_enrollment = $${paramIndex++}`);
-      params.push(data.expectedTotalEnrollment);
-    }
-
-    if (data.datePlannedStart !== undefined) {
-      updates.push(`date_planned_start = $${paramIndex++}`);
-      params.push(data.datePlannedStart);
-    }
-
-    if (data.datePlannedEnd !== undefined) {
-      updates.push(`date_planned_end = $${paramIndex++}`);
-      params.push(data.datePlannedEnd);
+    // Build update query dynamically
+    for (const [frontendField, dbColumn] of Object.entries(fieldMapping)) {
+      const value = (data as any)[frontendField];
+      if (value !== undefined && value !== null) {
+        updates.push(`${dbColumn} = $${paramIndex++}`);
+        params.push(value);
+      }
     }
 
     if (updates.length === 0) {
@@ -770,22 +913,33 @@ export const updateStudy = async (
       WHERE study_id = $${paramIndex}
     `;
 
+    logger.info('Executing update query', { updateCount: updates.length, studyId });
     await client.query(updateQuery, params);
 
-    // Log audit event
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name,
-        audit_log_event_type_id
-      ) VALUES (
-        NOW(), 'study', $1, $2, 'Study',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Study Updated' LIMIT 1)
-      )
-    `, [userId, studyId]);
+    // Log audit event (optional - don't fail if audit table doesn't exist)
+    try {
+      await client.query('SAVEPOINT audit_log');
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id, entity_name,
+          audit_log_event_type_id
+        ) VALUES (
+          NOW(), 'study', $1, $2, 'Study',
+          COALESCE(
+            (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%update%' LIMIT 1),
+            1
+          )
+        )
+      `, [userId, studyId]);
+      await client.query('RELEASE SAVEPOINT audit_log');
+    } catch (auditError: any) {
+      await client.query('ROLLBACK TO SAVEPOINT audit_log');
+      logger.warn('Audit logging failed for study update', { error: auditError.message });
+    }
 
     await client.query('COMMIT');
 
-    logger.info('Study updated successfully', { studyId });
+    logger.info('Study updated successfully', { studyId, fieldsUpdated: updates.length });
 
     return {
       success: true,

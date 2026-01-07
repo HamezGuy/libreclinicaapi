@@ -261,34 +261,146 @@ export const studySchemas = {
   }),
 
   create: Joi.object({
+    // Required fields for clinical trial compliance
     name: Joi.string().required().min(3).max(255)
       .messages({
         'string.min': 'Study name must be at least 3 characters',
-        'string.max': 'Study name cannot exceed 255 characters'
+        'string.max': 'Study name cannot exceed 255 characters',
+        'any.required': 'Study name is required'
       }),
     uniqueIdentifier: Joi.string().required().min(3).max(255)
       .pattern(/^[a-zA-Z0-9_-]+$/)
       .messages({
-        'string.pattern.base': 'Study identifier can only contain letters, numbers, hyphens, and underscores'
+        'string.pattern.base': 'Study identifier can only contain letters, numbers, hyphens, and underscores',
+        'any.required': 'Protocol number is required'
       }),
-    // Allow common field name variations from frontend
-    description: Joi.string().optional().max(2000).allow(''),
-    summary: Joi.string().optional().max(2000).allow(''),
-    principalInvestigator: Joi.string().optional().max(255).allow(''),
-    sponsor: Joi.string().optional().max(255).allow(''),
-    phase: Joi.string().optional().valid('I', 'II', 'III', 'IV', 'N/A', 'i', 'ii', 'iii', 'iv', 'phase_i', 'phase_ii', 'phase_iii', 'phase_iv'),
-    protocolType: Joi.string().optional().valid('interventional', 'observational'),
-    expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
-    targetEnrollment: Joi.number().integer().min(0).optional(), // Allow frontend variation
+    principalInvestigator: Joi.string().required().max(255)
+      .messages({
+        'any.required': 'Principal Investigator is required for clinical trials'
+      }),
+    sponsor: Joi.string().required().max(255)
+      .messages({
+        'any.required': 'Sponsor is required for clinical trials'
+      }),
+    phase: Joi.string().required().valid('I', 'II', 'III', 'IV', 'N/A', 'i', 'ii', 'iii', 'iv', 'phase_i', 'phase_ii', 'phase_iii', 'phase_iv')
+      .messages({
+        'any.required': 'Study phase is required',
+        'any.only': 'Phase must be I, II, III, IV, or N/A'
+      }),
+    expectedTotalEnrollment: Joi.number().integer().min(1).required()
+      .messages({
+        'any.required': 'Expected enrollment is required',
+        'number.min': 'Expected enrollment must be at least 1'
+      }),
     datePlannedStart: Joi.alternatives().try(
       Joi.date().iso(),
-      Joi.string().allow('')
-    ).optional(),
+      Joi.string().min(1)
+    ).required()
+      .messages({
+        'any.required': 'Planned start date is required'
+      }),
+    // Optional fields
+    description: Joi.string().optional().max(2000).allow(''),
+    summary: Joi.string().optional().max(2000).allow(''),
+    protocolType: Joi.string().optional().valid('interventional', 'observational'),
+    targetEnrollment: Joi.number().integer().min(0).optional(), // Allow frontend variation
     datePlannedEnd: Joi.alternatives().try(
       Joi.date().iso(),
       Joi.string().allow('')
     ).optional(),
-    parentStudyId: Joi.number().integer().positive().optional()
+    parentStudyId: Joi.number().integer().positive().optional(),
+    // Additional optional fields from frontend
+    officialTitle: Joi.string().optional().max(255).allow(''),
+    secondaryIdentifier: Joi.string().optional().max(255).allow(''),
+    collaborators: Joi.string().optional().max(1000).allow(''),
+    facilityName: Joi.string().optional().max(255).allow(''),
+    facilityCity: Joi.string().optional().max(255).allow(''),
+    facilityState: Joi.string().optional().max(20).allow(''),
+    facilityZip: Joi.string().optional().max(64).allow(''),
+    facilityCountry: Joi.string().optional().max(64).allow(''),
+    facilityRecruitmentStatus: Joi.string().optional().max(60).allow(''),
+    facilityContactName: Joi.string().optional().max(255).allow(''),
+    facilityContactDegree: Joi.string().optional().max(255).allow(''),
+    facilityContactPhone: Joi.string().optional().max(255).allow(''),
+    facilityContactEmail: Joi.string().optional().max(255).email().allow(''),
+    protocolDescription: Joi.string().optional().max(1000).allow(''),
+    protocolDateVerification: Joi.string().optional().allow(''),
+    medlineIdentifier: Joi.string().optional().max(255).allow(''),
+    url: Joi.string().optional().max(255).allow(''),
+    urlDescription: Joi.string().optional().max(255).allow(''),
+    resultsReference: Joi.boolean().optional(),
+    conditions: Joi.string().optional().max(500).allow(''),
+    keywords: Joi.string().optional().max(255).allow(''),
+    interventions: Joi.string().optional().max(1000).allow(''),
+    eligibility: Joi.string().optional().max(500).allow(''),
+    gender: Joi.string().optional().allow(''),
+    ageMin: Joi.string().optional().max(3).allow(''),
+    ageMax: Joi.string().optional().max(3).allow(''),
+    healthyVolunteerAccepted: Joi.boolean().optional(),
+    purpose: Joi.string().optional().max(64).allow(''),
+    allocation: Joi.string().optional().max(64).allow(''),
+    masking: Joi.string().optional().max(30).allow(''),
+    control: Joi.string().optional().max(30).allow(''),
+    assignment: Joi.string().optional().max(30).allow(''),
+    endpoint: Joi.string().optional().max(64).allow(''),
+    duration: Joi.string().optional().max(30).allow(''),
+    selection: Joi.string().optional().max(30).allow(''),
+    timing: Joi.string().optional().max(30).allow(''),
+    // Event definitions (phases) with CRF assignments
+    eventDefinitions: Joi.array().items(Joi.object({
+      name: Joi.string().required().max(255),
+      description: Joi.string().optional().max(2000).allow(''),
+      category: Joi.string().optional().allow(''),
+      type: Joi.string().valid('scheduled', 'unscheduled', 'common').default('scheduled'),
+      ordinal: Joi.number().integer().min(1).optional(),
+      repeating: Joi.boolean().default(false),
+      crfAssignments: Joi.array().items(Joi.object({
+        crfId: Joi.number().integer().positive().required(),
+        required: Joi.boolean().default(true),
+        doubleDataEntry: Joi.boolean().default(false),
+        electronicSignature: Joi.boolean().default(false),
+        hideCrf: Joi.boolean().default(false),
+        ordinal: Joi.number().integer().min(1).default(1)
+      })).optional()
+    })).optional(),
+    // Group classes
+    groupClasses: Joi.array().items(Joi.object({
+      name: Joi.string().required().max(255),
+      type: Joi.number().integer().min(1).max(4).default(1),
+      subjectAssignment: Joi.string().optional().allow(''),
+      groups: Joi.array().items(Joi.object({
+        name: Joi.string().required().max(255),
+        description: Joi.string().optional().max(1000).allow('')
+      })).optional()
+    })).optional(),
+    // Sites (child studies)
+    sites: Joi.array().items(Joi.object({
+      name: Joi.string().required().max(255),
+      uniqueIdentifier: Joi.string().required().max(255),
+      facilityName: Joi.string().optional().max(255).allow(''),
+      facilityCity: Joi.string().optional().max(255).allow(''),
+      facilityCountry: Joi.string().optional().max(64).allow(''),
+      principalInvestigator: Joi.string().optional().max(255).allow(''),
+      expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
+      inheritFromParent: Joi.boolean().default(true)
+    })).optional(),
+    // Study parameters
+    collectDob: Joi.string().optional().valid('1', '2', '3'),
+    genderRequired: Joi.string().optional(),
+    subjectPersonIdRequired: Joi.string().optional(),
+    subjectIdGeneration: Joi.string().optional().valid('manual', 'auto_editable', 'auto_non_editable'),
+    subjectIdPrefix: Joi.string().optional().allow(''),
+    subjectIdSuffix: Joi.string().optional().allow(''),
+    studySubjectIdLabel: Joi.string().optional().allow(''),
+    secondaryIdLabel: Joi.string().optional().allow(''),
+    personIdShownOnCrf: Joi.string().optional(),
+    secondaryLabelViewable: Joi.boolean().optional(),
+    eventLocationRequired: Joi.boolean().optional(),
+    dateOfEnrollmentForStudyRequired: Joi.string().optional(),
+    discrepancyManagement: Joi.boolean().optional(),
+    allowAdministrativeEditing: Joi.boolean().optional(),
+    mailNotification: Joi.string().optional().allow(''),
+    contactEmail: Joi.string().optional().email().allow('')
   }),
 
   update: Joi.object({

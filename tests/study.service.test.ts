@@ -310,7 +310,7 @@ describe('Study Service', () => {
       const parentResult = await studyService.createStudy({
         name: `Parent Study ${Date.now()}`,
         uniqueIdentifier: `PARENT-${Date.now()}`,
-        description: 'Parent study for site testing'
+        summary: 'Parent study for site testing'
       }, userId);
 
       parentStudyId = parentResult.studyId!;
@@ -381,7 +381,7 @@ describe('Study Service', () => {
       const result = await studyService.createStudy({
         name: `Metadata Study ${Date.now()}`,
         uniqueIdentifier: `META-${Date.now()}`,
-        description: 'Study for metadata testing'
+        summary: 'Study for metadata testing'
       }, userId);
 
       metadataStudyId = result.studyId!;

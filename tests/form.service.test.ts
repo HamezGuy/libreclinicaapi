@@ -32,7 +32,7 @@ describe('Form Service', () => {
     // Create a test CRF
     const crfResult = await testDb.pool.query(`
       INSERT INTO crf (
-        status_id, name, description, owner_id, date_created, oc_oid, study_id
+        status_id, name, description, owner_id, date_created, oc_oid, source_study_id
       ) VALUES (
         1, $1, 'Test CRF Description', $2, NOW(), $3, $4
       )

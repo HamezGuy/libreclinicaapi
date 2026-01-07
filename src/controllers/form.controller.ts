@@ -197,5 +197,109 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
   res.status(result.success ? 200 : 400).json(result);
 });
 
-export default { saveData, getData, getMetadata, getStatus, list, get, getByStudy, create, update, remove };
+// =============================================================================
+// TEMPLATE FORKING / VERSIONING CONTROLLERS
+// =============================================================================
+
+/**
+ * Get all versions of a form template
+ */
+export const getVersions = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = (req as any).user;
+
+  const result = await formService.getFormVersions(parseInt(id));
+
+  // Track access for audit (21 CFR Part 11)
+  if (user?.userId && result.success) {
+    await trackDocumentAccess(
+      user.userId,
+      user.username || user.userName,
+      'crf_version_history',
+      parseInt(id),
+      undefined,
+      'view'
+    );
+  }
+
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * Create a new version of an existing form template
+ * This is "forking" at the version level - same CRF, new version
+ */
+export const createVersion = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = (req as any).user;
+
+  const { versionName, revisionNotes, copyFromVersionId } = req.body;
+
+  if (!versionName) {
+    res.status(400).json({ success: false, message: 'versionName is required' });
+    return;
+  }
+
+  const result = await formService.createFormVersion(
+    parseInt(id),
+    { versionName, revisionNotes, copyFromVersionId },
+    user.userId
+  );
+
+  if (result.success) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'FORM_VERSION_CREATED',
+      entityType: 'crf_version',
+      entityId: result.crfVersionId,
+      details: `Created version "${versionName}" for form ID: ${id}`
+    });
+  }
+
+  res.status(result.success ? 201 : 400).json(result);
+});
+
+/**
+ * Fork (copy) an entire form template to create a new independent form
+ * This is "forking" at the CRF level - completely new CRF
+ */
+export const fork = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = (req as any).user;
+
+  const { newName, description, targetStudyId } = req.body;
+
+  if (!newName) {
+    res.status(400).json({ success: false, message: 'newName is required' });
+    return;
+  }
+
+  const result = await formService.forkForm(
+    parseInt(id),
+    { newName, description, targetStudyId },
+    user.userId
+  );
+
+  if (result.success) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'FORM_FORKED',
+      entityType: 'crf',
+      entityId: result.newCrfId,
+      details: `Forked form ID ${id} as "${newName}"`
+    });
+  }
+
+  res.status(result.success ? 201 : 400).json(result);
+});
+
+export default { 
+  saveData, getData, getMetadata, getStatus, 
+  list, get, getByStudy, 
+  create, update, remove,
+  // Forking/Versioning
+  getVersions, createVersion, fork
+};
 

@@ -69,6 +69,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      DEMO_MODE: "true"
       LIBRECLINICA_DB_HOST: postgres
       LIBRECLINICA_DB_PORT: 5432
       LIBRECLINICA_DB_NAME: libreclinica
@@ -78,8 +79,15 @@ services:
       LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
       SOAP_USERNAME: root
       SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
+      DISABLE_SOAP: "true"
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
-      ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
+      ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,https://edc-real-gosydyd0z-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
+      # Enable all new features
+      ENABLE_EMAIL_NOTIFICATIONS: "true"
+      ENABLE_SUBJECT_TRANSFERS: "true"
+      ENABLE_ECONSENT: "true"
+      ENABLE_EPRO: "true"
+      ENABLE_RTSM: "true"
     networks:
       - lc_network
 

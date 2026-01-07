@@ -24,12 +24,12 @@ describe('Randomization Service', () => {
     await testDb.pool.query('SELECT NOW()');
 
     // Create test study
-    testStudyId = await createTestStudy(pool, rootUserId, {
+    testStudyId = await createTestStudy(testDb.pool, rootUserId, {
       uniqueIdentifier: `RAND-TEST-${Date.now()}`
     });
 
     // Create test subject
-    testSubjectId = await createTestSubject(pool, testStudyId, {
+    testSubjectId = await createTestSubject(testDb.pool, testStudyId, {
       label: `RAND-SUB-${Date.now()}`
     });
 
@@ -184,7 +184,7 @@ describe('Randomization Service', () => {
     });
 
     it('should return empty array for study with no groups', async () => {
-      const emptyStudyId = await createTestStudy(pool, rootUserId, {
+      const emptyStudyId = await createTestStudy(testDb.pool, rootUserId, {
         uniqueIdentifier: `EMPTY-RAND-${Date.now()}`
       });
 
@@ -202,7 +202,7 @@ describe('Randomization Service', () => {
   describe('createRandomization', () => {
     it('should create randomization', async () => {
       // Create a new subject for this test
-      const newSubjectId = await createTestSubject(pool, testStudyId, {
+      const newSubjectId = await createTestSubject(testDb.pool, testStudyId, {
         label: `NEW-RAND-${Date.now()}`
       });
 
@@ -223,7 +223,7 @@ describe('Randomization Service', () => {
     });
 
     it('should set owner_id correctly', async () => {
-      const newSubjectId = await createTestSubject(pool, testStudyId, {
+      const newSubjectId = await createTestSubject(testDb.pool, testStudyId, {
         label: `OWNER-RAND-${Date.now()}`
       });
 
@@ -242,7 +242,7 @@ describe('Randomization Service', () => {
     });
 
     it('should create audit log entry', async () => {
-      const newSubjectId = await createTestSubject(pool, testStudyId, {
+      const newSubjectId = await createTestSubject(testDb.pool, testStudyId, {
         label: `AUDIT-RAND-${Date.now()}`
       });
 
@@ -268,7 +268,7 @@ describe('Randomization Service', () => {
     });
 
     it('should verify randomization in database', async () => {
-      const newSubjectId = await createTestSubject(pool, testStudyId, {
+      const newSubjectId = await createTestSubject(testDb.pool, testStudyId, {
         label: `VERIFY-RAND-${Date.now()}`
       });
 

@@ -352,15 +352,15 @@ describe('Patient/Subject CRUD API', () => {
       const subject = await subjectService.getSubjectById(testSubjectId);
       
       expect(subject).toBeDefined();
-      expect(subject?.study_subject_id).toBe(testSubjectId);
+      expect(subject?.studySubjectId).toBe(testSubjectId);
       expect(subject?.label).toBeDefined();
     });
 
     it('should include status information', async () => {
       const subject = await subjectService.getSubjectById(testSubjectId);
       
-      // status_name comes from database JOIN but may not be in TypeScript type
-      expect((subject as any)?.status_name || subject?.subject?.status_id).toBeDefined();
+      // Check status from the subject model
+      expect(subject?.status || subject?.subject?.statusId).toBeDefined();
     });
 
     it('should include events array', async () => {

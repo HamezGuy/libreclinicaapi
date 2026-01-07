@@ -2,18 +2,46 @@
  * Password Utility
  * 
  * Password hashing, validation, and complexity checks
- * - MD5 hashing for LibreClinica compatibility
+ * - MD5 hashing for LibreClinica legacy compatibility (SOAP WS-Security)
+ * - bcrypt for new password storage (Part 11 compliant)
+ * - Dual-authentication support for migration period
  * - Password complexity validation (21 CFR Part 11)
  * - Password expiration checking
  * - Account lockout management
  * 
  * Compliance: 21 CFR Part 11 §11.300 - Password Controls
+ * 
+ * MD5 LEGACY DOCUMENTATION:
+ * -------------------------
+ * LibreClinica's SOAP WS-Security requires MD5 password hashes.
+ * This is a known limitation of the LibreClinica platform.
+ * 
+ * Mitigation:
+ * 1. All NEW passwords are stored with bcrypt (secure)
+ * 2. MD5 hash is ONLY used for SOAP authentication to LibreClinica
+ * 3. Passwords are never stored as plaintext
+ * 4. Strong password policies compensate for MD5 weakness
+ * 5. Account lockout prevents brute-force attacks
+ * 
+ * Migration Path:
+ * - When user logs in with MD5 password, upgrade to bcrypt
+ * - Store bcrypt hash in extended user table
+ * - Use bcrypt for API auth, MD5 only for SOAP proxy
  */
 
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { config } from '../config/environment';
 import { logger } from '../config/logger';
+
+/**
+ * Password hash type identifier
+ */
+export enum PasswordHashType {
+  MD5 = 'md5',           // Legacy LibreClinica (32 hex chars)
+  BCRYPT = 'bcrypt',     // Secure bcrypt ($2a$, $2b$, $2y$ prefix)
+  UNKNOWN = 'unknown'
+}
 
 /**
  * Password validation result
@@ -95,6 +123,136 @@ export const comparePasswordBcrypt = async (
     logger.error('Password comparison error', { error: error.message });
     return false;
   }
+};
+
+/**
+ * Detect the hash type from a stored password hash
+ */
+export const detectHashType = (hash: string): PasswordHashType => {
+  if (!hash) return PasswordHashType.UNKNOWN;
+  
+  // bcrypt hashes start with $2a$, $2b$, or $2y$ and are 60 chars
+  if (hash.match(/^\$2[aby]\$\d{2}\$.{53}$/)) {
+    return PasswordHashType.BCRYPT;
+  }
+  
+  // MD5 hashes are 32 hex characters
+  if (hash.match(/^[a-f0-9]{32}$/i)) {
+    return PasswordHashType.MD5;
+  }
+  
+  return PasswordHashType.UNKNOWN;
+};
+
+/**
+ * Compare password with any hash type (auto-detect)
+ * Supports both MD5 (legacy) and bcrypt (secure)
+ */
+export const comparePasswordAny = async (
+  password: string,
+  hash: string
+): Promise<{ valid: boolean; hashType: PasswordHashType; needsUpgrade: boolean }> => {
+  const hashType = detectHashType(hash);
+  
+  switch (hashType) {
+    case PasswordHashType.BCRYPT:
+      const bcryptValid = await comparePasswordBcrypt(password, hash);
+      return { valid: bcryptValid, hashType, needsUpgrade: false };
+      
+    case PasswordHashType.MD5:
+      const md5Valid = comparePasswordMD5(password, hash);
+      // MD5 passwords should be upgraded to bcrypt
+      return { valid: md5Valid, hashType, needsUpgrade: md5Valid };
+      
+    default:
+      logger.warn('Unknown password hash type', { hashLength: hash?.length });
+      return { valid: false, hashType, needsUpgrade: false };
+  }
+};
+
+/**
+ * Upgrade a password from MD5 to bcrypt
+ * Call this after successful MD5 authentication
+ * 
+ * @returns Object with both hashes (MD5 for SOAP, bcrypt for API)
+ */
+export const upgradePasswordHash = async (
+  password: string
+): Promise<{ md5Hash: string; bcryptHash: string }> => {
+  const md5Hash = hashPasswordMD5(password);
+  const bcryptHash = await hashPasswordBcrypt(password);
+  
+  logger.info('Password hash upgraded from MD5 to bcrypt');
+  
+  return { md5Hash, bcryptHash };
+};
+
+/**
+ * Hash password for dual storage (both MD5 and bcrypt)
+ * - MD5 hash is used ONLY for LibreClinica SOAP authentication
+ * - bcrypt hash is used for API authentication
+ * 
+ * @returns Object with both hashes
+ */
+export const hashPasswordDual = async (
+  password: string
+): Promise<{ md5Hash: string; bcryptHash: string }> => {
+  const [bcryptHash] = await Promise.all([
+    hashPasswordBcrypt(password)
+  ]);
+  
+  return {
+    md5Hash: hashPasswordMD5(password),  // For SOAP WS-Security only
+    bcryptHash                            // For secure API authentication
+  };
+};
+
+/**
+ * Verify password and return both hash types for storage upgrade
+ * Use this during login to transparently upgrade MD5 to bcrypt
+ */
+export const verifyAndUpgrade = async (
+  password: string,
+  storedHash: string,
+  storedBcryptHash?: string | null
+): Promise<{
+  valid: boolean;
+  upgradedBcryptHash?: string;
+  shouldUpdateDatabase: boolean;
+}> => {
+  // If we have a bcrypt hash, verify against it (preferred)
+  if (storedBcryptHash) {
+    const bcryptValid = await comparePasswordBcrypt(password, storedBcryptHash);
+    return { valid: bcryptValid, shouldUpdateDatabase: false };
+  }
+  
+  // Fall back to MD5 verification
+  const hashType = detectHashType(storedHash);
+  
+  if (hashType === PasswordHashType.MD5) {
+    const md5Valid = comparePasswordMD5(password, storedHash);
+    
+    if (md5Valid) {
+      // Password is correct - upgrade to bcrypt
+      const bcryptHash = await hashPasswordBcrypt(password);
+      logger.info('Password verified via MD5, upgrading to bcrypt');
+      
+      return {
+        valid: true,
+        upgradedBcryptHash: bcryptHash,
+        shouldUpdateDatabase: true
+      };
+    }
+    
+    return { valid: false, shouldUpdateDatabase: false };
+  }
+  
+  if (hashType === PasswordHashType.BCRYPT) {
+    const bcryptValid = await comparePasswordBcrypt(password, storedHash);
+    return { valid: bcryptValid, shouldUpdateDatabase: false };
+  }
+  
+  return { valid: false, shouldUpdateDatabase: false };
 };
 
 /**
@@ -299,18 +457,37 @@ export const getPasswordStrengthLabel = (score: number): string => {
 };
 
 export default {
+  // Hash type detection
+  PasswordHashType,
+  detectHashType,
+  
+  // Legacy MD5 (for LibreClinica SOAP only)
   hashPasswordMD5,
-  hashPasswordBcrypt,
   comparePasswordMD5,
+  
+  // Secure bcrypt (for API authentication)
+  hashPasswordBcrypt,
   comparePasswordBcrypt,
+  
+  // Dual authentication (MD5 + bcrypt)
+  comparePasswordAny,
+  hashPasswordDual,
+  upgradePasswordHash,
+  verifyAndUpgrade,
+  
+  // Validation and policy
   validatePassword,
   isPasswordExpired,
   getDaysUntilPasswordExpires,
   isPasswordPreviouslyUsed,
   generateRandomPassword,
+  
+  // Account lockout
   shouldLockAccount,
   calculateLockoutDuration,
   isLockoutExpired,
+  
+  // Strength checking
   calculatePasswordStrength,
   getPasswordStrengthLabel
 };

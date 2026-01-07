@@ -22,13 +22,13 @@ describe('Subject Service', () => {
     await testDb.pool.query('SELECT NOW()');
 
     // Create test study
-    testStudyId = await createTestStudy(pool, rootUserId, {
+    testStudyId = await createTestStudy(testDb.pool, rootUserId, {
       uniqueIdentifier: `SUBJECT-TEST-${Date.now()}`,
       name: 'Subject Test Study'
     });
 
     // Create event definitions
-    await createTestEventDefinition(pool, testStudyId, {
+    await createTestEventDefinition(testDb.pool, testStudyId, {
       name: 'Screening Visit',
       ordinal: 1
     });
@@ -51,7 +51,7 @@ describe('Subject Service', () => {
   beforeEach(async () => {
     // Create test subjects
     for (let i = 0; i < 5; i++) {
-      const subjectId = await createTestSubject(pool, testStudyId, {
+      const subjectId = await createTestSubject(testDb.pool, testStudyId, {
         label: `SUB-TEST-${Date.now()}-${i}`,
         statusId: i % 2 === 0 ? 1 : 5 // Mix of available and removed
       });
@@ -176,7 +176,7 @@ describe('Subject Service', () => {
         const subject = await subjectService.getSubjectById(testSubjectIds[0]);
 
         expect(subject).toBeDefined();
-        expect(subject?.study_subject_id).toBe(testSubjectIds[0]);
+        expect(subject?.studySubjectId).toBe(testSubjectIds[0]);
       }
     });
 
@@ -185,7 +185,7 @@ describe('Subject Service', () => {
         const subject = await subjectService.getSubjectById(testSubjectIds[0]);
 
         expect(subject?.label).toBeDefined();
-        expect(subject?.status_name).toBeDefined();
+        expect(subject?.status).toBeDefined();
         expect(subject?.gender).toBeDefined();
       }
     });
@@ -203,18 +203,18 @@ describe('Subject Service', () => {
       if (testSubjectIds.length > 0) {
         const subject = await subjectService.getSubjectById(testSubjectIds[0]);
 
-        expect(subject?.completionPercentage).toBeDefined();
-        expect(typeof subject?.completionPercentage).toBe('number');
-        expect(subject?.completionPercentage).toBeGreaterThanOrEqual(0);
-        expect(subject?.completionPercentage).toBeLessThanOrEqual(100);
+        expect(subject?.progress?.percentComplete).toBeDefined();
+        expect(typeof subject?.progress?.percentComplete).toBe('number');
+        expect(subject?.progress?.percentComplete).toBeGreaterThanOrEqual(0);
+        expect(subject?.progress?.percentComplete).toBeLessThanOrEqual(100);
       }
     });
 
-    it('should include last activity date', async () => {
+    it('should include progress statistics', async () => {
       if (testSubjectIds.length > 0) {
         const subject = await subjectService.getSubjectById(testSubjectIds[0]);
 
-        expect(subject?.lastActivity).toBeDefined();
+        expect(subject?.progress).toBeDefined();
       }
     });
 
@@ -229,7 +229,7 @@ describe('Subject Service', () => {
         const subject = await subjectService.getSubjectById(testSubjectIds[0]);
 
         expect(subject?.subject).toBeDefined();
-        expect(subject?.subject?.subject_id).toBeDefined();
+        expect(subject?.subject?.subjectId).toBeDefined();
       }
     });
   });

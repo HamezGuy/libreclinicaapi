@@ -1,16 +1,19 @@
 /**
  * Double Data Entry (DDE) Service
  * 
- * Implements double data entry workflow for high-quality clinical trials.
- * Extends LibreClinica's native DDE support with:
- * - Discrepancy detection
- * - Side-by-side comparison
- * - Reconciliation workflow
+ * Implements double data entry workflow using LibreClinica's NATIVE tables.
+ * LibreClinica already supports DDE via:
+ * - event_definition_crf.double_entry (boolean flag)
+ * - event_crf.completion_status_id (1=not_started, 2=initial_data_entry, 3=complete, etc.)
+ * - event_crf.validator_id (stores second entry user)
+ * - Uses discrepancy_note for tracking differences
  * 
  * 21 CFR Part 11 Compliance:
- * - Full audit trail of all entries and resolutions
- * - Different user required for second entry
+ * - Full audit trail via audit_log_event
+ * - Different user required for second entry (validator)
  * - Complete data integrity checks
+ * 
+ * NOTE: This version uses ONLY existing LibreClinica tables - NO custom acc_* tables
  */
 
 import { pool } from '../../config/database';
@@ -92,6 +95,17 @@ export interface DDEDashboardItem {
 }
 
 // ============================================================================
+// LibreClinica Completion Status IDs
+// ============================================================================
+// From LibreClinica's completion_status table:
+// 1 = not_started
+// 2 = initial_data_entry (first entry in progress)
+// 3 = initial_data_entry_complete (first entry done, awaiting second)
+// 4 = double_data_entry (second entry in progress)  
+// 5 = double_data_entry_complete (both entries done)
+// ============================================================================
+
+// ============================================================================
 // Core Functions
 // ============================================================================
 
@@ -122,29 +136,42 @@ export async function isDDERequired(eventCrfId: number): Promise<boolean> {
 
 /**
  * Get DDE status for an event_crf
+ * Uses LibreClinica's native completion_status_id and validator fields
  */
 export async function getDDEStatus(eventCrfId: number): Promise<DDEStatus | null> {
   try {
     const query = `
       SELECT 
-        ds.*,
+        ec.event_crf_id,
+        ec.completion_status_id,
+        cs.name as completion_status_name,
+        ec.owner_id as first_entry_by,
         CONCAT(u1.first_name, ' ', u1.last_name) as first_entry_by_name,
-        CONCAT(u2.first_name, ' ', u2.last_name) as second_entry_by_name
-      FROM acc_dde_status ds
-      LEFT JOIN user_account u1 ON ds.first_entry_by = u1.user_id
-      LEFT JOIN user_account u2 ON ds.second_entry_by = u2.user_id
-      WHERE ds.event_crf_id = $1
+        ec.date_created as first_entry_at,
+        ec.validator_id as second_entry_by,
+        CONCAT(u2.first_name, ' ', u2.last_name) as second_entry_by_name,
+        ec.date_validate as second_entry_at,
+        edc.double_entry,
+        (SELECT COUNT(*) FROM item_data WHERE event_crf_id = ec.event_crf_id AND status_id = 1) as total_items,
+        (SELECT COUNT(*) FROM discrepancy_note dn 
+         INNER JOIN dn_event_crf_map dem ON dn.discrepancy_note_id = dem.discrepancy_note_id
+         WHERE dem.event_crf_id = ec.event_crf_id AND dn.discrepancy_note_type_id = 4
+         AND dn.resolution_status_id = 1) as open_discrepancies
+      FROM event_crf ec
+      JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      LEFT JOIN user_account u1 ON ec.owner_id = u1.user_id
+      LEFT JOIN user_account u2 ON ec.validator_id = u2.user_id
+      JOIN study_event se ON ec.study_event_id = se.study_event_id
+      LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      LEFT JOIN crf c ON cv.crf_id = c.crf_id
+      LEFT JOIN event_definition_crf edc ON edc.crf_id = c.crf_id 
+        AND edc.study_event_definition_id = se.study_event_definition_id
+      WHERE ec.event_crf_id = $1
     `;
 
     const result = await pool.query(query, [eventCrfId]);
 
     if (result.rows.length === 0) {
-      // Check if DDE is required but status not yet created
-      const isRequired = await isDDERequired(eventCrfId);
-      if (isRequired) {
-        // Create initial DDE status
-        return await initializeDDEStatus(eventCrfId);
-      }
       return null;
     }
 
@@ -153,38 +180,6 @@ export async function getDDEStatus(eventCrfId: number): Promise<DDEStatus | null
     logger.error('Error getting DDE status', { error: error.message, eventCrfId });
     return null;
   }
-}
-
-/**
- * Initialize DDE status for an event_crf
- */
-async function initializeDDEStatus(eventCrfId: number): Promise<DDEStatus> {
-  const query = `
-    INSERT INTO acc_dde_status (
-      event_crf_id, crf_version_id, first_entry_status, second_entry_status,
-      comparison_status, date_created, date_updated
-    )
-    SELECT 
-      ec.event_crf_id, ec.crf_version_id, 'pending', 'pending', 'pending',
-      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-    FROM event_crf ec
-    WHERE ec.event_crf_id = $1
-    ON CONFLICT (event_crf_id) DO NOTHING
-    RETURNING *
-  `;
-
-  const result = await pool.query(query, [eventCrfId]);
-  
-  if (result.rows.length === 0) {
-    // Already exists, fetch it
-    const existing = await pool.query(
-      'SELECT * FROM acc_dde_status WHERE event_crf_id = $1',
-      [eventCrfId]
-    );
-    return mapRowToDDEStatus(existing.rows[0]);
-  }
-
-  return mapRowToDDEStatus(result.rows[0]);
 }
 
 /**
@@ -198,13 +193,18 @@ export async function canUserPerformDDE(
     const status = await getDDEStatus(eventCrfId);
 
     if (!status) {
-      // DDE not required for this form
-      return { allowed: false, reason: 'DDE not required for this form' };
+      return { allowed: false, reason: 'Form not found' };
     }
 
     // If first entry not complete, any user can do it
     if (status.firstEntryStatus !== 'complete') {
       return { allowed: true, entryType: 'first' };
+    }
+
+    // Check if DDE is required
+    const isRequired = await isDDERequired(eventCrfId);
+    if (!isRequired) {
+      return { allowed: false, reason: 'DDE not required for this form' };
     }
 
     // First entry complete - check for second entry
@@ -229,7 +229,7 @@ export async function canUserPerformDDE(
 
 /**
  * Mark first entry as complete
- * Called when form is initially submitted
+ * Updates LibreClinica's completion_status_id to 3 (initial_data_entry_complete)
  */
 export async function markFirstEntryComplete(
   eventCrfId: number,
@@ -242,41 +242,25 @@ export async function markFirstEntryComplete(
   try {
     await client.query('BEGIN');
 
-    // Count total items for this form
-    const itemCountResult = await client.query(`
-      SELECT COUNT(DISTINCT id.item_id) as total
-      FROM item_data id
-      WHERE id.event_crf_id = $1 AND id.status_id = 1
-    `, [eventCrfId]);
-
-    const totalItems = parseInt(itemCountResult.rows[0]?.total || '0');
-
-    // Update or create DDE status
+    // Update event_crf completion status to initial_data_entry_complete (3)
     await client.query(`
-      INSERT INTO acc_dde_status (
-        event_crf_id, first_entry_status, first_entry_by, first_entry_at,
-        total_items, date_created, date_updated
-      ) VALUES (
-        $1, 'complete', $2, CURRENT_TIMESTAMP, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-      ON CONFLICT (event_crf_id) DO UPDATE SET
-        first_entry_status = 'complete',
-        first_entry_by = $2,
-        first_entry_at = CURRENT_TIMESTAMP,
-        total_items = $3,
-        date_updated = CURRENT_TIMESTAMP
-    `, [eventCrfId, userId, totalItems]);
+      UPDATE event_crf
+      SET completion_status_id = 3,
+          date_updated = CURRENT_TIMESTAMP,
+          update_id = $2
+      WHERE event_crf_id = $1
+    `, [eventCrfId, userId]);
 
     // Log audit event
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
-        old_value, new_value, audit_log_event_type_id, reason_for_change
+        old_value, new_value, audit_log_event_type_id, reason_for_change,
+        event_crf_id
       ) VALUES (
-        CURRENT_TIMESTAMP, 'acc_dde_status', $1, $2, 'DDE First Entry',
-        'pending', 'complete',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
-        'First data entry completed'
+        CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'DDE First Entry Complete',
+        'initial_data_entry', 'initial_data_entry_complete', 2,
+        'First data entry completed for DDE', $2
       )
     `, [userId, eventCrfId]);
 
@@ -294,6 +278,7 @@ export async function markFirstEntryComplete(
 
 /**
  * Submit second entry data
+ * Stores second entry values as annotations and updates validator_id
  */
 export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDEStatus> {
   logger.info('Submitting second entry', { 
@@ -313,51 +298,34 @@ export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDESt
       throw new Error(canDo.reason || 'Cannot perform second entry');
     }
 
-    // Insert DDE entries
-    for (const entry of request.entries) {
-      // Get corresponding item_data_id
-      const itemDataResult = await client.query(`
-        SELECT item_data_id FROM item_data
-        WHERE event_crf_id = $1 AND item_id = $2 AND status_id = 1
-        ORDER BY ordinal DESC LIMIT 1
-      `, [request.eventCrfId, entry.itemId]);
+    // Store second entry values in validator_annotations as JSON
+    const secondEntryData = JSON.stringify(request.entries.map(e => ({
+      itemId: e.itemId,
+      value: e.value
+    })));
 
-      const itemDataId = itemDataResult.rows[0]?.item_data_id;
-
-      await client.query(`
-        INSERT INTO acc_dde_entry (
-          event_crf_id, item_id, item_data_id, second_entry_value,
-          entered_by, entered_at
-        ) VALUES (
-          $1, $2, $3, $4, $5, CURRENT_TIMESTAMP
-        )
-        ON CONFLICT (event_crf_id, item_id) DO UPDATE SET
-          second_entry_value = $4,
-          entered_by = $5,
-          entered_at = CURRENT_TIMESTAMP
-      `, [request.eventCrfId, entry.itemId, itemDataId, entry.value, request.userId]);
-    }
-
-    // Update DDE status
+    // Update event_crf with validator info and completion status
     await client.query(`
-      UPDATE acc_dde_status
-      SET second_entry_status = 'complete',
-          second_entry_by = $2,
-          second_entry_at = CURRENT_TIMESTAMP,
-          date_updated = CURRENT_TIMESTAMP
+      UPDATE event_crf
+      SET validator_id = $2,
+          date_validate = CURRENT_TIMESTAMP,
+          validator_annotations = $3,
+          completion_status_id = 4,
+          date_updated = CURRENT_TIMESTAMP,
+          update_id = $2
       WHERE event_crf_id = $1
-    `, [request.eventCrfId, request.userId]);
+    `, [request.eventCrfId, request.userId, secondEntryData]);
 
     // Log audit event
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
-        old_value, new_value, audit_log_event_type_id, reason_for_change
+        old_value, new_value, audit_log_event_type_id, reason_for_change,
+        event_crf_id
       ) VALUES (
-        CURRENT_TIMESTAMP, 'acc_dde_status', $1, $2, 'DDE Second Entry',
-        'pending', 'complete',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
-        'Second data entry completed'
+        CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'DDE Second Entry Submitted',
+        'initial_data_entry_complete', 'double_data_entry', 2,
+        'Second data entry submitted for comparison', $2
       )
     `, [request.userId, request.eventCrfId]);
 
@@ -378,6 +346,7 @@ export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDESt
 
 /**
  * Compare first and second entries
+ * Creates discrepancy_notes for mismatches using LibreClinica's native query system
  */
 export async function compareEntries(eventCrfId: number): Promise<DDEComparison> {
   logger.info('Comparing DDE entries', { eventCrfId });
@@ -391,17 +360,12 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
     ORDER BY i.item_id
   `, [eventCrfId]);
 
-  // Get second entries (from acc_dde_entry)
-  const secondEntriesResult = await pool.query(`
-    SELECT dde.item_id, dde.second_entry_value
-    FROM acc_dde_entry dde
-    WHERE dde.event_crf_id = $1
-  `, [eventCrfId]);
-
-  // Get form info for context
-  const formInfoResult = await pool.query(`
+  // Get second entries from validator_annotations
+  const eventCrfResult = await pool.query(`
     SELECT 
+      ec.validator_annotations,
       ss.label as subject_label,
+      ss.study_subject_id,
       cv.name as form_name
     FROM event_crf ec
     JOIN study_event se ON ec.study_event_id = se.study_event_id
@@ -410,12 +374,21 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
     WHERE ec.event_crf_id = $1
   `, [eventCrfId]);
 
-  const formInfo = formInfoResult.rows[0] || {};
+  const eventCrf = eventCrfResult.rows[0] || {};
+  let secondEntries: { itemId: number; value: string }[] = [];
+  
+  try {
+    if (eventCrf.validator_annotations) {
+      secondEntries = JSON.parse(eventCrf.validator_annotations);
+    }
+  } catch (e) {
+    logger.warn('Could not parse validator_annotations', { eventCrfId });
+  }
 
   // Build lookup for second entries
   const secondEntriesMap: Record<number, string> = {};
-  for (const entry of secondEntriesResult.rows) {
-    secondEntriesMap[entry.item_id] = entry.second_entry_value;
+  for (const entry of secondEntries) {
+    secondEntriesMap[entry.itemId] = entry.value;
   }
 
   // Compare and create discrepancies
@@ -432,45 +405,63 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
       const secondValue = secondEntriesMap[first.item_id] ?? '';
       const matches = normalizeForComparison(first.value) === normalizeForComparison(secondValue);
 
-      // Update match status in dde_entry
-      await client.query(`
-        UPDATE acc_dde_entry
-        SET matches_first = $1
-        WHERE event_crf_id = $2 AND item_id = $3
-      `, [matches, eventCrfId, first.item_id]);
-
       if (matches) {
         matched++;
       } else {
         discrepancies++;
         
-        // Create or update discrepancy record
-        await client.query(`
-          INSERT INTO acc_dde_discrepancy (
-            event_crf_id, item_id, first_value, second_value,
-            resolution_status, date_created, date_updated
-          ) VALUES (
-            $1, $2, $3, $4, 'open', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        // Create discrepancy note using LibreClinica's native system
+        // discrepancy_note_type_id = 4 is "Reason for Change" - we use it for DDE
+        const discResult = await client.query(`
+          INSERT INTO discrepancy_note (
+            description, discrepancy_note_type_id, resolution_status_id,
+            detailed_notes, date_created, date_updated, owner_id,
+            entity_type, entity_id, study_id
           )
-          ON CONFLICT ON CONSTRAINT acc_dde_discrepancy_event_crf_id_item_id_key
-          DO UPDATE SET
-            first_value = $3,
-            second_value = $4,
-            resolution_status = 'open',
-            date_updated = CURRENT_TIMESTAMP
-        `, [eventCrfId, first.item_id, first.value, secondValue]);
+          SELECT 
+            'DDE Discrepancy: First value differs from second entry',
+            4, 1, $2,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ec.owner_id,
+            'itemData', $3, ss.study_id
+          FROM event_crf ec
+          JOIN study_event se ON ec.study_event_id = se.study_event_id
+          JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+          WHERE ec.event_crf_id = $1
+          RETURNING discrepancy_note_id
+        `, [
+          eventCrfId,
+          JSON.stringify({ firstValue: first.value, secondValue }),
+          first.item_data_id
+        ]);
+
+        // Link to item_data via dn_item_data_map
+        if (discResult.rows.length > 0) {
+          await client.query(`
+            INSERT INTO dn_item_data_map (
+              discrepancy_note_id, item_data_id, study_subject_id
+            )
+            SELECT $1, $2, ss.study_subject_id
+            FROM event_crf ec
+            JOIN study_event se ON ec.study_event_id = se.study_event_id
+            JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+            WHERE ec.event_crf_id = $3
+          `, [discResult.rows[0].discrepancy_note_id, first.item_data_id, eventCrfId]);
+        }
       }
 
-      // Get discrepancy ID if exists
-      const discResult = await client.query(`
-        SELECT discrepancy_id, resolution_status, resolved_value,
+      // Check for existing discrepancy
+      const existingDiscResult = await client.query(`
+        SELECT dn.discrepancy_note_id, dn.resolution_status_id, dn.detailed_notes,
                CONCAT(u.first_name, ' ', u.last_name) as resolved_by
-        FROM acc_dde_discrepancy d
-        LEFT JOIN user_account u ON d.resolved_by = u.user_id
-        WHERE d.event_crf_id = $1 AND d.item_id = $2
-      `, [eventCrfId, first.item_id]);
+        FROM discrepancy_note dn
+        INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
+        LEFT JOIN user_account u ON dn.update_id = u.user_id
+        WHERE dim.item_data_id = $1 AND dn.discrepancy_note_type_id = 4
+        ORDER BY dn.date_created DESC
+        LIMIT 1
+      `, [first.item_data_id]);
 
-      const disc = discResult.rows[0];
+      const disc = existingDiscResult.rows[0];
 
       comparisons.push({
         itemId: first.item_id,
@@ -479,27 +470,22 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
         firstValue: first.value,
         secondValue: secondValue,
         matches,
-        discrepancyId: disc?.discrepancy_id,
-        resolutionStatus: disc?.resolution_status,
-        resolvedValue: disc?.resolved_value,
+        discrepancyId: disc?.discrepancy_note_id,
+        resolutionStatus: disc?.resolution_status_id === 4 ? 'resolved' : 'open',
         resolvedBy: disc?.resolved_by
       });
     }
 
-    // Update DDE status
-    await client.query(`
-      UPDATE acc_dde_status
-      SET comparison_status = $1,
-          matched_items = $2,
-          discrepancy_count = $3,
-          date_updated = CURRENT_TIMESTAMP
-      WHERE event_crf_id = $4
-    `, [
-      discrepancies > 0 ? 'discrepancies' : 'matched',
-      matched,
-      discrepancies,
-      eventCrfId
-    ]);
+    // Update completion status if no discrepancies
+    if (discrepancies === 0) {
+      await client.query(`
+        UPDATE event_crf
+        SET completion_status_id = 5,
+            date_validate_completed = CURRENT_TIMESTAMP,
+            date_updated = CURRENT_TIMESTAMP
+        WHERE event_crf_id = $1
+      `, [eventCrfId]);
+    }
 
     await client.query('COMMIT');
   } catch (error: any) {
@@ -511,8 +497,8 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
 
   return {
     eventCrfId,
-    subjectLabel: formInfo.subject_label || '',
-    formName: formInfo.form_name || '',
+    subjectLabel: eventCrf.subject_label || '',
+    formName: eventCrf.form_name || '',
     items: comparisons,
     summary: {
       total: comparisons.length,
@@ -525,6 +511,7 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
 
 /**
  * Resolve a discrepancy
+ * Uses LibreClinica's native discrepancy_note resolution
  */
 export async function resolveDiscrepancy(resolution: DDEResolution): Promise<void> {
   logger.info('Resolving discrepancy', { 
@@ -539,7 +526,11 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
 
     // Get discrepancy details
     const discResult = await client.query(`
-      SELECT * FROM acc_dde_discrepancy WHERE discrepancy_id = $1
+      SELECT dn.*, dim.item_data_id, id.value as first_value, id.event_crf_id
+      FROM discrepancy_note dn
+      LEFT JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
+      LEFT JOIN item_data id ON dim.item_data_id = id.item_data_id
+      WHERE dn.discrepancy_note_id = $1
     `, [resolution.discrepancyId]);
 
     if (discResult.rows.length === 0) {
@@ -547,6 +538,10 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
     }
 
     const disc = discResult.rows[0];
+    let detailedNotes: any = {};
+    try {
+      detailedNotes = JSON.parse(disc.detailed_notes || '{}');
+    } catch (e) {}
 
     // Determine resolved value
     let resolvedValue: string;
@@ -555,7 +550,7 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
         resolvedValue = disc.first_value;
         break;
       case 'second_correct':
-        resolvedValue = disc.second_value;
+        resolvedValue = detailedNotes.secondValue || '';
         break;
       case 'new_value':
       case 'adjudicated':
@@ -568,65 +563,47 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
         throw new Error('Invalid resolution type');
     }
 
-    // Update discrepancy
+    // Update discrepancy note - resolution_status_id = 4 is "Closed"
     await client.query(`
-      UPDATE acc_dde_discrepancy
-      SET resolution_status = $1,
-          resolved_value = $2,
-          resolved_by = $3,
-          resolved_at = CURRENT_TIMESTAMP,
-          adjudication_notes = $4,
-          date_updated = CURRENT_TIMESTAMP
-      WHERE discrepancy_id = $5
+      UPDATE discrepancy_note
+      SET resolution_status_id = 4,
+          detailed_notes = $1,
+          date_updated = CURRENT_TIMESTAMP,
+          update_id = $2
+      WHERE discrepancy_note_id = $3
     `, [
-      resolution.resolution,
-      resolvedValue,
+      JSON.stringify({ ...detailedNotes, resolvedValue, resolution: resolution.resolution, adjudicationNotes: resolution.adjudicationNotes }),
       resolution.resolvedBy,
-      resolution.adjudicationNotes || null,
       resolution.discrepancyId
     ]);
 
     // Update the actual item_data with resolved value
-    await client.query(`
-      UPDATE item_data
-      SET value = $1, date_updated = CURRENT_TIMESTAMP, update_id = $2
-      WHERE event_crf_id = $3 AND item_id = $4 AND status_id = 1
-    `, [resolvedValue, resolution.resolvedBy, disc.event_crf_id, disc.item_id]);
+    if (disc.item_data_id) {
+      await client.query(`
+        UPDATE item_data
+        SET value = $1, date_updated = CURRENT_TIMESTAMP, update_id = $2
+        WHERE item_data_id = $3
+      `, [resolvedValue, resolution.resolvedBy, disc.item_data_id]);
 
-    // Update DDE status resolved count
-    await client.query(`
-      UPDATE acc_dde_status
-      SET resolved_count = (
-            SELECT COUNT(*) FROM acc_dde_discrepancy
-            WHERE event_crf_id = $1 AND resolution_status != 'open'
-          ),
-          comparison_status = CASE
-            WHEN (SELECT COUNT(*) FROM acc_dde_discrepancy 
-                  WHERE event_crf_id = $1 AND resolution_status = 'open') = 0
-            THEN 'resolved'
-            ELSE 'discrepancies'
-          END,
-          date_updated = CURRENT_TIMESTAMP
-      WHERE event_crf_id = $1
-    `, [disc.event_crf_id]);
-
-    // Log audit event
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name,
-        old_value, new_value, audit_log_event_type_id, reason_for_change
-      ) VALUES (
-        CURRENT_TIMESTAMP, 'acc_dde_discrepancy', $1, $2, 'DDE Discrepancy Resolution',
-        'open', $3,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
-        $4
-      )
-    `, [
-      resolution.resolvedBy,
-      disc.event_crf_id,
-      resolution.resolution,
-      resolution.adjudicationNotes || `Resolved as ${resolution.resolution}`
-    ]);
+      // Log to audit trail
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id, entity_name,
+          old_value, new_value, audit_log_event_type_id, reason_for_change,
+          event_crf_id
+        ) VALUES (
+          CURRENT_TIMESTAMP, 'item_data', $1, $2, 'DDE Resolution',
+          $3, $4, 1, $5, $6
+        )
+      `, [
+        resolution.resolvedBy,
+        disc.item_data_id,
+        disc.first_value,
+        resolvedValue,
+        resolution.adjudicationNotes || `DDE resolved as ${resolution.resolution}`,
+        disc.event_crf_id
+      ]);
+    }
 
     await client.query('COMMIT');
   } catch (error: any) {
@@ -652,8 +629,12 @@ export async function finalizeDDE(eventCrfId: number, userId: number): Promise<D
     // Check all discrepancies are resolved
     const openResult = await client.query(`
       SELECT COUNT(*) as open_count
-      FROM acc_dde_discrepancy
-      WHERE event_crf_id = $1 AND resolution_status = 'open'
+      FROM discrepancy_note dn
+      INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
+      INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+      WHERE id.event_crf_id = $1 
+        AND dn.discrepancy_note_type_id = 4
+        AND dn.resolution_status_id != 4
     `, [eventCrfId]);
 
     const openCount = parseInt(openResult.rows[0]?.open_count || '0');
@@ -661,25 +642,26 @@ export async function finalizeDDE(eventCrfId: number, userId: number): Promise<D
       throw new Error(`Cannot finalize: ${openCount} unresolved discrepancies remain`);
     }
 
-    // Update DDE status to complete
+    // Update completion_status_id to 5 (double_data_entry_complete)
     await client.query(`
-      UPDATE acc_dde_status
-      SET dde_complete = true,
-          comparison_status = 'resolved',
-          date_updated = CURRENT_TIMESTAMP
+      UPDATE event_crf
+      SET completion_status_id = 5,
+          date_validate_completed = CURRENT_TIMESTAMP,
+          date_updated = CURRENT_TIMESTAMP,
+          update_id = $2
       WHERE event_crf_id = $1
-    `, [eventCrfId]);
+    `, [eventCrfId, userId]);
 
     // Log audit event
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
-        old_value, new_value, audit_log_event_type_id, reason_for_change
+        old_value, new_value, audit_log_event_type_id, reason_for_change,
+        event_crf_id
       ) VALUES (
-        CURRENT_TIMESTAMP, 'acc_dde_status', $1, $2, 'DDE Finalized',
-        'in_progress', 'complete',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
-        'Double data entry finalized'
+        CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'DDE Finalized',
+        'double_data_entry', 'double_data_entry_complete', 2,
+        'Double data entry finalized', $2
       )
     `, [userId, eventCrfId]);
 
@@ -697,6 +679,7 @@ export async function finalizeDDE(eventCrfId: number, userId: number): Promise<D
 
 /**
  * Get DDE dashboard items (pending work)
+ * Uses LibreClinica's native completion_status to determine DDE state
  */
 export async function getDDEDashboard(
   userId: number,
@@ -707,96 +690,115 @@ export async function getDDEDashboard(
   stats: { total: number; pending: number; discrepancies: number; complete: number };
 }> {
   try {
-    // Base query conditions
-    let siteCondition = '';
-    const params: any[] = [];
-
-    if (siteId) {
-      params.push(siteId);
-      siteCondition = 'AND ss.study_id = $1';
-    }
-
-    // Get forms pending second entry
+    // Get forms pending second entry (completion_status = 3)
     const pendingSecondQuery = `
       SELECT 
-        ds.event_crf_id,
+        ec.event_crf_id,
         ss.study_subject_id,
         ss.label as subject_label,
         s.name as study_name,
         site.name as site_name,
         cv.name as form_name,
         sed.name as event_name,
-        ds.*,
-        EXTRACT(DAY FROM (CURRENT_TIMESTAMP - ds.first_entry_at)) as days_waiting
-      FROM acc_dde_status ds
-      JOIN event_crf ec ON ds.event_crf_id = ec.event_crf_id
+        ec.completion_status_id,
+        ec.owner_id as first_entry_by,
+        CONCAT(u1.first_name, ' ', u1.last_name) as first_entry_by_name,
+        ec.date_created as first_entry_at,
+        ec.validator_id as second_entry_by,
+        CONCAT(u2.first_name, ' ', u2.last_name) as second_entry_by_name,
+        ec.date_validate as second_entry_at,
+        EXTRACT(DAY FROM (CURRENT_TIMESTAMP - ec.date_created)) as days_waiting
+      FROM event_crf ec
       JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      JOIN crf c ON cv.crf_id = c.crf_id
       JOIN study_event se ON ec.study_event_id = se.study_event_id
       JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
       JOIN study site ON ss.study_id = site.study_id
       JOIN study s ON COALESCE(site.parent_study_id, site.study_id) = s.study_id
-      WHERE ds.first_entry_status = 'complete'
-        AND ds.second_entry_status != 'complete'
-        AND ds.dde_complete = false
-        ${siteCondition}
-      ORDER BY ds.first_entry_at ASC
+      JOIN event_definition_crf edc ON edc.crf_id = c.crf_id 
+        AND edc.study_event_definition_id = se.study_event_definition_id
+      LEFT JOIN user_account u1 ON ec.owner_id = u1.user_id
+      LEFT JOIN user_account u2 ON ec.validator_id = u2.user_id
+      WHERE ec.completion_status_id = 3
+        AND edc.double_entry = true
+        ${siteId ? 'AND ss.study_id = $1' : ''}
+      ORDER BY ec.date_created ASC
       LIMIT 50
     `;
 
-    const pendingSecondResult = await pool.query(pendingSecondQuery, params);
+    const pendingSecondResult = await pool.query(pendingSecondQuery, siteId ? [siteId] : []);
 
-    // Get forms with unresolved discrepancies
+    // Get forms with unresolved discrepancies (completion_status = 4)
     const pendingResolutionQuery = `
       SELECT 
-        ds.event_crf_id,
+        ec.event_crf_id,
         ss.study_subject_id,
         ss.label as subject_label,
         s.name as study_name,
         site.name as site_name,
         cv.name as form_name,
         sed.name as event_name,
-        ds.*,
-        EXTRACT(DAY FROM (CURRENT_TIMESTAMP - ds.second_entry_at)) as days_waiting
-      FROM acc_dde_status ds
-      JOIN event_crf ec ON ds.event_crf_id = ec.event_crf_id
+        ec.completion_status_id,
+        ec.owner_id as first_entry_by,
+        CONCAT(u1.first_name, ' ', u1.last_name) as first_entry_by_name,
+        ec.date_created as first_entry_at,
+        ec.validator_id as second_entry_by,
+        CONCAT(u2.first_name, ' ', u2.last_name) as second_entry_by_name,
+        ec.date_validate as second_entry_at,
+        EXTRACT(DAY FROM (CURRENT_TIMESTAMP - ec.date_validate)) as days_waiting,
+        (SELECT COUNT(*) FROM discrepancy_note dn 
+         INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
+         INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+         WHERE id.event_crf_id = ec.event_crf_id AND dn.discrepancy_note_type_id = 4 
+         AND dn.resolution_status_id != 4) as open_discrepancies
+      FROM event_crf ec
       JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      JOIN crf c ON cv.crf_id = c.crf_id
       JOIN study_event se ON ec.study_event_id = se.study_event_id
       JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
       JOIN study site ON ss.study_id = site.study_id
       JOIN study s ON COALESCE(site.parent_study_id, site.study_id) = s.study_id
-      WHERE ds.second_entry_status = 'complete'
-        AND ds.comparison_status = 'discrepancies'
-        AND ds.dde_complete = false
-        ${siteCondition}
-      ORDER BY ds.second_entry_at ASC
+      JOIN event_definition_crf edc ON edc.crf_id = c.crf_id 
+        AND edc.study_event_definition_id = se.study_event_definition_id
+      LEFT JOIN user_account u1 ON ec.owner_id = u1.user_id
+      LEFT JOIN user_account u2 ON ec.validator_id = u2.user_id
+      WHERE ec.completion_status_id = 4
+        AND edc.double_entry = true
+        ${siteId ? 'AND ss.study_id = $1' : ''}
+      ORDER BY ec.date_validate ASC
       LIMIT 50
     `;
 
-    const pendingResolutionResult = await pool.query(pendingResolutionQuery, params);
+    const pendingResolutionResult = await pool.query(pendingResolutionQuery, siteId ? [siteId] : []);
 
     // Get stats
     const statsQuery = `
       SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN second_entry_status != 'complete' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN comparison_status = 'discrepancies' THEN 1 ELSE 0 END) as discrepancies,
-        SUM(CASE WHEN dde_complete = true THEN 1 ELSE 0 END) as complete
-      FROM acc_dde_status
+        COUNT(*) FILTER (WHERE ec.completion_status_id IN (3, 4, 5) AND edc.double_entry = true) as total,
+        COUNT(*) FILTER (WHERE ec.completion_status_id = 3 AND edc.double_entry = true) as pending,
+        COUNT(*) FILTER (WHERE ec.completion_status_id = 4 AND edc.double_entry = true) as discrepancies,
+        COUNT(*) FILTER (WHERE ec.completion_status_id = 5 AND edc.double_entry = true) as complete
+      FROM event_crf ec
+      JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      JOIN crf c ON cv.crf_id = c.crf_id
+      JOIN study_event se ON ec.study_event_id = se.study_event_id
+      JOIN event_definition_crf edc ON edc.crf_id = c.crf_id 
+        AND edc.study_event_definition_id = se.study_event_definition_id
     `;
 
     const statsResult = await pool.query(statsQuery);
-    const stats = statsResult.rows[0];
+    const stats = statsResult.rows[0] || {};
 
     return {
       pendingSecondEntry: pendingSecondResult.rows.map(mapRowToDashboardItem),
       pendingResolution: pendingResolutionResult.rows.map(mapRowToDashboardItem),
       stats: {
-        total: parseInt(stats?.total || '0'),
-        pending: parseInt(stats?.pending || '0'),
-        discrepancies: parseInt(stats?.discrepancies || '0'),
-        complete: parseInt(stats?.complete || '0')
+        total: parseInt(stats.total || '0'),
+        pending: parseInt(stats.pending || '0'),
+        discrepancies: parseInt(stats.discrepancies || '0'),
+        complete: parseInt(stats.complete || '0')
       }
     };
   } catch (error: any) {
@@ -819,23 +821,43 @@ function normalizeForComparison(value: string | null | undefined): string {
 }
 
 function mapRowToDDEStatus(row: any): DDEStatus {
+  // Map LibreClinica completion_status_id to DDE status
+  // 1 = not_started, 2 = initial_data_entry, 3 = initial_data_entry_complete,
+  // 4 = double_data_entry, 5 = double_data_entry_complete
+  
+  const completionStatus = row.completion_status_id;
+  
+  let firstEntryStatus: 'pending' | 'in_progress' | 'complete' = 'pending';
+  let secondEntryStatus: 'pending' | 'in_progress' | 'complete' = 'pending';
+  let comparisonStatus: 'pending' | 'matched' | 'discrepancies' | 'resolved' = 'pending';
+  let ddeComplete = false;
+
+  if (completionStatus >= 2) firstEntryStatus = 'in_progress';
+  if (completionStatus >= 3) firstEntryStatus = 'complete';
+  if (completionStatus >= 4) secondEntryStatus = 'complete';
+  if (completionStatus === 4) comparisonStatus = row.open_discrepancies > 0 ? 'discrepancies' : 'matched';
+  if (completionStatus === 5) {
+    comparisonStatus = 'resolved';
+    ddeComplete = true;
+  }
+
   return {
-    statusId: row.status_id,
+    statusId: row.event_crf_id,
     eventCrfId: row.event_crf_id,
-    firstEntryStatus: row.first_entry_status,
+    firstEntryStatus,
     firstEntryBy: row.first_entry_by,
     firstEntryByName: row.first_entry_by_name,
     firstEntryAt: row.first_entry_at,
-    secondEntryStatus: row.second_entry_status,
+    secondEntryStatus,
     secondEntryBy: row.second_entry_by,
     secondEntryByName: row.second_entry_by_name,
     secondEntryAt: row.second_entry_at,
-    comparisonStatus: row.comparison_status,
-    totalItems: row.total_items || 0,
-    matchedItems: row.matched_items || 0,
-    discrepancyCount: row.discrepancy_count || 0,
-    resolvedCount: row.resolved_count || 0,
-    ddeComplete: row.dde_complete || false
+    comparisonStatus,
+    totalItems: parseInt(row.total_items || '0'),
+    matchedItems: parseInt(row.total_items || '0') - parseInt(row.open_discrepancies || '0'),
+    discrepancyCount: parseInt(row.open_discrepancies || '0'),
+    resolvedCount: 0,
+    ddeComplete
   };
 }
 
@@ -853,9 +875,6 @@ function mapRowToDashboardItem(row: any): DDEDashboardItem {
   };
 }
 
-// Need to add unique constraint for discrepancy table
-// This is added in the migration but noted here for reference
-
 export default {
   isDDERequired,
   getDDEStatus,
@@ -867,4 +886,3 @@ export default {
   finalizeDDE,
   getDDEDashboard
 };
-

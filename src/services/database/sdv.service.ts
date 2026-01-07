@@ -1,10 +1,14 @@
 /**
  * SDV (Source Data Verification) Service
  * Queries event_crf.sdv_status from LibreClinica
+ * 
+ * Integrated with Workflow Service for real EDC patterns:
+ * - When SDV is completed, related workflow tasks are auto-closed
  */
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import * as workflowService from './workflow.service';
 
 export const getSDVRecords = async (filters: {
   studyId?: number;
@@ -219,6 +223,15 @@ export const verifySDV = async (eventCrfId: number, userId: number) => {
     `, [userId, eventCrfId]);
 
     await client.query('COMMIT');
+
+    // AUTO-TRIGGER: Complete any SDV workflow tasks for this event_crf
+    // This is a real EDC pattern - when SDV is completed, close related workflows
+    try {
+      await workflowService.triggerSDVCompletedWorkflow(eventCrfId, userId);
+      logger.info('Auto-completed SDV workflow tasks', { eventCrfId });
+    } catch (workflowError: any) {
+      logger.warn('Failed to auto-complete SDV workflows', { error: workflowError.message });
+    }
 
     return { success: true, data: result.rows[0] };
   } catch (error) {

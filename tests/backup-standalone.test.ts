@@ -5,7 +5,7 @@
  * Tests pure logic, configuration, and file operations
  */
 
-import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -18,7 +18,7 @@ const gzipAsync = promisify(zlib.gzip);
 // Skip database-dependent setup
 jest.mock('../src/config/database', () => ({
   pool: {
-    query: jest.fn().mockResolvedValue({ rows: [] })
+    query: (jest.fn() as any).mockResolvedValue({ rows: [] })
   }
 }));
 

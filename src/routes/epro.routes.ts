@@ -3,11 +3,22 @@
  * 
  * Endpoints for managing PRO instruments, patient assignments, and responses.
  * Integrates with LibreClinica's database for patient/subject information.
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - §11.10(e): Full audit trail for all CREATE, UPDATE, DELETE operations
+ * - §11.10(k): UTC timestamps for all events
+ * - §11.50: Electronic signature for critical operations
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { logger } from '../config/logger';
+import {
+  Part11EventTypes,
+  recordPart11Audit,
+  Part11Request,
+  formatPart11Timestamp
+} from '../middleware/part11.middleware';
 
 const router = Router();
 
@@ -30,9 +41,10 @@ router.get('/dashboard', async (req: Request, res: Response, next: NextFunction)
     const { studyId } = req.query;
 
     // Get stats from acc_pro_* tables
+    // Note: table uses study_subject_id not subject_id
     const statsQuery = `
       SELECT
-        (SELECT COUNT(DISTINCT subject_id) FROM acc_pro_assignment WHERE status != 'cancelled') as total_patients,
+        (SELECT COUNT(DISTINCT study_subject_id) FROM acc_pro_assignment WHERE status != 'cancelled') as total_patients,
         (SELECT COUNT(*) FROM acc_pro_assignment WHERE status = 'pending') as pending_assignments,
         (SELECT COUNT(*) FROM acc_pro_assignment WHERE status = 'overdue') as overdue_assignments,
         (SELECT COUNT(*) FROM acc_pro_assignment WHERE status = 'completed') as completed_assignments
@@ -88,14 +100,12 @@ router.get('/instruments', async (req: Request, res: Response, next: NextFunctio
     `;
     const params: any[] = [];
 
-    if (studyId) {
-      params.push(studyId);
-      query += ` AND i.study_id = $${params.length}`;
-    }
+    // Note: acc_pro_instrument doesn't have study_id column - instruments are study-agnostic
+    // The study filter is done at assignment level
 
     if (status) {
       params.push(status);
-      query += ` AND i.status = $${params.length}`;
+      query += ` AND i.status_id = $${params.length}`;
     }
 
     query += ' ORDER BY i.name ASC';
@@ -106,14 +116,14 @@ router.get('/instruments', async (req: Request, res: Response, next: NextFunctio
       success: true,
       data: result.rows.map(row => ({
         instrumentId: row.instrument_id,
-        studyId: row.study_id,
         name: row.name,
+        shortName: row.short_name,
         description: row.description,
-        questionCount: row.question_count,
-        estimatedTime: row.estimated_time_minutes,
-        frequency: row.frequency,
-        status: row.status,
+        category: row.category,
+        estimatedMinutes: row.estimated_minutes,
+        statusId: row.status_id,
         content: row.content,
+        languageCode: row.language_code,
         assignmentCount: parseInt(row.assignment_count || 0)
       }))
     });
@@ -126,26 +136,51 @@ router.get('/instruments', async (req: Request, res: Response, next: NextFunctio
 /**
  * POST /api/epro/instruments
  * Create a new PRO instrument
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for instrument creation
+ * - Captures user, timestamp, and instrument details
  */
-router.post('/instruments', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/instruments', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
-    const { studyId, name, description, content, frequency, estimatedTime } = req.body;
-    const userId = (req as any).user?.id || 1;
+    const { name, shortName, description, content, category, estimatedMinutes, languageCode } = req.body;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
 
-    // Calculate question count from content
-    const questionCount = content?.questions?.length || 0;
+    // Generate short_name if not provided (required unique field)
+    const finalShortName = shortName || name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50).toLowerCase() + '_' + Date.now();
 
     const result = await pool.query(`
       INSERT INTO acc_pro_instrument (
-        study_id, name, description, question_count, estimated_time_minutes,
-        frequency, status, content, owner_id, date_created, date_updated
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, NOW(), NOW())
+        name, short_name, description, category, estimated_minutes,
+        language_code, status_id, content, date_created
+      ) VALUES ($1, $2, $3, $4, $5, $6, 1, $7, NOW())
       RETURNING *
-    `, [studyId, name, description, questionCount, estimatedTime || 10, frequency || 'once', content, userId]);
+    `, [name, finalShortName, description, category || 'general', estimatedMinutes || 10, languageCode || 'en', content]);
+
+    const instrumentId = result.rows[0].instrument_id;
+
+    // Part 11 Audit: Record instrument creation (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.PRO_INSTRUMENT_CREATED,
+      'acc_pro_instrument',
+      instrumentId,
+      name,
+      null, // No old value for creation
+      { name, category: category || 'general', estimatedMinutes: estimatedMinutes || 10 },
+      'PRO instrument created',
+      { ipAddress: req.ip }
+    );
 
     res.json({
       success: true,
-      data: result.rows[0]
+      data: {
+        instrumentId,
+        name: result.rows[0].name,
+        shortName: result.rows[0].short_name
+      }
     });
   } catch (error) {
     logger.error('Failed to create PRO instrument', { error });
@@ -192,6 +227,7 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
   try {
     const { studyId, status, subjectId } = req.query;
 
+    // Note: acc_pro_assignment uses study_subject_id, scheduled_date, completed_at
     let query = `
       SELECT 
         a.*,
@@ -199,14 +235,15 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
         ss.label as subject_label
       FROM acc_pro_assignment a
       LEFT JOIN acc_pro_instrument i ON a.instrument_id = i.instrument_id
-      LEFT JOIN study_subject ss ON a.subject_id = ss.study_subject_id
+      LEFT JOIN study_subject ss ON a.study_subject_id = ss.study_subject_id
       WHERE 1=1
     `;
     const params: any[] = [];
 
+    // Note: acc_pro_assignment doesn't have study_id, filter via study_subject
     if (studyId) {
       params.push(studyId);
-      query += ` AND a.study_id = $${params.length}`;
+      query += ` AND ss.study_id = $${params.length}`;
     }
 
     if (status) {
@@ -216,10 +253,10 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
 
     if (subjectId) {
       params.push(subjectId);
-      query += ` AND a.subject_id = $${params.length}`;
+      query += ` AND a.study_subject_id = $${params.length}`;
     }
 
-    query += ' ORDER BY a.due_date ASC';
+    query += ' ORDER BY a.scheduled_date ASC NULLS LAST';
 
     const result = await pool.query(query, params);
 
@@ -227,14 +264,14 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
       success: true,
       data: result.rows.map(row => ({
         assignmentId: row.assignment_id,
-        subjectId: row.subject_id,
+        subjectId: row.study_subject_id,
         subjectLabel: row.subject_label,
         instrumentId: row.instrument_id,
         instrumentName: row.instrument_name,
         status: row.status,
-        dueDate: row.due_date,
-        completedDate: row.completed_date,
-        remindersSent: row.reminders_sent || 0
+        scheduledDate: row.scheduled_date,
+        completedAt: row.completed_at,
+        notes: row.notes
       }))
     });
   } catch (error) {
@@ -246,19 +283,40 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
 /**
  * POST /api/epro/assignments
  * Assign a PRO instrument to a subject
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for assignment creation
+ * - Links to study subject for traceability
  */
-router.post('/assignments', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/assignments', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { subjectId, instrumentId, dueDate, studyId } = req.body;
-    const userId = (req as any).user?.id || 1;
+    const userId = req.user?.userId || 1;
+    const userName = req.user?.userName || 'system';
 
     const result = await pool.query(`
       INSERT INTO acc_pro_assignment (
-        subject_id, instrument_id, study_id, status, due_date,
+        study_subject_id, instrument_id, status, scheduled_date,
         assigned_by, date_created, date_updated
-      ) VALUES ($1, $2, $3, 'pending', $4, $5, NOW(), NOW())
+      ) VALUES ($1, $2, 'pending', $3, $4, NOW(), NOW())
       RETURNING *
-    `, [subjectId, instrumentId, studyId, dueDate, userId]);
+    `, [subjectId, instrumentId, dueDate, userId]);
+
+    const assignmentId = result.rows[0].assignment_id;
+
+    // Part 11 Audit: Record assignment creation (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.PRO_ASSIGNMENT_CREATED,
+      'acc_pro_assignment',
+      assignmentId,
+      `Assignment for subject ${subjectId}`,
+      null,
+      { subjectId, instrumentId, dueDate, status: 'pending' },
+      'PRO assignment created',
+      { ipAddress: req.ip }
+    );
 
     res.json({
       success: true,
@@ -273,10 +331,23 @@ router.post('/assignments', async (req: Request, res: Response, next: NextFuncti
 /**
  * POST /api/epro/assignments/:id/remind
  * Send a reminder for a PRO assignment
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for reminder sent
  */
-router.post('/assignments/:id/remind', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/assignments/:id/remind', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
+
+    // Get current reminder count before update
+    const beforeResult = await pool.query(
+      'SELECT reminders_sent, study_subject_id FROM acc_pro_assignment WHERE assignment_id = $1',
+      [id]
+    );
+    const oldReminderCount = beforeResult.rows[0]?.reminders_sent || 0;
+    const subjectId = beforeResult.rows[0]?.study_subject_id;
 
     // Update reminder count
     await pool.query(`
@@ -286,6 +357,20 @@ router.post('/assignments/:id/remind', async (req: Request, res: Response, next:
           date_updated = NOW()
       WHERE assignment_id = $1
     `, [id]);
+
+    // Part 11 Audit: Record reminder sent (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.PRO_REMINDER_SENT,
+      'acc_pro_assignment',
+      parseInt(id),
+      `Reminder for assignment ${id}`,
+      { reminders_sent: oldReminderCount },
+      { reminders_sent: oldReminderCount + 1, subject_id: subjectId },
+      'PRO reminder sent to patient',
+      { ipAddress: req.ip }
+    );
 
     // TODO: Queue email reminder via email service
 
@@ -306,15 +391,30 @@ router.post('/assignments/:id/remind', async (req: Request, res: Response, next:
 /**
  * POST /api/epro/assignments/:id/respond
  * Submit a PRO response
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for response submission
+ * - Captures response timestamp and completion data
+ * - Links to assignment for full traceability
  */
-router.post('/assignments/:id/respond', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/assignments/:id/respond', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
     const { responses, startedAt, completedAt } = req.body;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Get assignment details before update
+      const assignmentResult = await client.query(
+        'SELECT study_subject_id, instrument_id, status FROM acc_pro_assignment WHERE assignment_id = $1',
+        [id]
+      );
+      const assignment = assignmentResult.rows[0];
+      const oldStatus = assignment?.status;
 
       // Create response record
       const responseResult = await client.query(`
@@ -324,14 +424,37 @@ router.post('/assignments/:id/respond', async (req: Request, res: Response, next
         RETURNING *
       `, [id, JSON.stringify(responses), startedAt, completedAt]);
 
+      const responseId = responseResult.rows[0].response_id;
+
       // Update assignment status
       await client.query(`
         UPDATE acc_pro_assignment 
         SET status = 'completed',
-            completed_date = NOW(),
+            completed_at = NOW(),
             date_updated = NOW()
         WHERE assignment_id = $1
       `, [id]);
+
+      // Part 11 Audit: Record response submission (§11.10(e))
+      await recordPart11Audit(
+        userId,
+        userName,
+        Part11EventTypes.PRO_RESPONSE_SUBMITTED,
+        'acc_pro_response',
+        responseId,
+        `PRO Response for assignment ${id}`,
+        { status: oldStatus },
+        {
+          status: 'completed',
+          responseId,
+          subjectId: assignment?.study_subject_id,
+          instrumentId: assignment?.instrument_id,
+          startedAt,
+          completedAt: completedAt || formatPart11Timestamp()
+        },
+        'Patient submitted PRO questionnaire response',
+        { ipAddress: req.ip }
+      );
 
       await client.query('COMMIT');
 
@@ -390,11 +513,13 @@ router.get('/patients', async (req: Request, res: Response, next: NextFunction) 
   try {
     const { studyId, status } = req.query;
 
+    // Note: acc_patient_account uses patient_account_id, study_subject_id
+    // and doesn't have study_id - filter via study_subject join
     let query = `
       SELECT 
         p.*,
         ss.label as subject_label,
-        (SELECT COUNT(*) FROM acc_pro_assignment a WHERE a.subject_id = p.study_subject_id AND a.status = 'pending') as pending_forms
+        (SELECT COUNT(*) FROM acc_pro_assignment a WHERE a.study_subject_id = p.study_subject_id AND a.status = 'pending') as pending_forms
       FROM acc_patient_account p
       LEFT JOIN study_subject ss ON p.study_subject_id = ss.study_subject_id
       WHERE 1=1
@@ -403,7 +528,7 @@ router.get('/patients', async (req: Request, res: Response, next: NextFunction) 
 
     if (studyId) {
       params.push(studyId);
-      query += ` AND p.study_id = $${params.length}`;
+      query += ` AND ss.study_id = $${params.length}`;
     }
 
     if (status) {
@@ -418,7 +543,7 @@ router.get('/patients', async (req: Request, res: Response, next: NextFunction) 
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        patientId: row.patient_id,
+        patientAccountId: row.patient_account_id,
         studySubjectId: row.study_subject_id,
         subjectLabel: row.subject_label,
         email: row.email,

@@ -9,6 +9,8 @@ export interface AuthRequest extends Request {
     userName: string;
     email: string;
     userType: string;
+    role: string;
+    studyIds?: number[];
   };
 }
 
@@ -63,12 +65,14 @@ export const authMiddleware = (
       return;
     }
     
-    // Attach user to request
+    // Attach user to request (including role for permission checks)
     (req as AuthRequest).user = {
       userId: decoded.userId,
       userName: decoded.userName,
       email: decoded.email,
-      userType: decoded.userType
+      userType: decoded.userType,
+      role: decoded.role || decoded.userType, // Use role from token, fallback to userType
+      studyIds: decoded.studyIds
     };
     
     logger.debug('User authenticated', { 
@@ -113,7 +117,9 @@ export const optionalAuthMiddleware = (
         userId: decoded.userId,
         userName: decoded.userName,
         email: decoded.email,
-        userType: decoded.userType
+        userType: decoded.userType,
+        role: decoded.role || decoded.userType,
+        studyIds: decoded.studyIds
       };
     } catch (error) {
       // Ignore errors for optional auth
