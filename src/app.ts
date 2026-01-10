@@ -71,6 +71,12 @@ import printRoutes from './routes/print.routes';
 import ddeRoutes from './routes/dde.routes';
 // Organization management, invite codes, access requests
 import organizationRoutes from './routes/organization.routes';
+// Skip Logic and Form Linking
+import skipLogicRoutes from './routes/skip-logic.routes';
+// Site/Location Management
+import siteRoutes from './routes/site.routes';
+// Form Layout (column configuration)
+import formLayoutRoutes from './routes/form-layout.routes';
 
 // ============================================================================
 // FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
@@ -276,6 +282,11 @@ app.use('/api/print', printRoutes);
 app.use('/api/dde', ddeRoutes);
 // Organization management, invite codes, access requests
 app.use('/api/organizations', organizationRoutes);
+// Skip Logic, Form Linking, and Branching
+app.use('/api/skip-logic', skipLogicRoutes);
+// Site/Location Management
+app.use('/api/sites', siteRoutes);
+app.use('/api/form-layout', formLayoutRoutes);
 
 // ============================================================================
 // CONDITIONAL ROUTES - Require custom acc_* tables
@@ -397,6 +408,8 @@ app.get('/', (req: Request, res: Response) => {
       print: '/api/print - PDF generation for forms, casebooks, and audit trails',
       dde: '/api/dde - Double data entry workflow (uses native LibreClinica tables)',
       organizations: '/api/organizations - Organization management, invite codes, access requests',
+      skipLogic: '/api/skip-logic - Skip logic rules, form linking, and conditional visibility',
+      sites: '/api/sites - Site/location management and patient-site assignments',
       // Conditional features - require custom tables
       email: ENABLE_EMAIL_NOTIFICATIONS ? '/api/email - Email notifications (ENABLED)' : '/api/email - DISABLED (requires acc_email_* tables)',
       transfers: ENABLE_SUBJECT_TRANSFERS ? '/api/transfers - Subject transfers (ENABLED)' : '/api/transfers - DISABLED (requires acc_transfer_log table)',

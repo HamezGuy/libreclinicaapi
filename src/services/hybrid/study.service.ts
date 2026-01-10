@@ -226,17 +226,69 @@ export const getStudies = async (
 };
 
 /**
- * Get study by ID with statistics
+ * Get study by ID with ALL fields including nested data
+ * Returns: study data, event definitions, group classes, sites, and parameters
  */
 export const getStudyById = async (studyId: number, userId: number): Promise<any> => {
-  logger.info('Getting study details', { studyId, userId });
+  logger.info('Getting study details with full data', { studyId, userId });
 
   try {
-    // Note: study table does NOT have type_id column - it was removed/commented out in LibreClinica
-    // protocol_type is used instead for study type classification
+    // Get all study columns explicitly
     const query = `
       SELECT 
-        s.*,
+        s.study_id,
+        s.parent_study_id,
+        s.unique_identifier,
+        s.secondary_identifier,
+        s.name,
+        s.official_title,
+        s.summary,
+        s.protocol_description,
+        s.protocol_date_verification,
+        s.date_planned_start,
+        s.date_planned_end,
+        s.date_created,
+        s.date_updated,
+        s.expected_total_enrollment,
+        s.status_id,
+        s.owner_id,
+        s.oc_oid,
+        s.protocol_type,
+        s.phase,
+        s.sponsor,
+        s.collaborators,
+        s.principal_investigator,
+        s.facility_name,
+        s.facility_city,
+        s.facility_state,
+        s.facility_zip,
+        s.facility_country,
+        s.facility_recruitment_status,
+        s.facility_contact_name,
+        s.facility_contact_degree,
+        s.facility_contact_phone,
+        s.facility_contact_email,
+        s.medline_identifier,
+        s.url,
+        s.url_description,
+        s.results_reference,
+        s.conditions,
+        s.keywords,
+        s.eligibility,
+        s.gender,
+        s.age_min,
+        s.age_max,
+        s.healthy_volunteer_accepted,
+        s.purpose,
+        s.allocation,
+        s.masking,
+        s.control,
+        s.assignment,
+        s.endpoint,
+        s.interventions,
+        s.duration,
+        s.selection,
+        s.timing,
         st.name as status_name,
         s.protocol_type as type_name,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as total_subjects,
@@ -255,7 +307,176 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
       return null;
     }
 
-    return result.rows[0];
+    const study = result.rows[0];
+
+    // Get event definitions with CRF assignments
+    const eventsQuery = `
+      SELECT 
+        sed.study_event_definition_id,
+        sed.name,
+        sed.description,
+        sed.category,
+        sed.type,
+        sed.ordinal,
+        sed.repeating,
+        sed.oc_oid,
+        sed.status_id
+      FROM study_event_definition sed
+      WHERE sed.study_id = $1 AND sed.status_id = 1
+      ORDER BY sed.ordinal
+    `;
+    const eventsResult = await pool.query(eventsQuery, [studyId]);
+    
+    // Get CRF assignments for each event
+    const eventDefinitions = [];
+    for (const event of eventsResult.rows) {
+      const crfQuery = `
+        SELECT 
+          edc.crf_id,
+          edc.required_crf as required,
+          edc.double_entry as double_data_entry,
+          edc.electronic_signature,
+          edc.hide_crf,
+          edc.ordinal,
+          c.name as crf_name
+        FROM event_definition_crf edc
+        INNER JOIN crf c ON edc.crf_id = c.crf_id
+        WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
+        ORDER BY edc.ordinal
+      `;
+      const crfResult = await pool.query(crfQuery, [event.study_event_definition_id]);
+      
+      eventDefinitions.push({
+        studyEventDefinitionId: event.study_event_definition_id,
+        name: event.name,
+        description: event.description,
+        category: event.category,
+        type: event.type,
+        ordinal: event.ordinal,
+        repeating: event.repeating,
+        oid: event.oc_oid,
+        crfAssignments: crfResult.rows.map((crf: any) => ({
+          crfId: crf.crf_id,
+          crfName: crf.crf_name,
+          required: crf.required,
+          doubleDataEntry: crf.double_data_entry,
+          electronicSignature: crf.electronic_signature,
+          hideCrf: crf.hide_crf,
+          ordinal: crf.ordinal
+        }))
+      });
+    }
+
+    // Get group classes with groups
+    const groupClassesQuery = `
+      SELECT 
+        sgc.study_group_class_id,
+        sgc.name,
+        sgc.group_class_type_id,
+        sgc.subject_assignment,
+        sgc.status_id
+      FROM study_group_class sgc
+      WHERE sgc.study_id = $1 AND sgc.status_id = 1
+    `;
+    const groupClassesResult = await pool.query(groupClassesQuery, [studyId]);
+    
+    const groupClasses = [];
+    for (const gc of groupClassesResult.rows) {
+      // Note: Real LibreClinica study_group table may not have status_id column
+      let groupsResult;
+      try {
+        const groupsQuery = `
+          SELECT 
+            sg.study_group_id,
+            sg.name,
+            sg.description
+          FROM study_group sg
+          WHERE sg.study_group_class_id = $1 AND (sg.status_id = 1 OR sg.status_id IS NULL)
+        `;
+        groupsResult = await pool.query(groupsQuery, [gc.study_group_class_id]);
+      } catch {
+        // Fallback for minimal schema without status_id
+        const groupsQueryMinimal = `
+          SELECT 
+            sg.study_group_id,
+            sg.name,
+            sg.description
+          FROM study_group sg
+          WHERE sg.study_group_class_id = $1
+        `;
+        groupsResult = await pool.query(groupsQueryMinimal, [gc.study_group_class_id]);
+      }
+      
+      groupClasses.push({
+        studyGroupClassId: gc.study_group_class_id,
+        name: gc.name,
+        groupClassTypeId: gc.group_class_type_id,
+        subjectAssignment: gc.subject_assignment,
+        groups: groupsResult.rows.map((g: any) => ({
+          studyGroupId: g.study_group_id,
+          name: g.name,
+          description: g.description
+        }))
+      });
+    }
+
+    // Get sites (child studies)
+    const sitesQuery = `
+      SELECT 
+        s.study_id,
+        s.unique_identifier,
+        s.name,
+        s.principal_investigator,
+        s.expected_total_enrollment,
+        s.facility_name,
+        s.facility_city,
+        s.facility_state,
+        s.facility_country,
+        s.facility_recruitment_status,
+        s.status_id,
+        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects
+      FROM study s
+      WHERE s.parent_study_id = $1 AND s.status_id = 1
+      ORDER BY s.name
+    `;
+    const sitesResult = await pool.query(sitesQuery, [studyId]);
+    
+    const sites = sitesResult.rows.map((site: any) => ({
+      studyId: site.study_id,
+      uniqueIdentifier: site.unique_identifier,
+      name: site.name,
+      principalInvestigator: site.principal_investigator,
+      expectedTotalEnrollment: site.expected_total_enrollment,
+      facilityName: site.facility_name,
+      facilityCity: site.facility_city,
+      facilityState: site.facility_state,
+      facilityCountry: site.facility_country,
+      facilityRecruitmentStatus: site.facility_recruitment_status,
+      enrolledSubjects: parseInt(site.enrolled_subjects) || 0,
+      isActive: site.status_id === 1
+    }));
+
+    // Get study parameters
+    const paramsQuery = `
+      SELECT parameter, value
+      FROM study_parameter_value
+      WHERE study_id = $1
+    `;
+    const paramsResult = await pool.query(paramsQuery, [studyId]);
+    
+    const studyParameters: Record<string, string> = {};
+    for (const param of paramsResult.rows) {
+      studyParameters[param.parameter] = param.value;
+    }
+
+    // Return complete study data with all nested structures
+    return {
+      ...study,
+      eventDefinitions,
+      groupClasses,
+      sites,
+      studyParameters
+    };
   } catch (error: any) {
     logger.error('Get study details error', { error: error.message });
     throw error;
@@ -605,28 +826,41 @@ export const createStudy = async (
       logger.warn('Audit logging failed for study creation', { error: auditError.message });
     }
 
-    // Initialize default study parameters (optional - uses SAVEPOINT)
+    // Initialize study parameters - uses user-provided values or defaults
     try {
       await client.query('SAVEPOINT init_params');
+      const userParams = (data as any).studyParameters || {};
+      
+      // Define default parameters with user overrides
       const defaultParams = [
-        { handle: 'collectDob', value: '1' },
-        { handle: 'genderRequired', value: 'true' },
-        { handle: 'subjectPersonIdRequired', value: 'optional' },
-        { handle: 'subjectIdGeneration', value: 'manual' },
-        { handle: 'subjectIdPrefixSuffix', value: '' },
-        { handle: 'discrepancyManagement', value: 'true' },
+        { handle: 'collectDob', value: userParams.collectDob || '1' },
+        { handle: 'genderRequired', value: userParams.genderRequired || 'true' },
+        { handle: 'subjectPersonIdRequired', value: userParams.subjectPersonIdRequired || 'optional' },
+        { handle: 'subjectIdGeneration', value: userParams.subjectIdGeneration || 'manual' },
+        { handle: 'subjectIdPrefixSuffix', value: userParams.subjectIdPrefix || userParams.subjectIdSuffix ? 
+            `${userParams.subjectIdPrefix || ''}|${userParams.subjectIdSuffix || ''}` : '' },
+        { handle: 'studySubjectIdLabel', value: userParams.studySubjectIdLabel || 'Subject ID' },
+        { handle: 'secondaryIdLabel', value: userParams.secondaryIdLabel || 'Secondary ID' },
+        { handle: 'discrepancyManagement', value: userParams.discrepancyManagement !== undefined ? 
+            String(userParams.discrepancyManagement) : 'true' },
         { handle: 'interviewerNameRequired', value: 'required' },
         { handle: 'interviewerNameDefault', value: 'blank' },
         { handle: 'interviewerNameEditable', value: 'true' },
         { handle: 'interviewDateRequired', value: 'required' },
         { handle: 'interviewDateDefault', value: 'eventDate' },
         { handle: 'interviewDateEditable', value: 'true' },
-        { handle: 'personIdShownOnCRF', value: 'false' },
-        { handle: 'secondaryLabelViewable', value: 'false' },
+        { handle: 'personIdShownOnCRF', value: userParams.personIdShownOnCrf || 'false' },
+        { handle: 'secondaryLabelViewable', value: userParams.secondaryLabelViewable !== undefined ?
+            String(userParams.secondaryLabelViewable) : 'false' },
         { handle: 'adminForcedReasonForChange', value: 'true' },
-        { handle: 'eventLocationRequired', value: 'not_used' },
+        { handle: 'eventLocationRequired', value: userParams.eventLocationRequired ? 'required' : 'not_used' },
+        { handle: 'dateOfEnrollmentForStudyRequired', value: userParams.dateOfEnrollmentForStudyRequired || 'true' },
+        { handle: 'allowAdministrativeEditing', value: userParams.allowAdministrativeEditing !== undefined ?
+            String(userParams.allowAdministrativeEditing) : 'true' },
         { handle: 'participantPortal', value: 'disabled' },
-        { handle: 'randomization', value: 'disabled' }
+        { handle: 'randomization', value: 'disabled' },
+        { handle: 'mailNotification', value: userParams.mailNotification || '' },
+        { handle: 'contactEmail', value: userParams.contactEmail || '' }
       ];
 
       for (const param of defaultParams) {
@@ -637,7 +871,7 @@ export const createStudy = async (
         `, [studyId, param.handle, param.value]);
       }
       await client.query('RELEASE SAVEPOINT init_params');
-      logger.info('Study parameters initialized', { studyId, paramCount: defaultParams.length });
+      logger.info('Study parameters initialized', { studyId, paramCount: defaultParams.length, hasUserParams: Object.keys(userParams).length > 0 });
     } catch (paramError: any) {
       await client.query('ROLLBACK TO SAVEPOINT init_params');
       logger.warn('Study parameter initialization warning', { error: paramError.message });
@@ -720,6 +954,128 @@ export const createStudy = async (
       }
     }
 
+    // Create group classes and groups if provided
+    if ((data as any).groupClasses && Array.isArray((data as any).groupClasses)) {
+      const groupClasses = (data as any).groupClasses;
+      logger.info('Creating study group classes', { studyId, count: groupClasses.length });
+      
+      for (const groupClass of groupClasses) {
+        if (!groupClass.name) continue;
+        
+        try {
+          await client.query('SAVEPOINT create_group_class');
+          
+          // Insert study_group_class
+          const groupClassResult = await client.query(`
+            INSERT INTO study_group_class (
+              study_id, name, group_class_type_id, subject_assignment,
+              status_id, owner_id, date_created
+            ) VALUES ($1, $2, $3, $4, 1, $5, NOW())
+            RETURNING study_group_class_id
+          `, [
+            studyId,
+            groupClass.name,
+            groupClass.groupClassTypeId || 1,
+            groupClass.subjectAssignment || 'optional',
+            userId
+          ]);
+          
+          const groupClassId = groupClassResult.rows[0].study_group_class_id;
+          logger.info('Created study group class', { groupClassId, name: groupClass.name });
+          
+            // Insert groups within this class
+            // Note: Real LibreClinica study_group table is minimal (no status_id, owner_id columns)
+            if (groupClass.groups && Array.isArray(groupClass.groups)) {
+              for (const group of groupClass.groups) {
+                if (!group.name) continue;
+                
+                try {
+                  // Try with minimal columns first (real LibreClinica schema)
+                  await client.query(`
+                    INSERT INTO study_group (
+                      study_group_class_id, name, description
+                    ) VALUES ($1, $2, $3)
+                  `, [
+                    groupClassId,
+                    group.name,
+                    group.description || ''
+                  ]);
+                } catch (minimalError: any) {
+                  // If that fails, try with extended columns (test schema)
+                  await client.query(`
+                    INSERT INTO study_group (
+                      study_group_class_id, name, description,
+                      status_id, owner_id, date_created
+                    ) VALUES ($1, $2, $3, 1, $4, NOW())
+                  `, [
+                    groupClassId,
+                    group.name,
+                    group.description || '',
+                    userId
+                  ]);
+                }
+                
+                logger.info('Created study group', { groupClassId, name: group.name });
+              }
+            }
+          
+          await client.query('RELEASE SAVEPOINT create_group_class');
+        } catch (groupError: any) {
+          await client.query('ROLLBACK TO SAVEPOINT create_group_class');
+          logger.warn('Study group class creation warning', { error: groupError.message, groupClass: groupClass.name });
+        }
+      }
+    }
+
+    // Create sites (child studies) if provided
+    if ((data as any).sites && Array.isArray((data as any).sites)) {
+      const sites = (data as any).sites;
+      logger.info('Creating study sites', { studyId, count: sites.length });
+      
+      for (const site of sites) {
+        if (!site.name || !site.uniqueIdentifier) continue;
+        
+        try {
+          await client.query('SAVEPOINT create_site');
+          
+          // Generate OC OID for site
+          const siteOid = `S_${site.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          
+          // Insert site as child study
+          await client.query(`
+            INSERT INTO study (
+              parent_study_id, unique_identifier, name, summary,
+              principal_investigator, expected_total_enrollment,
+              facility_name, facility_city, facility_state, facility_country,
+              facility_recruitment_status,
+              status_id, owner_id, date_created, oc_oid
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13)
+          `, [
+            studyId,                                      // parent_study_id
+            site.uniqueIdentifier,                        // unique_identifier
+            site.name,                                    // name
+            site.summary || '',                           // summary
+            site.principalInvestigator || null,           // principal_investigator
+            site.expectedTotalEnrollment || 0,            // expected_total_enrollment
+            site.facilityName || null,                    // facility_name
+            site.facilityCity || null,                    // facility_city
+            site.facilityState || null,                   // facility_state
+            site.facilityCountry || null,                 // facility_country
+            site.facilityRecruitmentStatus || 'Not yet recruiting', // facility_recruitment_status
+            userId,                                       // owner_id
+            siteOid                                       // oc_oid
+          ]);
+          
+          logger.info('Created study site', { parentStudyId: studyId, siteName: site.name });
+          
+          await client.query('RELEASE SAVEPOINT create_site');
+        } catch (siteError: any) {
+          await client.query('ROLLBACK TO SAVEPOINT create_site');
+          logger.warn('Study site creation warning', { error: siteError.message, site: site.name });
+        }
+      }
+    }
+
     await client.query('COMMIT');
 
     logger.info('✅ Study created successfully', { studyId, name: data.name, userId });
@@ -743,7 +1099,8 @@ export const createStudy = async (
 };
 
 /**
- * Update study - supports ALL LibreClinica database fields
+ * Update study - supports ALL LibreClinica database fields AND nested data
+ * Handles: main study fields, event definitions, group classes, sites, and parameters
  */
 export const updateStudy = async (
   studyId: number,
@@ -807,10 +1164,16 @@ export const updateStudy = async (
     duration?: string;
     selection?: string;
     timing?: string;
+    
+    // Nested structures
+    eventDefinitions?: any[];
+    groupClasses?: any[];
+    sites?: any[];
+    studyParameters?: Record<string, any>;
   },
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Updating study', { studyId, userId, fields: Object.keys(data) });
+  logger.info('Updating study with full data', { studyId, userId, fields: Object.keys(data) });
 
   const client = await pool.connect();
 
@@ -822,28 +1185,20 @@ export const updateStudy = async (
     let paramIndex = 1;
 
     // Field mapping: frontend name -> database column
-    // This mapping covers ALL columns in the LibreClinica study table (see libreclinica-full-schema.sql)
     const fieldMapping: Record<string, string> = {
-      // Basic identification
       name: 'name',
       officialTitle: 'official_title',
       secondaryIdentifier: 'secondary_identifier',
       summary: 'summary',
-      description: 'summary',  // Map description to summary column (alias)
-      
-      // Team
+      description: 'summary',
       principalInvestigator: 'principal_investigator',
       sponsor: 'sponsor',
       collaborators: 'collaborators',
-      
-      // Classification & Timeline
       phase: 'phase',
       protocolType: 'protocol_type',
       expectedTotalEnrollment: 'expected_total_enrollment',
       datePlannedStart: 'date_planned_start',
       datePlannedEnd: 'date_planned_end',
-      
-      // Facility
       facilityName: 'facility_name',
       facilityCity: 'facility_city',
       facilityState: 'facility_state',
@@ -854,8 +1209,6 @@ export const updateStudy = async (
       facilityContactDegree: 'facility_contact_degree',
       facilityContactPhone: 'facility_contact_phone',
       facilityContactEmail: 'facility_contact_email',
-      
-      // Protocol details
       protocolDescription: 'protocol_description',
       protocolDateVerification: 'protocol_date_verification',
       medlineIdentifier: 'medline_identifier',
@@ -865,15 +1218,11 @@ export const updateStudy = async (
       conditions: 'conditions',
       keywords: 'keywords',
       interventions: 'interventions',
-      
-      // Eligibility
       eligibility: 'eligibility',
       gender: 'gender',
       ageMin: 'age_min',
       ageMax: 'age_max',
       healthyVolunteerAccepted: 'healthy_volunteer_accepted',
-      
-      // Study Design
       purpose: 'purpose',
       allocation: 'allocation',
       masking: 'masking',
@@ -885,7 +1234,7 @@ export const updateStudy = async (
       timing: 'timing'
     };
 
-    // Build update query dynamically
+    // Build update query dynamically for main study fields
     for (const [frontendField, dbColumn] of Object.entries(fieldMapping)) {
       const value = (data as any)[frontendField];
       if (value !== undefined && value !== null) {
@@ -894,29 +1243,361 @@ export const updateStudy = async (
       }
     }
 
-    if (updates.length === 0) {
-      return {
-        success: false,
-        message: 'No fields to update'
-      };
+    // Update main study table if there are fields to update
+    if (updates.length > 0) {
+      updates.push(`date_updated = NOW()`);
+      updates.push(`update_id = $${paramIndex++}`);
+      params.push(userId);
+      params.push(studyId);
+
+      const updateQuery = `
+        UPDATE study
+        SET ${updates.join(', ')}
+        WHERE study_id = $${paramIndex}
+      `;
+
+      logger.info('Executing study update query', { updateCount: updates.length, studyId });
+      await client.query(updateQuery, params);
     }
 
-    updates.push(`date_updated = NOW()`);
-    updates.push(`update_id = $${paramIndex++}`);
-    params.push(userId);
+    // Update event definitions if provided
+    if (data.eventDefinitions && Array.isArray(data.eventDefinitions)) {
+      logger.info('Updating event definitions', { studyId, count: data.eventDefinitions.length });
+      
+      for (const eventDef of data.eventDefinitions) {
+        if (!eventDef.name) continue;
+        
+        try {
+          await client.query('SAVEPOINT update_event');
+          
+          if (eventDef.studyEventDefinitionId) {
+            // Update existing event
+            await client.query(`
+              UPDATE study_event_definition
+              SET name = $1, description = $2, category = $3, type = $4, 
+                  ordinal = $5, repeating = $6, date_updated = NOW(), update_id = $7
+              WHERE study_event_definition_id = $8
+            `, [
+              eventDef.name,
+              eventDef.description || '',
+              eventDef.category || 'Study Event',
+              eventDef.type || 'scheduled',
+              eventDef.ordinal || 1,
+              eventDef.repeating || false,
+              userId,
+              eventDef.studyEventDefinitionId
+            ]);
+            
+            // Update CRF assignments - delete existing and recreate
+            if (eventDef.crfAssignments && Array.isArray(eventDef.crfAssignments)) {
+              await client.query(`
+                UPDATE event_definition_crf SET status_id = 5
+                WHERE study_event_definition_id = $1
+              `, [eventDef.studyEventDefinitionId]);
+              
+              for (const crfAssign of eventDef.crfAssignments) {
+                if (!crfAssign.crfId) continue;
+                
+                await client.query(`
+                  INSERT INTO event_definition_crf (
+                    study_event_definition_id, study_id, crf_id, required_crf,
+                    double_entry, hide_crf, ordinal, status_id, owner_id, date_created,
+                    electronic_signature
+                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+                `, [
+                  eventDef.studyEventDefinitionId,
+                  studyId,
+                  crfAssign.crfId,
+                  crfAssign.required ?? false,
+                  crfAssign.doubleDataEntry ?? false,
+                  crfAssign.hideCrf ?? false,
+                  crfAssign.ordinal || 1,
+                  userId,
+                  crfAssign.electronicSignature ?? false
+                ]);
+              }
+            }
+          } else {
+            // Create new event
+            const eventOid = `SE_${studyId}_${eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)}`;
+            
+            const eventResult = await client.query(`
+              INSERT INTO study_event_definition (
+                study_id, name, description, ordinal, type, repeating, category,
+                status_id, owner_id, date_created, oc_oid
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+              RETURNING study_event_definition_id
+            `, [
+              studyId,
+              eventDef.name,
+              eventDef.description || '',
+              eventDef.ordinal || 1,
+              eventDef.type || 'scheduled',
+              eventDef.repeating || false,
+              eventDef.category || 'Study Event',
+              userId,
+              eventOid
+            ]);
+            
+            const newEventDefId = eventResult.rows[0].study_event_definition_id;
+            
+            // Add CRF assignments
+            if (eventDef.crfAssignments && Array.isArray(eventDef.crfAssignments)) {
+              for (const crfAssign of eventDef.crfAssignments) {
+                if (!crfAssign.crfId) continue;
+                
+                await client.query(`
+                  INSERT INTO event_definition_crf (
+                    study_event_definition_id, study_id, crf_id, required_crf,
+                    double_entry, hide_crf, ordinal, status_id, owner_id, date_created,
+                    electronic_signature
+                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+                `, [
+                  newEventDefId,
+                  studyId,
+                  crfAssign.crfId,
+                  crfAssign.required ?? false,
+                  crfAssign.doubleDataEntry ?? false,
+                  crfAssign.hideCrf ?? false,
+                  crfAssign.ordinal || 1,
+                  userId,
+                  crfAssign.electronicSignature ?? false
+                ]);
+              }
+            }
+          }
+          
+          await client.query('RELEASE SAVEPOINT update_event');
+        } catch (eventError: any) {
+          await client.query('ROLLBACK TO SAVEPOINT update_event');
+          logger.warn('Event definition update warning', { error: eventError.message, event: eventDef.name });
+        }
+      }
+    }
 
-    params.push(studyId);
+    // Update group classes if provided
+    if (data.groupClasses && Array.isArray(data.groupClasses)) {
+      logger.info('Updating group classes', { studyId, count: data.groupClasses.length });
+      
+      for (const groupClass of data.groupClasses) {
+        if (!groupClass.name) continue;
+        
+        try {
+          await client.query('SAVEPOINT update_group_class');
+          
+          if (groupClass.studyGroupClassId) {
+            // Update existing group class
+            await client.query(`
+              UPDATE study_group_class
+              SET name = $1, group_class_type_id = $2, subject_assignment = $3,
+                  date_updated = NOW(), update_id = $4
+              WHERE study_group_class_id = $5
+            `, [
+              groupClass.name,
+              groupClass.groupClassTypeId || 1,
+              groupClass.subjectAssignment || 'optional',
+              userId,
+              groupClass.studyGroupClassId
+            ]);
+            
+            // Update groups within class
+            if (groupClass.groups && Array.isArray(groupClass.groups)) {
+              for (const group of groupClass.groups) {
+                if (!group.name) continue;
+                
+                if (group.studyGroupId) {
+                  // Update existing - try minimal columns first
+                  try {
+                    await client.query(`
+                      UPDATE study_group
+                      SET name = $1, description = $2
+                      WHERE study_group_id = $3
+                    `, [group.name, group.description || '', group.studyGroupId]);
+                  } catch {
+                    await client.query(`
+                      UPDATE study_group
+                      SET name = $1, description = $2, date_updated = NOW(), update_id = $3
+                      WHERE study_group_id = $4
+                    `, [group.name, group.description || '', userId, group.studyGroupId]);
+                  }
+                } else {
+                  // Insert new - try minimal columns first (real LibreClinica schema)
+                  try {
+                    await client.query(`
+                      INSERT INTO study_group (
+                        study_group_class_id, name, description
+                      ) VALUES ($1, $2, $3)
+                    `, [groupClass.studyGroupClassId, group.name, group.description || '']);
+                  } catch {
+                    await client.query(`
+                      INSERT INTO study_group (
+                        study_group_class_id, name, description,
+                        status_id, owner_id, date_created
+                      ) VALUES ($1, $2, $3, 1, $4, NOW())
+                    `, [groupClass.studyGroupClassId, group.name, group.description || '', userId]);
+                  }
+                }
+              }
+            }
+          } else {
+            // Create new group class
+            const gcResult = await client.query(`
+              INSERT INTO study_group_class (
+                study_id, name, group_class_type_id, subject_assignment,
+                status_id, owner_id, date_created
+              ) VALUES ($1, $2, $3, $4, 1, $5, NOW())
+              RETURNING study_group_class_id
+            `, [
+              studyId,
+              groupClass.name,
+              groupClass.groupClassTypeId || 1,
+              groupClass.subjectAssignment || 'optional',
+              userId
+            ]);
+            
+            const newGroupClassId = gcResult.rows[0].study_group_class_id;
+            
+            if (groupClass.groups && Array.isArray(groupClass.groups)) {
+              for (const group of groupClass.groups) {
+                if (!group.name) continue;
+                
+                // Try minimal columns first (real LibreClinica schema)
+                try {
+                  await client.query(`
+                    INSERT INTO study_group (
+                      study_group_class_id, name, description
+                    ) VALUES ($1, $2, $3)
+                  `, [newGroupClassId, group.name, group.description || '']);
+                } catch {
+                  await client.query(`
+                    INSERT INTO study_group (
+                      study_group_class_id, name, description,
+                      status_id, owner_id, date_created
+                    ) VALUES ($1, $2, $3, 1, $4, NOW())
+                  `, [newGroupClassId, group.name, group.description || '', userId]);
+                }
+              }
+            }
+          }
+          
+          await client.query('RELEASE SAVEPOINT update_group_class');
+        } catch (gcError: any) {
+          await client.query('ROLLBACK TO SAVEPOINT update_group_class');
+          logger.warn('Group class update warning', { error: gcError.message, groupClass: groupClass.name });
+        }
+      }
+    }
 
-    const updateQuery = `
-      UPDATE study
-      SET ${updates.join(', ')}
-      WHERE study_id = $${paramIndex}
-    `;
+    // Update sites if provided
+    if (data.sites && Array.isArray(data.sites)) {
+      logger.info('Updating sites', { studyId, count: data.sites.length });
+      
+      for (const site of data.sites) {
+        if (!site.name || !site.uniqueIdentifier) continue;
+        
+        try {
+          await client.query('SAVEPOINT update_site');
+          
+          if (site.studyId) {
+            // Update existing site
+            await client.query(`
+              UPDATE study
+              SET name = $1, principal_investigator = $2, expected_total_enrollment = $3,
+                  facility_name = $4, facility_city = $5, facility_state = $6,
+                  facility_country = $7, facility_recruitment_status = $8,
+                  date_updated = NOW(), update_id = $9
+              WHERE study_id = $10 AND parent_study_id = $11
+            `, [
+              site.name,
+              site.principalInvestigator || null,
+              site.expectedTotalEnrollment || 0,
+              site.facilityName || null,
+              site.facilityCity || null,
+              site.facilityState || null,
+              site.facilityCountry || null,
+              site.facilityRecruitmentStatus || 'Not yet recruiting',
+              userId,
+              site.studyId,
+              studyId
+            ]);
+          } else {
+            // Create new site
+            const siteOid = `S_${site.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            
+            await client.query(`
+              INSERT INTO study (
+                parent_study_id, unique_identifier, name, summary,
+                principal_investigator, expected_total_enrollment,
+                facility_name, facility_city, facility_state, facility_country,
+                facility_recruitment_status,
+                status_id, owner_id, date_created, oc_oid
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13)
+            `, [
+              studyId,
+              site.uniqueIdentifier,
+              site.name,
+              site.summary || '',
+              site.principalInvestigator || null,
+              site.expectedTotalEnrollment || 0,
+              site.facilityName || null,
+              site.facilityCity || null,
+              site.facilityState || null,
+              site.facilityCountry || null,
+              site.facilityRecruitmentStatus || 'Not yet recruiting',
+              userId,
+              siteOid
+            ]);
+          }
+          
+          await client.query('RELEASE SAVEPOINT update_site');
+        } catch (siteError: any) {
+          await client.query('ROLLBACK TO SAVEPOINT update_site');
+          logger.warn('Site update warning', { error: siteError.message, site: site.name });
+        }
+      }
+    }
 
-    logger.info('Executing update query', { updateCount: updates.length, studyId });
-    await client.query(updateQuery, params);
+    // Update study parameters if provided
+    if (data.studyParameters && typeof data.studyParameters === 'object') {
+      logger.info('Updating study parameters', { studyId, paramCount: Object.keys(data.studyParameters).length });
+      
+      try {
+        await client.query('SAVEPOINT update_params');
+        
+        for (const [param, value] of Object.entries(data.studyParameters)) {
+          if (value === undefined || value === null) continue;
+          
+          const stringValue = String(value);
+          
+          // Check if parameter exists (no UNIQUE constraint in real LC)
+          const existsCheck = await client.query(`
+            SELECT study_parameter_value_id FROM study_parameter_value
+            WHERE study_id = $1 AND parameter = $2
+          `, [studyId, param]);
+          
+          if (existsCheck.rows.length > 0) {
+            // Update existing
+            await client.query(`
+              UPDATE study_parameter_value SET value = $1
+              WHERE study_id = $2 AND parameter = $3
+            `, [stringValue, studyId, param]);
+          } else {
+            // Insert new
+            await client.query(`
+              INSERT INTO study_parameter_value (study_id, parameter, value)
+              VALUES ($1, $2, $3)
+            `, [studyId, param, stringValue]);
+          }
+        }
+        
+        await client.query('RELEASE SAVEPOINT update_params');
+      } catch (paramError: any) {
+        await client.query('ROLLBACK TO SAVEPOINT update_params');
+        logger.warn('Study parameter update warning', { error: paramError.message });
+      }
+    }
 
-    // Log audit event (optional - don't fail if audit table doesn't exist)
+    // Log audit event
     try {
       await client.query('SAVEPOINT audit_log');
       await client.query(`
@@ -939,7 +1620,7 @@ export const updateStudy = async (
 
     await client.query('COMMIT');
 
-    logger.info('Study updated successfully', { studyId, fieldsUpdated: updates.length });
+    logger.info('Study updated successfully with all nested data', { studyId, fieldsUpdated: updates.length });
 
     return {
       success: true,

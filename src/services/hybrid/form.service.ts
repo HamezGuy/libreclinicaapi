@@ -932,6 +932,7 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
         c.crf_id,
         c.name,
         c.description,
+        c.category,
         c.oc_oid,
         c.status_id,
         s.name as status_name,
@@ -966,6 +967,7 @@ export const getAllForms = async (): Promise<any[]> => {
         c.crf_id,
         c.name,
         c.description,
+        c.category,
         c.oc_oid,
         c.status_id,
         s.name as status_name,
@@ -1332,17 +1334,18 @@ export const createForm = async (
       };
     }
 
-    // Insert CRF
+    // Insert CRF (including category column)
     const crfResult = await client.query(`
       INSERT INTO crf (
-        name, description, status_id, owner_id, date_created, oc_oid, source_study_id
+        name, description, category, status_id, owner_id, date_created, oc_oid, source_study_id
       ) VALUES (
-        $1, $2, 1, $3, NOW(), $4, $5
+        $1, $2, $3, 1, $4, NOW(), $5, $6
       )
       RETURNING crf_id
     `, [
       data.name,
       data.description || '',
+      data.category || 'other',
       userId,
       ocOid,
       data.studyId || null
@@ -1542,9 +1545,9 @@ export const createForm = async (
           INSERT INTO item_form_metadata (
             item_id, crf_version_id, section_id, response_set_id, ordinal,
             left_item_text, required, default_value, regexp, regexp_error_msg, 
-            show_item, width_decimal
+            show_item, width_decimal, column_number
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
           )
         `, [
           itemId,
@@ -1558,7 +1561,8 @@ export const createForm = async (
           regexpPattern,
           regexpErrorMsg,
           (field.hidden !== true && field.isHidden !== true), // show_item is opposite of hidden
-          widthDecimal
+          widthDecimal,
+          (field as any).columnPosition || (field as any).columnNumber || 1 // column_number for multi-column layout
         ]);
 
         logger.debug('Created form field with metadata', { 
@@ -1566,6 +1570,7 @@ export const createForm = async (
           label: field.label, 
           type: field.type,
           required: field.required,
+          columnNumber: (field as any).columnPosition || (field as any).columnNumber || 1,
           hasOptions: field.options?.length || 0,
           hasValidation: field.validationRules?.length || 0
         });
@@ -1727,6 +1732,13 @@ export const updateForm = async (
         params.push(statusId);
         logger.info('Updating form status', { crfId, status: data.status, statusId });
       }
+    }
+
+    // Update category if provided
+    if (data.category !== undefined) {
+      updates.push(`category = $${paramIndex++}`);
+      params.push(data.category || 'other');
+      logger.info('Updating form category', { crfId, category: data.category });
     }
 
     updates.push(`date_updated = NOW()`);

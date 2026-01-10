@@ -389,6 +389,7 @@ CREATE TABLE crf (
     study_id INTEGER REFERENCES study(study_id),
     name VARCHAR(255) NOT NULL,
     description VARCHAR(2000),
+    category VARCHAR(100) DEFAULT 'other',
     owner_id INTEGER REFERENCES user_account(user_id),
     date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
