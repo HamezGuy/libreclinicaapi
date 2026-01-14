@@ -404,14 +404,139 @@ export const studySchemas = {
   }),
 
   update: Joi.object({
+    // Basic fields
     name: Joi.string().optional().min(3).max(255),
-    description: Joi.string().optional().max(2000),
-    principalInvestigator: Joi.string().optional().max(255),
-    sponsor: Joi.string().optional().max(255),
-    phase: Joi.string().optional().valid('I', 'II', 'III', 'IV', 'N/A'),
+    description: Joi.string().optional().max(2000).allow(''),
+    summary: Joi.string().optional().max(2000).allow(''),
+    officialTitle: Joi.string().optional().max(255).allow(''),
+    secondaryIdentifier: Joi.string().optional().max(255).allow(''),
+    principalInvestigator: Joi.string().optional().max(255).allow(''),
+    sponsor: Joi.string().optional().max(255).allow(''),
+    collaborators: Joi.string().optional().max(1000).allow(''),
+    phase: Joi.string().optional().allow(''),
+    protocolType: Joi.string().optional().valid('interventional', 'observational').allow(''),
     expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
-    datePlannedStart: Joi.date().iso().optional(),
-    datePlannedEnd: Joi.date().iso().optional()
+    datePlannedStart: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().allow('')
+    ).optional(),
+    datePlannedEnd: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().allow('')
+    ).optional(),
+    
+    // Facility fields
+    facilityName: Joi.string().optional().max(255).allow(''),
+    facilityCity: Joi.string().optional().max(255).allow(''),
+    facilityState: Joi.string().optional().max(20).allow(''),
+    facilityZip: Joi.string().optional().max(64).allow(''),
+    facilityCountry: Joi.string().optional().max(64).allow(''),
+    facilityRecruitmentStatus: Joi.string().optional().max(60).allow(''),
+    facilityContactName: Joi.string().optional().max(255).allow(''),
+    facilityContactDegree: Joi.string().optional().max(255).allow(''),
+    facilityContactPhone: Joi.string().optional().max(255).allow(''),
+    facilityContactEmail: Joi.string().optional().max(255).email().allow(''),
+    
+    // Protocol fields
+    protocolDescription: Joi.string().optional().max(1000).allow(''),
+    protocolDateVerification: Joi.string().optional().allow(''),
+    medlineIdentifier: Joi.string().optional().max(255).allow(''),
+    url: Joi.string().optional().max(255).allow(''),
+    urlDescription: Joi.string().optional().max(255).allow(''),
+    resultsReference: Joi.boolean().optional(),
+    
+    // Eligibility fields
+    conditions: Joi.string().optional().max(500).allow(''),
+    keywords: Joi.string().optional().max(255).allow(''),
+    interventions: Joi.string().optional().max(1000).allow(''),
+    eligibility: Joi.string().optional().max(500).allow(''),
+    gender: Joi.string().optional().allow(''),
+    ageMin: Joi.string().optional().max(3).allow(''),
+    ageMax: Joi.string().optional().max(3).allow(''),
+    healthyVolunteerAccepted: Joi.boolean().optional(),
+    
+    // Design fields
+    purpose: Joi.string().optional().max(64).allow(''),
+    allocation: Joi.string().optional().max(64).allow(''),
+    masking: Joi.string().optional().max(30).allow(''),
+    control: Joi.string().optional().max(30).allow(''),
+    assignment: Joi.string().optional().max(30).allow(''),
+    endpoint: Joi.string().optional().max(64).allow(''),
+    duration: Joi.string().optional().max(30).allow(''),
+    selection: Joi.string().optional().max(30).allow(''),
+    timing: Joi.string().optional().max(30).allow(''),
+    
+    // Event definitions (phases/visits) with CRF assignments
+    eventDefinitions: Joi.array().items(Joi.object({
+      studyEventDefinitionId: Joi.number().integer().optional(), // For existing events
+      name: Joi.string().required().max(255),
+      description: Joi.string().optional().max(2000).allow(''),
+      category: Joi.string().optional().allow(''),
+      type: Joi.string().valid('scheduled', 'unscheduled', 'common').default('scheduled'),
+      ordinal: Joi.number().integer().min(1).optional(),
+      repeating: Joi.boolean().default(false),
+      crfAssignments: Joi.array().items(Joi.object({
+        crfId: Joi.number().integer().positive().required(),
+        required: Joi.boolean().default(true),
+        doubleDataEntry: Joi.boolean().default(false),
+        electronicSignature: Joi.boolean().default(false),
+        hideCrf: Joi.boolean().default(false),
+        ordinal: Joi.number().integer().min(1).default(1)
+      })).optional()
+    })).optional(),
+    
+    // Group classes
+    groupClasses: Joi.array().items(Joi.object({
+      studyGroupClassId: Joi.number().integer().optional(), // For existing groups
+      name: Joi.string().required().max(255),
+      type: Joi.alternatives().try(
+        Joi.number().integer().min(1).max(4),
+        Joi.string()
+      ).default(1),
+      subjectAssignment: Joi.string().optional().allow(''),
+      description: Joi.string().optional().max(1000).allow(''),
+      groups: Joi.array().items(Joi.object({
+        studyGroupId: Joi.number().integer().optional(),
+        name: Joi.string().required().max(255),
+        description: Joi.string().optional().max(1000).allow('')
+      })).optional()
+    })).optional(),
+    
+    // Sites (child studies)
+    sites: Joi.array().items(Joi.object({
+      studyId: Joi.number().integer().optional(), // For existing sites
+      name: Joi.string().required().max(255),
+      uniqueIdentifier: Joi.string().required().max(255),
+      facilityName: Joi.string().optional().max(255).allow(''),
+      facilityCity: Joi.string().optional().max(255).allow(''),
+      facilityState: Joi.string().optional().max(20).allow(''),
+      facilityCountry: Joi.string().optional().max(64).allow(''),
+      principalInvestigator: Joi.string().optional().max(255).allow(''),
+      expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
+      facilityRecruitmentStatus: Joi.string().optional().max(60).allow(''),
+      inheritFromParent: Joi.boolean().default(true)
+    })).optional(),
+    
+    // Study parameters (settings)
+    studyParameters: Joi.object({
+      collectDob: Joi.string().optional().valid('1', '2', '3', 'full', 'year_only', 'not_used'),
+      genderRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      subjectPersonIdRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      subjectIdGeneration: Joi.string().optional().valid('manual', 'auto_editable', 'auto_non_editable', 'auto'),
+      subjectIdPrefix: Joi.string().optional().allow(''),
+      subjectIdSuffix: Joi.string().optional().allow(''),
+      studySubjectIdLabel: Joi.string().optional().allow(''),
+      secondaryIdLabel: Joi.string().optional().allow(''),
+      personIdShownOnCrf: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      secondaryLabelViewable: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      eventLocationRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      dateOfEnrollmentForStudyRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      discrepancyManagement: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      allowAdministrativeEditing: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      adminForcedReasonForChange: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+      mailNotification: Joi.string().optional().allow(''),
+      contactEmail: Joi.string().optional().email().allow('')
+    }).optional()
   })
 };
 
@@ -430,17 +555,24 @@ export const querySchemas = {
     detailedNotes: Joi.string().optional().max(2000),
     queryType: Joi.string().valid('Query', 'Failed Validation Check', 'Annotation', 'Reason for Change').required(),
     studyId: Joi.number().integer().positive().required(),
-    subjectId: Joi.number().integer().positive().optional()
+    subjectId: Joi.number().integer().positive().optional(),
+    assignedUserId: Joi.number().integer().positive().optional()  // User to assign the query to
   }),
 
   respond: Joi.object({
-    description: Joi.string().required().min(10).max(1000)
+    description: Joi.string().min(10).max(1000)
       .messages({
         'string.min': 'Response must be at least 10 characters',
         'string.max': 'Response must not exceed 1000 characters'
       }),
-    detailedNotes: Joi.string().optional().max(2000)
-  }),
+    response: Joi.string().min(10).max(1000)  // Alias for description
+      .messages({
+        'string.min': 'Response must be at least 10 characters',
+        'string.max': 'Response must not exceed 1000 characters'
+      }),
+    detailedNotes: Joi.string().optional().max(2000),
+    newStatusId: Joi.number().integer().min(1).max(5).optional()  // Optional: change status when responding
+  }).or('description', 'response'),  // Require at least one of description or response
 
   updateStatus: Joi.object({
     statusId: Joi.number().integer().min(1).max(10).required()

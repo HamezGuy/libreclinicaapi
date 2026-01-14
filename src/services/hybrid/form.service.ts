@@ -530,6 +530,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         i.description,
         i.units,
         i.oc_oid,
+        i.phi_status,
         idt.name as data_type,
         idt.code as data_type_code,
         igm.ordinal,
@@ -541,6 +542,8 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         ifm.regexp as validation_pattern,
         ifm.regexp_error_msg as validation_message,
         ifm.show_item,
+        ifm.column_number,
+        ifm.width_decimal,
         -- Options from response_set
         rs.options_text,
         rs.options_values,
@@ -649,6 +652,15 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         validationRules.push({ type: 'max', value: max, message: `Maximum value is ${max}` });
       }
       
+      // Determine field type from:
+      // 1. Extended props (preserves frontend types like 'yesno', 'textarea')
+      // 2. Response type (LibreClinica's UI type)
+      // 3. Data type code (fallback)
+      const fieldType = extendedProps.type 
+        || mapResponseTypeToFieldType(item.response_type) 
+        || item.data_type_code?.toLowerCase() 
+        || 'text';
+      
       return {
         // Core identifiers
         id: item.item_id?.toString(),
@@ -657,9 +669,10 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         oc_oid: item.oc_oid,
         
         // Type info
-        type: item.data_type_code?.toLowerCase() || 'text',
+        type: fieldType,
         data_type: item.data_type,
         data_type_code: item.data_type_code,
+        response_type: item.response_type,
         
         // Display
         label: item.name,
@@ -688,8 +701,9 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         order: item.ordinal,
         section: item.section_name,
         group_name: item.group_name,
-        width: extendedProps.width,
-        columnPosition: extendedProps.columnPosition,
+        width: extendedProps.width || 'full',
+        columnPosition: item.column_number || extendedProps.columnPosition || 1,
+        columnNumber: item.column_number || 1,
         groupId: extendedProps.groupId,
         
         // Clinical
@@ -927,12 +941,19 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
   logger.info('Getting study forms', { studyId });
 
   try {
+    // Check if category column exists in crf table
+    const columnCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'crf' AND column_name = 'category'
+    `);
+    const hasCategoryColumn = columnCheck.rows.length > 0;
+
     const query = `
       SELECT 
         c.crf_id,
         c.name,
         c.description,
-        c.category,
+        ${hasCategoryColumn ? 'c.category,' : "'other' as category,"}
         c.oc_oid,
         c.status_id,
         s.name as status_name,
@@ -962,12 +983,19 @@ export const getAllForms = async (): Promise<any[]> => {
   logger.info('Getting all forms');
 
   try {
+    // Check if category column exists in crf table
+    const columnCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'crf' AND column_name = 'category'
+    `);
+    const hasCategoryColumn = columnCheck.rows.length > 0;
+
     const query = `
       SELECT 
         c.crf_id,
         c.name,
         c.description,
-        c.category,
+        ${hasCategoryColumn ? 'c.category,' : "'other' as category,"}
         c.oc_oid,
         c.status_id,
         s.name as status_name,
@@ -1170,6 +1198,9 @@ interface FormField {
  */
 const serializeExtendedProperties = (field: FormField): string => {
   const extended = {
+    // Field type (preserves types like 'yesno', 'textarea', 'radio' that map to LibreClinica types)
+    type: field.type,
+    
     // PHI and Compliance
     isPhiField: field.isPhiField,
     phiClassification: field.phiClassification,
@@ -1296,6 +1327,35 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
 };
 
 /**
+ * Map LibreClinica response_type name back to field type
+ * Used when loading form metadata to determine the frontend field type
+ */
+const mapResponseTypeToFieldType = (responseType: string | null | undefined): string | null => {
+  if (!responseType) return null;
+  
+  const normalizedType = responseType.toLowerCase();
+  
+  const typeMap: Record<string, string> = {
+    'text': 'text',
+    'textarea': 'textarea',
+    'checkbox': 'checkbox',
+    'file': 'file',
+    'radio': 'radio',
+    'single-select': 'select',
+    'select': 'select',
+    'dropdown': 'select',
+    'multi-select': 'multiselect',
+    'multiselect': 'multiselect',
+    'calculation': 'calculation',
+    'group-calculation': 'calculation',
+    'instant-calculation': 'barcode',
+    'barcode': 'barcode'
+  };
+  
+  return typeMap[normalizedType] || null;
+};
+
+/**
  * Create a new form template (CRF) with fields
  */
 export const createForm = async (
@@ -1306,10 +1366,11 @@ export const createForm = async (
     fields?: FormField[];
     category?: string;
     version?: string;
+    status?: 'draft' | 'published' | 'archived';
   },
   userId: number
 ): Promise<{ success: boolean; crfId?: number; message?: string }> => {
-  logger.info('Creating form template', { name: data.name, userId, fieldCount: data.fields?.length || 0 });
+  logger.info('Creating form template', { name: data.name, userId, fieldCount: data.fields?.length || 0, status: data.status });
 
   const client = await pool.connect();
 
@@ -1334,38 +1395,75 @@ export const createForm = async (
       };
     }
 
-    // Insert CRF (including category column)
-    const crfResult = await client.query(`
-      INSERT INTO crf (
-        name, description, category, status_id, owner_id, date_created, oc_oid, source_study_id
-      ) VALUES (
-        $1, $2, $3, 1, $4, NOW(), $5, $6
-      )
-      RETURNING crf_id
-    `, [
-      data.name,
-      data.description || '',
-      data.category || 'other',
-      userId,
-      ocOid,
-      data.studyId || null
-    ]);
+    // Map frontend status to LibreClinica status_id
+    // LibreClinica statuses: 1=available (published), 2=unavailable (draft), 5=removed (archived)
+    const statusMap: Record<string, number> = {
+      'published': 1,
+      'draft': 2,
+      'archived': 5
+    };
+    const statusId = data.status ? (statusMap[data.status] || 2) : 2; // Default to draft (2)
+
+    // Check if category column exists in crf table
+    const columnCheck = await client.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'crf' AND column_name = 'category'
+    `);
+    const hasCategoryColumn = columnCheck.rows.length > 0;
+
+    // Insert CRF (conditionally include category column if it exists)
+    let crfResult;
+    if (hasCategoryColumn) {
+      crfResult = await client.query(`
+        INSERT INTO crf (
+          name, description, category, status_id, owner_id, date_created, oc_oid, source_study_id
+        ) VALUES (
+          $1, $2, $3, $4, $5, NOW(), $6, $7
+        )
+        RETURNING crf_id
+      `, [
+        data.name,
+        data.description || '',
+        data.category || 'other',
+        statusId,
+        userId,
+        ocOid,
+        data.studyId || null
+      ]);
+    } else {
+      crfResult = await client.query(`
+        INSERT INTO crf (
+          name, description, status_id, owner_id, date_created, oc_oid, source_study_id
+        ) VALUES (
+          $1, $2, $3, $4, NOW(), $5, $6
+        )
+        RETURNING crf_id
+      `, [
+        data.name,
+        data.description || '',
+        statusId,
+        userId,
+        ocOid,
+        data.studyId || null
+      ]);
+    }
 
     const crfId = crfResult.rows[0].crf_id;
 
-    // Create initial version
+    // Create initial version with same status as CRF
     const versionOid = `${ocOid}_V1`;
     const versionResult = await client.query(`
       INSERT INTO crf_version (
         crf_id, name, description, status_id, owner_id, date_created, oc_oid
       ) VALUES (
-        $1, $2, $3, 1, $4, NOW(), $5
+        $1, $2, $3, $4, $5, NOW(), $6
       )
       RETURNING crf_version_id
     `, [
       crfId,
       data.version || 'v1.0',
       data.description || 'Initial version',
+      statusId,
       userId,
       versionOid
     ]);
@@ -1734,11 +1832,20 @@ export const updateForm = async (
       }
     }
 
-    // Update category if provided
+    // Update category if provided AND if column exists
     if (data.category !== undefined) {
-      updates.push(`category = $${paramIndex++}`);
-      params.push(data.category || 'other');
-      logger.info('Updating form category', { crfId, category: data.category });
+      // Check if category column exists
+      const columnCheck = await client.query(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'crf' AND column_name = 'category'
+      `);
+      if (columnCheck.rows.length > 0) {
+        updates.push(`category = $${paramIndex++}`);
+        params.push(data.category || 'other');
+        logger.info('Updating form category', { crfId, category: data.category });
+      } else {
+        logger.info('Skipping category update - column does not exist', { crfId });
+      }
     }
 
     updates.push(`date_updated = NOW()`);

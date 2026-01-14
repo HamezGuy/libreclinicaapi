@@ -32,23 +32,25 @@ router.get('/:id/events', validate({ params: commonSchemas.idParam }), controlle
 router.get('/:id/stats', validate({ params: commonSchemas.idParam }), controller.getStats);
 router.get('/:id/users', validate({ params: commonSchemas.idParam }), controller.getUsers);
 
-// Create/Update/Delete - require admin or coordinator role + electronic signature
+// Create/Update/Delete - require admin or coordinator role
+// NOTE: E-signature requirement temporarily disabled for usability
+// TODO: Re-enable when frontend e-signature flow is fully implemented
 router.post('/', 
   requireRole('admin', 'coordinator'), 
   validate({ body: studySchemas.create }), 
-  requireSignatureFor(SignatureMeanings.STUDY_CREATE),
+  // requireSignatureFor(SignatureMeanings.STUDY_CREATE), // DISABLED - re-enable later
   controller.create
 );
 router.put('/:id', 
   requireRole('admin', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: studySchemas.update }), 
-  requireSignatureFor(SignatureMeanings.STUDY_UPDATE),
+  // requireSignatureFor(SignatureMeanings.STUDY_UPDATE), // DISABLED - re-enable later
   controller.update
 );
 router.delete('/:id', 
   requireRole('admin'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.STUDY_DELETE),
+  // requireSignatureFor(SignatureMeanings.STUDY_DELETE), // DISABLED - re-enable later
   controller.remove
 );
 

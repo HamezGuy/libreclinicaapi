@@ -79,36 +79,31 @@ export const getStudies = async (
     const { status, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
 
-    // Try SOAP first for Part 11 compliance
-    if (config.libreclinica.soapEnabled && username) {
-      try {
-        const soapResult = await studySoap.listStudies(userId, username);
-        if (soapResult.success && soapResult.data) {
-          logger.info('✅ Studies retrieved via SOAP', { count: soapResult.data.length });
-          
-          // Enrich with DB stats
-          const enrichedStudies = await enrichStudiesWithStats(soapResult.data, userId);
-          
-          // Apply pagination
-          const paginatedStudies = enrichedStudies.slice(offset, offset + limit);
-          
-          return {
-            success: true,
-            data: paginatedStudies,
-            pagination: {
-              page,
-              limit,
-              total: enrichedStudies.length,
-              totalPages: Math.ceil(enrichedStudies.length / limit)
-            }
-          };
-        }
-      } catch (soapError: any) {
-        logger.warn('SOAP study list failed, falling back to DB', { error: soapError.message });
-      }
-    }
+    // NOTE: Disabled SOAP for study listing because SOAP returns studies that may not exist
+    // in the local database, causing update operations to fail silently.
+    // For proper CRUD operations, we always use the database directly.
+    // SOAP study listing is inconsistent with database state in development environments.
+    // 
+    // Original code (kept for reference):
+    // if (config.libreclinica.soapEnabled && username) {
+    //   try {
+    //     const soapResult = await studySoap.listStudies(userId, username);
+    //     if (soapResult.success && soapResult.data) {
+    //       logger.info('✅ Studies retrieved via SOAP', { count: soapResult.data.length });
+    //       const enrichedStudies = await enrichStudiesWithStats(soapResult.data, userId);
+    //       const paginatedStudies = enrichedStudies.slice(offset, offset + limit);
+    //       return {
+    //         success: true,
+    //         data: paginatedStudies,
+    //         pagination: { page, limit, total: enrichedStudies.length, totalPages: Math.ceil(enrichedStudies.length / limit) }
+    //       };
+    //     }
+    //   } catch (soapError: any) {
+    //     logger.warn('SOAP study list failed, falling back to DB', { error: soapError.message });
+    //   }
+    // }
 
-    // Fallback to database if SOAP unavailable
+    // Always use database for study listing to ensure CRUD consistency
     logger.info('📋 Using database fallback for study list');
 
     const conditions: string[] = ['1=1'];

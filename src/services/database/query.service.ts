@@ -191,6 +191,7 @@ export const createQuery = async (
     detailedNotes?: string;
     typeId?: number;
     queryType?: string; // Frontend sends this as string
+    assignedUserId?: number; // User to assign the query to
   },
   userId: number
 ): Promise<{ success: boolean; queryId?: number; message?: string }> => {
@@ -231,14 +232,14 @@ export const createQuery = async (
       };
     }
 
-    // Insert discrepancy note (main record)
+    // Insert discrepancy note (main record) - include assigned_user_id if provided
     const insertNoteQuery = `
       INSERT INTO discrepancy_note (
         description, detailed_notes, discrepancy_note_type_id,
         resolution_status_id, study_id, entity_type,
-        owner_id, date_created
+        owner_id, assigned_user_id, date_created
       ) VALUES (
-        $1, $2, $3, 1, $4, $5, $6, NOW()
+        $1, $2, $3, 1, $4, $5, $6, $7, NOW()
       )
       RETURNING discrepancy_note_id
     `;
@@ -249,7 +250,8 @@ export const createQuery = async (
       typeId,
       data.studyId,
       data.entityType,
-      userId
+      userId,
+      data.assignedUserId || null  // Set assigned user if provided
     ]);
 
     const queryId = noteResult.rows[0].discrepancy_note_id;
