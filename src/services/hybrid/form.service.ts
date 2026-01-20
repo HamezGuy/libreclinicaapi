@@ -745,7 +745,11 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         hasNativeScd: scdByItemId.has(item.item_id),
         
         // Custom
-        customAttributes: extendedProps.customAttributes
+        customAttributes: extendedProps.customAttributes,
+        
+        // Table field properties
+        tableColumns: extendedProps.tableColumns,
+        tableSettings: extendedProps.tableSettings
       };
     });
 
@@ -1071,7 +1075,8 @@ const mapFieldTypeToDataType = (fieldType: string): number => {
     'checkbox': 1,  // BL - Boolean
     'radio': 5,     // ST - stored as string
     'select': 5,    // ST - stored as string
-    'file': 11      // FILE
+    'file': 11,     // FILE
+    'table': 5      // ST - Table data stored as JSON string
   };
   return typeMap[fieldType?.toLowerCase()] || 5; // Default to ST (string)
 };
@@ -1246,7 +1251,11 @@ const serializeExtendedProperties = (field: FormField): string => {
     customAttributes: field.customAttributes,
     
     // Readonly
-    readonly: field.readonly || field.isReadonly
+    readonly: field.readonly || field.isReadonly,
+    
+    // Table field properties
+    tableColumns: field.tableColumns,
+    tableSettings: field.tableSettings
   };
   
   // Remove undefined values
@@ -1321,7 +1330,10 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
     'blood_pressure': 1,
     'oxygen_saturation': 1,
     'respiration_rate': 1,
-    'yesno': 5         // Yes/No uses radio type
+    'yesno': 5,        // Yes/No uses radio type
+    
+    // Table type - uses a special response type for repeating/grid data
+    'table': 11        // Table field (repeating group with structure)
   };
   return typeMap[fieldType?.toLowerCase()] || 1;
 };
@@ -1349,7 +1361,10 @@ const mapResponseTypeToFieldType = (responseType: string | null | undefined): st
     'calculation': 'calculation',
     'group-calculation': 'calculation',
     'instant-calculation': 'barcode',
-    'barcode': 'barcode'
+    'barcode': 'barcode',
+    'table': 'table',
+    'repeating': 'table',
+    'grid': 'table'
   };
   
   return typeMap[normalizedType] || null;
