@@ -70,13 +70,13 @@ import printRoutes from './routes/print.routes';
 // Double Data Entry (21 CFR Part 11 compliant) - Uses NATIVE LibreClinica tables
 import ddeRoutes from './routes/dde.routes';
 // Organization management, invite codes, access requests
-import organizationRoutes from './routes/organization.routes';
-// Skip Logic and Form Linking
-import skipLogicRoutes from './routes/skip-logic.routes';
-// Site/Location Management
-import siteRoutes from './routes/site.routes';
-// Form Layout (column configuration)
-import formLayoutRoutes from './routes/form-layout.routes';
+// import organizationRoutes from './routes/organization.routes';
+// // Skip Logic and Form Linking
+// import skipLogicRoutes from './routes/skip-logic.routes';
+// // Site/Location Management
+// import siteRoutes from './routes/site.routes';
+// // Form Layout (column configuration)
+// import formLayoutRoutes from './routes/form-layout.routes';
 
 // ============================================================================
 // FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
@@ -281,12 +281,12 @@ app.use('/api/print', printRoutes);
 // Double Data Entry (Part 11 compliant - uses NATIVE LibreClinica tables)
 app.use('/api/dde', ddeRoutes);
 // Organization management, invite codes, access requests
-app.use('/api/organizations', organizationRoutes);
-// Skip Logic, Form Linking, and Branching
-app.use('/api/skip-logic', skipLogicRoutes);
-// Site/Location Management
-app.use('/api/sites', siteRoutes);
-app.use('/api/form-layout', formLayoutRoutes);
+// app.use('/api/organizations', organizationRoutes);
+// // Skip Logic, Form Linking, and Branching
+// app.use('/api/skip-logic', skipLogicRoutes);
+// // Site/Location Management
+// app.use('/api/sites', siteRoutes);
+// app.use('/api/form-layout', formLayoutRoutes);
 
 // ============================================================================
 // CONDITIONAL ROUTES - Require custom acc_* tables

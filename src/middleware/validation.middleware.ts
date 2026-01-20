@@ -166,6 +166,7 @@ export const authSchemas = {
  */
 export const subjectSchemas = {
   create: Joi.object({
+    // === REQUIRED FIELDS ===
     studyId: Joi.number().integer().positive().required()
       .messages({
         'number.base': 'Study ID must be a number',
@@ -177,10 +178,48 @@ export const subjectSchemas = {
         'string.empty': 'Subject ID is required',
         'string.max': 'Subject ID must not exceed 30 characters'
       }),
+    
+    // === OPTIONAL STUDY_SUBJECT FIELDS ===
     secondaryId: Joi.string().optional().allow('').max(30),
-    enrollmentDate: Joi.date().iso().optional(),
-    gender: Joi.string().valid('m', 'f', 'Male', 'Female', '').optional(),
-    dateOfBirth: Joi.date().iso().optional()
+    enrollmentDate: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate()
+    ).optional(),
+    timeZone: Joi.string().optional().allow('').max(255),
+    
+    // === OPTIONAL SUBJECT (DEMOGRAPHICS) FIELDS ===
+    gender: Joi.string().valid('m', 'f', 'Male', 'Female', 'male', 'female', '').optional(),
+    dateOfBirth: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate()
+    ).optional(),
+    personId: Joi.string().optional().allow('').max(255),
+    
+    // === FAMILY/GENETIC STUDY FIELDS ===
+    fatherId: Joi.number().integer().positive().optional().allow(null),
+    motherId: Joi.number().integer().positive().optional().allow(null),
+    
+    // === GROUP ASSIGNMENTS (for randomization) ===
+    groupAssignments: Joi.array().items(Joi.object({
+      studyGroupClassId: Joi.number().integer().positive().required(),
+      studyGroupId: Joi.number().integer().positive().required(),
+      notes: Joi.string().optional().allow('').max(255)
+    })).optional(),
+    
+    // === FIRST EVENT SCHEDULING ===
+    scheduleEvent: Joi.object({
+      studyEventDefinitionId: Joi.number().integer().positive().required(),
+      location: Joi.string().optional().allow('').max(255),
+      startDate: Joi.alternatives().try(
+        Joi.date().iso(),
+        Joi.string().isoDate()
+      ).optional()
+    }).optional(),
+    
+    // === ELECTRONIC SIGNATURE (21 CFR Part 11 §11.50) ===
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500)
   }),
 
   list: Joi.object({
@@ -268,9 +307,11 @@ export const studySchemas = {
         'string.max': 'Study name cannot exceed 255 characters',
         'any.required': 'Study name is required'
       }),
-    uniqueIdentifier: Joi.string().required().min(3).max(255)
+    uniqueIdentifier: Joi.string().required().min(3).max(30)
       .pattern(/^[a-zA-Z0-9_-]+$/)
       .messages({
+        'string.min': 'Protocol number must be at least 3 characters',
+        'string.max': 'Protocol number cannot exceed 30 characters',
         'string.pattern.base': 'Study identifier can only contain letters, numbers, hyphens, and underscores',
         'any.required': 'Protocol number is required'
       }),
@@ -300,8 +341,8 @@ export const studySchemas = {
         'any.required': 'Planned start date is required'
       }),
     // Optional fields
-    description: Joi.string().optional().max(2000).allow(''),
-    summary: Joi.string().optional().max(2000).allow(''),
+    description: Joi.string().optional().max(1000).allow(''),  // Maps to protocol_description
+    summary: Joi.string().optional().max(255).allow(''),  // Database: varchar(255)
     protocolType: Joi.string().optional().valid('interventional', 'observational'),
     targetEnrollment: Joi.number().integer().min(0).optional(), // Allow frontend variation
     datePlannedEnd: Joi.alternatives().try(
@@ -333,7 +374,7 @@ export const studySchemas = {
     keywords: Joi.string().optional().max(255).allow(''),
     interventions: Joi.string().optional().max(1000).allow(''),
     eligibility: Joi.string().optional().max(500).allow(''),
-    gender: Joi.string().optional().allow(''),
+    gender: Joi.string().optional().max(30).allow(''),  // Database: varchar(30)
     ageMin: Joi.string().optional().max(3).allow(''),
     ageMax: Joi.string().optional().max(3).allow(''),
     healthyVolunteerAccepted: Joi.boolean().optional(),
@@ -400,7 +441,12 @@ export const studySchemas = {
     discrepancyManagement: Joi.boolean().optional(),
     allowAdministrativeEditing: Joi.boolean().optional(),
     mailNotification: Joi.string().optional().allow(''),
-    contactEmail: Joi.string().optional().email().allow('')
+    contactEmail: Joi.string().optional().email().allow(''),
+    
+    // === ELECTRONIC SIGNATURE (21 CFR Part 11 §11.50) ===
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500)
   }),
 
   update: Joi.object({
@@ -450,7 +496,7 @@ export const studySchemas = {
     keywords: Joi.string().optional().max(255).allow(''),
     interventions: Joi.string().optional().max(1000).allow(''),
     eligibility: Joi.string().optional().max(500).allow(''),
-    gender: Joi.string().optional().allow(''),
+    gender: Joi.string().optional().max(30).allow(''),  // Database: varchar(30)
     ageMin: Joi.string().optional().max(3).allow(''),
     ageMax: Joi.string().optional().max(3).allow(''),
     healthyVolunteerAccepted: Joi.boolean().optional(),
@@ -536,7 +582,12 @@ export const studySchemas = {
       adminForcedReasonForChange: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
       mailNotification: Joi.string().optional().allow(''),
       contactEmail: Joi.string().optional().email().allow('')
-    }).optional()
+    }).optional(),
+    
+    // === ELECTRONIC SIGNATURE (21 CFR Part 11 §11.50) ===
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500)
   })
 };
 
