@@ -121,13 +121,19 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
 /**
  * Close query with electronic signature (password verification)
  * 21 CFR Part 11 compliant
+ * 
+ * Note: The requireSignatureFor middleware verifies the password and sets
+ * req.signatureVerified = true, then deletes the password from the body.
+ * We check signatureVerified to avoid double-verification issues.
  */
 export const closeWithSignature = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
+  const signatureVerified = (req as any).signatureVerified;
   const { id } = req.params;
   const { password, reason, meaning } = req.body;
 
-  if (!password) {
+  // Check if signature was verified by middleware OR password is provided
+  if (!signatureVerified && !password) {
     res.status(400).json({ success: false, message: 'Password is required for electronic signature' });
     return;
   }
@@ -137,6 +143,20 @@ export const closeWithSignature = asyncHandler(async (req: Request, res: Respons
     return;
   }
 
+  // If signature already verified by middleware, close without re-verifying password
+  if (signatureVerified) {
+    const result = await queryService.closeQueryWithSignatureVerified(
+      parseInt(id),
+      user.userId,
+      { reason, meaning }
+    );
+
+    let statusCode = result.success ? 200 : (result.message?.includes('not found') ? 404 : 500);
+    res.status(statusCode).json(result);
+    return;
+  }
+
+  // Fallback: verify password in service (shouldn't normally reach here with middleware)
   const result = await queryService.closeQueryWithSignature(
     parseInt(id),
     user.userId,

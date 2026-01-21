@@ -571,6 +571,63 @@ export const closeQueryWithSignature = async (
       };
     }
 
+    // Password verified - delegate to the verified function
+    return closeQueryWithSignatureVerified(queryId, userId, {
+      reason: data.reason,
+      meaning: data.meaning
+    }, client, user);
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Close query with signature error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to close query: ${error.message}`
+    };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Close query with verified electronic signature
+ * Called when password has already been verified by middleware
+ * 21 CFR Part 11 compliant
+ */
+export const closeQueryWithSignatureVerified = async (
+  queryId: number,
+  userId: number,
+  data: {
+    reason: string;
+    meaning?: string;
+  },
+  existingClient?: any,
+  existingUser?: any
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Closing query with verified signature', { queryId, userId });
+
+  const client = existingClient || await pool.connect();
+  const needsRelease = !existingClient;
+
+  try {
+    if (!existingClient) {
+      await client.query('BEGIN');
+    }
+
+    // Get user info if not provided
+    let user = existingUser;
+    if (!user) {
+      const userResult = await client.query(
+        `SELECT user_name, first_name, last_name FROM user_account WHERE user_id = $1`,
+        [userId]
+      );
+
+      if (userResult.rows.length === 0) {
+        throw new Error('User not found');
+      }
+      user = userResult.rows[0];
+    }
+
     // Get current query status
     const queryResult = await client.query(
       `SELECT resolution_status_id, description FROM discrepancy_note WHERE discrepancy_note_id = $1`,
@@ -626,7 +683,9 @@ export const closeQueryWithSignature = async (
       `${data.reason}. Signature meaning: ${data.meaning || 'Query resolved'}`
     ]);
 
-    await client.query('COMMIT');
+    if (!existingClient) {
+      await client.query('COMMIT');
+    }
 
     logger.info('Query closed with signature successfully', { queryId, userId, userName: user.user_name });
 
@@ -635,7 +694,9 @@ export const closeQueryWithSignature = async (
       message: 'Query closed with electronic signature successfully'
     };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    if (!existingClient) {
+      await client.query('ROLLBACK');
+    }
     logger.error('Close query with signature error', { error: error.message });
 
     return {
@@ -643,7 +704,9 @@ export const closeQueryWithSignature = async (
       message: `Failed to close query: ${error.message}`
     };
   } finally {
-    client.release();
+    if (needsRelease) {
+      client.release();
+    }
   }
 };
 
@@ -1044,6 +1107,7 @@ export default {
   addQueryResponse,
   updateQueryStatus,
   closeQueryWithSignature,
+  closeQueryWithSignatureVerified,
   getQueryAuditTrail,
   getQueryStats,
   getQueryTypes,

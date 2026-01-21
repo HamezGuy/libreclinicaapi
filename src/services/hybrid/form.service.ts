@@ -1196,6 +1196,10 @@ interface FormField {
     trackChanges: boolean;
     reasonRequired: boolean;
   };
+  
+  // Table field properties
+  tableColumns?: any[];
+  tableSettings?: Record<string, any>;
 }
 
 /**
