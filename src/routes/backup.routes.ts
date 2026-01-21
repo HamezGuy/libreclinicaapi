@@ -9,8 +9,12 @@
 
 import { Router } from 'express';
 import * as backupController from '../controllers/backup.controller';
+import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
+
+// Apply authentication to all backup routes
+router.use(authMiddleware);
 
 /**
  * @route GET /api/backup/status

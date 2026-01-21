@@ -65,6 +65,10 @@ import aeRoutes from './routes/ae.routes';
 import filesRoutes from './routes/files.routes';
 // Backup and Recovery (21 CFR Part 11 compliant)
 import backupRoutes from './routes/backup.routes';
+// Retention Management (21 CFR Part 11 & HIPAA compliant)
+import retentionRoutes from './routes/retention.routes';
+// Regulatory Export (21 CFR Part 11 & HIPAA compliant)
+import regulatoryExportRoutes from './routes/regulatory-export.routes';
 // Print/PDF Generation (21 CFR Part 11 compliant)
 import printRoutes from './routes/print.routes';
 // Double Data Entry (21 CFR Part 11 compliant) - Uses NATIVE LibreClinica tables
@@ -276,6 +280,10 @@ app.use('/api/ae', aeRoutes);
 app.use('/api/files', filesRoutes);
 // Backup and Recovery (Part 11 compliant - database backups)
 app.use('/api/backup', backupRoutes);
+// Retention Management (Part 11 & HIPAA compliant - policies, legal holds, cleanup)
+app.use('/api/retention', retentionRoutes);
+// Regulatory Export (Part 11 & HIPAA compliant - FDA/EMA submission packages)
+app.use('/api/regulatory-export', regulatoryExportRoutes);
 // Print/PDF Generation (Part 11 compliant - form printing, casebooks, audit trails)
 app.use('/api/print', printRoutes);
 // Double Data Entry (Part 11 compliant - uses NATIVE LibreClinica tables)

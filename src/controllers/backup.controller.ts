@@ -108,9 +108,10 @@ export const getBackup = async (req: Request, res: Response): Promise<void> => {
  */
 export const triggerBackup = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { type } = req.body;
-    const userId = (req as any).user?.id || 0;
-    const username = (req as any).user?.username || 'api_user';
+    // Accept both 'type' (legacy) and 'backupType' (frontend standard)
+    const type = req.body.type || req.body.backupType;
+    const userId = (req as any).user?.userId || (req as any).user?.id || 0;
+    const username = (req as any).user?.userName || (req as any).user?.username || 'api_user';
     
     if (!type || !Object.values(BackupType).includes(type)) {
       res.status(400).json({
@@ -148,8 +149,8 @@ export const triggerBackup = async (req: Request, res: Response): Promise<void> 
 export const verifyBackup = async (req: Request, res: Response): Promise<void> => {
   try {
     const { backupId } = req.params;
-    const userId = (req as any).user?.id || 0;
-    const username = (req as any).user?.username || 'api_user';
+    const userId = (req as any).user?.userId || (req as any).user?.id || 0;
+    const username = (req as any).user?.userName || (req as any).user?.username || 'api_user';
     
     const result = await backupService.verifyBackup(backupId, userId, username);
     
@@ -177,8 +178,8 @@ export const restoreBackup = async (req: Request, res: Response): Promise<void> 
   try {
     const { backupId } = req.params;
     const { targetDatabase, confirmRestore } = req.body;
-    const userId = (req as any).user?.id || 0;
-    const username = (req as any).user?.username || 'api_user';
+    const userId = (req as any).user?.userId || (req as any).user?.id || 0;
+    const username = (req as any).user?.userName || (req as any).user?.username || 'api_user';
     
     if (!confirmRestore) {
       res.status(400).json({
@@ -288,8 +289,8 @@ export const getSchedulerStatus = async (req: Request, res: Response): Promise<v
  */
 export const cleanupBackups = async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = (req as any).user?.id || 0;
-    const username = (req as any).user?.username || 'api_user';
+    const userId = (req as any).user?.userId || (req as any).user?.id || 0;
+    const username = (req as any).user?.userName || (req as any).user?.username || 'api_user';
     
     const result = await backupService.cleanupOldBackups(userId, username);
     
