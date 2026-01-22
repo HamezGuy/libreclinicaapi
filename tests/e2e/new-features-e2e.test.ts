@@ -194,20 +194,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           [createdRecords.consentDocuments]
         );
       }
-      if (createdRecords.ddeStatuses.length > 0) {
-        await client.query(
-          `DELETE FROM acc_dde_discrepancy WHERE status_id = ANY($1)`,
-          [createdRecords.ddeStatuses]
-        );
-        await client.query(
-          `DELETE FROM acc_dde_entry WHERE status_id = ANY($1)`,
-          [createdRecords.ddeStatuses]
-        );
-        await client.query(
-          `DELETE FROM acc_dde_status WHERE status_id = ANY($1)`,
-          [createdRecords.ddeStatuses]
-        );
-      }
+      // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables
       if (createdRecords.transfers.length > 0) {
         await client.query(
           `DELETE FROM acc_transfer_log WHERE transfer_id = ANY($1)`,
@@ -485,82 +472,44 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
 
   // ============================================================================
   // 3. DOUBLE DATA ENTRY (DDE) - Full E2E Flow
+  // NOTE: DDE now uses native LibreClinica tables (event_crf, item_data, discrepancy_note)
+  // instead of custom acc_dde_* tables which have been removed
   // ============================================================================
-  describe('Feature 3: Double Data Entry E2E', () => {
+  describe('Feature 3: Double Data Entry E2E - Native Tables', () => {
     
-    describe('DDE Status Flow', () => {
-      it('should create and retrieve DDE status through full cycle', async () => {
-        // Step 1: Get an event_crf that requires DDE
-        const eventCrfResult = await testPool.query(`
-          SELECT ec.event_crf_id, cv.double_entry
-          FROM event_crf ec
-          JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-          WHERE cv.double_entry = true
-          LIMIT 1
+    describe('Native DDE Table Verification', () => {
+      it('should have DDE columns in event_crf table', async () => {
+        const result = await testPool.query(`
+          SELECT column_name FROM information_schema.columns 
+          WHERE table_name = 'event_crf' 
+          AND column_name IN ('completion_status_id', 'validator_id')
         `);
+        
+        const columns = result.rows.map((r: any) => r.column_name);
+        expect(columns).toContain('completion_status_id');
+        expect(columns).toContain('validator_id');
+      });
 
-        if (eventCrfResult.rows.length === 0) {
-          // Create a test DDE status directly
-          const statusResult = await testPool.query(`
-            INSERT INTO acc_dde_status (
-              event_crf_id, first_entry_status, second_entry_status,
-              comparison_status, total_items, matched_items, discrepancy_count,
-              resolved_count, dde_complete, date_created, date_updated
-            ) VALUES ($1, 'pending', 'pending', 'pending', 10, 0, 0, 0, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            RETURNING status_id
-          `, [1]); // Using a placeholder event_crf_id
+      it('should have discrepancy_note table for tracking differences', async () => {
+        const result = await testPool.query(`
+          SELECT COUNT(*) as count FROM information_schema.tables 
+          WHERE table_name = 'discrepancy_note'
+        `);
+        
+        expect(parseInt(result.rows[0].count)).toBeGreaterThan(0);
+      });
+    });
 
-          if (statusResult.rows.length > 0) {
-            createdRecords.ddeStatuses.push(statusResult.rows[0].status_id);
-          }
-        }
-
-        // Step 2: Query DDE status via API
+    describe('DDE API Flow', () => {
+      it('should retrieve DDE status via API', async () => {
+        // Query DDE status via API
         const apiResponse = await request(app)
           .get('/api/dde/forms/1/status')
           .set('Authorization', `Bearer ${authToken}`);
 
-        // Step 3: Verify response structure
+        // Verify response structure
         expect(apiResponse.status).toBe(200);
         expect(apiResponse.body).toHaveProperty('success');
-      });
-    });
-
-    describe('DDE Comparison Flow', () => {
-      it('should store and compare DDE entries correctly', async () => {
-        // Step 1: Create DDE status with entries
-        const statusResult = await testPool.query(`
-          INSERT INTO acc_dde_status (
-            event_crf_id, first_entry_status, second_entry_status,
-            comparison_status, total_items, matched_items, discrepancy_count,
-            resolved_count, dde_complete, date_created, date_updated
-          ) VALUES (999, 'complete', 'complete', 'discrepancies', 5, 4, 1, 0, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          RETURNING status_id
-        `);
-
-        const statusId = statusResult.rows[0].status_id;
-        createdRecords.ddeStatuses.push(statusId);
-
-        // Step 2: Create discrepancy
-        const discrepancyResult = await testPool.query(`
-          INSERT INTO acc_dde_discrepancy (
-            status_id, item_id, first_value, second_value,
-            resolution_status, date_created, date_updated
-          ) VALUES ($1, 1, '75', '76', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          RETURNING discrepancy_id
-        `, [statusId]);
-
-        // Step 3: Verify via database
-        const verifyResult = await testPool.query(`
-          SELECT ds.*, 
-            (SELECT COUNT(*) FROM acc_dde_discrepancy WHERE status_id = ds.status_id) as discrepancy_count
-          FROM acc_dde_status ds
-          WHERE ds.status_id = $1
-        `, [statusId]);
-
-        expect(verifyResult.rows[0].first_entry_status).toBe('complete');
-        expect(verifyResult.rows[0].second_entry_status).toBe('complete');
-        expect(parseInt(verifyResult.rows[0].discrepancy_count)).toBeGreaterThan(0);
       });
     });
   });
@@ -1139,14 +1088,17 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
       expect(transfersWithAudit.rows).toBeDefined();
     });
 
-    it('should update DDE status when data is entered', async () => {
-      // Verify DDE tracking is working
-      const ddeStatusResult = await testPool.query(`
-        SELECT * FROM acc_dde_status WHERE status_id = ANY($1)
-      `, [createdRecords.ddeStatuses]);
+    it('should verify DDE uses native LibreClinica tables', async () => {
+      // DDE now uses native LibreClinica tables (event_crf, discrepancy_note)
+      // instead of custom acc_dde_* tables
+      const ddeColumnsResult = await testPool.query(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'event_crf' 
+        AND column_name IN ('completion_status_id', 'validator_id')
+      `);
 
-      // Should have DDE statuses from our tests
-      expect(ddeStatusResult.rows.length).toBeGreaterThanOrEqual(0);
+      // Should have DDE columns in event_crf
+      expect(ddeColumnsResult.rows.length).toBeGreaterThanOrEqual(2);
     });
   });
 

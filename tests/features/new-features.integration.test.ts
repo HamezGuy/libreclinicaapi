@@ -327,20 +327,18 @@ describe('Database Schema Verification', () => {
     }
   });
 
-  test('acc_dde_status table should exist with correct structure', async () => {
+  test('DDE uses native LibreClinica tables (event_crf columns)', async () => {
+    // NOTE: acc_dde_* tables have been removed - DDE now uses native LibreClinica tables
     const result = await pool.query(`
-      SELECT column_name, data_type 
-      FROM information_schema.columns 
-      WHERE table_name = 'acc_dde_status'
-      ORDER BY ordinal_position
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'event_crf' 
+      AND column_name IN ('completion_status_id', 'validator_id')
+      ORDER BY column_name
     `);
     
-    if (result.rows.length > 0) {
-      const columns = result.rows.map(r => r.column_name);
-      expect(columns).toContain('event_crf_id');
-      expect(columns).toContain('first_entry_status');
-      expect(columns).toContain('second_entry_status');
-    }
+    const columns = result.rows.map(r => r.column_name);
+    expect(columns).toContain('completion_status_id');
+    expect(columns).toContain('validator_id');
   });
 
   test('acc_consent_document table should exist with correct structure', async () => {

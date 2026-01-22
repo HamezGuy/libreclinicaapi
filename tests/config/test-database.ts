@@ -114,9 +114,7 @@ export async function cleanupTestData(): Promise<void> {
       'acc_subject_consent',
       'acc_consent_version',
       'acc_consent_document',
-      'acc_dde_discrepancy',
-      'acc_dde_entry',
-      'acc_dde_status',
+      // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables
       'acc_transfer_log',
       'acc_email_queue',
       'acc_notification_preference'
@@ -169,22 +167,11 @@ export const ACC_TABLE_SCHEMA = {
     'notes', 'date_created', 'date_updated'
   ],
   
-  // Double Data Entry
-  acc_dde_status: [
-    'status_id', 'event_crf_id', 'crf_version_id', 'first_entry_status', 'first_entry_by', 'first_entry_at',
-    'second_entry_status', 'second_entry_by', 'second_entry_at', 'comparison_status',
-    'total_items', 'matched_items', 'discrepancy_count', 'resolved_count', 'dde_complete',
-    'date_created', 'date_updated'
-  ],
-  acc_dde_entry: [
-    'dde_entry_id', 'event_crf_id', 'item_id', 'item_data_id', 'second_entry_value',
-    'entered_by', 'entered_at', 'matches_first'
-  ],
-  acc_dde_discrepancy: [
-    'discrepancy_id', 'event_crf_id', 'item_id', 'dde_entry_id', 'first_value', 'second_value',
-    'resolution_status', 'resolved_value', 'resolved_by', 'resolved_at',
-    'adjudicated_by', 'adjudication_notes', 'date_created', 'date_updated'
-  ],
+  // NOTE: Double Data Entry (DDE) now uses native LibreClinica tables:
+  // - event_crf (completion_status_id, validator_id)
+  // - item_data (for storing values)
+  // - discrepancy_note (for tracking differences)
+  // Custom acc_dde_* tables have been removed.
   
   // eConsent
   acc_consent_document: [

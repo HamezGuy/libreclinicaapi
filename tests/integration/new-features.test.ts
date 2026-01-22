@@ -39,9 +39,7 @@ async function cleanupTestData() {
     await client.query("DELETE FROM acc_kit WHERE kit_number LIKE 'TEST_%'");
     await client.query("DELETE FROM acc_shipment WHERE shipment_number LIKE 'TEST_%'");
     await client.query("DELETE FROM acc_kit_type WHERE name LIKE 'TEST_%'");
-    await client.query("DELETE FROM acc_dde_discrepancy WHERE first_value LIKE 'TEST_%'");
-    await client.query("DELETE FROM acc_dde_entry WHERE second_entry_value LIKE 'TEST_%'");
-    await client.query("DELETE FROM acc_dde_status WHERE total_items = 999");
+    // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables
     await client.query("DELETE FROM acc_transfer_log WHERE reason_for_transfer LIKE 'TEST_%'");
     await client.query('COMMIT');
   } catch (error) {
@@ -295,84 +293,69 @@ async function testSubjectTransfer(): Promise<void> {
 
 // =============================================================================
 // 3. Double Data Entry (DDE) Tests
+// NOTE: DDE now uses native LibreClinica tables (event_crf, item_data, discrepancy_note)
+// instead of custom acc_dde_* tables which have been removed
 // =============================================================================
 
 async function testDDE(): Promise<void> {
-  console.log('\n📝 Testing Double Data Entry (DDE)...\n');
+  console.log('\n📝 Testing Double Data Entry (DDE) - Using Native LibreClinica Tables...\n');
 
-  // Test 3.1: Check DDE tables structure
+  // Test 3.1: Check native DDE support exists in event_crf table
   try {
-    const tables = ['acc_dde_status', 'acc_dde_entry', 'acc_dde_discrepancy'];
-    let allExist = true;
+    const result = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'event_crf' 
+      AND column_name IN ('completion_status_id', 'validator_id')
+      ORDER BY column_name
+    `);
     
-    for (const table of tables) {
-      const result = await pool.query(`
-        SELECT COUNT(*) as count FROM information_schema.tables 
-        WHERE table_name = $1
-      `, [table]);
-      
-      if (parseInt(result.rows[0].count) === 0) {
-        allExist = false;
-        break;
-      }
-    }
+    const columns = result.rows.map(r => r.column_name);
+    const hasCompletionStatus = columns.includes('completion_status_id');
+    const hasValidatorId = columns.includes('validator_id');
     
-    if (allExist) {
-      recordResult('DDE', 'Tables Exist', true, 'All DDE tables exist');
+    if (hasCompletionStatus && hasValidatorId) {
+      recordResult('DDE', 'Native DDE Columns', true, 
+        'event_crf has completion_status_id and validator_id columns for DDE');
     } else {
-      recordResult('DDE', 'Tables Exist', false, 'Some DDE tables missing');
+      recordResult('DDE', 'Native DDE Columns', false, 
+        `Missing columns: ${!hasCompletionStatus ? 'completion_status_id ' : ''}${!hasValidatorId ? 'validator_id' : ''}`);
     }
   } catch (error: any) {
-    recordResult('DDE', 'Tables Exist', false, error.message);
+    recordResult('DDE', 'Native DDE Columns', false, error.message);
   }
 
-  // Test 3.2: Test DDE status creation and retrieval
+  // Test 3.2: Verify discrepancy_note table exists for DDE discrepancy tracking
   try {
-    // Get an event_crf for testing
-    const crfResult = await pool.query('SELECT event_crf_id, crf_version_id FROM event_crf LIMIT 1');
+    const result = await pool.query(`
+      SELECT COUNT(*) as count FROM information_schema.tables 
+      WHERE table_name = 'discrepancy_note'
+    `);
     
-    if (crfResult.rows.length === 0) {
-      recordResult('DDE', 'Create Status', false, 'No event_crf found for testing');
-      return;
-    }
-
-    const eventCrfId = crfResult.rows[0].event_crf_id;
-    const crfVersionId = crfResult.rows[0].crf_version_id;
-    const userResult = await pool.query('SELECT user_id FROM user_account LIMIT 1');
-    const userId = userResult.rows[0]?.user_id || 1;
-
-    // Insert DDE status
-    const insertResult = await pool.query(`
-      INSERT INTO acc_dde_status (
-        event_crf_id, crf_version_id, first_entry_status, second_entry_status,
-        comparison_status, total_items, matched_items, discrepancy_count,
-        resolved_count, dde_complete, first_entry_by, date_created, date_updated
-      ) VALUES (
-        $1, $2, 'complete', 'pending', 'pending', 999, 0, 0, 0, false, $3,
-        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-      ON CONFLICT (event_crf_id) DO UPDATE SET total_items = 999
-      RETURNING status_id
-    `, [eventCrfId, crfVersionId, userId]);
-
-    const statusId = insertResult.rows[0]?.status_id;
-    
-    if (statusId) {
-      // Verify read back
-      const verifyResult = await pool.query(
-        'SELECT * FROM acc_dde_status WHERE status_id = $1',
-        [statusId]
-      );
-      
-      if (verifyResult.rows.length > 0 && verifyResult.rows[0].total_items === 999) {
-        recordResult('DDE', 'Create Status', true, 
-          `DDE status created and verified (id: ${statusId})`);
-      } else {
-        recordResult('DDE', 'Create Status', false, 'DDE status created but verification failed');
-      }
+    if (parseInt(result.rows[0].count) > 0) {
+      recordResult('DDE', 'Discrepancy Note Table', true, 
+        'discrepancy_note table exists for tracking DDE discrepancies');
+    } else {
+      recordResult('DDE', 'Discrepancy Note Table', false, 'discrepancy_note table not found');
     }
   } catch (error: any) {
-    recordResult('DDE', 'Create Status', false, error.message);
+    recordResult('DDE', 'Discrepancy Note Table', false, error.message);
+  }
+
+  // Test 3.3: Verify completion_status lookup table exists
+  try {
+    const result = await pool.query(`
+      SELECT status_id, name FROM completion_status ORDER BY status_id
+    `);
+    
+    if (result.rows.length > 0) {
+      const statuses = result.rows.map(r => `${r.status_id}=${r.name}`).join(', ');
+      recordResult('DDE', 'Completion Status Table', true, 
+        `completion_status table exists with values: ${statuses}`);
+    } else {
+      recordResult('DDE', 'Completion Status Table', false, 'completion_status table empty');
+    }
+  } catch (error: any) {
+    recordResult('DDE', 'Completion Status Table', false, error.message);
   }
 }
 

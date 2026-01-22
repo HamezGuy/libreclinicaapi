@@ -70,9 +70,7 @@ describe('Database Integration Tests', () => {
         'acc_reconsent_request',
         'acc_consent_version',
         'acc_consent_document',
-        'acc_dde_discrepancy',
-        'acc_dde_entry',
-        'acc_dde_status',
+        // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables
         'acc_transfer_log',
         'acc_email_queue',
         'acc_notification_preference'
@@ -108,9 +106,7 @@ describe('Database Integration Tests', () => {
       'acc_email_queue': 'queue_id',
       'acc_notification_preference': 'preference_id',
       'acc_transfer_log': 'transfer_id',
-      'acc_dde_status': 'status_id',
-      'acc_dde_entry': 'entry_id',
-      'acc_dde_discrepancy': 'discrepancy_id',
+      // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables
       'acc_consent_document': 'document_id',
       'acc_consent_version': 'version_id',
       'acc_subject_consent': 'consent_id',
@@ -137,9 +133,7 @@ describe('Database Integration Tests', () => {
       'acc_email_queue',
       'acc_notification_preference',
       'acc_transfer_log',
-      'acc_dde_status',
-      'acc_dde_entry',
-      'acc_dde_discrepancy',
+      // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables (event_crf, discrepancy_note)
       'acc_consent_document',
       'acc_consent_version',
       'acc_subject_consent',
@@ -354,100 +348,39 @@ describe('Database Integration Tests', () => {
   // ============================================================================
   // DOUBLE DATA ENTRY - CRUD Tests
   // ============================================================================
-  describe('Double Data Entry - Database CRUD', () => {
+  // NOTE: DDE now uses native LibreClinica tables (event_crf, item_data, discrepancy_note)
+  // instead of custom acc_dde_* tables which have been removed
+  // ============================================================================
+  describe('Double Data Entry - Native LibreClinica Tables', () => {
     
-    let testStatusId: number;
-
-    describe('acc_dde_status', () => {
-      it('should create DDE status record', async () => {
-        const insertResult = await client.query(`
-          INSERT INTO acc_dde_status (
-            event_crf_id, first_entry_status, second_entry_status,
-            comparison_status, total_items, matched_items, discrepancy_count,
-            resolved_count, dde_complete, date_created, date_updated
-          ) VALUES (9999, 'pending', 'pending', 'pending', 10, 0, 0, 0, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          RETURNING status_id
-        `);
-
-        testStatusId = insertResult.rows[0].status_id;
-        trackRecord('acc_dde_status', testStatusId);
-
-        // RETRIEVE
-        const selectResult = await client.query(
-          `SELECT * FROM acc_dde_status WHERE status_id = $1`,
-          [testStatusId]
-        );
-
-        expect(selectResult.rows[0].first_entry_status).toBe('pending');
-        expect(selectResult.rows[0].dde_complete).toBe(false);
-      });
+    it('should have DDE columns in event_crf table', async () => {
+      const result = await client.query(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'event_crf' 
+        AND column_name IN ('completion_status_id', 'validator_id')
+        ORDER BY column_name
+      `);
+      
+      const columns = result.rows.map((r: any) => r.column_name);
+      expect(columns).toContain('completion_status_id');
+      expect(columns).toContain('validator_id');
     });
 
-    describe('acc_dde_entry', () => {
-      it('should create DDE entry linked to status', async () => {
-        if (!testStatusId) {
-          console.log('Skipping: No DDE status created');
-          return;
-        }
-
-        const insertResult = await client.query(`
-          INSERT INTO acc_dde_entry (
-            status_id, item_id, entry_number, value, entered_by, entered_at
-          ) VALUES ($1, 1, 1, '75', 1, CURRENT_TIMESTAMP)
-          RETURNING entry_id
-        `, [testStatusId]);
-
-        const entryId = insertResult.rows[0].entry_id;
-        trackRecord('acc_dde_entry', entryId);
-
-        // Verify foreign key relationship
-        const joinResult = await client.query(`
-          SELECT e.*, s.event_crf_id
-          FROM acc_dde_entry e
-          JOIN acc_dde_status s ON e.status_id = s.status_id
-          WHERE e.entry_id = $1
-        `, [entryId]);
-
-        expect(joinResult.rows[0].status_id).toBe(testStatusId);
-        expect(joinResult.rows[0].value).toBe('75');
-      });
+    it('should have discrepancy_note table for DDE discrepancy tracking', async () => {
+      const result = await client.query(`
+        SELECT COUNT(*) as count FROM information_schema.tables 
+        WHERE table_name = 'discrepancy_note'
+      `);
+      
+      expect(parseInt(result.rows[0].count)).toBeGreaterThan(0);
     });
 
-    describe('acc_dde_discrepancy', () => {
-      it('should create and resolve discrepancy', async () => {
-        if (!testStatusId) {
-          console.log('Skipping: No DDE status created');
-          return;
-        }
-
-        // INSERT discrepancy
-        const insertResult = await client.query(`
-          INSERT INTO acc_dde_discrepancy (
-            status_id, item_id, first_value, second_value,
-            resolution_status, date_created, date_updated
-          ) VALUES ($1, 1, '75', '76', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          RETURNING discrepancy_id
-        `, [testStatusId]);
-
-        const discrepancyId = insertResult.rows[0].discrepancy_id;
-        trackRecord('acc_dde_discrepancy', discrepancyId);
-
-        // Resolve discrepancy
-        await client.query(`
-          UPDATE acc_dde_discrepancy 
-          SET resolution_status = 'first_correct', resolved_value = '75',
-              resolved_by = 1, resolved_at = CURRENT_TIMESTAMP, resolution_comment = 'First entry verified'
-          WHERE discrepancy_id = $1
-        `, [discrepancyId]);
-
-        const resolvedResult = await client.query(
-          `SELECT * FROM acc_dde_discrepancy WHERE discrepancy_id = $1`,
-          [discrepancyId]
-        );
-
-        expect(resolvedResult.rows[0].resolution_status).toBe('first_correct');
-        expect(resolvedResult.rows[0].resolved_value).toBe('75');
-      });
+    it('should have completion_status lookup table', async () => {
+      const result = await client.query(`
+        SELECT status_id, name FROM completion_status ORDER BY status_id
+      `);
+      
+      expect(result.rows.length).toBeGreaterThan(0);
     });
   });
 

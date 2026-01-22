@@ -71,21 +71,7 @@ const SCHEMA = {
     'completed_by', 'completed_at', 'cancelled_by', 'cancelled_at', 'cancel_reason',
     'notes', 'date_created', 'date_updated'
   ],
-  acc_dde_status: [
-    'status_id', 'event_crf_id', 'crf_version_id', 'first_entry_status', 'first_entry_by', 'first_entry_at',
-    'second_entry_status', 'second_entry_by', 'second_entry_at', 'comparison_status',
-    'total_items', 'matched_items', 'discrepancy_count', 'resolved_count', 'dde_complete',
-    'date_created', 'date_updated'
-  ],
-  acc_dde_entry: [
-    'dde_entry_id', 'event_crf_id', 'item_id', 'item_data_id', 'second_entry_value',
-    'entered_by', 'entered_at', 'matches_first'
-  ],
-  acc_dde_discrepancy: [
-    'discrepancy_id', 'event_crf_id', 'item_id', 'dde_entry_id', 'first_value', 'second_value',
-    'resolution_status', 'resolved_value', 'resolved_by', 'resolved_at',
-    'adjudicated_by', 'adjudication_notes', 'date_created', 'date_updated'
-  ],
+  // NOTE: acc_dde_* tables removed - DDE uses native LibreClinica tables (event_crf, item_data, discrepancy_note)
   acc_consent_document: [
     'document_id', 'study_id', 'name', 'description', 'document_type', 'language_code',
     'status', 'requires_witness', 'requires_lar', 'age_of_majority', 'min_reading_time',
@@ -375,71 +361,43 @@ async function runTests() {
 
   // ========================================================================
   // PHASE 5: DOUBLE DATA ENTRY (Feature 3)
+  // NOTE: DDE now uses native LibreClinica tables (event_crf, item_data, discrepancy_note)
+  // instead of custom acc_dde_* tables
   // ========================================================================
-  console.log('\n📝 Feature 3: Double Data Entry (DDE)');
+  console.log('\n📝 Feature 3: Double Data Entry (DDE) - Uses Native LibreClinica Tables');
   console.log('───────────────────────────────────────────────────────────────');
 
   try {
     await runInTransaction(pool, async (client) => {
-      // Get an event_crf_id that doesn't already have a DDE status
+      // DDE uses native LibreClinica tables:
+      // - event_crf.completion_status_id (1=not_started, 2=initial_data_entry, 3=complete)
+      // - event_crf.validator_id (stores second entry user)
+      // - discrepancy_note for tracking differences
+      
+      // Verify native DDE tables exist
       const eventCrfResult = await client.query(`
-        SELECT ec.event_crf_id FROM event_crf ec
-        LEFT JOIN acc_dde_status dde ON ec.event_crf_id = dde.event_crf_id
-        WHERE dde.status_id IS NULL
-        LIMIT 1
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'event_crf' 
+        AND column_name IN ('completion_status_id', 'validator_id')
       `);
       
-      if (eventCrfResult.rows.length === 0) {
-        // All event_crfs have DDE status - this is actually a pass
-        // because it means the DDE system is in use
-        return;
+      if (eventCrfResult.rows.length < 2) {
+        throw new Error('Native DDE columns not found in event_crf table');
       }
 
-      const eventCrfId = eventCrfResult.rows[0].event_crf_id;
-
-      // Insert DDE status
-      const statusResult = await client.query(`
-        INSERT INTO acc_dde_status (event_crf_id, first_entry_status, second_entry_status, comparison_status,
-          total_items, matched_items, discrepancy_count, resolved_count, dde_complete, date_created, date_updated)
-        VALUES ($1, 'pending', 'pending', 'pending', 10, 0, 0, 0, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        RETURNING status_id
-      `, [eventCrfId]);
-
-      const statusId = statusResult.rows[0].status_id;
-
-      // Get a valid item_id
-      const itemResult = await client.query(`SELECT item_id FROM item LIMIT 1`);
-      const itemId = itemResult.rows.length > 0 ? itemResult.rows[0].item_id : 1;
-
-      // Insert DDE entry (using correct column names)
-      const entryResult = await client.query(`
-        INSERT INTO acc_dde_entry (event_crf_id, item_id, second_entry_value, entered_by, entered_at)
-        VALUES ($1, $2, '75', 1, CURRENT_TIMESTAMP)
-        RETURNING dde_entry_id
-      `, [eventCrfId, itemId]);
-
-      const ddeEntryId = entryResult.rows[0].dde_entry_id;
-
-      // Insert discrepancy (using correct column names: first_value, second_value)
-      await client.query(`
-        INSERT INTO acc_dde_discrepancy (event_crf_id, item_id, dde_entry_id, first_value, second_value, 
-          resolution_status, date_created, date_updated)
-        VALUES ($1, $2, $3, '75', '76', 'open', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `, [eventCrfId, itemId, ddeEntryId]);
-
-      // Verify
-      const verifyResult = await client.query(`
-        SELECT s.*, (SELECT COUNT(*) FROM acc_dde_entry WHERE event_crf_id = s.event_crf_id) as entry_count
-        FROM acc_dde_status s WHERE status_id = $1
-      `, [statusId]);
-
-      if (verifyResult.rows.length !== 1) {
-        throw new Error('DDE status not found after insert');
+      // Verify discrepancy_note table exists for DDE discrepancy tracking
+      const dnResult = await client.query(`
+        SELECT COUNT(*) as count FROM information_schema.tables 
+        WHERE table_name = 'discrepancy_note'
+      `);
+      
+      if (dnResult.rows[0].count === '0') {
+        throw new Error('discrepancy_note table not found');
       }
     });
-    recordResult('DDE', 'Create status, entry, and discrepancy (transaction test)', true);
+    recordResult('DDE', 'Native LibreClinica DDE tables verified (event_crf, discrepancy_note)', true);
   } catch (e: any) {
-    recordResult('DDE', 'Create status, entry, and discrepancy (transaction test)', false, e.message);
+    recordResult('DDE', 'Native LibreClinica DDE tables verified', false, e.message);
   }
 
   // ========================================================================
