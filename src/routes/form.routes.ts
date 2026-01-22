@@ -20,6 +20,17 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
+// ============================================================================
+// 21 CFR PART 11 ARCHIVE OPERATIONS (must be before /:id routes)
+// Forms are NEVER permanently deleted - they are archived for compliance
+// ============================================================================
+
+// Get archived forms (admin only) - MUST be before /:id route to avoid parameter matching
+router.get('/archived', 
+  requireRole('admin'),
+  controller.getArchivedForms
+);
+
 // Form templates (CRFs) - read operations (no signature required)
 router.get('/', controller.list);
 router.get('/by-study', controller.getByStudy);
@@ -46,17 +57,6 @@ router.delete('/:id',
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_DELETE),
   controller.remove
-);
-
-// ============================================================================
-// 21 CFR PART 11 ARCHIVE OPERATIONS
-// Forms are NEVER permanently deleted - they are archived for compliance
-// ============================================================================
-
-// Get archived forms (admin only)
-router.get('/archived', 
-  requireRole('admin'),
-  controller.getArchivedForms
 );
 
 // Archive a form (admin only) - replaces delete for compliance

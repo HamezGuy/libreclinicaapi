@@ -952,6 +952,8 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
     `);
     const hasCategoryColumn = columnCheck.rows.length > 0;
 
+    // Filter out archived forms (status_id 5=removed, 6=archived) for 21 CFR Part 11 compliance
+    // Archived forms are only visible to admins via the /archived endpoint
     const query = `
       SELECT 
         c.crf_id,
@@ -968,6 +970,7 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       WHERE c.source_study_id = $1
+        AND c.status_id NOT IN (5, 6)
       ORDER BY c.name
     `;
 
