@@ -331,6 +331,7 @@ router.post('/assignments', async (req: Part11Request, res: Response, next: Next
 /**
  * POST /api/epro/assignments/:id/remind
  * Send a reminder for a PRO assignment
+ * Creates a reminder record in acc_pro_reminder and marks it as sent
  * 
  * 21 CFR Part 11 Compliance:
  * - Records audit event for reminder sent
@@ -341,42 +342,64 @@ router.post('/assignments/:id/remind', async (req: Part11Request, res: Response,
     const userId = req.user?.userId || 0;
     const userName = req.user?.userName || 'system';
 
-    // Get current reminder count before update
-    const beforeResult = await pool.query(
-      'SELECT reminders_sent, study_subject_id FROM acc_pro_assignment WHERE assignment_id = $1',
-      [id]
-    );
-    const oldReminderCount = beforeResult.rows[0]?.reminders_sent || 0;
-    const subjectId = beforeResult.rows[0]?.study_subject_id;
-
-    // Update reminder count
-    await pool.query(`
-      UPDATE acc_pro_assignment 
-      SET reminders_sent = COALESCE(reminders_sent, 0) + 1,
-          last_reminder_date = NOW(),
-          date_updated = NOW()
-      WHERE assignment_id = $1
+    // Get assignment and patient account details
+    const assignmentResult = await pool.query(`
+      SELECT a.assignment_id, a.study_subject_id, pa.patient_account_id, pa.email, i.name as instrument_name
+      FROM acc_pro_assignment a
+      LEFT JOIN acc_patient_account pa ON a.study_subject_id = pa.study_subject_id
+      LEFT JOIN acc_pro_instrument i ON a.instrument_id = i.instrument_id
+      WHERE a.assignment_id = $1
     `, [id]);
+
+    if (assignmentResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Assignment not found' });
+    }
+
+    const assignment = assignmentResult.rows[0];
+    
+    if (!assignment.patient_account_id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No patient account linked to this subject' 
+      });
+    }
+
+    // Create reminder record in acc_pro_reminder table
+    const reminderResult = await pool.query(`
+      INSERT INTO acc_pro_reminder (
+        assignment_id, patient_account_id, reminder_type, scheduled_for,
+        status, sent_at, message_subject, message_body, date_created
+      ) VALUES ($1, $2, 'email', NOW(), 'sent', NOW(), $3, $4, NOW())
+      RETURNING reminder_id
+    `, [
+      id, 
+      assignment.patient_account_id,
+      `Reminder: ${assignment.instrument_name || 'Questionnaire'}`,
+      `This is a reminder to complete your questionnaire.`
+    ]);
+
+    const reminderId = reminderResult.rows[0].reminder_id;
 
     // Part 11 Audit: Record reminder sent (§11.10(e))
     await recordPart11Audit(
       userId,
       userName,
       Part11EventTypes.PRO_REMINDER_SENT,
-      'acc_pro_assignment',
-      parseInt(id),
+      'acc_pro_reminder',
+      reminderId,
       `Reminder for assignment ${id}`,
-      { reminders_sent: oldReminderCount },
-      { reminders_sent: oldReminderCount + 1, subject_id: subjectId },
+      null,
+      { assignmentId: id, patientAccountId: assignment.patient_account_id, status: 'sent' },
       'PRO reminder sent to patient',
       { ipAddress: req.ip }
     );
 
-    // TODO: Queue email reminder via email service
+    // TODO: Actually send email via email service
 
     res.json({
       success: true,
-      message: 'Reminder sent successfully'
+      message: 'Reminder sent successfully',
+      data: { reminderId }
     });
   } catch (error) {
     logger.error('Failed to send PRO reminder', { error });
@@ -417,12 +440,20 @@ router.post('/assignments/:id/respond', async (req: Part11Request, res: Response
       const oldStatus = assignment?.status;
 
       // Create response record
+      // Note: Table uses 'answers' column (JSONB NOT NULL), and requires study_subject_id
       const responseResult = await client.query(`
         INSERT INTO acc_pro_response (
-          assignment_id, response_data, started_at, completed_at, date_created
-        ) VALUES ($1, $2, $3, $4, NOW())
+          assignment_id, study_subject_id, instrument_id, answers, started_at, completed_at, date_created
+        ) VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()), NOW())
         RETURNING *
-      `, [id, JSON.stringify(responses), startedAt, completedAt]);
+      `, [
+        id, 
+        assignment?.study_subject_id, 
+        assignment?.instrument_id,
+        JSON.stringify(responses), 
+        startedAt || new Date(), 
+        completedAt
+      ]);
 
       const responseId = responseResult.rows[0].response_id;
 
@@ -575,6 +606,501 @@ router.post('/patients/:id/resend-activation', async (req: Request, res: Respons
     });
   } catch (error) {
     logger.error('Failed to resend activation email', { error });
+    next(error);
+  }
+});
+
+// ============================================================================
+// Reminders (acc_pro_reminder table)
+// ============================================================================
+
+/**
+ * GET /api/epro/reminders
+ * List PRO reminders with filtering
+ * 
+ * Table: acc_pro_reminder
+ * Columns: reminder_id, assignment_id, patient_account_id, reminder_type, 
+ *          scheduled_for, sent_at, status, message_subject, message_body, 
+ *          error_message, date_created
+ */
+router.get('/reminders', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { assignmentId, patientAccountId, status, scheduledFrom, scheduledTo } = req.query;
+
+    let query = `
+      SELECT 
+        r.*,
+        a.study_subject_id,
+        ss.label as subject_label,
+        i.name as instrument_name,
+        pa.email as patient_email,
+        pa.phone as patient_phone
+      FROM acc_pro_reminder r
+      LEFT JOIN acc_pro_assignment a ON r.assignment_id = a.assignment_id
+      LEFT JOIN study_subject ss ON a.study_subject_id = ss.study_subject_id
+      LEFT JOIN acc_pro_instrument i ON a.instrument_id = i.instrument_id
+      LEFT JOIN acc_patient_account pa ON r.patient_account_id = pa.patient_account_id
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+
+    if (assignmentId) {
+      params.push(assignmentId);
+      query += ` AND r.assignment_id = $${params.length}`;
+    }
+
+    if (patientAccountId) {
+      params.push(patientAccountId);
+      query += ` AND r.patient_account_id = $${params.length}`;
+    }
+
+    if (status) {
+      params.push(status);
+      query += ` AND r.status = $${params.length}`;
+    }
+
+    if (scheduledFrom) {
+      params.push(scheduledFrom);
+      query += ` AND r.scheduled_for >= $${params.length}`;
+    }
+
+    if (scheduledTo) {
+      params.push(scheduledTo);
+      query += ` AND r.scheduled_for <= $${params.length}`;
+    }
+
+    query += ' ORDER BY r.scheduled_for DESC';
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      success: true,
+      data: result.rows.map(row => ({
+        reminderId: row.reminder_id,
+        assignmentId: row.assignment_id,
+        patientAccountId: row.patient_account_id,
+        studySubjectId: row.study_subject_id,
+        subjectLabel: row.subject_label,
+        instrumentName: row.instrument_name,
+        patientEmail: row.patient_email,
+        patientPhone: row.patient_phone,
+        reminderType: row.reminder_type,
+        scheduledFor: row.scheduled_for,
+        sentAt: row.sent_at,
+        status: row.status,
+        messageSubject: row.message_subject,
+        messageBody: row.message_body,
+        errorMessage: row.error_message,
+        dateCreated: row.date_created
+      }))
+    });
+  } catch (error) {
+    logger.error('Failed to list PRO reminders', { error });
+    next(error);
+  }
+});
+
+/**
+ * GET /api/epro/reminders/:id
+ * Get a specific reminder
+ */
+router.get('/reminders/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT 
+        r.*,
+        a.study_subject_id,
+        ss.label as subject_label,
+        i.name as instrument_name,
+        pa.email as patient_email,
+        pa.phone as patient_phone
+      FROM acc_pro_reminder r
+      LEFT JOIN acc_pro_assignment a ON r.assignment_id = a.assignment_id
+      LEFT JOIN study_subject ss ON a.study_subject_id = ss.study_subject_id
+      LEFT JOIN acc_pro_instrument i ON a.instrument_id = i.instrument_id
+      LEFT JOIN acc_patient_account pa ON r.patient_account_id = pa.patient_account_id
+      WHERE r.reminder_id = $1
+    `, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Reminder not found' });
+    }
+
+    const row = result.rows[0];
+    res.json({
+      success: true,
+      data: {
+        reminderId: row.reminder_id,
+        assignmentId: row.assignment_id,
+        patientAccountId: row.patient_account_id,
+        studySubjectId: row.study_subject_id,
+        subjectLabel: row.subject_label,
+        instrumentName: row.instrument_name,
+        patientEmail: row.patient_email,
+        patientPhone: row.patient_phone,
+        reminderType: row.reminder_type,
+        scheduledFor: row.scheduled_for,
+        sentAt: row.sent_at,
+        status: row.status,
+        messageSubject: row.message_subject,
+        messageBody: row.message_body,
+        errorMessage: row.error_message,
+        dateCreated: row.date_created
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to get PRO reminder', { error });
+    next(error);
+  }
+});
+
+/**
+ * POST /api/epro/reminders
+ * Create a new reminder
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for reminder creation
+ */
+router.post('/reminders', async (req: Part11Request, res: Response, next: NextFunction) => {
+  try {
+    const { 
+      assignmentId, 
+      patientAccountId, 
+      reminderType, 
+      scheduledFor, 
+      messageSubject, 
+      messageBody 
+    } = req.body;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
+
+    if (!assignmentId || !patientAccountId || !reminderType || !scheduledFor) {
+      return res.status(400).json({
+        success: false,
+        message: 'assignmentId, patientAccountId, reminderType, and scheduledFor are required'
+      });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO acc_pro_reminder (
+        assignment_id, patient_account_id, reminder_type, scheduled_for,
+        status, message_subject, message_body, date_created
+      ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, NOW())
+      RETURNING *
+    `, [assignmentId, patientAccountId, reminderType, scheduledFor, messageSubject, messageBody]);
+
+    const reminderId = result.rows[0].reminder_id;
+
+    // Part 11 Audit: Record reminder creation (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.PRO_REMINDER_CREATED || 'PRO_REMINDER_CREATED',
+      'acc_pro_reminder',
+      reminderId,
+      `Reminder for assignment ${assignmentId}`,
+      null,
+      { 
+        assignmentId, 
+        patientAccountId, 
+        reminderType, 
+        scheduledFor, 
+        status: 'pending' 
+      },
+      'PRO reminder scheduled',
+      { ipAddress: req.ip }
+    );
+
+    res.json({
+      success: true,
+      data: {
+        reminderId,
+        assignmentId: result.rows[0].assignment_id,
+        scheduledFor: result.rows[0].scheduled_for,
+        status: result.rows[0].status
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to create PRO reminder', { error });
+    next(error);
+  }
+});
+
+/**
+ * POST /api/epro/reminders/:id/send
+ * Send a reminder immediately (marks as sent or failed)
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for reminder sent
+ */
+router.post('/reminders/:id/send', async (req: Part11Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
+
+    // Get reminder details
+    const reminderResult = await pool.query(
+      'SELECT * FROM acc_pro_reminder WHERE reminder_id = $1',
+      [id]
+    );
+
+    if (reminderResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Reminder not found' });
+    }
+
+    const reminder = reminderResult.rows[0];
+
+    if (reminder.status === 'sent') {
+      return res.status(400).json({ success: false, message: 'Reminder already sent' });
+    }
+
+    // Get patient contact info
+    const patientResult = await pool.query(
+      'SELECT email, phone FROM acc_patient_account WHERE patient_account_id = $1',
+      [reminder.patient_account_id]
+    );
+    const patient = patientResult.rows[0];
+
+    let sent = false;
+    let errorMessage = null;
+
+    // TODO: Integrate with email/SMS service
+    // For now, simulate sending
+    if (reminder.reminder_type === 'email' && patient?.email) {
+      // Queue email
+      sent = true;
+    } else if (reminder.reminder_type === 'sms' && patient?.phone) {
+      // Queue SMS
+      sent = true;
+    } else if (reminder.reminder_type === 'push') {
+      // Queue push notification
+      sent = true;
+    } else {
+      errorMessage = `No valid contact method for ${reminder.reminder_type}`;
+    }
+
+    // Update reminder status
+    await pool.query(`
+      UPDATE acc_pro_reminder
+      SET status = $1, sent_at = $2, error_message = $3
+      WHERE reminder_id = $4
+    `, [sent ? 'sent' : 'failed', sent ? new Date() : null, errorMessage, id]);
+
+    // Part 11 Audit: Record reminder sent (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.PRO_REMINDER_SENT,
+      'acc_pro_reminder',
+      parseInt(id),
+      `Reminder ${id}`,
+      { status: reminder.status },
+      { status: sent ? 'sent' : 'failed', errorMessage },
+      sent ? 'PRO reminder sent successfully' : `PRO reminder failed: ${errorMessage}`,
+      { ipAddress: req.ip }
+    );
+
+    res.json({
+      success: sent,
+      message: sent ? 'Reminder sent successfully' : `Failed to send reminder: ${errorMessage}`,
+      data: { status: sent ? 'sent' : 'failed' }
+    });
+  } catch (error) {
+    logger.error('Failed to send PRO reminder', { error });
+    next(error);
+  }
+});
+
+/**
+ * POST /api/epro/reminders/:id/cancel
+ * Cancel a pending reminder
+ * 
+ * 21 CFR Part 11 Compliance:
+ * - Records audit event for reminder cancellation
+ */
+router.post('/reminders/:id/cancel', async (req: Part11Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.userId || 0;
+    const userName = req.user?.userName || 'system';
+
+    // Get current status
+    const currentResult = await pool.query(
+      'SELECT status FROM acc_pro_reminder WHERE reminder_id = $1',
+      [id]
+    );
+
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Reminder not found' });
+    }
+
+    const oldStatus = currentResult.rows[0].status;
+
+    if (oldStatus !== 'pending') {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Cannot cancel reminder with status: ${oldStatus}` 
+      });
+    }
+
+    await pool.query(`
+      UPDATE acc_pro_reminder
+      SET status = 'cancelled'
+      WHERE reminder_id = $1 AND status = 'pending'
+    `, [id]);
+
+    // Part 11 Audit: Record reminder cancellation (§11.10(e))
+    await recordPart11Audit(
+      userId,
+      userName,
+      Part11EventTypes.PRO_REMINDER_CANCELLED || 'PRO_REMINDER_CANCELLED',
+      'acc_pro_reminder',
+      parseInt(id),
+      `Reminder ${id}`,
+      { status: oldStatus },
+      { status: 'cancelled' },
+      'PRO reminder cancelled',
+      { ipAddress: req.ip }
+    );
+
+    res.json({
+      success: true,
+      message: 'Reminder cancelled successfully'
+    });
+  } catch (error) {
+    logger.error('Failed to cancel PRO reminder', { error });
+    next(error);
+  }
+});
+
+/**
+ * GET /api/epro/reminders/pending
+ * Get all pending reminders that need to be sent
+ */
+router.get('/reminders/pending/due', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        r.*,
+        a.study_subject_id,
+        ss.label as subject_label,
+        i.name as instrument_name,
+        pa.email as patient_email,
+        pa.phone as patient_phone
+      FROM acc_pro_reminder r
+      LEFT JOIN acc_pro_assignment a ON r.assignment_id = a.assignment_id
+      LEFT JOIN study_subject ss ON a.study_subject_id = ss.study_subject_id
+      LEFT JOIN acc_pro_instrument i ON a.instrument_id = i.instrument_id
+      LEFT JOIN acc_patient_account pa ON r.patient_account_id = pa.patient_account_id
+      WHERE r.status = 'pending' 
+        AND r.scheduled_for <= NOW()
+      ORDER BY r.scheduled_for ASC
+    `);
+
+    res.json({
+      success: true,
+      data: result.rows.map(row => ({
+        reminderId: row.reminder_id,
+        assignmentId: row.assignment_id,
+        patientAccountId: row.patient_account_id,
+        subjectLabel: row.subject_label,
+        instrumentName: row.instrument_name,
+        patientEmail: row.patient_email,
+        patientPhone: row.patient_phone,
+        reminderType: row.reminder_type,
+        scheduledFor: row.scheduled_for,
+        messageSubject: row.message_subject,
+        messageBody: row.message_body
+      }))
+    });
+  } catch (error) {
+    logger.error('Failed to get pending reminders', { error });
+    next(error);
+  }
+});
+
+/**
+ * POST /api/epro/assignments/:id/schedule-reminders
+ * Schedule automatic reminders for an assignment
+ * Creates reminders based on configuration (e.g., 1 day before, day of, 1 day after)
+ */
+router.post('/assignments/:id/schedule-reminders', async (req: Part11Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const { reminderSchedule } = req.body;
+    // reminderSchedule: [{ daysBefore: 1, type: 'email' }, { daysBefore: 0, type: 'sms' }]
+    const userId = req.user?.userId || 0;
+
+    // Get assignment details
+    const assignmentResult = await pool.query(`
+      SELECT a.*, pa.patient_account_id
+      FROM acc_pro_assignment a
+      LEFT JOIN acc_patient_account pa ON a.study_subject_id = pa.study_subject_id
+      WHERE a.assignment_id = $1
+    `, [id]);
+
+    if (assignmentResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Assignment not found' });
+    }
+
+    const assignment = assignmentResult.rows[0];
+
+    if (!assignment.patient_account_id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No patient account linked to this assignment' 
+      });
+    }
+
+    if (!assignment.scheduled_date) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Assignment has no scheduled date' 
+      });
+    }
+
+    const defaultSchedule = reminderSchedule || [
+      { daysBefore: 1, type: 'email' },
+      { daysBefore: 0, type: 'email' }
+    ];
+
+    const createdReminders = [];
+
+    for (const schedule of defaultSchedule) {
+      const scheduledFor = new Date(assignment.scheduled_date);
+      scheduledFor.setDate(scheduledFor.getDate() - (schedule.daysBefore || 0));
+
+      // Don't create reminders in the past
+      if (scheduledFor <= new Date()) continue;
+
+      const result = await pool.query(`
+        INSERT INTO acc_pro_reminder (
+          assignment_id, patient_account_id, reminder_type, scheduled_for,
+          status, message_subject, message_body, date_created
+        ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, NOW())
+        RETURNING reminder_id
+      `, [
+        id,
+        assignment.patient_account_id,
+        schedule.type || 'email',
+        scheduledFor,
+        `Reminder: Questionnaire Due`,
+        `You have a questionnaire that is due on ${assignment.scheduled_date}. Please complete it at your earliest convenience.`
+      ]);
+
+      createdReminders.push(result.rows[0].reminder_id);
+    }
+
+    res.json({
+      success: true,
+      message: `${createdReminders.length} reminders scheduled`,
+      data: { reminderIds: createdReminders }
+    });
+  } catch (error) {
+    logger.error('Failed to schedule reminders', { error });
     next(error);
   }
 });

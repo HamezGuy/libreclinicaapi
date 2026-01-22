@@ -73,6 +73,8 @@ import regulatoryExportRoutes from './routes/regulatory-export.routes';
 import printRoutes from './routes/print.routes';
 // Double Data Entry (21 CFR Part 11 compliant) - Uses NATIVE LibreClinica tables
 import ddeRoutes from './routes/dde.routes';
+// CRF/Item Flagging (uses LibreClinica native tables: event_crf_flag, item_data_flag)
+import flaggingRoutes from './routes/flagging.routes';
 // Organization management, invite codes, access requests
 // import organizationRoutes from './routes/organization.routes';
 // // Skip Logic and Form Linking
@@ -288,6 +290,8 @@ app.use('/api/regulatory-export', regulatoryExportRoutes);
 app.use('/api/print', printRoutes);
 // Double Data Entry (Part 11 compliant - uses NATIVE LibreClinica tables)
 app.use('/api/dde', ddeRoutes);
+// CRF/Item Flagging (Part 11 compliant - uses native LibreClinica tables)
+app.use('/api/flagging', flaggingRoutes);
 // Organization management, invite codes, access requests
 // app.use('/api/organizations', organizationRoutes);
 // // Skip Logic, Form Linking, and Branching
@@ -415,6 +419,7 @@ app.get('/', (req: Request, res: Response) => {
       backup: '/api/backup - Database backup and recovery (21 CFR Part 11 compliant)',
       print: '/api/print - PDF generation for forms, casebooks, and audit trails',
       dde: '/api/dde - Double data entry workflow (uses native LibreClinica tables)',
+      flagging: '/api/flagging - CRF/Item flagging for data review (uses native LibreClinica tables)',
       organizations: '/api/organizations - Organization management, invite codes, access requests',
       skipLogic: '/api/skip-logic - Skip logic rules, form linking, and conditional visibility',
       sites: '/api/sites - Site/location management and patient-site assignments',
