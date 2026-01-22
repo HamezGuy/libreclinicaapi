@@ -176,25 +176,110 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Delete a form template
+ * NOTE: For 21 CFR Part 11 compliance, this now archives instead of deletes
  */
 export const remove = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const user = (req as any).user;
 
-  const result = await formService.deleteForm(parseInt(id), user.userId);
+  // For 21 CFR Part 11 compliance, delete now archives the form
+  const result = await formService.archiveForm(parseInt(id), user.userId, 'Archived via delete operation');
 
   if (result.success) {
     await trackUserAction({
       userId: user.userId,
       username: user.username || user.userName,
-      action: 'FORM_DELETED',
+      action: 'FORM_ARCHIVED',
       entityType: 'crf',
       entityId: parseInt(id),
-      details: `Deleted form ID: ${id}`
+      details: `Archived form ID: ${id} (21 CFR Part 11 compliance - no permanent deletion)`
     });
   }
 
   res.status(result.success ? 200 : 400).json(result);
+});
+
+// =============================================================================
+// 21 CFR PART 11 ARCHIVE OPERATIONS
+// =============================================================================
+
+/**
+ * Archive a form template (21 CFR Part 11 compliant)
+ * Archived forms are hidden from regular users but can be viewed/restored by admins
+ */
+export const archive = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = (req as any).user;
+  const { reason } = req.body;
+
+  const result = await formService.archiveForm(parseInt(id), user.userId, reason);
+
+  if (result.success) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'FORM_ARCHIVED',
+      entityType: 'crf',
+      entityId: parseInt(id),
+      details: `Archived form ID: ${id}. Reason: ${reason || 'Not specified'}`
+    });
+  }
+
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * Restore an archived form (admin only)
+ * 21 CFR Part 11 compliant - maintains full audit trail
+ */
+export const restore = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = (req as any).user;
+  const { reason } = req.body;
+
+  const result = await formService.restoreForm(parseInt(id), user.userId, reason);
+
+  if (result.success) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'FORM_RESTORED',
+      entityType: 'crf',
+      entityId: parseInt(id),
+      details: `Restored form ID: ${id} from archive. Reason: ${reason || 'Not specified'}`
+    });
+  }
+
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * Get all archived forms (admin only)
+ * 21 CFR Part 11 compliant - provides visibility to archived records
+ */
+export const getArchivedForms = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const user = (req as any).user;
+
+  const parsedStudyId = studyId ? parseInt(studyId as string) : undefined;
+  const result = await formService.getArchivedForms(parsedStudyId);
+
+  // Track admin access to archived forms
+  await trackDocumentAccess(
+    user.userId,
+    user.username || user.userName,
+    'archived_forms',
+    0,
+    'Archived Forms List',
+    'view'
+  );
+
+  res.json({ 
+    success: true, 
+    data: result,
+    total: result.length,
+    message: '21 CFR Part 11 compliant archived forms list'
+  });
 });
 
 // =============================================================================
@@ -375,6 +460,8 @@ export default {
   saveData, getData, getMetadata, getStatus, 
   list, get, getByStudy, 
   create, update, remove,
+  // 21 CFR Part 11 Archive Operations
+  archive, restore, getArchivedForms,
   // Forking/Versioning
   getVersions, createVersion, fork,
   // Field-level operations with validation

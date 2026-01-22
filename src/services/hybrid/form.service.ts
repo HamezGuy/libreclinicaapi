@@ -2172,50 +2172,274 @@ export const updateForm = async (
 };
 
 /**
- * Delete a form template (soft delete by changing status)
+ * Archive a form template (21 CFR Part 11 compliant - no permanent deletion)
+ * 
+ * For 21 CFR Part 11 compliance, forms are NEVER deleted - they are archived.
+ * Archived forms:
+ * - Are hidden from regular users
+ * - Can only be viewed by admins in the Archived Forms tab
+ * - Can be restored by admins
+ * - Maintain full audit trail
+ * 
+ * Status IDs:
+ * - 1 = available
+ * - 2 = unavailable/locked
+ * - 5 = removed (legacy - should not be used)
+ * - 6 = archived (21 CFR Part 11 compliant)
+ */
+export const archiveForm = async (
+  crfId: number,
+  userId: number,
+  reason?: string
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Archiving form template (21 CFR Part 11)', { crfId, userId, reason });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Get current form info for audit
+    const formQuery = await client.query(`
+      SELECT c.name, c.status_id, s.name as status_name
+      FROM crf c
+      INNER JOIN status s ON c.status_id = s.status_id
+      WHERE c.crf_id = $1
+    `, [crfId]);
+
+    if (formQuery.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form not found' };
+    }
+
+    const form = formQuery.rows[0];
+    const oldStatus = form.status_id;
+
+    // Check if already archived
+    if (oldStatus === 6) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is already archived' };
+    }
+
+    // Set status to archived (status_id = 6)
+    // Note: We first need to ensure status_id 6 exists - if not, we'll use 5 but mark as archived
+    const statusCheck = await client.query(`
+      SELECT status_id FROM status WHERE status_id = 6
+    `);
+
+    let archiveStatusId = 6;
+    if (statusCheck.rows.length === 0) {
+      // Status 6 doesn't exist, create it
+      await client.query(`
+        INSERT INTO status (status_id, name, description)
+        VALUES (6, 'archived', '21 CFR Part 11 compliant archived status')
+        ON CONFLICT (status_id) DO NOTHING
+      `);
+    }
+
+    // Archive the form
+    await client.query(`
+      UPDATE crf
+      SET status_id = $1, date_updated = NOW(), update_id = $2
+      WHERE crf_id = $3
+    `, [archiveStatusId, userId, crfId]);
+
+    // Also archive all versions of this form
+    await client.query(`
+      UPDATE crf_version
+      SET status_id = $1, date_updated = NOW(), update_id = $2
+      WHERE crf_id = $3 AND status_id != $1
+    `, [archiveStatusId, userId, crfId]);
+
+    // Log audit event (21 CFR Part 11 §11.10(e))
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'crf', $1, $2, $3,
+        $4, 'archived', $5,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Archive%' OR name LIKE '%Update%' LIMIT 1)
+      )
+    `, [userId, crfId, form.name, form.status_name, reason || 'Form archived for 21 CFR Part 11 compliance']);
+
+    await client.query('COMMIT');
+
+    logger.info('Form template archived successfully (21 CFR Part 11)', { crfId });
+
+    return {
+      success: true,
+      message: `Form "${form.name}" archived successfully. It can be restored by an administrator.`
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Archive form error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to archive form: ${error.message}`
+    };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Restore an archived form (admin only)
+ * 21 CFR Part 11 compliant - maintains full audit trail
+ */
+export const restoreForm = async (
+  crfId: number,
+  userId: number,
+  reason?: string
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Restoring archived form', { crfId, userId, reason });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Get current form info
+    const formQuery = await client.query(`
+      SELECT c.name, c.status_id, s.name as status_name
+      FROM crf c
+      INNER JOIN status s ON c.status_id = s.status_id
+      WHERE c.crf_id = $1
+    `, [crfId]);
+
+    if (formQuery.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form not found' };
+    }
+
+    const form = formQuery.rows[0];
+
+    // Check if form is archived
+    if (form.status_id !== 6 && form.status_id !== 5) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is not archived' };
+    }
+
+    // Restore to available status (status_id = 1)
+    await client.query(`
+      UPDATE crf
+      SET status_id = 1, date_updated = NOW(), update_id = $1
+      WHERE crf_id = $2
+    `, [userId, crfId]);
+
+    // Also restore all versions of this form
+    await client.query(`
+      UPDATE crf_version
+      SET status_id = 1, date_updated = NOW(), update_id = $1
+      WHERE crf_id = $2 AND status_id IN (5, 6)
+    `, [userId, crfId]);
+
+    // Log audit event
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'crf', $1, $2, $3,
+        'archived', 'available', $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Restore%' OR name LIKE '%Update%' LIMIT 1)
+      )
+    `, [userId, crfId, form.name, reason || 'Form restored from archive']);
+
+    await client.query('COMMIT');
+
+    logger.info('Form template restored successfully', { crfId });
+
+    return {
+      success: true,
+      message: `Form "${form.name}" restored successfully`
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Restore form error', { error: error.message });
+
+    return {
+      success: false,
+      message: `Failed to restore form: ${error.message}`
+    };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Get all archived forms (admin only)
+ * 21 CFR Part 11 compliant - provides visibility to archived records
+ */
+export const getArchivedForms = async (studyId?: number): Promise<any[]> => {
+  logger.info('Getting archived forms', { studyId });
+
+  try {
+    // Check if category column exists in crf table
+    const columnCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'crf' AND column_name = 'category'
+    `);
+    const hasCategoryColumn = columnCheck.rows.length > 0;
+
+    let query = `
+      SELECT 
+        c.crf_id,
+        c.name,
+        c.description,
+        ${hasCategoryColumn ? 'c.category,' : "'other' as category,"}
+        c.oc_oid,
+        c.status_id,
+        s.name as status_name,
+        st.name as study_name,
+        st.study_id,
+        c.date_created,
+        c.date_updated,
+        u.first_name || ' ' || u.last_name as archived_by,
+        (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id) as version_count,
+        (SELECT COUNT(*) FROM event_crf ec 
+         JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id 
+         WHERE cv.crf_id = c.crf_id) as usage_count
+      FROM crf c
+      INNER JOIN status s ON c.status_id = s.status_id
+      LEFT JOIN study st ON c.source_study_id = st.study_id
+      LEFT JOIN user_account u ON c.update_id = u.user_id
+      WHERE c.status_id IN (5, 6)
+    `;
+
+    const params: any[] = [];
+    if (studyId) {
+      params.push(studyId);
+      query += ` AND c.source_study_id = $1`;
+    }
+
+    query += ` ORDER BY c.date_updated DESC, c.name`;
+
+    const result = await pool.query(query, params);
+    logger.info('Archived forms retrieved', { count: result.rows.length });
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get archived forms error', { error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Delete a form template - DEPRECATED for 21 CFR Part 11
+ * This function now calls archiveForm instead of permanently deleting.
+ * Permanent deletion is NOT allowed per 21 CFR Part 11 requirements.
  */
 export const deleteForm = async (
   crfId: number,
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Deleting form template', { crfId, userId });
-
-  try {
-    // Check if form is in use
-    const usageCheck = await pool.query(`
-      SELECT COUNT(*) as count FROM event_crf ec
-      JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-      WHERE cv.crf_id = $1
-    `, [crfId]);
-
-    if (parseInt(usageCheck.rows[0].count) > 0) {
-      return {
-        success: false,
-        message: 'Cannot delete form - it is being used by subjects'
-      };
-    }
-
-    // Set status to removed (status_id = 5 typically)
-    await pool.query(`
-      UPDATE crf
-      SET status_id = 5, date_updated = NOW(), update_id = $1
-      WHERE crf_id = $2
-    `, [userId, crfId]);
-
-    logger.info('Form template deleted successfully', { crfId });
-
-    return {
-      success: true,
-      message: 'Form template deleted successfully'
-    };
-  } catch (error: any) {
-    logger.error('Delete form error', { error: error.message });
-
-    return {
-      success: false,
-      message: `Failed to delete form: ${error.message}`
-    };
-  }
+  logger.warn('deleteForm called - redirecting to archiveForm for 21 CFR Part 11 compliance', { crfId, userId });
+  
+  // For 21 CFR Part 11 compliance, we archive instead of delete
+  return archiveForm(crfId, userId, 'Form archived via delete operation - 21 CFR Part 11 compliance');
 };
 
 // =============================================================================
@@ -3127,6 +3351,10 @@ export default {
   createForm,
   updateForm,
   deleteForm,
+  // 21 CFR Part 11 Archive Functions
+  archiveForm,
+  restoreForm,
+  getArchivedForms,
   // Template Forking Functions
   getFormVersions,
   createFormVersion,

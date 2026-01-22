@@ -48,6 +48,33 @@ router.delete('/:id',
   controller.remove
 );
 
+// ============================================================================
+// 21 CFR PART 11 ARCHIVE OPERATIONS
+// Forms are NEVER permanently deleted - they are archived for compliance
+// ============================================================================
+
+// Get archived forms (admin only)
+router.get('/archived', 
+  requireRole('admin'),
+  controller.getArchivedForms
+);
+
+// Archive a form (admin only) - replaces delete for compliance
+router.post('/:id/archive', 
+  requireRole('admin'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor(SignatureMeanings.CRF_DELETE),
+  controller.archive
+);
+
+// Restore an archived form (admin only)
+router.post('/:id/restore', 
+  requireRole('admin'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  controller.restore
+);
+
 // Template Forking/Versioning - write operations (signature required per §11.50)
 // Create new version of existing CRF
 router.post('/:id/versions', 
