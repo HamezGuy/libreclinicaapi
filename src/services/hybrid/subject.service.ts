@@ -162,75 +162,136 @@ const createSubjectDirect = async (
   try {
     await client.query('BEGIN');
 
+    // 0. Pre-check: Verify subject label doesn't already exist in this study
+    const duplicateCheckQuery = `
+      SELECT study_subject_id, label FROM study_subject 
+      WHERE study_id = $1 AND label = $2 AND status_id != 5
+    `;
+    const duplicateCheck = await client.query(duplicateCheckQuery, [
+      request.studyId, 
+      request.studySubjectId
+    ]);
+    
+    if (duplicateCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      logger.warn('Subject label already exists in study', { 
+        label: request.studySubjectId, 
+        studyId: request.studyId,
+        existingId: duplicateCheck.rows[0].study_subject_id
+      });
+      return {
+        success: false,
+        message: `Subject with ID "${request.studySubjectId}" already exists in this study. Please use a different Subject ID.`
+      };
+    }
+
     // 1. Create subject record first (demographics table)
     // Normalize gender value
     const gender = request.gender === 'Male' || request.gender === 'm' ? 'm' : 
                    request.gender === 'Female' || request.gender === 'f' ? 'f' : '';
-    // Use personId if provided, otherwise use studySubjectId as unique identifier
-    const uniqueIdentifier = request.personId || request.studySubjectId;
+    
+    // Use personId if provided for cross-study linking
+    // If not provided, generate a study-specific unique identifier to avoid conflicts
+    // The unique_identifier is used for cross-study patient linking in LibreClinica
+    let uniqueIdentifier: string;
+    if (request.personId && request.personId.trim()) {
+      uniqueIdentifier = request.personId.trim();
+    } else {
+      // Generate a unique identifier that includes studyId to prevent conflicts
+      // Format: studySubjectId-studyId (ensures uniqueness across studies)
+      uniqueIdentifier = `${request.studySubjectId}-S${request.studyId}`;
+    }
+    
+    // Check if subject with this unique_identifier already exists
+    // This handles cross-study linking when personId is provided
+    let existingSubjectId: number | null = null;
+    if (request.personId && request.personId.trim()) {
+      const existingSubjectQuery = `
+        SELECT subject_id FROM subject 
+        WHERE unique_identifier = $1 AND status_id = 1
+      `;
+      const existingResult = await client.query(existingSubjectQuery, [uniqueIdentifier]);
+      if (existingResult.rows.length > 0) {
+        existingSubjectId = existingResult.rows[0].subject_id;
+        logger.info('Found existing subject for cross-study linking', { 
+          uniqueIdentifier, 
+          subjectId: existingSubjectId 
+        });
+      }
+    }
     
     // Handle family links (for genetic studies)
     const fatherId = request.fatherId && request.fatherId > 0 ? request.fatherId : null;
     const motherId = request.motherId && request.motherId > 0 ? request.motherId : null;
     
-    // Try full schema first, fall back to minimal schema if columns don't exist
-    // Use SAVEPOINT to handle schema differences without aborting the transaction
-    let subjectResult;
-    await client.query('SAVEPOINT subject_insert');
-    try {
-      const subjectQuery = `
-        INSERT INTO subject (
-          date_of_birth, gender, unique_identifier, 
-          father_id, mother_id,
-          date_created, date_updated, 
-          owner_id, update_id, dob_collected, status_id
-        ) VALUES (
-          $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, $7, 1
-        )
-        RETURNING subject_id
-      `;
-      const dobCollected = request.dateOfBirth ? true : false;
-      subjectResult = await client.query(subjectQuery, [
-        request.dateOfBirth || null,
-        gender,
-        uniqueIdentifier,
-        fatherId,
-        motherId,
-        userId,
-        dobCollected
-      ]);
-      await client.query('RELEASE SAVEPOINT subject_insert');
-    } catch (schemaError: any) {
-      // Roll back to savepoint and try minimal schema
-      await client.query('ROLLBACK TO SAVEPOINT subject_insert');
-      
-      if (schemaError.message.includes('dob_collected')) {
-        logger.info('Using minimal subject schema (dob_collected not available)');
-        const minimalSubjectQuery = `
+    let subjectId: number;
+    
+    // Use existing subject if found (cross-study linking)
+    if (existingSubjectId) {
+      subjectId = existingSubjectId;
+      logger.info('Using existing subject for new study enrollment', { subjectId, uniqueIdentifier });
+    } else {
+      // Create new subject record
+      // Try full schema first, fall back to minimal schema if columns don't exist
+      // Use SAVEPOINT to handle schema differences without aborting the transaction
+      let subjectResult;
+      await client.query('SAVEPOINT subject_insert');
+      try {
+        const subjectQuery = `
           INSERT INTO subject (
             date_of_birth, gender, unique_identifier, 
             father_id, mother_id,
             date_created, date_updated, 
-            owner_id, update_id, status_id
+            owner_id, update_id, dob_collected, status_id
           ) VALUES (
-            $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, 1
+            $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, $7, 1
           )
           RETURNING subject_id
         `;
-        subjectResult = await client.query(minimalSubjectQuery, [
+        const dobCollected = request.dateOfBirth ? true : false;
+        subjectResult = await client.query(subjectQuery, [
           request.dateOfBirth || null,
           gender,
           uniqueIdentifier,
           fatherId,
           motherId,
-          userId
+          userId,
+          dobCollected
         ]);
-      } else {
-        throw schemaError;
+        await client.query('RELEASE SAVEPOINT subject_insert');
+      } catch (schemaError: any) {
+        // Roll back to savepoint and try minimal schema
+        await client.query('ROLLBACK TO SAVEPOINT subject_insert');
+        
+        if (schemaError.message.includes('dob_collected')) {
+          logger.info('Using minimal subject schema (dob_collected not available)');
+          const minimalSubjectQuery = `
+            INSERT INTO subject (
+              date_of_birth, gender, unique_identifier, 
+              father_id, mother_id,
+              date_created, date_updated, 
+              owner_id, update_id, status_id
+            ) VALUES (
+              $1, $2, $3, $4, $5, NOW(), NOW(), $6, $6, 1
+            )
+            RETURNING subject_id
+          `;
+          subjectResult = await client.query(minimalSubjectQuery, [
+            request.dateOfBirth || null,
+            gender,
+            uniqueIdentifier,
+            fatherId,
+            motherId,
+            userId
+          ]);
+        } else {
+          throw schemaError;
+        }
       }
-    }
 
-    const subjectId = subjectResult.rows[0].subject_id;
+      subjectId = subjectResult.rows[0].subject_id;
+    }
 
     // 2. Create study_subject record (enrollment table)
     // Includes: label, secondary_label, enrollment_date, time_zone, oc_oid
@@ -245,7 +306,10 @@ const createSubjectDirect = async (
     `;
 
     // Generate OC OID (OpenClinica Object ID)
-    const ocOid = `SS_${request.studySubjectId.replace(/[^a-zA-Z0-9]/g, '')}`.substring(0, 40);
+    // Include studyId and timestamp to ensure uniqueness across studies
+    const timestamp = Date.now().toString(36); // Base36 for compact representation
+    const cleanLabel = request.studySubjectId.replace(/[^a-zA-Z0-9]/g, '');
+    const ocOid = `SS_${request.studyId}_${cleanLabel}_${timestamp}`.substring(0, 40);
     
     // Handle timezone (defaults to empty string if not provided)
     const timeZone = request.timeZone || '';

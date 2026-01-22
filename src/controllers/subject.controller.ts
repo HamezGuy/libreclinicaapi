@@ -88,7 +88,38 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const result = await subjectService.createSubject(req.body, user.userId, user.username);
+  
+  // Handle both username and userName from auth middleware
+  const username = user?.username || user?.userName;
+  
+  if (!user?.userId || !username) {
+    logger.error('Missing user info for subject creation', { 
+      hasUserId: !!user?.userId, 
+      hasUsername: !!username 
+    });
+    res.status(401).json({ 
+      success: false, 
+      message: 'User authentication required for subject creation' 
+    });
+    return;
+  }
+  
+  logger.info('Creating subject', { 
+    userId: user.userId, 
+    username,
+    studyId: req.body.studyId,
+    studySubjectId: req.body.studySubjectId
+  });
+  
+  const result = await subjectService.createSubject(req.body, user.userId, username);
+  
+  if (!result.success) {
+    logger.warn('Subject creation failed', { 
+      message: result.message,
+      studyId: req.body.studyId,
+      studySubjectId: req.body.studySubjectId
+    });
+  }
 
   res.status(result.success ? 201 : 400).json(result);
 });
