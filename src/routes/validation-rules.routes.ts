@@ -3,9 +3,15 @@
  * 
  * API endpoints for managing validation rules
  * 
+ * Endpoints for form instances (event_crf):
+ * - GET /event-crf/:eventCrfId/rules - Get rules for a form instance
+ * - POST /event-crf/:eventCrfId/validate - Validate a form instance
+ * - POST /validate-field - Validate a single field change
+ * 
  * 21 CFR Part 11 Compliance:
  * - Rule creation/modification requires electronic signature (§11.50)
  * - All changes are logged to audit trail (§11.10(e))
+ * - Validation checks are device checks per §11.10(h)
  */
 
 import { Router } from 'express';
@@ -19,7 +25,29 @@ const router = Router();
 // All routes require authentication
 router.use(authMiddleware);
 
-// Get validation rules for a CRF (no signature required)
+// ============================================
+// FORM INSTANCE (EVENT_CRF) VALIDATION ROUTES
+// These apply validation rules to form copies on patients
+// ============================================
+
+// Get validation rules for a form instance (event_crf)
+// Used when loading a form to apply rules to ALL copies
+router.get('/event-crf/:eventCrfId/rules', controller.getRulesForEventCrf);
+
+// Validate a form instance (event_crf) - validates all data in the form
+// Optionally creates queries for validation failures
+router.post('/event-crf/:eventCrfId/validate', controller.validateEventCrf);
+
+// Validate a single field change - for real-time validation on field blur/change
+// This is the primary endpoint for triggering validation on CRUD operations
+router.post('/validate-field', controller.validateFieldChange);
+
+// ============================================
+// TEMPLATE-LEVEL VALIDATION ROUTES
+// These manage validation rules on CRF templates
+// ============================================
+
+// Get validation rules for a CRF template
 router.get('/crf/:crfId', controller.getRulesForCrf);
 
 // Get validation rules for a study (all CRFs)
@@ -56,7 +84,7 @@ router.delete('/:ruleId',
   controller.deleteRule
 );
 
-// Validate form data against rules (no signature - read-only operation)
+// Validate form data against rules (for templates - no form instance context)
 router.post('/validate/:crfId', controller.validateData);
 
 // Test a rule (no signature - read-only operation)

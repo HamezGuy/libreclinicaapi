@@ -76,5 +76,21 @@ router.post('/save',
 router.get('/data/:eventCrfId', controller.getData);
 router.get('/status/:eventCrfId', controller.getStatus);
 
+// Single field update with validation (for real-time validation on field change)
+// This endpoint:
+// 1. Validates the field value against all applicable rules
+// 2. Optionally creates queries for validation failures
+// 3. Updates the field data if validation passes (or if validateOnly=false)
+router.patch('/field/:eventCrfId', 
+  requireRole('data_entry', 'investigator', 'coordinator'),
+  controller.updateField
+);
+
+// Validate only (no data update) - for real-time validation feedback
+router.post('/validate-field/:eventCrfId',
+  requireRole('data_entry', 'investigator', 'coordinator'),
+  controller.validateField
+);
+
 export default router;
 

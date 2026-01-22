@@ -32,6 +32,16 @@ router.get('/my-assigned', controller.getMyAssigned);
 // Form-specific queries (no signature required for reading)
 router.get('/form/:eventCrfId', controller.getFormQueries);
 
+// Field-specific queries (no signature required for reading)
+// Get queries for a specific item_data_id
+router.get('/item-data/:itemDataId', controller.getFieldQueries);
+
+// Get queries by form and field name
+router.get('/form/:eventCrfId/field/:fieldName', controller.getQueriesByField);
+
+// Get open query counts for all fields in a form (for efficient UI rendering)
+router.get('/form/:eventCrfId/field-counts', controller.getFormFieldQueryCounts);
+
 // Single query operations (no signature required for reading)
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/thread', controller.getThread);

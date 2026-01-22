@@ -295,11 +295,89 @@ export const fork = asyncHandler(async (req: Request, res: Response) => {
   res.status(result.success ? 201 : 400).json(result);
 });
 
+/**
+ * Update a single field value with validation
+ * 
+ * PATCH /forms/field/:eventCrfId
+ * Body: { fieldName, value, createQueries? }
+ * 
+ * This endpoint:
+ * 1. Validates the field value against all applicable rules
+ * 2. Creates queries for validation failures (if createQueries=true)
+ * 3. Updates the field data
+ * 4. Logs to audit trail
+ */
+export const updateField = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId } = req.params;
+  const { fieldName, value, createQueries } = req.body;
+  const user = (req as any).user;
+
+  if (!fieldName) {
+    res.status(400).json({ success: false, message: 'fieldName is required' });
+    return;
+  }
+
+  const result = await formService.updateFieldData(
+    parseInt(eventCrfId),
+    fieldName,
+    value,
+    user.userId,
+    { validateOnly: false, createQueries: createQueries === true }
+  );
+
+  if (result.success) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'FIELD_UPDATED',
+      entityType: 'item_data',
+      entityId: result.data?.itemDataId,
+      details: `Updated field "${fieldName}" in form ${eventCrfId}`
+    });
+  }
+
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * Validate a single field value without updating
+ * 
+ * POST /forms/validate-field/:eventCrfId
+ * Body: { fieldName, value, createQueries? }
+ * 
+ * This endpoint provides real-time validation feedback
+ * without persisting the value. Used for:
+ * - Field blur validation
+ * - Pre-submission validation check
+ */
+export const validateField = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId } = req.params;
+  const { fieldName, value, createQueries } = req.body;
+  const user = (req as any).user;
+
+  if (!fieldName) {
+    res.status(400).json({ success: false, message: 'fieldName is required' });
+    return;
+  }
+
+  const result = await formService.updateFieldData(
+    parseInt(eventCrfId),
+    fieldName,
+    value,
+    user.userId,
+    { validateOnly: true, createQueries: createQueries === true }
+  );
+
+  res.json(result);
+});
+
 export default { 
   saveData, getData, getMetadata, getStatus, 
   list, get, getByStudy, 
   create, update, remove,
   // Forking/Versioning
-  getVersions, createVersion, fork
+  getVersions, createVersion, fork,
+  // Field-level operations with validation
+  updateField, validateField
 };
 

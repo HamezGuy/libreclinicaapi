@@ -1100,6 +1100,122 @@ export const getMyAssignedQueries = async (userId: number, studyId?: number): Pr
   }
 };
 
+/**
+ * Get queries for a specific field (item_data)
+ * 
+ * This retrieves queries linked to a specific data point via dn_item_data_map.
+ * Used for displaying field-level query indicators in the UI.
+ */
+export const getFieldQueries = async (itemDataId: number): Promise<any[]> => {
+  logger.info('Getting field queries', { itemDataId });
+
+  try {
+    const query = `
+      SELECT 
+        dn.discrepancy_note_id,
+        dn.description,
+        dn.detailed_notes,
+        dnt.name as type_name,
+        dnst.name as status_name,
+        dn.date_created,
+        u1.user_name as created_by,
+        u2.user_name as assigned_to,
+        dim.column_name,
+        (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count
+      FROM discrepancy_note dn
+      INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
+      LEFT JOIN user_account u1 ON dn.owner_id = u1.user_id
+      LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
+      INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
+      WHERE dim.item_data_id = $1
+        AND dn.parent_dn_id IS NULL
+      ORDER BY dn.date_created DESC
+    `;
+
+    const result = await pool.query(query, [itemDataId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get field queries error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get queries for a field by event_crf_id and field name
+ * 
+ * This retrieves queries linked to a specific field within a form instance.
+ * Used when itemDataId is not known but eventCrfId and fieldName are available.
+ */
+export const getQueriesByField = async (eventCrfId: number, fieldName: string): Promise<any[]> => {
+  logger.info('Getting queries by field', { eventCrfId, fieldName });
+
+  try {
+    // First, find the item_data_id for this field
+    const itemDataQuery = `
+      SELECT id.item_data_id
+      FROM item_data id
+      INNER JOIN item i ON id.item_id = i.item_id
+      WHERE id.event_crf_id = $1
+        AND (LOWER(i.name) = LOWER($2) OR LOWER(i.oc_oid) = LOWER($2))
+        AND id.deleted = false
+      LIMIT 1
+    `;
+
+    const itemDataResult = await pool.query(itemDataQuery, [eventCrfId, fieldName]);
+    
+    if (itemDataResult.rows.length === 0) {
+      // Field not found - return empty array
+      return [];
+    }
+
+    const itemDataId = itemDataResult.rows[0].item_data_id;
+    return await getFieldQueries(itemDataId);
+  } catch (error: any) {
+    logger.error('Get queries by field error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get open query count for all fields in a form
+ * 
+ * Returns a map of fieldName -> openQueryCount for efficient UI rendering.
+ */
+export const getFormFieldQueryCounts = async (eventCrfId: number): Promise<Record<string, number>> => {
+  logger.info('Getting form field query counts', { eventCrfId });
+
+  try {
+    const query = `
+      SELECT 
+        i.name as field_name,
+        COUNT(dn.discrepancy_note_id) as query_count
+      FROM item_data id
+      INNER JOIN item i ON id.item_id = i.item_id
+      INNER JOIN dn_item_data_map dim ON id.item_data_id = dim.item_data_id
+      INNER JOIN discrepancy_note dn ON dim.discrepancy_note_id = dn.discrepancy_note_id
+      INNER JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+      WHERE id.event_crf_id = $1
+        AND id.deleted = false
+        AND dn.parent_dn_id IS NULL
+        AND rs.name NOT IN ('Closed', 'Not Applicable')
+      GROUP BY i.name
+    `;
+
+    const result = await pool.query(query, [eventCrfId]);
+    
+    const counts: Record<string, number> = {};
+    for (const row of result.rows) {
+      counts[row.field_name] = parseInt(row.query_count);
+    }
+    
+    return counts;
+  } catch (error: any) {
+    logger.error('Get form field query counts error', { error: error.message });
+    return {};
+  }
+};
+
 export default {
   getQueries,
   getQueryById,
@@ -1113,6 +1229,9 @@ export default {
   getQueryTypes,
   getResolutionStatuses,
   getFormQueries,
+  getFieldQueries,
+  getQueriesByField,
+  getFormFieldQueryCounts,
   reassignQuery,
   getQueryCountByStatus,
   getQueryCountByType,

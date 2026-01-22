@@ -331,15 +331,175 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
   }
 };
 
+/**
+ * Get validation rules for an event_crf (form instance on a patient)
+ * This ensures validation rules apply to ALL form copies, not just templates.
+ */
+export const getRulesForEventCrf = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { eventCrfId } = req.params;
+
+    const rules = await validationRulesService.getRulesForEventCrf(parseInt(eventCrfId));
+
+    const response: ApiResponse = {
+      success: true,
+      data: rules
+    };
+
+    res.json(response);
+  } catch (error) {
+    logger.error('Get event_crf validation rules error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Validate an event_crf (form instance on a patient)
+ * 
+ * This endpoint validates all data in a form instance and optionally
+ * creates queries (discrepancy notes) for validation failures.
+ * 
+ * Used for:
+ * - Form submission validation
+ * - Re-validation after data import
+ * - Batch validation for data cleaning
+ */
+export const validateEventCrf = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const user = (req as any).user;
+    const { eventCrfId } = req.params;
+    const { createQueries } = req.body;
+
+    const result = await validationRulesService.validateEventCrf(
+      parseInt(eventCrfId),
+      {
+        createQueries: createQueries === true,
+        userId: user?.userId
+      }
+    );
+
+    // Audit trail if queries were created
+    if (result.queriesCreated && result.queriesCreated > 0) {
+      await trackUserAction({
+        userId: user.userId,
+        username: user.username || user.userName,
+        action: 'VALIDATION_QUERIES_CREATED',
+        entityType: 'event_crf',
+        entityId: parseInt(eventCrfId),
+        details: `Created ${result.queriesCreated} queries from validation failures`
+      });
+    }
+
+    const response: ApiResponse = {
+      success: true,
+      data: result
+    };
+
+    res.json(response);
+  } catch (error) {
+    logger.error('Validate event_crf error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Validate a single field change
+ * 
+ * This endpoint provides real-time validation feedback when a user
+ * changes a field value. It can optionally create queries for failures.
+ * 
+ * Request body:
+ * - crfId: The CRF template ID
+ * - fieldPath: The field being validated
+ * - value: The new value
+ * - allFormData: (Optional) All form data for cross-field validation
+ * - createQueries: (Optional) Create query for validation failure
+ * - eventCrfId: (Optional) The event_crf_id for form instance context
+ * - itemDataId: (Optional) The item_data_id for precise query linking
+ * - itemId: (Optional) The item_id for field matching
+ * - operationType: (Optional) 'create' | 'update' | 'delete' - the type of CRUD operation
+ * 
+ * This endpoint is designed to be called on every field change to ensure
+ * validation rules apply to ALL form copies (event_crf instances).
+ */
+export const validateFieldChange = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const user = (req as any).user;
+    const { 
+      crfId, 
+      fieldPath, 
+      value, 
+      allFormData = {},
+      createQueries = false,
+      eventCrfId,
+      studyId,
+      subjectId,
+      itemDataId,
+      itemId,
+      operationType = 'update'
+    } = req.body;
+
+    if (!crfId || !fieldPath) {
+      res.status(400).json({
+        success: false,
+        message: 'crfId and fieldPath are required'
+      });
+      return;
+    }
+
+    const result = await validationRulesService.validateFieldChange(
+      parseInt(crfId),
+      fieldPath,
+      value,
+      allFormData,
+      {
+        createQueries,
+        studyId: studyId ? parseInt(studyId) : undefined,
+        subjectId: subjectId ? parseInt(subjectId) : undefined,
+        eventCrfId: eventCrfId ? parseInt(eventCrfId) : undefined,
+        itemDataId: itemDataId ? parseInt(itemDataId) : undefined,
+        itemId: itemId ? parseInt(itemId) : undefined,
+        userId: user?.userId,
+        operationType: operationType as 'create' | 'update' | 'delete'
+      }
+    );
+
+    // Log audit event if queries were created
+    if (result.queriesCreated && result.queriesCreated > 0) {
+      await trackUserAction({
+        userId: user.userId,
+        username: user.username || user.userName,
+        action: 'VALIDATION_QUERY_CREATED',
+        entityType: 'validation',
+        entityId: parseInt(crfId),
+        details: `Created ${result.queriesCreated} validation query for field ${fieldPath} (${operationType})`
+      });
+    }
+
+    const response: ApiResponse = {
+      success: true,
+      data: result
+    };
+
+    res.json(response);
+  } catch (error) {
+    logger.error('Validate field change error:', error);
+    next(error);
+  }
+};
+
 export default {
   getRulesForCrf,
   getRulesForStudy,
+  getRulesForEventCrf,
   getRule,
   createRule,
   updateRule,
   toggleRule,
   deleteRule,
   validateData,
+  validateEventCrf,
+  validateFieldChange,
   testRule
 };
 

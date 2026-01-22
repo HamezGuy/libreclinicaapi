@@ -339,6 +339,40 @@ export const getMyAssigned = asyncHandler(async (req: Request, res: Response) =>
   res.json({ success: true, data: result });
 });
 
+/**
+ * Get queries for a specific field (item_data)
+ */
+export const getFieldQueries = asyncHandler(async (req: Request, res: Response) => {
+  const { itemDataId } = req.params;
+
+  const result = await queryService.getFieldQueries(parseInt(itemDataId));
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get queries for a field by event_crf_id and field name
+ */
+export const getQueriesByField = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId, fieldName } = req.params;
+
+  const result = await queryService.getQueriesByField(parseInt(eventCrfId), fieldName);
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Get open query count for all fields in a form
+ * Used for efficient rendering of field-level query indicators
+ */
+export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId } = req.params;
+
+  const result = await queryService.getFormFieldQueryCounts(parseInt(eventCrfId));
+
+  res.json({ success: true, data: result });
+});
+
 export default { 
   list, 
   get, 
@@ -350,7 +384,10 @@ export default {
   stats, 
   getQueryTypes, 
   getResolutionStatuses, 
-  getFormQueries, 
+  getFormQueries,
+  getFieldQueries,
+  getQueriesByField,
+  getFormFieldQueryCounts,
   reassign, 
   countByStatus, 
   countByType, 

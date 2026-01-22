@@ -2883,6 +2883,238 @@ export const forkForm = async (
   }
 };
 
+/**
+ * Update a single field value in an event_crf with validation
+ * 
+ * This function:
+ * 1. Validates the new value against all applicable rules
+ * 2. Creates queries for validation failures if enabled
+ * 3. Updates the item_data record
+ * 4. Logs to audit trail
+ * 
+ * Used for real-time validation on field change/blur events.
+ * 
+ * 21 CFR Part 11 §11.10(e) - Audit trail
+ * 21 CFR Part 11 §11.10(h) - Device checks (validation)
+ */
+export const updateFieldData = async (
+  eventCrfId: number,
+  fieldName: string,
+  value: any,
+  userId: number,
+  options?: {
+    validateOnly?: boolean;  // If true, only validate, don't update
+    createQueries?: boolean; // Create queries for validation failures
+  }
+): Promise<ApiResponse<any>> => {
+  logger.info('Updating field data', { eventCrfId, fieldName, userId });
+
+  const client = await pool.connect();
+
+  try {
+    // Get event_crf details
+    const eventCrfResult = await client.query(`
+      SELECT 
+        ec.event_crf_id,
+        ec.study_subject_id,
+        ec.status_id,
+        cv.crf_id,
+        cv.crf_version_id,
+        ss.study_id
+      FROM event_crf ec
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN study_subject ss ON ec.study_subject_id = ss.study_subject_id
+      WHERE ec.event_crf_id = $1
+    `, [eventCrfId]);
+
+    if (eventCrfResult.rows.length === 0) {
+      return { success: false, message: 'Form not found' };
+    }
+
+    const eventCrf = eventCrfResult.rows[0];
+
+    // Check if locked
+    if (eventCrf.status_id === 6) {
+      return {
+        success: false,
+        message: 'Cannot edit data - this record is locked.',
+        errors: ['RECORD_LOCKED']
+      } as any;
+    }
+
+    // Find the item_id for this field
+    const itemResult = await client.query(`
+      SELECT i.item_id, i.name
+      FROM item i
+      INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+      WHERE igm.crf_version_id = $1
+        AND (LOWER(i.name) = LOWER($2) OR LOWER(i.oc_oid) = LOWER($2))
+      LIMIT 1
+    `, [eventCrf.crf_version_id, fieldName]);
+
+    if (itemResult.rows.length === 0) {
+      return { success: false, message: `Field "${fieldName}" not found in form` };
+    }
+
+    const itemId = itemResult.rows[0].item_id;
+
+    // Get current item_data (if exists)
+    const existingResult = await client.query(`
+      SELECT item_data_id, value FROM item_data
+      WHERE event_crf_id = $1 AND item_id = $2 AND deleted = false
+      LIMIT 1
+    `, [eventCrfId, itemId]);
+
+    const itemDataId = existingResult.rows[0]?.item_data_id;
+    const oldValue = existingResult.rows[0]?.value;
+
+    // Get all form data for cross-field validation
+    const allDataResult = await client.query(`
+      SELECT i.name, id.value
+      FROM item_data id
+      INNER JOIN item i ON id.item_id = i.item_id
+      WHERE id.event_crf_id = $1 AND id.deleted = false
+    `, [eventCrfId]);
+
+    const allFormData: Record<string, any> = {};
+    for (const row of allDataResult.rows) {
+      allFormData[row.name] = row.value;
+    }
+    // Include the new value being validated
+    allFormData[fieldName] = value;
+
+    // Validate the field change
+    const validationResult = await validationRulesService.validateFieldChange(
+      eventCrf.crf_id,
+      fieldName,
+      value,
+      allFormData,
+      {
+        createQueries: options?.createQueries ?? false,
+        studyId: eventCrf.study_id,
+        subjectId: eventCrf.study_subject_id,
+        eventCrfId: eventCrfId,
+        itemDataId: itemDataId,
+        userId: userId
+      }
+    );
+
+    // If validate only, return the validation result
+    if (options?.validateOnly) {
+      return {
+        success: validationResult.valid,
+        data: {
+          valid: validationResult.valid,
+          errors: validationResult.errors,
+          warnings: validationResult.warnings,
+          queryCreated: validationResult.queryCreated
+        }
+      };
+    }
+
+    // If there are hard errors and we should not save, return early
+    // (This is configurable - some systems allow saving with warnings but block errors)
+    if (!validationResult.valid && validationResult.errors.length > 0) {
+      return {
+        success: false,
+        message: 'Validation failed',
+        data: {
+          valid: false,
+          errors: validationResult.errors,
+          warnings: validationResult.warnings,
+          queryCreated: validationResult.queryCreated
+        }
+      } as any;
+    }
+
+    // Proceed with update
+    await client.query('BEGIN');
+
+    let stringValue = value === null || value === undefined ? '' : String(value);
+
+    // Encrypt if needed
+    if (config.encryption?.enableFieldEncryption && stringValue) {
+      stringValue = encryptField(stringValue);
+    }
+
+    let savedItemDataId: number;
+
+    if (itemDataId) {
+      // Update existing
+      if (oldValue !== stringValue) {
+        await client.query(`
+          UPDATE item_data
+          SET value = $1, date_updated = NOW(), update_id = $2
+          WHERE item_data_id = $3
+        `, [stringValue, userId, itemDataId]);
+
+        // Audit trail
+        await client.query(`
+          INSERT INTO audit_log_event (
+            audit_date, audit_table, user_id, entity_id,
+            old_value, new_value, audit_log_event_type_id,
+            event_crf_id
+          ) VALUES (NOW(), 'item_data', $1, $2, $3, $4, 1, $5)
+        `, [userId, itemDataId, oldValue, stringValue, eventCrfId]);
+      }
+      savedItemDataId = itemDataId;
+    } else {
+      // Insert new
+      const insertResult = await client.query(`
+        INSERT INTO item_data (
+          item_id, event_crf_id, value, status_id, owner_id, date_created, ordinal
+        ) VALUES ($1, $2, $3, 1, $4, NOW(), 1)
+        RETURNING item_data_id
+      `, [itemId, eventCrfId, stringValue, userId]);
+
+      savedItemDataId = insertResult.rows[0].item_data_id;
+
+      // Audit trail for creation
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id,
+          new_value, audit_log_event_type_id, event_crf_id
+        ) VALUES (NOW(), 'item_data', $1, $2, $3, 4, $4)
+      `, [userId, savedItemDataId, stringValue, eventCrfId]);
+    }
+
+    // Update event_crf timestamp
+    await client.query(`
+      UPDATE event_crf SET date_updated = NOW(), update_id = $1
+      WHERE event_crf_id = $2
+    `, [userId, eventCrfId]);
+
+    await client.query('COMMIT');
+
+    logger.info('Field data updated', { 
+      eventCrfId, 
+      fieldName, 
+      itemDataId: savedItemDataId,
+      hasValidationErrors: !validationResult.valid
+    });
+
+    return {
+      success: true,
+      data: {
+        itemDataId: savedItemDataId,
+        valid: validationResult.valid,
+        errors: validationResult.errors,
+        warnings: validationResult.warnings,
+        queryCreated: validationResult.queryCreated
+      },
+      message: validationResult.valid 
+        ? 'Field updated successfully' 
+        : 'Field updated with validation warnings'
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Update field data error', { error: error.message });
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
+  }
+};
+
 export default {
   saveFormData,
   getFormData,
@@ -2898,6 +3130,8 @@ export default {
   // Template Forking Functions
   getFormVersions,
   createFormVersion,
-  forkForm
+  forkForm,
+  // Field-level operations
+  updateFieldData
 };
 
