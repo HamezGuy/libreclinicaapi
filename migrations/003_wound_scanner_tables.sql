@@ -254,49 +254,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_trail_timestamp ON audit_trail(event_timest
 CREATE INDEX IF NOT EXISTS idx_audit_trail_created_at ON audit_trail(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_trail_category ON audit_trail(category);
 
--- ============================================================================
--- SYNC QUEUE TABLE (Offline support)
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS sync_queue (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  device_id VARCHAR(255) NOT NULL,
-  local_session_id VARCHAR(100) NOT NULL,
-  payload JSONB NOT NULL,
-  retry_count INTEGER DEFAULT 0,
-  max_retries INTEGER DEFAULT 5,
-  status VARCHAR(50) DEFAULT 'pending',
-  error_message TEXT,
-  queued_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  processed_at TIMESTAMP WITH TIME ZONE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_queue_device_id ON sync_queue(device_id);
-CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
-CREATE INDEX IF NOT EXISTS idx_sync_queue_queued_at ON sync_queue(queued_at);
-
--- ============================================================================
--- TEMPLATE CACHE TABLE (Cache LibreClinica CRF templates)
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS template_cache (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  template_id VARCHAR(255) UNIQUE NOT NULL,
-  name VARCHAR(500) NOT NULL,
-  version VARCHAR(50) NOT NULL,
-  definition JSONB NOT NULL,
-  libreclinica_crf_id INTEGER,
-  libreclinica_version_id INTEGER,
-  fetched_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  expires_at TIMESTAMP WITH TIME ZONE,
-  is_active BOOLEAN DEFAULT true,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_template_cache_template_id ON template_cache(template_id);
-CREATE INDEX IF NOT EXISTS idx_template_cache_is_active ON template_cache(is_active);
+-- NOTE: sync_queue and template_cache tables removed - features not implemented
 
 -- ============================================================================
 -- HELPER VIEWS
@@ -365,10 +323,7 @@ CREATE TRIGGER update_devices_updated_at
   BEFORE UPDATE ON devices 
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-DROP TRIGGER IF EXISTS update_template_cache_updated_at ON template_cache;
-CREATE TRIGGER update_template_cache_updated_at 
-  BEFORE UPDATE ON template_cache 
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+-- template_cache trigger removed - table not used
 
 -- ============================================================================
 -- GRANTS (Adjust based on your user setup)
@@ -394,6 +349,4 @@ COMMENT ON TABLE wound_measurements IS 'Calculated wound measurements from captu
 COMMENT ON TABLE electronic_signatures IS '21 CFR Part 11 compliant electronic signatures';
 COMMENT ON TABLE audit_trail IS 'Hash-chained audit trail for compliance';
 COMMENT ON TABLE devices IS 'Registered iOS devices for capture';
-COMMENT ON TABLE sync_queue IS 'Offline sync queue for mobile devices';
-COMMENT ON TABLE template_cache IS 'Cached LibreClinica CRF templates for mobile use';
 
