@@ -1,0 +1,213 @@
+================================================================================
+COMPREHENSIVE SOAP DEPLOYMENT ANALYSIS
+================================================================================
+Date: December 5, 2025
+Author: AI Analysis
+Server: AWS Lightsail - 18.225.57.5
+
+================================================================================
+TIMELINE OF EVENTS
+================================================================================
+
+1. November 29-30, 2025: WAR file created on Windows
+   - LibreClinica-patched.war: Nov 29, 2025 9:26 PM (78,344,222 bytes)
+   - LibreClinica-soap-fixed.war: Nov 30, 2025 12:57 AM (78,344,222 bytes)
+   - Both files are IDENTICAL in size
+
+2. December 3, 2025 (Commit 3d35ce6): "Fix SOAP URL and password in docker-compose"
+   - Changed 2 lines in production-deployment/docker-compose.yml
+   - This was 2 days ago
+
+3. December 5, 2025 (Today): Deployment started failing
+   - WAR file was uploaded: 18:50 UTC (78,344,222 bytes)
+   - Copied to deployment folder: 18:52 UTC
+   - SOAP test fails with 404
+
+================================================================================
+ROOT CAUSE ANALYSIS
+================================================================================
+
+*** THE PRIMARY ROOT CAUSE ***
+The WAR file (LibreClinica-soap-fixed.war) was created on WINDOWS and contains
+BACKSLASH path separators instead of forward slashes.
+
+EVIDENCE:
+  docker exec libreclinica_core ls -la /usr/local/tomcat/webapps/libreclinica/
+  
+  Shows files like:
+    WEB-INF\classes\castor.properties     <-- BACKSLASH in filename!
+    WEB-INF\classes\datainfo.properties   <-- BACKSLASH in filename!
+    META-INF\MANIFEST.MF                  <-- BACKSLASH in filename!
+
+  And:
+    docker exec libreclinica_core test -d /usr/local/tomcat/webapps/libreclinica/WEB-INF
+    Result: DOES NOT EXIST
+
+This means Tomcat tried to extract the WAR but treated "WEB-INF\classes\castor.properties"
+as a SINGLE FILENAME instead of a path to a file in a directory structure.
+
+*** WHY THIS HAPPENED ***
+The WAR file was created/packaged on Windows (likely using Windows zip tools or 
+a Windows-based build process). Windows uses backslashes (\) for paths, but WAR
+files (which are ZIP files) should use forward slashes (/) for Unix compatibility.
+
+*** WHY IT SEEMED TO WORK BEFORE ***
+It's possible that:
+1. A different WAR was used in previous deployments
+2. The container was using a cached/expanded version from before
+3. Docker volumes preserved old data
+
+================================================================================
+5 THINGS THAT COULD CAUSE THIS ISSUE
+================================================================================
+
+1. **WAR FILE PATH SEPARATORS** (CONFIRMED ROOT CAUSE)
+   - WAR packaged on Windows with backslash separators
+   - Tomcat on Linux can't properly extract the WAR
+   - WEB-INF directory never gets created
+
+2. **READ-ONLY MOUNT** (Contributing Factor)
+   - docker-compose has: "./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro"
+   - The ":ro" makes the WAR read-only
+   - Tomcat may have issues expanding read-only WARs (though it usually works)
+
+3. **BROKEN libreclinica-ws.war FROM BASE IMAGE**
+   - The jaspersnel/libreclinica:latest image ships with libreclinica-ws.war
+   - This WAR has missing dependencies (NoClassDefFoundError: org/apache/commons/pool)
+   - This separate SOAP WAR always fails to deploy
+   - But this is NOT the issue - the SOAP was supposed to be IN the main app
+
+4. **WRONG SOAP URL CONFIGURATION**
+   - Current: LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
+   - The libreclinica-ws app is broken (from base image)
+   - Should be: http://core:8080/libreclinica/ws (if WAR was properly deployed)
+
+5. **DOCKER VOLUME/CACHE ISSUES**
+   - Old container state might be cached
+   - Volume libreclinicaapi_core_data might have stale data
+   - Need complete rebuild
+
+================================================================================
+DATABASE CHANGES IN LAST 24 HOURS
+================================================================================
+
+From git log:
+- Commit d830fb9: "Fix randomization schema - add study_group_class_id and 
+  status_id to subject_group_map insert"
+  
+  Changed files:
+    - src/services/database/randomization.service.ts (14 lines)
+    - tests/schema/libreclinica-schema.sql (12 lines)
+  
+  These are DATABASE SERVICE changes, not deployment/SOAP changes.
+  These should NOT affect SOAP deployment.
+
+From the server, there's also a temp_db container running:
+  - Container: temp_db (postgres:14-alpine)
+  - Created: 6 hours ago
+  - This is separate from libreclinica_db
+
+No direct database schema changes should affect SOAP WAR deployment.
+
+================================================================================
+CODE CHANGES ANALYSIS (3d35ce6 to d830fb9)
+================================================================================
+
+Files changed (relevant to deployment):
+1. production-deployment/docker-compose.yml
+2. production-deployment/nginx.conf
+3. production-deployment/nginx-http-only.conf
+4. src/config/environment.ts
+5. src/services/soap/soapClient.ts
+
+Other changes (not deployment related):
+- Various service files (query, sdv, auth, randomization)
+- Route files
+- Controller files
+- Test files
+
+The SOAP-related changes were mostly about URL configuration, not WAR packaging.
+
+================================================================================
+WHAT ACTUALLY NEEDS TO BE FIXED
+================================================================================
+
+THE FIX: The WAR file needs to be repackaged on Linux (or with proper tools)
+to have forward slash (/) path separators.
+
+OPTION A: Repackage on Linux
+  1. On the server: unzip the WAR
+  2. zip it back up (Linux zip will use forward slashes)
+  3. Deploy the new WAR
+
+OPTION B: Repackage on Windows properly
+  1. Use jar command: jar -cvf LibreClinica.war -C LibreClinica .
+  2. The jar command creates proper path separators
+  3. Upload and deploy
+
+OPTION C: Use the ORIGINAL jaspersnel image WAR
+  1. The base image has a working libreclinica.war (not the -ws one)
+  2. But it doesn't have SOAP working
+  3. We need to extract it, add Spring WS jars, and repackage PROPERLY
+
+================================================================================
+VERIFICATION THAT WAR IS THE ISSUE
+================================================================================
+
+Test 1: Check WAR paths
+  unzip -l /home/ubuntu/libreclinicaapi/LibreClinica-soap-fixed.war | grep WEB-INF | head -5
+  
+  If you see: WEB-INF\web.xml  (with backslash) -> Problem confirmed
+  Should be:  WEB-INF/web.xml  (with forward slash)
+
+Test 2: Compare with working WAR
+  docker run --rm jaspersnel/libreclinica:latest unzip -l /usr/local/tomcat/webapps/libreclinica.war | grep WEB-INF | head -5
+  
+  This should show forward slashes.
+
+================================================================================
+IMMEDIATE FIX STEPS
+================================================================================
+
+Step 1: Extract and repackage WAR on the server
+
+  cd /home/ubuntu
+  rm -rf /tmp/war-fix
+  mkdir -p /tmp/war-fix
+  cd /tmp/war-fix
+  unzip /home/ubuntu/libreclinicaapi/LibreClinica-soap-fixed.war
+  zip -r /home/ubuntu/LibreClinica-fixed-proper.war .
+  
+Step 2: Verify the new WAR has proper paths
+
+  unzip -l /home/ubuntu/LibreClinica-fixed-proper.war | grep 'WEB-INF/' | head -3
+  
+  Should show: WEB-INF/  (with forward slash)
+
+Step 3: Deploy the properly packaged WAR
+
+  cp /home/ubuntu/LibreClinica-fixed-proper.war /home/ubuntu/libreclinicaapi/production-deployment/LibreClinica-soap-fixed.war
+  
+Step 4: Restart containers
+
+  cd /home/ubuntu/libreclinicaapi/production-deployment
+  docker compose down
+  docker compose up -d
+
+Step 5: Verify deployment
+
+  sleep 120  # Wait for Tomcat to fully deploy
+  docker exec libreclinica_core test -d /usr/local/tomcat/webapps/libreclinica/WEB-INF && echo "SUCCESS" || echo "FAILED"
+  docker exec libreclinica_core curl -s 'http://localhost:8080/libreclinica/pages/login/login' | head -1
+
+================================================================================
+LONG-TERM FIX
+================================================================================
+
+1. Rebuild the WAR properly on a Linux system or use jar command
+2. Store the properly built WAR in version control or artifact storage
+3. Update deployment documentation to note the path separator requirement
+4. Consider building the WAR as part of CI/CD pipeline
+
+================================================================================
+

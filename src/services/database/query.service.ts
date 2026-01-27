@@ -50,12 +50,14 @@ export const getQueries = async (
 
     const whereClause = conditions.join(' AND ');
 
-    // Count
+    // Count - include subject joins if filtering by subjectId
     const countQuery = `
       SELECT COUNT(*) as total
       FROM discrepancy_note dn
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
+      ${subjectId ? 'LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id' : ''}
+      ${subjectId ? 'LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id' : ''}
       WHERE ${whereClause}
     `;
 
@@ -71,11 +73,19 @@ export const getQueries = async (
         dn.description,
         dn.detailed_notes,
         dn.entity_type,
+        dn.resolution_status_id,
+        dn.discrepancy_note_type_id,
+        dn.owner_id,
+        dn.assigned_user_id,
         dnt.name as type_name,
         dnst.name as status_name,
         dn.date_created,
         u1.user_name as created_by,
+        u1.first_name as owner_first_name,
+        u1.last_name as owner_last_name,
         u2.user_name as assigned_to,
+        u2.first_name as assigned_first_name,
+        u2.last_name as assigned_last_name,
         dn.study_id,
         ss.study_subject_id,
         ss.label as subject_label,
@@ -115,7 +125,15 @@ export const getQueries = async (
 };
 
 /**
- * Get query by ID with responses
+ * Get query by ID with responses and linked item_data info
+ * 
+ * Returns full query details including:
+ * - Query metadata (type, status, dates)
+ * - Linked item_data info (field name, current value, event_crf_id)
+ * - Response thread
+ * 
+ * This enables the frontend to show the current field value and
+ * allow corrections via the query response.
  */
 export const getQueryById = async (queryId: number): Promise<any> => {
   logger.info('Getting query by ID', { queryId });
@@ -151,6 +169,75 @@ export const getQueryById = async (queryId: number): Promise<any> => {
 
     const parent = parentResult.rows[0];
 
+    // Get linked item_data info (field name, current value, event_crf_id)
+    // This enables the frontend to display current value and allow corrections
+    const itemDataQuery = `
+      SELECT 
+        dim.item_data_id,
+        dim.column_name,
+        id.value as current_value,
+        id.event_crf_id,
+        id.item_id,
+        i.name as field_name,
+        i.oc_oid as field_oid,
+        c.name as form_name,
+        cv.name as form_version
+      FROM dn_item_data_map dim
+      INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+      INNER JOIN item i ON id.item_id = i.item_id
+      INNER JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      WHERE dim.discrepancy_note_id = $1
+      LIMIT 1
+    `;
+
+    const itemDataResult = await pool.query(itemDataQuery, [queryId]);
+    
+    let linkedItemData = null;
+    if (itemDataResult.rows.length > 0) {
+      const row = itemDataResult.rows[0];
+      linkedItemData = {
+        itemDataId: row.item_data_id,
+        eventCrfId: row.event_crf_id,
+        itemId: row.item_id,
+        fieldName: row.field_name,
+        fieldOid: row.field_oid,
+        columnName: row.column_name,
+        currentValue: row.current_value,
+        formName: row.form_name,
+        formVersion: row.form_version
+      };
+    }
+
+    // Get linked event_crf info if no item_data link
+    let linkedEventCrf = null;
+    if (!linkedItemData) {
+      const eventCrfQuery = `
+        SELECT 
+          decm.event_crf_id,
+          decm.column_name,
+          c.name as form_name,
+          cv.name as form_version
+        FROM dn_event_crf_map decm
+        INNER JOIN event_crf ec ON decm.event_crf_id = ec.event_crf_id
+        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        INNER JOIN crf c ON cv.crf_id = c.crf_id
+        WHERE decm.discrepancy_note_id = $1
+        LIMIT 1
+      `;
+      const eventCrfResult = await pool.query(eventCrfQuery, [queryId]);
+      if (eventCrfResult.rows.length > 0) {
+        const row = eventCrfResult.rows[0];
+        linkedEventCrf = {
+          eventCrfId: row.event_crf_id,
+          columnName: row.column_name,
+          formName: row.form_name,
+          formVersion: row.form_version
+        };
+      }
+    }
+
     // Get responses
     const responsesQuery = `
       SELECT 
@@ -168,7 +255,10 @@ export const getQueryById = async (queryId: number): Promise<any> => {
 
     return {
       ...parent,
-      responses: responsesResult.rows
+      linkedItemData,  // Field-level link (for data corrections)
+      linkedEventCrf,  // Form-level link (fallback)
+      responses: responsesResult.rows,
+      canCorrectValue: !!linkedItemData  // Frontend can use this to show correction option
     };
   } catch (error: any) {
     logger.error('Get query by ID error', { error: error.message });
@@ -317,6 +407,12 @@ export const createQuery = async (
  * Add response to query
  * Creates a child discrepancy_note with parent_dn_id pointing to the parent query.
  * Optionally updates the parent status (e.g., to "Updated" when responding).
+ * 
+ * NEW: If correctedValue is provided, this function will also update the linked
+ * item_data record with the corrected value. This enables queries to actually
+ * change form values.
+ * 
+ * 21 CFR Part 11 compliant - maintains full audit trail for data corrections.
  */
 export const addQueryResponse = async (
   parentQueryId: number,
@@ -324,10 +420,18 @@ export const addQueryResponse = async (
     description: string;
     detailedNotes?: string;
     newStatusId?: number;  // Optional: update parent status (2=Updated, 3=Resolution Proposed)
+    correctedValue?: string;  // NEW: Value to correct the field to
+    correctionReason?: string;  // NEW: Reason for the correction
   },
   userId: number
-): Promise<{ success: boolean; responseId?: number; message?: string }> => {
-  logger.info('Adding query response', { parentQueryId, userId });
+): Promise<{ success: boolean; responseId?: number; message?: string; itemDataUpdated?: boolean }> => {
+  logger.info('Adding query response', { 
+    parentQueryId, 
+    userId, 
+    hasCorrection: data.correctedValue !== undefined,
+    correctedValue: data.correctedValue,
+    correctionReason: data.correctionReason
+  });
 
   const client = await pool.connect();
 
@@ -350,6 +454,115 @@ export const addQueryResponse = async (
     const parent = parentResult.rows[0];
     const oldStatusId = parent.resolution_status_id;
 
+    // If correctedValue is provided, find and update the linked item_data
+    let itemDataUpdated = false;
+    let oldValue: string | null = null;
+    let itemDataId: number | null = null;
+    let eventCrfId: number | null = null;
+    
+    if (data.correctedValue !== undefined) {
+      // Find the linked item_data through dn_item_data_map
+      logger.info('Looking for linked item_data for correction', { parentQueryId });
+      
+      const itemDataMapResult = await client.query(`
+        SELECT dim.item_data_id, id.value as old_value, id.event_crf_id, id.item_id, i.name as field_name
+        FROM dn_item_data_map dim
+        INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+        INNER JOIN item i ON id.item_id = i.item_id
+        WHERE dim.discrepancy_note_id = $1
+        LIMIT 1
+      `, [parentQueryId]);
+
+      logger.info('dn_item_data_map query result', { 
+        parentQueryId, 
+        rowCount: itemDataMapResult.rows.length,
+        row: itemDataMapResult.rows[0] 
+      });
+
+      if (itemDataMapResult.rows.length > 0) {
+        const itemDataRow = itemDataMapResult.rows[0];
+        itemDataId = itemDataRow.item_data_id;
+        eventCrfId = itemDataRow.event_crf_id;
+        oldValue = itemDataRow.old_value;
+        const fieldName = itemDataRow.field_name;
+
+        // Check if the event_crf is locked before allowing update
+        const lockCheckResult = await client.query(`
+          SELECT status_id FROM event_crf WHERE event_crf_id = $1
+        `, [eventCrfId]);
+
+        if (lockCheckResult.rows.length > 0 && lockCheckResult.rows[0].status_id === 6) {
+          await client.query('ROLLBACK');
+          logger.warn('Attempted to correct locked record via query', { eventCrfId, parentQueryId });
+          return {
+            success: false,
+            message: 'Cannot update data - this record is locked. Request an unlock through the Data Lock Management system.'
+          };
+        }
+
+        // Update the item_data with the corrected value
+        await client.query(`
+          UPDATE item_data
+          SET value = $1, date_updated = NOW(), update_id = $2
+          WHERE item_data_id = $3
+        `, [data.correctedValue, userId, itemDataId]);
+
+        // Log audit trail for the data correction (critical for 21 CFR Part 11)
+        await client.query(`
+          INSERT INTO audit_log_event (
+            audit_date, audit_table, user_id, entity_id,
+            old_value, new_value, reason_for_change,
+            audit_log_event_type_id, event_crf_id
+          ) VALUES (
+            NOW(), 'item_data', $1, $2, $3, $4, $5,
+            (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%updated%' LIMIT 1),
+            $6
+          )
+        `, [
+          userId,
+          itemDataId,
+          oldValue,
+          data.correctedValue,
+          `Query correction: ${data.correctionReason || data.description}`,
+          eventCrfId
+        ]);
+
+        itemDataUpdated = true;
+        logger.info('Updated item_data via query response', { 
+          itemDataId, 
+          fieldName,
+          oldValue, 
+          newValue: data.correctedValue 
+        });
+      } else {
+        // No linked item_data - try to find via event_crf_map
+        const eventCrfMapResult = await client.query(`
+          SELECT event_crf_id FROM dn_event_crf_map
+          WHERE discrepancy_note_id = $1
+          LIMIT 1
+        `, [parentQueryId]);
+
+        if (eventCrfMapResult.rows.length > 0) {
+          eventCrfId = eventCrfMapResult.rows[0].event_crf_id;
+          logger.warn('Query has event_crf link but no item_data link - cannot update field value directly', { 
+            parentQueryId, 
+            eventCrfId 
+          });
+        } else {
+          logger.warn('Query has no item_data or event_crf link - cannot update field value', { parentQueryId });
+        }
+      }
+    }
+
+    // Build the full response description
+    let fullDescription = data.description;
+    if (data.correctedValue !== undefined && itemDataUpdated) {
+      fullDescription += ` [DATA CORRECTED: "${oldValue || 'N/A'}" → "${data.correctedValue}"]`;
+      if (data.correctionReason) {
+        fullDescription += ` Reason: ${data.correctionReason}`;
+      }
+    }
+
     // Insert response as child discrepancy_note
     const insertQuery = `
       INSERT INTO discrepancy_note (
@@ -364,7 +577,7 @@ export const addQueryResponse = async (
 
     const insertResult = await client.query(insertQuery, [
       parentQueryId,
-      data.description,
+      fullDescription,
       data.detailedNotes || '',
       data.newStatusId || 2, // Default to Updated status for responses
       parent.study_id,
@@ -385,32 +598,46 @@ export const addQueryResponse = async (
     }
 
     // Log audit event for the response
+    let auditNewValue = `Status: ${newStatusId}, Response: ${data.description.substring(0, 200)}`;
+    if (itemDataUpdated) {
+      auditNewValue += `, Data corrected: "${oldValue}" → "${data.correctedValue}"`;
+    }
+
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
         old_value, new_value, reason_for_change,
         audit_log_event_type_id
       ) VALUES (
-        NOW(), 'discrepancy_note', $1, $2, 'Query Response',
-        $3, $4, $5,
+        NOW(), 'discrepancy_note', $1, $2, $3,
+        $4, $5, $6,
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%updated%' LIMIT 1)
       )
     `, [
       userId, 
       parentQueryId, 
+      itemDataUpdated ? 'Query Response with Data Correction' : 'Query Response',
       `Status: ${oldStatusId}`,
-      `Status: ${newStatusId}, Response: ${data.description.substring(0, 200)}`,
-      'Query response added'
+      auditNewValue,
+      data.correctionReason || 'Query response added'
     ]);
 
     await client.query('COMMIT');
 
-    logger.info('Query response added successfully', { responseId, parentQueryId });
+    logger.info('Query response added successfully', { 
+      responseId, 
+      parentQueryId, 
+      itemDataUpdated,
+      newStatusId 
+    });
 
     return {
       success: true,
       responseId,
-      message: 'Response added successfully'
+      message: itemDataUpdated 
+        ? 'Response added and data corrected successfully' 
+        : 'Response added successfully',
+      itemDataUpdated
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -1024,6 +1251,9 @@ export const getQueryThread = async (queryId: number): Promise<any[]> => {
 export const getOverdueQueries = async (studyId: number, daysThreshold: number = 7): Promise<any[]> => {
   logger.info('Getting overdue queries', { studyId, daysThreshold });
 
+  // Validate daysThreshold is a positive integer to prevent SQL injection
+  const safeDaysThreshold = Math.max(1, Math.floor(Number(daysThreshold) || 7));
+
   try {
     const query = `
       SELECT 
@@ -1044,11 +1274,11 @@ export const getOverdueQueries = async (studyId: number, daysThreshold: number =
       WHERE dn.study_id = $1
         AND dn.parent_dn_id IS NULL
         AND dnst.name IN ('New', 'Updated', 'Resolution Proposed')
-        AND dn.date_created < NOW() - INTERVAL '${daysThreshold} days'
+        AND dn.date_created < NOW() - ($2 || ' days')::INTERVAL
       ORDER BY dn.date_created ASC
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, [studyId, safeDaysThreshold.toString()]);
     return result.rows;
   } catch (error: any) {
     logger.error('Get overdue queries error', { error: error.message });

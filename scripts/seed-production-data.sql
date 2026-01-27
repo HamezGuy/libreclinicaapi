@@ -229,6 +229,48 @@ ON CONFLICT (item_id) DO NOTHING;
 SELECT setval('item_item_id_seq', 20);
 
 -- ============================================================================
+-- 10b. ITEM GROUP METADATA (Links items to CRF versions - CRITICAL for form saving)
+-- ============================================================================
+
+INSERT INTO item_group_metadata (item_group_metadata_id, item_group_id, crf_version_id, item_id, ordinal)
+VALUES
+  -- Demographics (crf_version_id = 1, item_group_id = 1)
+  (1, 1, 1, 1, 1),   -- DOB
+  (2, 1, 1, 2, 2),   -- GENDER
+  (3, 1, 1, 3, 3),   -- RACE
+  (4, 1, 1, 4, 4),   -- ETHNICITY
+  -- Vital Signs (crf_version_id = 2, item_group_id = 2)
+  (5, 2, 2, 5, 1),   -- SYSBP
+  (6, 2, 2, 6, 2),   -- DIABP
+  (7, 2, 2, 7, 3),   -- PULSE
+  (8, 2, 2, 8, 4),   -- TEMP
+  (9, 2, 2, 9, 5),   -- WEIGHT
+  (10, 2, 2, 10, 6), -- HEIGHT
+  -- Medical History (crf_version_id = 3, item_group_id = 3) - for simplicity reuse some items
+  (11, 3, 3, 1, 1),  -- DOB (for history reference)
+  -- Physical Exam (crf_version_id = 4, item_group_id = 4)
+  (12, 4, 4, 9, 1),  -- WEIGHT
+  (13, 4, 4, 10, 2), -- HEIGHT
+  -- Laboratory Results (crf_version_id = 5, item_group_id = 5)
+  (14, 5, 5, 11, 1), -- WBC
+  (15, 5, 5, 12, 2), -- RBC
+  (16, 5, 5, 13, 3), -- HGB
+  (17, 5, 5, 14, 4), -- PLT
+  (18, 5, 5, 15, 5), -- CREAT
+  (19, 5, 5, 16, 6), -- ALT
+  (20, 5, 5, 17, 7), -- AST
+  -- Concomitant Medications (crf_version_id = 6, item_group_id = 6) - placeholder
+  -- Adverse Events (crf_version_id = 7, item_group_id = 7) - placeholder
+  -- Study Drug Administration (crf_version_id = 8, item_group_id = 8) - placeholder
+  -- Efficacy Assessment (crf_version_id = 9, item_group_id = 9)
+  (21, 9, 9, 18, 1), -- PAIN_SCORE
+  (22, 9, 9, 19, 2), -- FUNCTION_SCORE
+  (23, 9, 9, 20, 3)  -- QOL_SCORE
+ON CONFLICT (item_group_metadata_id) DO NOTHING;
+
+SELECT setval('item_group_metadata_item_group_metadata_id_seq', 23);
+
+-- ============================================================================
 -- 11. SUBJECTS (Demographics table - 15 patients)
 -- ============================================================================
 
@@ -606,7 +648,8 @@ VALUES
   (7, NOW() - INTERVAL '10 days', 'item_data', 2, 33, 'PAIN_SCORE', 'Value updated', 1, '5', '4')
 ON CONFLICT (audit_id) DO NOTHING;
 
-SELECT setval('audit_log_event_audit_id_seq', 7);
+-- Set sequence to MAX of existing records to avoid duplicate key errors
+SELECT setval('audit_log_event_audit_id_seq', GREATEST((SELECT COALESCE(MAX(audit_id), 0) FROM audit_log_event), 7));
 
 -- ============================================================================
 -- 22. AUDIT USER LOGIN (Login history)
@@ -626,7 +669,63 @@ VALUES
   (10, 'monitor', 4, NOW() - INTERVAL '3 days', 1, 'Successful login', 1)
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('audit_user_login_id_seq', 10);
+-- Set sequence to MAX of existing records to avoid duplicate key errors
+SELECT setval('audit_user_login_id_seq', GREATEST((SELECT COALESCE(MAX(id), 0) FROM audit_user_login), 10));
+
+-- ============================================================================
+-- 23. VALIDATION RULES (For demonstrating query creation)
+-- ============================================================================
+
+-- Create validation_rules table if not exists
+CREATE TABLE IF NOT EXISTS validation_rules (
+  validation_rule_id SERIAL PRIMARY KEY,
+  crf_id INTEGER,
+  crf_version_id INTEGER,
+  item_id INTEGER,
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  rule_type VARCHAR(50) NOT NULL,
+  field_path VARCHAR(255),
+  severity VARCHAR(20) DEFAULT 'error',
+  error_message TEXT NOT NULL,
+  warning_message TEXT,
+  active BOOLEAN DEFAULT true,
+  min_value NUMERIC,
+  max_value NUMERIC,
+  pattern TEXT,
+  operator VARCHAR(20),
+  compare_field_path VARCHAR(255),
+  custom_expression TEXT,
+  date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  date_updated TIMESTAMP,
+  owner_id INTEGER,
+  update_id INTEGER
+);
+
+-- Insert validation rules for Vital Signs CRF (crf_id = 2)
+INSERT INTO validation_rules (validation_rule_id, crf_id, item_id, name, rule_type, field_path, severity, error_message, warning_message, min_value, max_value, active)
+VALUES
+  -- Systolic Blood Pressure range validation
+  (1, 2, 5, 'SYSBP Range', 'range', 'SYSBP', 'error', 'Systolic BP must be between 60 and 250 mmHg', 'Systolic BP is outside normal range (90-140)', 60, 250, true),
+  -- Diastolic Blood Pressure range validation  
+  (2, 2, 6, 'DIABP Range', 'range', 'DIABP', 'error', 'Diastolic BP must be between 30 and 150 mmHg', 'Diastolic BP is outside normal range (60-90)', 30, 150, true),
+  -- Pulse rate range validation
+  (3, 2, 7, 'PULSE Range', 'range', 'PULSE', 'error', 'Pulse must be between 30 and 200 bpm', 'Pulse is outside normal range (60-100)', 30, 200, true),
+  -- Temperature range validation
+  (4, 2, 8, 'TEMP Range', 'range', 'TEMP', 'error', 'Temperature must be between 34.0 and 42.0 °C', 'Temperature is outside normal range (36.1-37.2)', 34.0, 42.0, true),
+  -- Weight range validation
+  (5, 2, 9, 'WEIGHT Range', 'range', 'WEIGHT', 'error', 'Weight must be between 20 and 300 kg', NULL, 20, 300, true),
+  -- Height range validation
+  (6, 2, 10, 'HEIGHT Range', 'range', 'HEIGHT', 'error', 'Height must be between 50 and 250 cm', NULL, 50, 250, true),
+  -- SBP > DBP comparison validation
+  (7, 2, 5, 'SYSBP > DIABP', 'comparison', 'SYSBP', 'error', 'Systolic BP must be greater than Diastolic BP', NULL, NULL, NULL, true),
+  -- Required field validations
+  (8, 2, 5, 'SYSBP Required', 'required', 'SYSBP', 'error', 'Systolic Blood Pressure is required', NULL, NULL, NULL, true),
+  (9, 2, 6, 'DIABP Required', 'required', 'DIABP', 'error', 'Diastolic Blood Pressure is required', NULL, NULL, NULL, true),
+  (10, 2, 7, 'PULSE Required', 'required', 'PULSE', 'error', 'Pulse Rate is required', NULL, NULL, NULL, true)
+ON CONFLICT (validation_rule_id) DO NOTHING;
+
+SELECT setval('validation_rules_validation_rule_id_seq', 10);
 
 -- ============================================================================
 -- COMMIT TRANSACTION

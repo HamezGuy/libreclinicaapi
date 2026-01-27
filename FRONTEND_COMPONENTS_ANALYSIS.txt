@@ -1,0 +1,444 @@
+================================================================================
+              FRONTEND COMPONENTS & SERVICES ANALYSIS
+================================================================================
+                      Generated: November 28, 2025
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Project Structure Overview
+2. Core Services (LibreClinica Integration)
+3. Component-to-Service Mapping
+4. Current API URL Configuration
+5. Services That Need API Connection
+6. Components That Need Updates
+7. Data Flow Analysis
+
+================================================================================
+1. PROJECT STRUCTURE OVERVIEW
+================================================================================
+
+Location: D:\EDC-Projects\ElectronicDataCaptureReal\src\app
+
+Key Directories:
+├── components/          # UI Components
+│   ├── dashboard/       # Main dashboard
+│   ├── login/           # Authentication
+│   ├── queries-dashboard/
+│   ├── sdv-dashboard/
+│   ├── randomization-dashboard/
+│   ├── workflow-management/
+│   ├── user-management/
+│   ├── data-lock-management/
+│   ├── monitoring-dashboard/
+│   ├── ai-assistant/
+│   ├── my-tasks/
+│   └── ... (50+ components)
+├── services/            # API Services
+├── models/              # TypeScript Models
+├── interfaces/          # TypeScript Interfaces
+├── guards/              # Route Guards
+├── interceptors/        # HTTP Interceptors
+├── tokens/              # Dependency Injection Tokens
+└── store/               # NgRx State Management
+
+================================================================================
+2. CORE SERVICES (LIBRECLINICA INTEGRATION)
+================================================================================
+
+FULLY IMPLEMENTED SERVICES (Connected to API):
+----------------------------------------------
+
+1. LibreClinicaAuthService (libreclinica-auth.service.ts)
+   File: src/app/services/libreclinica-auth.service.ts
+   API Base: environment.apiUrl + '/auth'
+   Endpoints Used:
+   - POST /api/auth/login ✅
+   - POST /api/auth/google ✅
+   - GET /api/auth/verify ✅
+   - POST /api/auth/refresh ✅
+   Status: FULLY WORKING
+
+2. LibreClinicaStudyService (libreclinica-study.service.ts)
+   File: src/app/services/libreclinica-study.service.ts
+   API Base: environment.studyApiUrl
+   Endpoints Used:
+   - GET /api/studies ✅
+   - GET /api/studies/:id ✅
+   - GET /api/studies/:id/metadata ✅
+   - GET /api/studies/:id/forms ✅
+   - GET /api/studies/:id/sites ✅
+   - GET /api/studies/:id/events ✅
+   - GET /api/studies/:id/stats ✅
+   - GET /api/studies/:id/users ✅
+   Status: FULLY WORKING (READ), NEEDS CREATE/UPDATE/DELETE
+
+3. LibreClinicaSubjectService (libreclinica-subject.service.ts)
+   File: src/app/services/libreclinica-subject.service.ts
+   API Base: environment.subjectApiUrl
+   Endpoints Used:
+   - GET /api/subjects ✅
+   - GET /api/subjects/:id ✅
+   - GET /api/subjects/:id/progress ✅
+   - GET /api/subjects/:id/events ✅
+   - GET /api/subjects/:id/forms ✅
+   - POST /api/subjects ✅
+   - PUT /api/subjects/:id ✅
+   - PUT /api/subjects/:id/status ✅
+   - DELETE /api/subjects/:id ✅
+   Status: FULLY WORKING (CRUD)
+
+4. LibreClinicaFormService (libreclinica-form.service.ts)
+   File: src/app/services/libreclinica-form.service.ts
+   API Base: environment.formApiUrl
+   Endpoints Used:
+   - GET /api/forms ✅
+   - GET /api/forms/by-study ✅
+   - GET /api/forms/:id ✅
+   - GET /api/forms/:crfId/metadata ✅
+   - POST /api/forms/save ✅
+   - GET /api/forms/data/:eventCrfId ✅
+   - GET /api/forms/status/:eventCrfId ✅
+   Status: FULLY WORKING
+
+5. LibreClinicaQueryService (libreclinica-query.service.ts)
+   File: src/app/services/libreclinica-query.service.ts
+   API Base: environment.queryApiUrl
+   Endpoints Used:
+   - GET /api/queries ✅
+   - GET /api/queries/stats ✅
+   - GET /api/queries/:id ✅
+   - POST /api/queries ✅
+   - POST /api/queries/:id/respond ✅
+   - PUT /api/queries/:id/status ✅
+   Status: FULLY WORKING
+
+6. LibreClinicaDashboardService (libreclinica-dashboard.service.ts)
+   File: src/app/services/libreclinica-dashboard.service.ts
+   API Base: environment.dashboardApiUrl
+   Endpoints Used:
+   - GET /api/dashboard/enrollment ✅
+   - GET /api/dashboard/completion ✅
+   - GET /api/dashboard/queries ✅
+   - GET /api/dashboard/activity ✅
+   Status: FULLY WORKING
+
+7. LibreClinicaWorkflowService (libreclinica-workflow.service.ts)
+   File: src/app/services/libreclinica-workflow.service.ts
+   API Base: environment.apiUrl + '/workflows'
+   Endpoints Used:
+   - GET /api/workflows ✅
+   - GET /api/workflows/user/:userId ✅
+   - GET /api/workflows/user/:userId/summary ✅
+   - POST /api/workflows ✅
+   - PUT /api/workflows/:id/status ✅
+   - POST /api/workflows/:id/complete ✅
+   - POST /api/workflows/:id/approve ✅
+   - POST /api/workflows/:id/reject ✅
+   - POST /api/workflows/:id/handoff ✅
+   Status: FULLY WORKING
+
+8. LibreClinicaSDVService (libreclinica-sdv.service.ts)
+   File: src/app/services/libreclinica-sdv.service.ts
+   API Base: environment.libreclinicaApiUrl + '/sdv'
+   Endpoints Used:
+   - GET /api/sdv ✅
+   - GET /api/sdv/:id ✅
+   - PUT /api/sdv/:id/verify ✅
+   Status: FULLY WORKING
+
+9. LibreClinicaRandomizationService (libreclinica-randomization.service.ts)
+   File: src/app/services/libreclinica-randomization.service.ts
+   API Base: environment.libreclinicaApiUrl + '/randomization'
+   Endpoints Used:
+   - GET /api/randomization ✅
+   - POST /api/randomization ✅
+   - GET /api/randomization/groups/:studyId ✅
+   Status: FULLY WORKING
+
+10. LibreClinicaEventService (libreclinica-event.service.ts)
+    File: src/app/services/libreclinica-event.service.ts
+    API Base: environment.libreclinicaApiUrl + '/events'
+    Endpoints Used:
+    - GET /api/events/study/:studyId ✅
+    - GET /api/events/:id ✅
+    - GET /api/events/:id/crfs ✅
+    - GET /api/events/subject/:subjectId ✅
+    - POST /api/events ✅
+    - PUT /api/events/:id ✅
+    - DELETE /api/events/:id ✅
+    - POST /api/events/schedule ✅
+    Status: FULLY WORKING
+
+11. LibreClinicaUserService (libreclinica-user.service.ts)
+    File: src/app/services/libreclinica-user.service.ts
+    API Base: environment.userApiUrl
+    Endpoints Used:
+    - GET /api/users ✅
+    - GET /api/users/:id ✅
+    - POST /api/users ✅
+    - PUT /api/users/:id ✅
+    - DELETE /api/users/:id ✅
+    - GET /api/users/meta/roles ✅
+    - POST /api/users/:id/assign-study ✅
+    - GET /api/users/:id/role/:studyId ✅
+    Status: FULLY WORKING
+
+12. LibreClinicaAuditService (libreclinica-audit.service.ts)
+    File: src/app/services/libreclinica-audit.service.ts
+    API Base: environment.auditApiUrl
+    Endpoints Used:
+    - GET /api/audit ✅
+    - GET /api/audit/export ✅
+    - GET /api/audit/subject/:id ✅
+    Status: FULLY WORKING
+
+================================================================================
+3. COMPONENT-TO-SERVICE MAPPING
+================================================================================
+
+Dashboard Component (dashboard.component.ts)
+--------------------------------------------
+Services Injected:
+- AUTH_SERVICE_TOKEN → EnhancedAuthService
+- PATIENT_SERVICE_TOKEN → LibreClinicaPatientAdapter
+- STUDY_SERVICE_TOKEN → LibreClinicaStudyAdapter
+- FORM_TEMPLATE_SERVICE_TOKEN → LibreClinicaFormTemplateAdapter
+- STUDY_PHASE_SERVICE_TOKEN → LibreClinicaStudyPhaseAdapter
+- LibreClinicaAuditService (directly)
+Status: CONNECTED via adapters
+
+Login Component (login.component.ts)
+------------------------------------
+Services Injected:
+- LibreClinicaAuthService (directly)
+Status: CONNECTED
+
+Queries Dashboard (queries-dashboard.component.ts)
+--------------------------------------------------
+Services Needed: LibreClinicaQueryService
+Status: NEEDS INJECTION
+
+SDV Dashboard (sdv-dashboard.component.ts)
+------------------------------------------
+Services Needed: LibreClinicaSDVService
+Status: NEEDS INJECTION
+
+Randomization Dashboard (randomization-dashboard.component.ts)
+--------------------------------------------------------------
+Services Needed: LibreClinicaRandomizationService
+Status: NEEDS INJECTION
+
+Workflow Management (workflow-management.component.ts)
+------------------------------------------------------
+Services Needed: LibreClinicaWorkflowService
+Status: NEEDS INJECTION
+
+My Tasks (my-tasks.component.ts)
+--------------------------------
+Services Needed: LibreClinicaWorkflowService
+Status: NEEDS INJECTION
+
+User Management (user-management.component.ts)
+----------------------------------------------
+Services Needed: LibreClinicaUserService
+Status: NEEDS INJECTION
+
+Data Lock Management (data-lock-management.component.ts)
+---------------------------------------------------------
+Services Needed: Data Lock Service
+Status: NEEDS SERVICE + INJECTION
+
+Monitoring Dashboard (monitoring-dashboard.component.ts)
+--------------------------------------------------------
+Services Needed: LibreClinicaMonitoringService
+Status: NEEDS SERVICE + INJECTION
+
+AI Assistant (ai-assistant.component.ts)
+----------------------------------------
+Services Needed: AI Service (already has ai-assistant.service.ts)
+Status: NEEDS UPDATE TO USE API
+
+================================================================================
+4. CURRENT API URL CONFIGURATION
+================================================================================
+
+File: src/environments/environment.ts
+
+CURRENT CONFIGURATION:
+{
+  production: false,
+  apiUrl: 'https://api.accuratrials.com/api',  // PRODUCTION URL
+  aiBackendUrl: 'https://api.accuratrials.com/api/ai',
+  firebase: { ... }
+}
+
+ISSUE: Missing specific endpoint URLs. The services expect:
+- environment.studyApiUrl
+- environment.subjectApiUrl
+- environment.formApiUrl
+- environment.queryApiUrl
+- environment.dashboardApiUrl
+- environment.userApiUrl
+- environment.auditApiUrl
+- environment.libreclinicaApiUrl
+
+REQUIRED FIX:
+Add all endpoint URLs based on the main apiUrl.
+
+================================================================================
+5. SERVICES THAT NEED API CONNECTION
+================================================================================
+
+Services Currently NOT Using Real API:
+--------------------------------------
+
+1. MockAuthService (mock-auth.service.ts)
+   - Used for testing only
+   - Keep as backup
+
+2. MockPatientService (mock-patient.service.ts)
+   - Should be replaced by LibreClinicaPatientAdapter
+   - Already done via token injection
+
+3. MockStudyService (mock-study.service.ts)
+   - Should be replaced by LibreClinicaStudyAdapter
+   - Already done via token injection
+
+4. MockFormTemplateService (mock-form-template.service.ts)
+   - Should be replaced by LibreClinicaFormTemplateAdapter
+   - Already done via token injection
+
+5. MockStudyPhaseService (mock-study-phase.service.ts)
+   - Should be replaced by LibreClinicaStudyPhaseAdapter
+   - Already done via token injection
+
+Services Needing Creation:
+--------------------------
+
+1. LibreClinicaDataLockService
+   - For data-lock-management component
+   - API: /api/data-locks
+
+2. LibreClinicaMonitoringService
+   - For monitoring-dashboard component
+   - API: /api/monitoring
+
+3. LibreClinicaCodingService
+   - For meddra-coding-modal, whodrug-coding-modal
+   - API: /api/coding
+
+================================================================================
+6. COMPONENTS THAT NEED UPDATES
+================================================================================
+
+PRIORITY 1 - Core Functionality:
+--------------------------------
+
+1. queries-dashboard.component.ts
+   - Inject LibreClinicaQueryService
+   - Replace mock data with API calls
+   - Add CRUD operations
+
+2. sdv-dashboard.component.ts
+   - Inject LibreClinicaSDVService
+   - Replace mock data with API calls
+   - Add verification functionality
+
+3. randomization-dashboard.component.ts
+   - Inject LibreClinicaRandomizationService
+   - Replace mock data with API calls
+   - Add randomization functionality
+
+4. workflow-management.component.ts
+   - Inject LibreClinicaWorkflowService
+   - Replace mock data with API calls
+   - Add full workflow operations
+
+5. my-tasks.component.ts
+   - Inject LibreClinicaWorkflowService
+   - Get user-specific tasks from API
+
+6. user-management.component.ts
+   - Inject LibreClinicaUserService
+   - Replace mock data with API calls
+   - Add CRUD operations
+
+PRIORITY 2 - Additional Features:
+---------------------------------
+
+7. data-lock-management.component.ts
+   - Create/inject data lock service
+   - Connect to /api/data-locks
+
+8. monitoring-dashboard.component.ts
+   - Create/inject monitoring service
+   - Connect to /api/monitoring
+
+9. ai-assistant.component.ts
+   - Update to use /api/ai endpoints
+   - Connect chat functionality
+
+10. patient-enrollment-modal.component.ts
+    - Ensure using LibreClinicaSubjectService.createSubject()
+
+11. patient-randomization-modal.component.ts
+    - Use LibreClinicaRandomizationService.randomizeSubject()
+
+12. query-creation-modal.component.ts
+    - Use LibreClinicaQueryService.createQuery()
+
+13. sdv-workflow-modal.component.ts
+    - Use LibreClinicaSDVService.verifySDV()
+
+================================================================================
+7. DATA FLOW ANALYSIS
+================================================================================
+
+Authentication Flow:
+-------------------
+1. User enters credentials in LoginComponent
+2. LibreClinicaAuthService.login() called
+3. POST /api/auth/login
+4. JWT tokens stored in localStorage
+5. User redirected to Dashboard
+6. authInterceptor adds Bearer token to all requests
+
+Patient Data Flow:
+-----------------
+1. DashboardComponent loads
+2. PATIENT_SERVICE_TOKEN → LibreClinicaPatientAdapter
+3. LibreClinicaPatientAdapter → LibreClinicaSubjectService
+4. LibreClinicaSubjectService → GET /api/subjects
+5. Data mapped and displayed
+
+Study Data Flow:
+---------------
+1. DashboardComponent loads
+2. STUDY_SERVICE_TOKEN → LibreClinicaStudyAdapter
+3. LibreClinicaStudyAdapter → LibreClinicaStudyService
+4. LibreClinicaStudyService → GET /api/studies
+5. Data mapped and displayed
+
+Form Data Flow (for data entry):
+-------------------------------
+1. User opens form
+2. LibreClinicaFormService.getFormMetadata() for structure
+3. LibreClinicaFormService.getFormData() for existing data
+4. User fills form
+5. LibreClinicaFormService.saveFormData() → POST /api/forms/save
+6. Backend uses SOAP to save to LibreClinica
+
+Query Data Flow:
+---------------
+1. QueriesDashboardComponent loads
+2. LibreClinicaQueryService.getQueries()
+3. GET /api/queries with filters
+4. Display in dashboard
+5. User creates/responds to query
+6. POST /api/queries or POST /api/queries/:id/respond
+
+================================================================================
+END OF ANALYSIS
+================================================================================
+

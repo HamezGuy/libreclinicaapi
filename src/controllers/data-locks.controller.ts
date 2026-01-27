@@ -210,6 +210,8 @@ export const lockEvent = asyncHandler(async (req: Request, res: Response) => {
  * Unlock all data for a study event (visit)
  * DELETE /api/data-locks/event/:studyEventId
  * Body: { reason: string }
+ * 
+ * 21 CFR Part 11 §11.10(e) - Audit trail for unlock actions
  */
 export const unlockEvent = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
@@ -226,10 +228,13 @@ export const unlockEvent = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  // Reuse the individual form unlock for each form in the event
-  // For now, we'll use the subject unlock as a basis
-  // TODO: Add specific event unlock to service
-  res.status(501).json({ success: false, message: 'Event unlock not yet implemented' });
+  const result = await dataLocksService.unlockEventData(
+    parseInt(studyEventId),
+    user.userId,
+    reason
+  );
+
+  res.json(result);
 });
 
 export default { 

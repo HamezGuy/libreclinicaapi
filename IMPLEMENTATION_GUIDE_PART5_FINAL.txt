@@ -1,0 +1,690 @@
+================================================================================
+COMPLETE IMPLEMENTATION GUIDE - PART 5 (ANGULAR INTEGRATION & TESTING)
+LibreClinica API + Angular Integration
+================================================================================
+
+FINAL PART - ANGULAR INTEGRATION
+
+================================================================================
+PHASE 8: ANGULAR INTEGRATION (4-5 HOURS)
+================================================================================
+
+Task 8.1: Update Angular Environment
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\environments\environment.ts
+
+Update with:
+```typescript
+export const environment = {
+  production: false,
+  apiUrl: 'http://localhost:3000/api',
+  firebaseConfig: {
+    // ... existing config ...
+  },
+  // Add LibreClinica API
+  libreclinicaApi: {
+    baseUrl: 'http://localhost:3000/api',
+    timeout: 30000
+  }
+};
+```
+
+Task 8.2: Create HTTP Interceptor
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\app\interceptors\auth.interceptor.ts
+
+Code:
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpInterceptor, HttpRequest, HttpHandler, HttpEvent, HttpErrorResponse } from '@angular/common/http';
+import { Observable, throwError } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+import { Router } from '@angular/router';
+
+@Injectable()
+export class AuthInterceptor implements HttpInterceptor {
+  constructor(private router: Router) {}
+
+  intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
+    // Get token from localStorage
+    const token = localStorage.getItem('libreclinica_token');
+    
+    // Clone request and add authorization header
+    if (token) {
+      req = req.clone({
+        setHeaders: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+    }
+    
+    return next.handle(req).pipe(
+      catchError((error: HttpErrorResponse) => {
+        if (error.status === 401) {
+          // Token expired or invalid
+          localStorage.removeItem('libreclinica_token');
+          localStorage.removeItem('libreclinica_refresh_token');
+          this.router.navigate(['/login']);
+        }
+        return throwError(() => error);
+      })
+    );
+  }
+}
+```
+
+Task 8.3: Create LibreClinica Auth Service
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\app\services\libreclinica-auth.service.ts
+
+Code:
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable, BehaviorSubject } from 'rxjs';
+import { map, tap } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
+
+export interface LoginResponse {
+  success: boolean;
+  data?: {
+    token: string;
+    refreshToken: string;
+    user: {
+      userId: number;
+      userName: string;
+      email: string;
+      userType: string;
+    };
+  };
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class LibreclinicaAuthService {
+  private baseUrl = environment.libreclinicaApi.baseUrl;
+  private currentUserSubject = new BehaviorSubject<any>(null);
+  public currentUser$ = this.currentUserSubject.asObservable();
+
+  constructor(private http: HttpClient) {
+    // Load user from localStorage on init
+    const token = localStorage.getItem('libreclinica_token');
+    if (token) {
+      this.verifyToken().subscribe();
+    }
+  }
+
+  login(username: string, password: string): Observable<LoginResponse> {
+    return this.http.post<LoginResponse>(`${this.baseUrl}/auth/login`, {
+      username,
+      password
+    }).pipe(
+      tap(response => {
+        if (response.success && response.data) {
+          localStorage.setItem('libreclinica_token', response.data.token);
+          localStorage.setItem('libreclinica_refresh_token', response.data.refreshToken);
+          this.currentUserSubject.next(response.data.user);
+        }
+      })
+    );
+  }
+
+  googleLogin(googleToken: string): Observable<LoginResponse> {
+    return this.http.post<LoginResponse>(`${this.baseUrl}/auth/google`, {
+      googleToken
+    }).pipe(
+      tap(response => {
+        if (response.success && response.data) {
+          localStorage.setItem('libreclinica_token', response.data.token);
+          localStorage.setItem('libreclinica_refresh_token', response.data.refreshToken);
+          this.currentUserSubject.next(response.data.user);
+        }
+      })
+    );
+  }
+
+  logout(): void {
+    localStorage.removeItem('libreclinica_token');
+    localStorage.removeItem('libreclinica_refresh_token');
+    this.currentUserSubject.next(null);
+  }
+
+  verifyToken(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/auth/verify`).pipe(
+      tap(response => {
+        if (response.success && response.data) {
+          this.currentUserSubject.next(response.data.user);
+        }
+      })
+    );
+  }
+
+  refreshToken(): Observable<any> {
+    const refreshToken = localStorage.getItem('libreclinica_refresh_token');
+    return this.http.post<any>(`${this.baseUrl}/auth/refresh`, {
+      refreshToken
+    }).pipe(
+      tap(response => {
+        if (response.success && response.data) {
+          localStorage.setItem('libreclinica_token', response.data.token);
+          localStorage.setItem('libreclinica_refresh_token', response.data.refreshToken);
+        }
+      })
+    );
+  }
+
+  isAuthenticated(): boolean {
+    return !!localStorage.getItem('libreclinica_token');
+  }
+
+  getCurrentUser(): any {
+    return this.currentUserSubject.value;
+  }
+}
+```
+
+Task 8.4: Create LibreClinica Patient Service
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\app\services\libreclinica-patient.service.ts
+
+Code:
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
+import { Patient } from '../models/patient.model';
+
+@Injectable({
+  providedIn: 'root'
+})
+export class LibreclinicaPatientService {
+  private baseUrl = environment.libreclinicaApi.baseUrl;
+
+  constructor(private http: HttpClient) {}
+
+  getPatients(studyId: number): Observable<Patient[]> {
+    return this.http.get<any>(`${this.baseUrl}/subjects?studyId=${studyId}`).pipe(
+      map(response => {
+        if (response.success) {
+          return response.data.map((subject: any) => this.mapToPatient(subject));
+        }
+        return [];
+      })
+    );
+  }
+
+  getPatientById(id: string): Observable<Patient | null> {
+    return this.http.get<any>(`${this.baseUrl}/subjects/${id}`).pipe(
+      map(response => {
+        if (response.success) {
+          return this.mapToPatient(response.data);
+        }
+        return null;
+      })
+    );
+  }
+
+  createPatient(patient: Partial<Patient>, studyId: number, studyIdentifier: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/subjects`, {
+      studyId,
+      studyIdentifier,
+      subjectLabel: patient.patientId,
+      gender: patient.gender === 'Male' ? 'm' : 'f',
+      dateOfBirth: patient.dateOfBirth,
+      enrollmentDate: patient.enrollmentDate || new Date().toISOString()
+    });
+  }
+
+  private mapToPatient(subject: any): Patient {
+    return {
+      id: subject.study_subject_id.toString(),
+      patientId: subject.label,
+      firstName: subject.first_name || '',
+      lastName: subject.last_name || '',
+      dateOfBirth: subject.date_of_birth ? new Date(subject.date_of_birth) : undefined,
+      gender: subject.gender === 'm' ? 'Male' : 'Female',
+      email: subject.email || '',
+      phone: subject.phone || '',
+      status: subject.status_name || 'Active',
+      enrollmentDate: new Date(subject.enrollment_date),
+      studyId: subject.study_id.toString(),
+      siteId: subject.site_id?.toString() || '',
+      consentDate: new Date(subject.enrollment_date),
+      createdAt: new Date(subject.date_created),
+      updatedAt: subject.date_updated ? new Date(subject.date_updated) : new Date(subject.date_created)
+    };
+  }
+}
+```
+
+Task 8.5: Create Audit Trail Service
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\app\services\libreclinica-audit.service.ts
+
+Code:
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
+
+export interface AuditEntry {
+  auditId: number;
+  auditDate: Date;
+  auditTable: string;
+  userId: number;
+  userName: string;
+  entityId: number;
+  actionMessage: string;
+  oldValue: string;
+  newValue: string;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class LibreclinicaAuditService {
+  private baseUrl = environment.libreclinicaApi.baseUrl;
+
+  constructor(private http: HttpClient) {}
+
+  getAuditTrail(filters: {
+    userId?: number;
+    studyId?: number;
+    subjectId?: number;
+    startDate?: Date;
+    endDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Observable<{ items: AuditEntry[], total: number }> {
+    const params: any = {};
+    
+    if (filters.userId) params.userId = filters.userId;
+    if (filters.studyId) params.studyId = filters.studyId;
+    if (filters.subjectId) params.subjectId = filters.subjectId;
+    if (filters.startDate) params.startDate = filters.startDate.toISOString();
+    if (filters.endDate) params.endDate = filters.endDate.toISOString();
+    if (filters.limit) params.limit = filters.limit;
+    if (filters.offset) params.offset = filters.offset;
+    
+    const queryString = new URLSearchParams(params).toString();
+    
+    return this.http.get<any>(`${this.baseUrl}/audit?${queryString}`).pipe(
+      map(response => {
+        if (response.success) {
+          return {
+            items: response.data.items.map((item: any) => ({
+              auditId: item.audit_id,
+              auditDate: new Date(item.audit_date),
+              auditTable: item.audit_table,
+              userId: item.user_id,
+              userName: item.user_name,
+              entityId: item.entity_id,
+              actionMessage: item.action_message,
+              oldValue: item.old_value,
+              newValue: item.new_value
+            })),
+            total: response.data.total
+          };
+        }
+        return { items: [], total: 0 };
+      })
+    );
+  }
+
+  getSubjectAudit(subjectId: number): Observable<AuditEntry[]> {
+    return this.http.get<any>(`${this.baseUrl}/audit/subject/${subjectId}`).pipe(
+      map(response => {
+        if (response.success) {
+          return response.data.map((item: any) => ({
+            auditId: item.audit_id,
+            auditDate: new Date(item.audit_date),
+            auditTable: item.audit_table,
+            userId: item.user_id,
+            userName: item.user_name,
+            entityId: item.entity_id,
+            actionMessage: item.action_message,
+            oldValue: item.old_value,
+            newValue: item.new_value
+          }));
+        }
+        return [];
+      })
+    );
+  }
+
+  exportAuditTrail(filters: any): void {
+    const params = new URLSearchParams(filters).toString();
+    window.open(`${this.baseUrl}/audit/export?${params}`, '_blank');
+  }
+}
+```
+
+Task 8.6: Create Dashboard Service
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\app\services\libreclinica-dashboard.service.ts
+
+Code:
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
+
+@Injectable({
+  providedIn: 'root'
+})
+export class LibreclinicaDashboardService {
+  private baseUrl = environment.libreclinicaApi.baseUrl;
+
+  constructor(private http: HttpClient) {}
+
+  getEnrollmentStats(studyId?: number): Observable<any[]> {
+    const url = studyId 
+      ? `${this.baseUrl}/dashboard/enrollment?studyId=${studyId}`
+      : `${this.baseUrl}/dashboard/enrollment`;
+    
+    return this.http.get<any>(url).pipe(
+      map(response => response.success ? response.data : [])
+    );
+  }
+
+  getCompletionStats(studyId: number): Observable<any[]> {
+    return this.http.get<any>(`${this.baseUrl}/dashboard/completion?studyId=${studyId}`).pipe(
+      map(response => response.success ? response.data : [])
+    );
+  }
+
+  getQueryStats(studyId: number): Observable<any[]> {
+    return this.http.get<any>(`${this.baseUrl}/dashboard/queries?studyId=${studyId}`).pipe(
+      map(response => response.success ? response.data : [])
+    );
+  }
+
+  getUserActivity(studyId: number, days: number = 30): Observable<any[]> {
+    return this.http.get<any>(`${this.baseUrl}/dashboard/activity?studyId=${studyId}&days=${days}`).pipe(
+      map(response => response.success ? response.data : [])
+    );
+  }
+}
+```
+
+Task 8.7: Update Angular App Module
+───────────────────────────────────────────────────────────────────────────
+
+File: D:\EDC-Projects\ElectronicDataCaptureReal\src\app\app.module.ts (or app.config.ts for standalone)
+
+Add to providers:
+```typescript
+import { HTTP_INTERCEPTORS } from '@angular/common/http';
+import { AuthInterceptor } from './interceptors/auth.interceptor';
+
+// In providers array:
+{
+  provide: HTTP_INTERCEPTORS,
+  useClass: AuthInterceptor,
+  multi: true
+}
+```
+
+Task 8.8: Update Service Providers
+───────────────────────────────────────────────────────────────────────────
+
+Update any component or module that currently uses mock services:
+
+OLD:
+```typescript
+providers: [
+  { provide: AuthService, useClass: MockAuthService },
+  { provide: PatientService, useClass: MockPatientService }
+]
+```
+
+NEW:
+```typescript
+providers: [
+  { provide: AuthService, useClass: LibreclinicaAuthService },
+  { provide: PatientService, useClass: LibreclinicaPatientService }
+]
+```
+
+Or create an interface and implement it:
+```typescript
+// Keep your existing IAuthService interface
+export class LibreclinicaAuthService implements IAuthService {
+  // Implement all interface methods
+}
+```
+
+================================================================================
+PHASE 9: TESTING (2-3 HOURS)
+================================================================================
+
+Task 9.1: Test Backend API
+───────────────────────────────────────────────────────────────────────────
+
+1. Start LibreClinica Docker:
+   ```bash
+   cd D:\EDC-Projects\LibreClinica-Setup\LibreClinica
+   docker compose up -d
+   ```
+
+2. Start the API:
+   ```bash
+   cd D:\EDC-Projects\libreclinica-api
+   npm run dev
+   ```
+
+3. Test health endpoint:
+   ```bash
+   curl http://localhost:3000/health
+   ```
+
+4. Test login:
+   ```bash
+   curl -X POST http://localhost:3000/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d "{\"username\":\"root\",\"password\":\"root\"}"
+   ```
+
+5. Save the token and test authenticated endpoint:
+   ```bash
+   curl http://localhost:3000/api/subjects?studyId=1 \
+     -H "Authorization: Bearer YOUR_TOKEN_HERE"
+   ```
+
+Task 9.2: Test Angular Integration
+───────────────────────────────────────────────────────────────────────────
+
+1. Make sure API is running on http://localhost:3000
+
+2. Start Angular app:
+   ```bash
+   cd D:\EDC-Projects\ElectronicDataCaptureReal
+   npm start
+   ```
+
+3. Open browser to http://localhost:4200
+
+4. Test login flow:
+   - Navigate to login page
+   - Enter LibreClinica credentials (root/root)
+   - Verify successful login and token storage
+   - Check browser console for API calls
+
+5. Test patient list:
+   - Navigate to patients/subjects page
+   - Verify data loads from API
+   - Check network tab for API requests
+
+6. Test audit trail:
+   - Navigate to audit trail page
+   - Verify audit entries display
+   - Test filters and export
+
+Task 9.3: End-to-End Test
+───────────────────────────────────────────────────────────────────────────
+
+Complete workflow test:
+
+1. Login to Angular UI
+2. View dashboard statistics
+3. View patient/subject list
+4. Create new subject (tests SOAP API)
+5. View subject details
+6. View audit trail for subject
+7. Export audit trail
+8. Logout
+
+Verify:
+- All API calls use Bearer token
+- All actions are logged in audit_log_event table
+- SOAP calls succeed for write operations
+- Database queries work for read operations
+- Errors are handled gracefully
+- Session timeout works (wait 30 minutes)
+
+================================================================================
+PHASE 10: DEPLOYMENT CHECKLIST
+================================================================================
+
+Before Production:
+
+1. Environment Variables:
+   ✓ Change JWT_SECRET to strong random value
+   ✓ Set NODE_ENV=production
+   ✓ Configure HTTPS_ONLY=true
+   ✓ Set secure CORS origins
+   ✓ Configure Google OAuth credentials
+
+2. Security:
+   ✓ Enable HTTPS/TLS
+   ✓ Configure firewall rules
+   ✓ Review rate limits
+   ✓ Test account lockout
+   ✓ Verify password complexity
+
+3. Database:
+   ✓ Backup LibreClinica database
+   ✓ Test connection pool limits
+   ✓ Verify audit_user_api_log table created
+
+4. Monitoring:
+   ✓ Check log files are rotating
+   ✓ Set up log monitoring
+   ✓ Configure alerts for errors
+   ✓ Monitor disk space for logs
+
+5. Documentation:
+   ✓ Document API endpoints
+   ✓ Create user guides
+   ✓ Document deployment process
+   ✓ Create troubleshooting guide
+
+================================================================================
+TROUBLESHOOTING GUIDE
+================================================================================
+
+Problem: API won't start
+Solution:
+- Check PostgreSQL is running (LibreClinica DB)
+- Verify .env file has correct database credentials
+- Check logs in logs/error.log
+- Verify port 3000 is not in use
+
+Problem: SOAP calls fail
+Solution:
+- Verify LibreClinica is running (http://localhost:8080/LibreClinica)
+- Check SOAP_USERNAME and SOAP_PASSWORD in .env
+- Check logs for SOAP error messages
+- Test SOAP directly: http://localhost:8080/LibreClinica/ws/studySubject/v1?wsdl
+
+Problem: Authentication fails
+Solution:
+- Verify user exists in user_account table
+- Check password is hashed with MD5
+- Verify account_non_locked = true
+- Check login_attempts < 5
+- Verify enabled = true
+
+Problem: Angular can't connect to API
+Solution:
+- Check API is running on http://localhost:3000
+- Verify CORS origins include http://localhost:4200
+- Check browser console for CORS errors
+- Verify network tab shows 200 responses
+
+Problem: Audit trail not logging
+Solution:
+- Check audit_user_api_log table exists
+- Verify database user has INSERT permissions
+- Check logs/audit.log file
+- Verify auditMiddleware is registered in app.ts
+
+================================================================================
+COMPLETION CHECKLIST
+================================================================================
+
+Backend API:
+☐ All middleware files created
+☐ Authentication service with Google OAuth
+☐ SOAP wrapper services (Subject, Data, Study, Event)
+☐ Database services (Audit, Query, Dashboard, User)
+☐ All controllers created
+☐ All routes configured
+☐ app.ts and server.ts created
+☐ API tested with curl/Postman
+
+Angular Integration:
+☐ Environment updated with API URL
+☐ HTTP interceptor created
+☐ LibreclinicaAuthService created
+☐ LibreclinicaPatientService created
+☐ LibreclinicaAuditService created
+☐ LibreclinicaDashboardService created
+☐ Providers updated to use real services
+☐ App tested end-to-end
+
+Documentation:
+☐ API endpoint documentation
+☐ Deployment guide
+☐ User guide
+☐ Troubleshooting guide
+
+Security & Compliance:
+☐ All 21 CFR Part 11 requirements met
+☐ Audit trail working
+☐ Password complexity enforced
+☐ Session timeout working
+☐ Account lockout working
+☐ HTTPS ready for production
+
+================================================================================
+END OF IMPLEMENTATION GUIDE
+================================================================================
+
+TOTAL ESTIMATED TIME: 30-40 hours
+
+For questions or issues:
+- Review Integration-Research folder for specifications
+- Check LibreClinica database schema (122 tables documented)
+- Review Part 11 compliance requirements
+- Test SOAP endpoints directly in LibreClinica
+
+Good luck with implementation! 🚀
+

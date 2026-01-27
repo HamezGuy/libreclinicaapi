@@ -1,0 +1,739 @@
+================================================================================
+COMPLETE IMPLEMENTATION GUIDE - PART 2
+LibreClinica API + Angular Integration
+================================================================================
+
+CONTINUED FROM PART 1...
+
+================================================================================
+PHASE 2: AUTHENTICATION & UTILITIES (3-4 HOURS)
+================================================================================
+
+Task 2.1: Create JWT Utilities
+───────────────────────────────────────────────────────────────────────────
+
+File: src/utils/jwt.util.ts
+
+Code:
+```typescript
+import jwt from 'jsonwebtoken';
+import { config } from '../config/environment';
+
+export interface TokenPayload {
+  userId: number;
+  userName: string;
+  email: string;
+  userType: string;
+}
+
+export function generateToken(payload: TokenPayload): string {
+  return jwt.sign(payload, config.jwt.secret, {
+    expiresIn: config.jwt.expiresIn
+  });
+}
+
+export function generateRefreshToken(payload: TokenPayload): string {
+  return jwt.sign(payload, config.jwt.secret, {
+    expiresIn: config.jwt.refreshExpiresIn
+  });
+}
+
+export function verifyToken(token: string): TokenPayload {
+  return jwt.verify(token, config.jwt.secret) as TokenPayload;
+}
+```
+
+Task 2.2: Create Password Utilities
+───────────────────────────────────────────────────────────────────────────
+
+File: src/utils/password.util.ts
+
+Purpose: LibreClinica uses MD5 for passwords, validate complexity for Part 11
+
+Code:
+```typescript
+import md5 from 'md5';
+import { config } from '../config/environment';
+
+export interface PasswordValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+/**
+ * Validate password against 21 CFR Part 11 requirements
+ */
+export function validatePassword(password: string): PasswordValidationResult {
+  const errors: string[] = [];
+  
+  if (password.length < config.part11.passwordMinLength) {
+    errors.push(`Password must be at least ${config.part11.passwordMinLength} characters`);
+  }
+  
+  if (config.part11.passwordRequireUppercase && !/[A-Z]/.test(password)) {
+    errors.push('Password must contain at least one uppercase letter');
+  }
+  
+  if (config.part11.passwordRequireLowercase && !/[a-z]/.test(password)) {
+    errors.push('Password must contain at least one lowercase letter');
+  }
+  
+  if (config.part11.passwordRequireNumber && !/[0-9]/.test(password)) {
+    errors.push('Password must contain at least one number');
+  }
+  
+  if (config.part11.passwordRequireSpecial && !/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+    errors.push('Password must contain at least one special character');
+  }
+  
+  return {
+    valid: errors.length === 0,
+    errors
+  };
+}
+
+/**
+ * Hash password for LibreClinica (MD5)
+ */
+export function hashPassword(password: string): string {
+  return md5(password);
+}
+
+/**
+ * Compare password with hash
+ */
+export function comparePassword(password: string, hash: string): boolean {
+  return md5(password) === hash;
+}
+```
+
+Task 2.3: Create Authentication Service
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/database/auth.service.ts
+
+Purpose: Handle authentication, login tracking, account lockout
+
+Code:
+```typescript
+import { db } from '../../config/database';
+import { logger } from '../../config/logger';
+import { comparePassword, hashPassword, validatePassword } from '../../utils/password.util';
+import { generateToken, generateRefreshToken, TokenPayload } from '../../utils/jwt.util';
+import { OAuth2Client } from 'google-auth-library';
+import { config } from '../../config/environment';
+
+const googleClient = new OAuth2Client(config.google.clientId);
+
+export interface LoginResult {
+  success: boolean;
+  token?: string;
+  refreshToken?: string;
+  user?: any;
+  error?: string;
+}
+
+/**
+ * Authenticate user with username/password
+ */
+export async function authenticateUser(
+  username: string,
+  password: string,
+  ipAddress: string
+): Promise<LoginResult> {
+  try {
+    // Get user from database
+    const userResult = await db.query(`
+      SELECT user_id, user_name, passwd, email, user_type_id, 
+             account_non_locked, enabled, login_attempts, lockout_time
+      FROM user_account
+      WHERE LOWER(user_name) = LOWER($1)
+    `, [username]);
+    
+    if (userResult.rows.length === 0) {
+      await logFailedLogin(username, ipAddress, 'User not found');
+      return { success: false, error: 'Invalid credentials' };
+    }
+    
+    const user = userResult.rows[0];
+    
+    // Check if account is locked
+    if (!user.account_non_locked) {
+      const lockoutTime = new Date(user.lockout_time);
+      const now = new Date();
+      const minutesLocked = Math.floor((now.getTime() - lockoutTime.getTime()) / 60000);
+      
+      if (minutesLocked < config.part11.accountLockoutDurationMinutes) {
+        const remainingMinutes = config.part11.accountLockoutDurationMinutes - minutesLocked;
+        await logFailedLogin(username, ipAddress, 'Account locked');
+        return { 
+          success: false, 
+          error: `Account locked. Try again in ${remainingMinutes} minutes.` 
+        };
+      } else {
+        // Unlock account
+        await db.query(`
+          UPDATE user_account 
+          SET account_non_locked = true, login_attempts = 0
+          WHERE user_id = $1
+        `, [user.user_id]);
+      }
+    }
+    
+    // Check if account is enabled
+    if (!user.enabled) {
+      await logFailedLogin(username, ipAddress, 'Account disabled');
+      return { success: false, error: 'Account is disabled' };
+    }
+    
+    // Verify password (LibreClinica uses MD5)
+    if (!comparePassword(password, user.passwd)) {
+      // Increment login attempts
+      const loginAttempts = (user.login_attempts || 0) + 1;
+      
+      if (loginAttempts >= config.part11.maxLoginAttempts) {
+        // Lock account
+        await db.query(`
+          UPDATE user_account 
+          SET account_non_locked = false, login_attempts = $1, lockout_time = NOW()
+          WHERE user_id = $2
+        `, [loginAttempts, user.user_id]);
+        
+        await logFailedLogin(username, ipAddress, 'Max attempts exceeded - account locked');
+        return { 
+          success: false, 
+          error: `Account locked after ${loginAttempts} failed attempts` 
+        };
+      } else {
+        await db.query(`
+          UPDATE user_account SET login_attempts = $1 WHERE user_id = $2
+        `, [loginAttempts, user.user_id]);
+        
+        await logFailedLogin(username, ipAddress, 'Invalid password');
+        return { success: false, error: 'Invalid credentials' };
+      }
+    }
+    
+    // Successful login - reset attempts
+    await db.query(`
+      UPDATE user_account 
+      SET login_attempts = 0, last_visit_date = NOW()
+      WHERE user_id = $1
+    `, [user.user_id]);
+    
+    // Get user type name
+    const userTypeResult = await db.query(`
+      SELECT user_type FROM user_type WHERE user_type_id = $1
+    `, [user.user_type_id]);
+    const userType = userTypeResult.rows[0]?.user_type || 'user';
+    
+    // Generate tokens
+    const payload: TokenPayload = {
+      userId: user.user_id,
+      userName: user.user_name,
+      email: user.email || '',
+      userType
+    };
+    
+    const token = generateToken(payload);
+    const refreshToken = generateRefreshToken(payload);
+    
+    // Log successful login
+    await logSuccessfulLogin(user.user_id, username, ipAddress);
+    
+    logger.info('User authenticated successfully', {
+      userId: user.user_id,
+      username: user.user_name,
+      userType
+    });
+    
+    return {
+      success: true,
+      token,
+      refreshToken,
+      user: {
+        userId: user.user_id,
+        userName: user.user_name,
+        email: user.email,
+        userType
+      }
+    };
+  } catch (error) {
+    logger.error('Authentication error', {
+      error: (error as Error).message,
+      username
+    });
+    return { success: false, error: 'Authentication failed' };
+  }
+}
+
+/**
+ * Authenticate with Google OAuth token
+ */
+export async function authenticateWithGoogle(
+  googleToken: string,
+  ipAddress: string
+): Promise<LoginResult> {
+  try {
+    // Verify Google token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: googleToken,
+      audience: config.google.clientId
+    });
+    
+    const payload = ticket.getPayload();
+    if (!payload) {
+      return { success: false, error: 'Invalid Google token' };
+    }
+    
+    const email = payload.email;
+    if (!email) {
+      return { success: false, error: 'Email not provided by Google' };
+    }
+    
+    // Find user by email
+    const userResult = await db.query(`
+      SELECT user_id, user_name, email, user_type_id, enabled
+      FROM user_account
+      WHERE LOWER(email) = LOWER($1)
+    `, [email]);
+    
+    if (userResult.rows.length === 0) {
+      await logFailedLogin(email, ipAddress, 'Google user not found');
+      return { 
+        success: false, 
+        error: 'No account found for this Google email' 
+      };
+    }
+    
+    const user = userResult.rows[0];
+    
+    if (!user.enabled) {
+      await logFailedLogin(email, ipAddress, 'Account disabled');
+      return { success: false, error: 'Account is disabled' };
+    }
+    
+    // Update last login
+    await db.query(`
+      UPDATE user_account SET last_visit_date = NOW() WHERE user_id = $1
+    `, [user.user_id]);
+    
+    // Get user type
+    const userTypeResult = await db.query(`
+      SELECT user_type FROM user_type WHERE user_type_id = $1
+    `, [user.user_type_id]);
+    const userType = userTypeResult.rows[0]?.user_type || 'user';
+    
+    // Generate tokens
+    const tokenPayload: TokenPayload = {
+      userId: user.user_id,
+      userName: user.user_name,
+      email: user.email,
+      userType
+    };
+    
+    const token = generateToken(tokenPayload);
+    const refreshToken = generateRefreshToken(tokenPayload);
+    
+    // Log successful login
+    await logSuccessfulLogin(user.user_id, user.user_name, ipAddress, 'Google OAuth');
+    
+    logger.info('User authenticated via Google', {
+      userId: user.user_id,
+      email: user.email
+    });
+    
+    return {
+      success: true,
+      token,
+      refreshToken,
+      user: {
+        userId: user.user_id,
+        userName: user.user_name,
+        email: user.email,
+        userType
+      }
+    };
+  } catch (error) {
+    logger.error('Google authentication error', {
+      error: (error as Error).message
+    });
+    return { success: false, error: 'Google authentication failed' };
+  }
+}
+
+async function logSuccessfulLogin(
+  userId: number,
+  username: string,
+  ipAddress: string,
+  method: string = 'Password'
+): Promise<void> {
+  await db.query(`
+    INSERT INTO audit_log_event (
+      audit_id, audit_date, audit_table, user_id, 
+      entity_id, action_message, old_value, new_value
+    ) VALUES (
+      nextval('audit_log_event_audit_id_seq'),
+      NOW(), 'user_account', $1, $2, $3, '', $4
+    )
+  `, [
+    userId,
+    userId,
+    `User logged in via ${method}`,
+    JSON.stringify({ ipAddress, timestamp: new Date() })
+  ]);
+}
+
+async function logFailedLogin(
+  username: string,
+  ipAddress: string,
+  reason: string
+): Promise<void> {
+  logger.warn('Failed login attempt', {
+    username,
+    ipAddress,
+    reason
+  });
+  
+  // You could create a separate failed_login_log table if needed
+}
+```
+
+================================================================================
+PHASE 3: SOAP WRAPPER SERVICES (4-5 HOURS)
+================================================================================
+
+Task 3.1: Create Base SOAP Client
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/soap/soapClient.ts
+
+Purpose: Base SOAP client with authentication for LibreClinica
+
+Code:
+```typescript
+import soap from 'soap';
+import { config } from '../../config/environment';
+import { logger } from '../../config/logger';
+
+export class SoapClient {
+  private client: soap.Client | null = null;
+  
+  async getClient(): Promise<soap.Client> {
+    if (this.client) {
+      return this.client;
+    }
+    
+    try {
+      const wsdlUrl = `${config.libreclinica.soapUrl}/studySubject/v1?wsdl`;
+      
+      this.client = await soap.createClientAsync(wsdlUrl, {
+        wsdl_options: {
+          timeout: 30000
+        }
+      });
+      
+      // Add authentication header
+      this.client.addSoapHeader({
+        'wsse:Security': {
+          'wsse:UsernameToken': {
+            'wsse:Username': config.libreclinica.soapUsername,
+            'wsse:Password': config.libreclinica.soapPassword
+          }
+        }
+      });
+      
+      logger.info('SOAP client created successfully');
+      
+      return this.client;
+    } catch (error) {
+      logger.error('Failed to create SOAP client', {
+        error: (error as Error).message
+      });
+      throw error;
+    }
+  }
+  
+  async callSoap(
+    service: string,
+    method: string,
+    params: any
+  ): Promise<any> {
+    try {
+      const wsdlUrl = `${config.libreclinica.soapUrl}/${service}/v1?wsdl`;
+      const client = await soap.createClientAsync(wsdlUrl);
+      
+      // Add auth header
+      client.addSoapHeader({
+        'wsse:Security': {
+          'wsse:UsernameToken': {
+            'wsse:Username': config.libreclinica.soapUsername,
+            'wsse:Password': config.libreclinica.soapPassword
+          }
+        }
+      });
+      
+      logger.debug(`Calling SOAP ${service}.${method}`, { params });
+      
+      const result = await client[method + 'Async'](params);
+      
+      logger.debug(`SOAP ${service}.${method} completed`, { 
+        success: true 
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error(`SOAP ${service}.${method} failed`, {
+        error: (error as Error).message,
+        params
+      });
+      throw error;
+    }
+  }
+}
+
+export const soapClient = new SoapClient();
+```
+
+Task 3.2: Create Subject SOAP Service
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/soap/subjectSoap.service.ts
+
+Purpose: Create and manage study subjects via SOAP
+
+Code:
+```typescript
+import { soapClient } from './soapClient';
+import { logger } from '../../config/logger';
+
+export interface CreateSubjectRequest {
+  studyIdentifier: string;
+  subjectLabel: string;
+  gender: 'm' | 'f';
+  dateOfBirth?: string;
+  enrollmentDate: string;
+  siteIdentifier?: string;
+}
+
+/**
+ * Create a subject via LibreClinica SOAP API (GxP compliant)
+ */
+export async function createSubject(
+  request: CreateSubjectRequest
+): Promise<any> {
+  try {
+    logger.info('Creating subject via SOAP', {
+      studyIdentifier: request.studyIdentifier,
+      subjectLabel: request.subjectLabel
+    });
+    
+    // Build SOAP request
+    const soapRequest = {
+      studySubject: {
+        label: request.subjectLabel,
+        enrollmentDate: request.enrollmentDate,
+        subject: {
+          uniqueIdentifier: request.subjectLabel,
+          gender: request.gender,
+          dateOfBirth: request.dateOfBirth || ''
+        },
+        studyRef: {
+          identifier: request.studyIdentifier
+        }
+      }
+    };
+    
+    if (request.siteIdentifier) {
+      soapRequest.studySubject['siteRef'] = {
+        identifier: request.siteIdentifier
+      };
+    }
+    
+    const result = await soapClient.callSoap(
+      'studySubject',
+      'create',
+      soapRequest
+    );
+    
+    logger.info('Subject created successfully via SOAP', {
+      subjectLabel: request.subjectLabel,
+      result
+    });
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to create subject via SOAP', {
+      error: (error as Error).message,
+      request
+    });
+    throw error;
+  }
+}
+
+/**
+ * List subjects for a study
+ */
+export async function listSubjects(studyIdentifier: string): Promise<any> {
+  try {
+    const result = await soapClient.callSoap(
+      'studySubject',
+      'listAllByStudy',
+      {
+        studyRef: {
+          identifier: studyIdentifier
+        }
+      }
+    );
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to list subjects via SOAP', {
+      error: (error as Error).message,
+      studyIdentifier
+    });
+    throw error;
+  }
+}
+
+/**
+ * Check if subject exists
+ */
+export async function isSubjectExists(
+  studyIdentifier: string,
+  subjectLabel: string
+): Promise<boolean> {
+  try {
+    const result = await soapClient.callSoap(
+      'studySubject',
+      'isStudySubject',
+      {
+        studyRef: { identifier: studyIdentifier },
+        studySubject: { label: subjectLabel }
+      }
+    );
+    
+    return result[0]?.result === 'true';
+  } catch (error) {
+    return false;
+  }
+}
+```
+
+Task 3.3: Create Data SOAP Service
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/soap/dataSoap.service.ts
+
+Purpose: Import clinical data via ODM XML (GxP compliant)
+
+Code:
+```typescript
+import { soapClient } from './soapClient';
+import { logger } from '../../config/logger';
+import xml2js from 'xml2js';
+
+export interface ImportDataRequest {
+  studyOid: string;
+  subjectKey: string;
+  studyEventOid: string;
+  formOid: string;
+  data: Record<string, any>;
+}
+
+/**
+ * Import clinical data via SOAP (21 CFR Part 11 compliant)
+ */
+export async function importData(request: ImportDataRequest): Promise<any> {
+  try {
+    logger.info('Importing data via SOAP', {
+      studyOid: request.studyOid,
+      subjectKey: request.subjectKey,
+      formOid: request.formOid
+    });
+    
+    // Build ODM XML
+    const odmXml = buildOdmXml(request);
+    
+    const result = await soapClient.callSoap(
+      'data',
+      'import',
+      {
+        odm: odmXml
+      }
+    );
+    
+    logger.info('Data imported successfully via SOAP', {
+      subjectKey: request.subjectKey,
+      formOid: request.formOid
+    });
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to import data via SOAP', {
+      error: (error as Error).message,
+      request
+    });
+    throw error;
+  }
+}
+
+/**
+ * Build ODM XML for data import (ODM 1.3 format)
+ */
+function buildOdmXml(request: ImportDataRequest): string {
+  const builder = new xml2js.Builder({
+    rootName: 'ODM',
+    xmldec: { version: '1.0', encoding: 'UTF-8' }
+  });
+  
+  const odmObject = {
+    $: {
+      'xmlns': 'http://www.cdisc.org/ns/odm/v1.3',
+      'xmlns:OpenClinica': 'http://www.openclinica.org/ns/odm_ext_v130/v3.1',
+      'ODMVersion': '1.3',
+      'FileType': 'Transactional',
+      'FileOID': `ODM.${new Date().getTime()}`,
+      'CreationDateTime': new Date().toISOString()
+    },
+    ClinicalData: {
+      $: {
+        StudyOID: request.studyOid,
+        MetaDataVersionOID: 'v1'
+      },
+      SubjectData: {
+        $: {
+          SubjectKey: request.subjectKey
+        },
+        StudyEventData: {
+          $: {
+            StudyEventOID: request.studyEventOid
+          },
+          FormData: {
+            $: {
+              FormOID: request.formOid
+            },
+            ItemGroupData: {
+              ItemData: Object.keys(request.data).map(itemOid => ({
+                $: {
+                  ItemOID: itemOid,
+                  Value: request.data[itemOid]
+                }
+              }))
+            }
+          }
+        }
+      }
+    }
+  };
+  
+  return builder.buildObject(odmObject);
+}
+```
+
+[CONTINUE IN NEXT PART...]
+
+================================================================================
+END OF PART 2 - SEE PART 3 FOR CONTINUATION
+================================================================================
+

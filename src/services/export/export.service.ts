@@ -206,10 +206,10 @@ export const buildCsvExport = async (
   const subjects = await getSubjectsForExport(datasetConfig.studyOID, username);
 
   // Build header row
-  const headers = ['SubjectID', 'StudySubjectID', 'Status'];
+  const headers = ['SubjectID', 'StudySubjectID'];
+  if (datasetConfig.showSubjectStatus) headers.push('Status');
   if (datasetConfig.showSubjectGender) headers.push('Sex');
   if (datasetConfig.showSubjectDob) headers.push('DateOfBirth');
-  if (datasetConfig.showSubjectStatus) headers.push('Status');
 
   const rows: string[] = [headers.join(',')];
 
@@ -217,15 +217,50 @@ export const buildCsvExport = async (
   for (const subject of subjects) {
     const row: string[] = [
       csvEscape(subject.subjectOID || subject.uniqueIdentifier || ''),
-      csvEscape(subject.studySubjectID || subject.label || ''),
-      csvEscape(subject.status || '')
+      csvEscape(subject.studySubjectID || subject.label || '')
     ];
     
+    if (datasetConfig.showSubjectStatus) row.push(csvEscape(subject.status || ''));
     if (datasetConfig.showSubjectGender) row.push(csvEscape(subject.sex || ''));
     if (datasetConfig.showSubjectDob) row.push(csvEscape(subject.dateOfBirth || ''));
-    if (datasetConfig.showSubjectStatus) row.push(csvEscape(subject.status || ''));
     
     rows.push(row.join(','));
+  }
+
+  return rows.join('\n');
+};
+
+/**
+ * Build tab-delimited export
+ */
+export const buildTabDelimitedExport = async (
+  datasetConfig: DatasetConfig,
+  username: string
+): Promise<string> => {
+  logger.info('Building tab-delimited export', { studyOID: datasetConfig.studyOID });
+
+  const subjects = await getSubjectsForExport(datasetConfig.studyOID, username);
+
+  // Build header row
+  const headers = ['SubjectID', 'StudySubjectID'];
+  if (datasetConfig.showSubjectStatus) headers.push('Status');
+  if (datasetConfig.showSubjectGender) headers.push('Sex');
+  if (datasetConfig.showSubjectDob) headers.push('DateOfBirth');
+
+  const rows: string[] = [headers.join('\t')];
+
+  // Build data rows
+  for (const subject of subjects) {
+    const row: string[] = [
+      subject.subjectOID || subject.uniqueIdentifier || '',
+      subject.studySubjectID || subject.label || ''
+    ];
+    
+    if (datasetConfig.showSubjectStatus) row.push(subject.status || '');
+    if (datasetConfig.showSubjectGender) row.push(subject.sex || '');
+    if (datasetConfig.showSubjectDob) row.push(subject.dateOfBirth || '');
+    
+    rows.push(row.join('\t'));
   }
 
   return rows.join('\n');
@@ -262,7 +297,7 @@ export const executeExport = async (
         extension = 'csv';
         break;
       case 'txt':
-        content = await buildCsvExport(datasetConfig, username);
+        content = await buildTabDelimitedExport(datasetConfig, username);
         mimeType = 'text/plain';
         extension = 'txt';
         break;

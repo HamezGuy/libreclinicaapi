@@ -1,0 +1,20 @@
+{
+  "backupId": "BKP-2026-01-26-TRANSACTION_LOG-1769472000023",
+  "backupType": "transaction_log",
+  "backupDateTime": "2026-01-27T00:00:00.511Z",
+  "backupSize": 7485,
+  "backupDuration": 488,
+  "backupLocation": "D:\\EDC-Projects\\libreclinica-api\\backups\\transaction_log\\BKP-2026-01-26-TRANSACTION_LOG-1769472000023_libreclinica_2026-01-27T00-00-00-104Z.sql.gz",
+  "checksum": "813ba11ae6c8b72ea5284f8d83ff559a4218ed95fd0cccf29b658012ae2cd137",
+  "checksumAlgorithm": "SHA-256",
+  "verificationStatus": "verified",
+  "retentionUntil": "2026-01-28T00:00:00.511Z",
+  "databaseName": "libreclinica",
+  "databaseHost": "localhost",
+  "userId": 0,
+  "username": "scheduler",
+  "databases": [
+    "libreclinica"
+  ],
+  "encrypted": false
+}

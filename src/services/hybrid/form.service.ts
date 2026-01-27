@@ -67,16 +67,17 @@ export const saveFormData = async (
     };
   }
 
-  // Apply validation rules BEFORE saving
-  // Create queries (discrepancy notes) for validation failures
+  // PRE-SAVE VALIDATION: Check for hard errors that should block the save
+  // Note: We do NOT create queries here because we don't have item_data_ids yet.
+  // Queries will be created in the POST-SAVE validation step with proper item_data links.
   if (crfId && formData) {
     try {
-      // First pass: validate without creating queries to check for hard errors
+      // Validate WITHOUT creating queries - just check for hard errors
       const validationResult = await validationRulesService.validateFormData(
         crfId,
         formData,
         {
-          createQueries: true,  // Create queries for validation failures
+          createQueries: false,  // Don't create queries yet - will do in post-save
           studyId: request.studyId,
           subjectId: request.subjectId,
           userId: userId
@@ -84,19 +85,18 @@ export const saveFormData = async (
       );
 
       // If there are hard edit errors, block the save
+      // Note: Queries will be created when the user saves with valid data
       if (!validationResult.valid && validationResult.errors.length > 0) {
-        logger.warn('Form data validation failed - queries created', { 
+        logger.warn('Form data validation failed - save blocked', { 
           crfId, 
-          errors: validationResult.errors,
-          queriesCreated: validationResult.queriesCreated
+          errorCount: validationResult.errors.length
         });
         
         return {
           success: false,
-          message: 'Validation failed',
+          message: 'Validation failed. Please correct the errors before saving.',
           errors: validationResult.errors,
-          warnings: validationResult.warnings,
-          queriesCreated: validationResult.queriesCreated
+          warnings: validationResult.warnings
         } as any;
       }
 
@@ -104,12 +104,12 @@ export const saveFormData = async (
       if (validationResult.warnings.length > 0) {
         logger.info('Form data validation warnings', { 
           crfId, 
-          warnings: validationResult.warnings 
+          warningCount: validationResult.warnings.length 
         });
       }
     } catch (validationError: any) {
       // Don't block save if validation service fails
-      logger.warn('Validation check failed, proceeding with save', { 
+      logger.warn('Pre-save validation check failed, proceeding with save', { 
         error: validationError.message 
       });
     }
@@ -341,7 +341,37 @@ const saveFormDataDirect = async (
       totalFields: Object.keys(formData).length
     });
 
-    // 7. AUTO-TRIGGER WORKFLOW: Create SDV task for completed form (Real EDC workflow)
+    // 7. POST-SAVE VALIDATION: Run validation rules and create queries for failures
+    // This happens AFTER save so we have proper item_data_id links for queries
+    // Queries created here can be resolved by users to correct the data
+    let validationResult: any = null;
+    try {
+      // Use validateEventCrf which loads all data and validates with proper itemDataMap
+      validationResult = await validationRulesService.validateEventCrf(
+        eventCrfId!,
+        {
+          createQueries: true,  // Create queries linked to specific item_data records
+          userId: userId
+        }
+      );
+
+      if (validationResult.errors.length > 0 || validationResult.warnings.length > 0) {
+        logger.info('Post-save validation completed', {
+          eventCrfId,
+          errors: validationResult.errors.length,
+          warnings: validationResult.warnings.length,
+          queriesCreated: validationResult.queriesCreated
+        });
+      }
+    } catch (validationError: any) {
+      // Don't fail the save if validation fails - data is already committed
+      logger.warn('Post-save validation check failed', { 
+        error: validationError.message,
+        eventCrfId
+      });
+    }
+
+    // 8. AUTO-TRIGGER WORKFLOW: Create SDV task for completed form (Real EDC workflow)
     // This automatically creates a workflow task when form data is saved
     try {
       // Get form details for workflow creation
@@ -376,10 +406,23 @@ const saveFormDataDirect = async (
       logger.warn('Failed to auto-create workflow for form submission', { error: workflowError.message });
     }
 
+    // Build response with validation info if available
+    const responseData: any = { eventCrfId, savedCount };
+    if (validationResult) {
+      responseData.validation = {
+        valid: validationResult.valid,
+        errors: validationResult.errors,
+        warnings: validationResult.warnings,
+        queriesCreated: validationResult.queriesCreated
+      };
+    }
+
     return {
       success: true,
-      data: { eventCrfId, savedCount },
-      message: `Form data saved successfully (${savedCount} fields)`
+      data: responseData,
+      message: validationResult && validationResult.queriesCreated > 0
+        ? `Form data saved successfully (${savedCount} fields). ${validationResult.queriesCreated} validation queries created.`
+        : `Form data saved successfully (${savedCount} fields)`
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -3210,51 +3253,52 @@ export const updateFieldData = async (
     // Include the new value being validated
     allFormData[fieldName] = value;
 
-    // Validate the field change
-    const validationResult = await validationRulesService.validateFieldChange(
+    // PRE-SAVE VALIDATION: Check for hard errors that should block the save
+    // Note: We don't create queries here yet - we do that POST-SAVE with proper item_data_id
+    const preValidationResult = await validationRulesService.validateFieldChange(
       eventCrf.crf_id,
       fieldName,
       value,
       allFormData,
       {
-        createQueries: options?.createQueries ?? false,
+        createQueries: false,  // Don't create queries yet - will do post-save
         studyId: eventCrf.study_id,
         subjectId: eventCrf.study_subject_id,
         eventCrfId: eventCrfId,
-        itemDataId: itemDataId,
+        itemDataId: itemDataId,  // May be undefined for new fields
+        itemId: itemId,
         userId: userId
       }
     );
 
-    // If validate only, return the validation result
+    // If validate only, return the validation result (no queries created in validate-only mode)
     if (options?.validateOnly) {
       return {
-        success: validationResult.valid,
+        success: preValidationResult.valid,
         data: {
-          valid: validationResult.valid,
-          errors: validationResult.errors,
-          warnings: validationResult.warnings,
-          queryCreated: validationResult.queryCreated
+          valid: preValidationResult.valid,
+          errors: preValidationResult.errors,
+          warnings: preValidationResult.warnings,
+          queryCreated: false
         }
       };
     }
 
     // If there are hard errors and we should not save, return early
-    // (This is configurable - some systems allow saving with warnings but block errors)
-    if (!validationResult.valid && validationResult.errors.length > 0) {
+    if (!preValidationResult.valid && preValidationResult.errors.length > 0) {
       return {
         success: false,
-        message: 'Validation failed',
+        message: 'Validation failed. Please correct the error before saving.',
         data: {
           valid: false,
-          errors: validationResult.errors,
-          warnings: validationResult.warnings,
-          queryCreated: validationResult.queryCreated
+          errors: preValidationResult.errors,
+          warnings: preValidationResult.warnings,
+          queryCreated: false
         }
       } as any;
     }
 
-    // Proceed with update
+    // Proceed with update - now we can create/update item_data
     await client.query('BEGIN');
 
     let stringValue = value === null || value === undefined ? '' : String(value);
@@ -3313,25 +3357,65 @@ export const updateFieldData = async (
 
     await client.query('COMMIT');
 
+    // POST-SAVE VALIDATION: Now create queries with proper item_data_id link
+    // This ensures queries can actually update the field value when resolved
+    let postValidationResult = preValidationResult;
+    if (options?.createQueries) {
+      try {
+        postValidationResult = await validationRulesService.validateFieldChange(
+          eventCrf.crf_id,
+          fieldName,
+          value,
+          allFormData,
+          {
+            createQueries: true,  // NOW create queries with proper item_data link
+            studyId: eventCrf.study_id,
+            subjectId: eventCrf.study_subject_id,
+            eventCrfId: eventCrfId,
+            itemDataId: savedItemDataId,  // We now have the actual item_data_id
+            itemId: itemId,
+            userId: userId
+          }
+        );
+        logger.info('Post-save field validation completed', { 
+          eventCrfId, 
+          fieldName, 
+          savedItemDataId,
+          queriesCreated: postValidationResult.queriesCreated 
+        });
+      } catch (validationError: any) {
+        // Don't fail the save if validation fails - data is already committed
+        logger.warn('Post-save field validation failed', { 
+          error: validationError.message,
+          eventCrfId,
+          fieldName
+        });
+      }
+    }
+
     logger.info('Field data updated', { 
       eventCrfId, 
       fieldName, 
       itemDataId: savedItemDataId,
-      hasValidationErrors: !validationResult.valid
+      hasValidationWarnings: postValidationResult.warnings.length > 0,
+      queriesCreated: postValidationResult.queriesCreated || 0
     });
 
     return {
       success: true,
       data: {
         itemDataId: savedItemDataId,
-        valid: validationResult.valid,
-        errors: validationResult.errors,
-        warnings: validationResult.warnings,
-        queryCreated: validationResult.queryCreated
+        valid: postValidationResult.valid,
+        errors: postValidationResult.errors,
+        warnings: postValidationResult.warnings,
+        queryCreated: (postValidationResult.queriesCreated || 0) > 0,
+        queriesCreated: postValidationResult.queriesCreated || 0
       },
-      message: validationResult.valid 
-        ? 'Field updated successfully' 
-        : 'Field updated with validation warnings'
+      message: postValidationResult.queriesCreated && postValidationResult.queriesCreated > 0
+        ? `Field updated. ${postValidationResult.queriesCreated} validation query created.`
+        : (postValidationResult.warnings.length > 0 
+          ? 'Field updated with validation warnings' 
+          : 'Field updated successfully')
     };
   } catch (error: any) {
     await client.query('ROLLBACK');

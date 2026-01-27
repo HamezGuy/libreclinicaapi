@@ -31,7 +31,7 @@ export class WorkflowController {
       const { status, priority, assignedTo, studyId, type, limit, offset } = req.query;
       
       const result = await workflowService.getAllWorkflows({
-        status: status as workflowService.WorkflowStatus,
+        status: status as string,
         priority: priority as workflowService.WorkflowPriority,
         assignedTo: assignedTo as string,
         studyId: studyId ? parseInt(studyId as string) : undefined,
@@ -139,11 +139,14 @@ export class WorkflowController {
   /**
    * Update workflow status
    * PUT /api/workflows/:id/status
+   * 
+   * 21 CFR Part 11 §11.10(f) - Validates permitted sequencing of steps
+   * Body: { status: string, reason?: string }
    */
   async updateWorkflowStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
-      const { status } = req.body;
+      const { status, reason } = req.body;
       const user = (req as any).user;
       const userId = user?.userId || user?.user_id;
       
@@ -152,7 +155,12 @@ export class WorkflowController {
         return;
       }
 
-      const result = await workflowService.updateWorkflowStatus(id, status, userId);
+      const result = await workflowService.updateWorkflowStatus(id, status, userId, reason);
+      
+      if (!result.success) {
+        res.status(400).json(result);
+        return;
+      }
       
       res.json(result);
     } catch (error) {

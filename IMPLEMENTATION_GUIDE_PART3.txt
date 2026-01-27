@@ -1,0 +1,662 @@
+================================================================================
+COMPLETE IMPLEMENTATION GUIDE - PART 3 (DATABASE SERVICES)
+LibreClinica API + Angular Integration
+================================================================================
+
+CONTINUED FROM PART 2...
+
+================================================================================
+PHASE 4: DIRECT DATABASE SERVICES (5-6 HOURS)
+================================================================================
+
+Task 4.1: Audit Trail Service
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/database/audit.service.ts
+
+Purpose: Query LibreClinica's audit_log_event table (21 CFR Part 11 §11.10(e))
+
+Code:
+```typescript
+import { db } from '../../config/database';
+import { logger } from '../../config/logger';
+
+export interface AuditTrailQuery {
+  userId?: number;
+  studyId?: number;
+  subjectId?: number;
+  table?: string;
+  startDate?: Date;
+  endDate?: Date;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Get audit trail (21 CFR Part 11 requirement)
+ */
+export async function getAuditTrail(query: AuditTrailQuery): Promise<any> {
+  try {
+    let sql = `
+      SELECT 
+        ale.audit_id,
+        ale.audit_date,
+        ale.audit_table,
+        ale.user_id,
+        ua.user_name,
+        ale.entity_id,
+        ale.action_message,
+        ale.old_value,
+        ale.new_value,
+        ale.event_crf_id,
+        ale.study_event_id
+      FROM audit_log_event ale
+      LEFT JOIN user_account ua ON ale.user_id = ua.user_id
+      WHERE 1=1
+    `;
+    
+    const params: any[] = [];
+    let paramCount = 1;
+    
+    if (query.userId) {
+      sql += ` AND ale.user_id = $${paramCount++}`;
+      params.push(query.userId);
+    }
+    
+    if (query.table) {
+      sql += ` AND ale.audit_table = $${paramCount++}`;
+      params.push(query.table);
+    }
+    
+    if (query.startDate) {
+      sql += ` AND ale.audit_date >= $${paramCount++}`;
+      params.push(query.startDate);
+    }
+    
+    if (query.endDate) {
+      sql += ` AND ale.audit_date <= $${paramCount++}`;
+      params.push(query.endDate);
+    }
+    
+    if (query.subjectId) {
+      sql += ` AND ale.entity_id = $${paramCount++}`;
+      params.push(query.subjectId);
+    }
+    
+    sql += ` ORDER BY ale.audit_date DESC`;
+    
+    if (query.limit) {
+      sql += ` LIMIT $${paramCount++}`;
+      params.push(query.limit);
+    }
+    
+    if (query.offset) {
+      sql += ` OFFSET $${paramCount++}`;
+      params.push(query.offset);
+    }
+    
+    const result = await db.query(sql, params);
+    
+    return {
+      items: result.rows,
+      total: result.rowCount
+    };
+  } catch (error) {
+    logger.error('Failed to get audit trail', {
+      error: (error as Error).message,
+      query
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get audit trail for specific subject
+ */
+export async function getSubjectAuditTrail(
+  studySubjectId: number,
+  limit: number = 100
+): Promise<any> {
+  try {
+    const result = await db.query(`
+      SELECT 
+        ale.audit_id,
+        ale.audit_date,
+        ale.audit_table,
+        ale.user_id,
+        ua.user_name,
+        ua.first_name,
+        ua.last_name,
+        ale.action_message,
+        ale.old_value,
+        ale.new_value
+      FROM audit_log_event ale
+      LEFT JOIN user_account ua ON ale.user_id = ua.user_id
+      WHERE ale.entity_id = $1
+        OR ale.study_subject_id = $1
+      ORDER BY ale.audit_date DESC
+      LIMIT $2
+    `, [studySubjectId, limit]);
+    
+    return result.rows;
+  } catch (error) {
+    logger.error('Failed to get subject audit trail', {
+      error: (error as Error).message,
+      studySubjectId
+    });
+    throw error;
+  }
+}
+
+/**
+ * Export audit trail (for regulatory submissions)
+ */
+export async function exportAuditTrail(
+  query: AuditTrailQuery
+): Promise<string> {
+  try {
+    const auditData = await getAuditTrail({ ...query, limit: 999999 });
+    
+    // Convert to CSV
+    const headers = [
+      'Audit ID', 'Date', 'Table', 'User ID', 'User Name',
+      'Entity ID', 'Action', 'Old Value', 'New Value'
+    ];
+    
+    let csv = headers.join(',') + '\n';
+    
+    for (const row of auditData.items) {
+      csv += [
+        row.audit_id,
+        row.audit_date,
+        row.audit_table,
+        row.user_id,
+        row.user_name || '',
+        row.entity_id,
+        `"${(row.action_message || '').replace(/"/g, '""')}"`,
+        `"${(row.old_value || '').replace(/"/g, '""')}"`,
+        `"${(row.new_value || '').replace(/"/g, '""')}"`
+      ].join(',') + '\n';
+    }
+    
+    return csv;
+  } catch (error) {
+    logger.error('Failed to export audit trail', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+```
+
+Task 4.2: Query Management Service
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/database/query.service.ts
+
+Purpose: Manage discrepancy notes (queries) in LibreClinica
+
+Code:
+```typescript
+import { db } from '../../config/database';
+import { logger } from '../../config/logger';
+
+export interface CreateQueryRequest {
+  itemDataId?: number;
+  eventCrfId?: number;
+  description: string;
+  detailedNotes?: string;
+  type: 'Query' | 'Annotation' | 'Failed Validation';
+  userId: number;
+}
+
+/**
+ * Get queries (discrepancy notes) with filters
+ */
+export async function getQueries(
+  studyId?: number,
+  subjectId?: number,
+  status?: string,
+  limit: number = 100,
+  offset: number = 0
+): Promise<any> {
+  try {
+    let sql = `
+      SELECT 
+        dn.discrepancy_note_id,
+        dn.description,
+        dn.detailed_notes,
+        dn.discrepancy_note_type_id,
+        dnt.name as type_name,
+        dn.resolution_status_id,
+        rs.name as status_name,
+        dn.date_created,
+        dn.date_updated,
+        dn.owner_id,
+        ua.user_name as owner_name,
+        dn.entity_type,
+        dn.study_id,
+        s.name as study_name,
+        ss.label as subject_label
+      FROM discrepancy_note dn
+      LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      LEFT JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+      LEFT JOIN user_account ua ON dn.owner_id = ua.user_id
+      LEFT JOIN study s ON dn.study_id = s.study_id
+      LEFT JOIN study_subject ss ON dn.entity_id = ss.study_subject_id AND dn.entity_type = 'studySub'
+      WHERE 1=1
+    `;
+    
+    const params: any[] = [];
+    let paramCount = 1;
+    
+    if (studyId) {
+      sql += ` AND dn.study_id = $${paramCount++}`;
+      params.push(studyId);
+    }
+    
+    if (subjectId) {
+      sql += ` AND dn.entity_id = $${paramCount++} AND dn.entity_type = 'studySub'`;
+      params.push(subjectId);
+    }
+    
+    if (status) {
+      sql += ` AND rs.name = $${paramCount++}`;
+      params.push(status);
+    }
+    
+    sql += ` ORDER BY dn.date_created DESC LIMIT $${paramCount++} OFFSET $${paramCount++}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(sql, params);
+    
+    return {
+      items: result.rows,
+      total: result.rowCount
+    };
+  } catch (error) {
+    logger.error('Failed to get queries', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get query by ID with history
+ */
+export async function getQueryById(queryId: number): Promise<any> {
+  try {
+    // Get main query
+    const mainResult = await db.query(`
+      SELECT 
+        dn.discrepancy_note_id,
+        dn.description,
+        dn.detailed_notes,
+        dn.discrepancy_note_type_id,
+        dnt.name as type_name,
+        dn.resolution_status_id,
+        rs.name as status_name,
+        dn.date_created,
+        dn.date_updated,
+        dn.owner_id,
+        ua.user_name as owner_name,
+        dn.entity_type,
+        dn.entity_id
+      FROM discrepancy_note dn
+      LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      LEFT JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+      LEFT JOIN user_account ua ON dn.owner_id = ua.user_id
+      WHERE dn.discrepancy_note_id = $1
+    `, [queryId]);
+    
+    if (mainResult.rows.length === 0) {
+      return null;
+    }
+    
+    // Get history/responses
+    const historyResult = await db.query(`
+      SELECT 
+        dnm.discrepancy_note_id,
+        dnm.description,
+        dnm.detailed_notes,
+        dnm.date_created,
+        dnm.owner_id,
+        ua.user_name as owner_name,
+        ua.first_name,
+        ua.last_name
+      FROM dn_discrepancy_note_map dnm
+      LEFT JOIN discrepancy_note dn ON dnm.discrepancy_note_id = dn.discrepancy_note_id
+      LEFT JOIN user_account ua ON dn.owner_id = ua.user_id
+      WHERE dnm.parent_dn_id = $1
+      ORDER BY dnm.date_created ASC
+    `, [queryId]);
+    
+    return {
+      ...mainResult.rows[0],
+      history: historyResult.rows
+    };
+  } catch (error) {
+    logger.error('Failed to get query by ID', {
+      error: (error as Error).message,
+      queryId
+    });
+    throw error;
+  }
+}
+
+/**
+ * Create new query
+ */
+export async function createQuery(request: CreateQueryRequest): Promise<any> {
+  try {
+    const client = await db.getClient();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Get discrepancy note type ID
+      const typeResult = await client.query(`
+        SELECT discrepancy_note_type_id 
+        FROM discrepancy_note_type 
+        WHERE name = $1
+      `, [request.type]);
+      
+      const typeId = typeResult.rows[0]?.discrepancy_note_type_id || 1;
+      
+      // Get resolution status ID for "New"
+      const statusResult = await client.query(`
+        SELECT resolution_status_id 
+        FROM resolution_status 
+        WHERE name = 'New'
+      `);
+      
+      const statusId = statusResult.rows[0]?.resolution_status_id || 1;
+      
+      // Create discrepancy note
+      const insertResult = await client.query(`
+        INSERT INTO discrepancy_note (
+          description, detailed_notes, discrepancy_note_type_id,
+          resolution_status_id, owner_id, date_created,
+          entity_type, entity_id
+        ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7)
+        RETURNING discrepancy_note_id
+      `, [
+        request.description,
+        request.detailedNotes || '',
+        typeId,
+        statusId,
+        request.userId,
+        request.itemDataId ? 'itemData' : 'eventCrf',
+        request.itemDataId || request.eventCrfId
+      ]);
+      
+      const noteId = insertResult.rows[0].discrepancy_note_id;
+      
+      await client.query('COMMIT');
+      
+      logger.info('Query created', { noteId, userId: request.userId });
+      
+      return { discrepancyNoteId: noteId };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    logger.error('Failed to create query', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+
+/**
+ * Respond to query
+ */
+export async function respondToQuery(
+  parentQueryId: number,
+  response: string,
+  userId: number
+): Promise<any> {
+  try {
+    const client = await db.getClient();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Create response note
+      const insertResult = await client.query(`
+        INSERT INTO discrepancy_note (
+          description, detailed_notes, discrepancy_note_type_id,
+          resolution_status_id, owner_id, date_created, parent_dn_id
+        ) VALUES ($1, $2, 1, 2, $3, NOW(), $4)
+        RETURNING discrepancy_note_id
+      `, ['Response', response, userId, parentQueryId]);
+      
+      const responseId = insertResult.rows[0].discrepancy_note_id;
+      
+      // Create mapping
+      await client.query(`
+        INSERT INTO dn_discrepancy_note_map (
+          discrepancy_note_id, column_name, parent_dn_id
+        ) VALUES ($1, 'response', $2)
+      `, [responseId, parentQueryId]);
+      
+      // Update parent status to "Updated"
+      await client.query(`
+        UPDATE discrepancy_note 
+        SET resolution_status_id = 3, date_updated = NOW()
+        WHERE discrepancy_note_id = $1
+      `, [parentQueryId]);
+      
+      await client.query('COMMIT');
+      
+      logger.info('Query response added', { 
+        parentQueryId, 
+        responseId, 
+        userId 
+      });
+      
+      return { responseId };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    logger.error('Failed to respond to query', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+
+/**
+ * Close query
+ */
+export async function closeQuery(queryId: number, userId: number): Promise<any> {
+  try {
+    // Get resolution status ID for "Closed"
+    const statusResult = await db.query(`
+      SELECT resolution_status_id 
+      FROM resolution_status 
+      WHERE name = 'Closed'
+    `);
+    
+    const closedStatusId = statusResult.rows[0]?.resolution_status_id || 4;
+    
+    await db.query(`
+      UPDATE discrepancy_note 
+      SET resolution_status_id = $1, date_updated = NOW()
+      WHERE discrepancy_note_id = $2
+    `, [closedStatusId, queryId]);
+    
+    logger.info('Query closed', { queryId, userId });
+    
+    return { success: true };
+  } catch (error) {
+    logger.error('Failed to close query', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+```
+
+Task 4.3: Dashboard Service
+───────────────────────────────────────────────────────────────────────────
+
+File: src/services/database/dashboard.service.ts
+
+Purpose: Calculate statistics for dashboard (not in LibreClinica UI)
+
+Code:
+```typescript
+import { db } from '../../config/database';
+import { logger } from '../../config/logger';
+
+/**
+ * Get enrollment statistics
+ */
+export async function getEnrollmentStats(studyId?: number): Promise<any> {
+  try {
+    let sql = `
+      SELECT 
+        s.study_id,
+        s.name as study_name,
+        s.identifier as study_identifier,
+        COUNT(DISTINCT ss.study_subject_id) as total_subjects,
+        COUNT(DISTINCT CASE WHEN ss.status_id = 1 THEN ss.study_subject_id END) as active_subjects,
+        COUNT(DISTINCT CASE WHEN ss.date_created >= NOW() - INTERVAL '30 days' THEN ss.study_subject_id END) as enrolled_last_30_days,
+        MIN(ss.enrollment_date) as first_enrollment,
+        MAX(ss.enrollment_date) as last_enrollment
+      FROM study s
+      LEFT JOIN study_subject ss ON s.study_id = ss.study_id
+      WHERE 1=1
+    `;
+    
+    const params: any[] = [];
+    
+    if (studyId) {
+      sql += ` AND s.study_id = $1`;
+      params.push(studyId);
+    }
+    
+    sql += ` GROUP BY s.study_id, s.name, s.identifier ORDER BY s.name`;
+    
+    const result = await db.query(sql, params);
+    
+    return result.rows;
+  } catch (error) {
+    logger.error('Failed to get enrollment stats', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get form completion statistics
+ */
+export async function getCompletionStats(studyId: number): Promise<any> {
+  try {
+    const result = await db.query(`
+      SELECT 
+        crf.crf_id,
+        crf.name as crf_name,
+        COUNT(DISTINCT ec.event_crf_id) as total_forms,
+        COUNT(DISTINCT CASE WHEN ss.completion_status_id = 2 THEN ec.event_crf_id END) as completed_forms,
+        COUNT(DISTINCT CASE WHEN ss.completion_status_id = 1 THEN ec.event_crf_id END) as pending_forms,
+        ROUND(
+          100.0 * COUNT(DISTINCT CASE WHEN ss.completion_status_id = 2 THEN ec.event_crf_id END) / 
+          NULLIF(COUNT(DISTINCT ec.event_crf_id), 0), 
+          2
+        ) as completion_percentage
+      FROM crf_version cv
+      JOIN crf ON cv.crf_id = crf.crf_id
+      LEFT JOIN event_crf ec ON cv.crf_version_id = ec.crf_version_id
+      LEFT JOIN study_subject ss ON ec.study_subject_id = ss.study_subject_id
+      WHERE crf.study_id = $1
+      GROUP BY crf.crf_id, crf.name
+      ORDER BY crf.name
+    `, [studyId]);
+    
+    return result.rows;
+  } catch (error) {
+    logger.error('Failed to get completion stats', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get query statistics
+ */
+export async function getQueryStats(studyId: number): Promise<any> {
+  try {
+    const result = await db.query(`
+      SELECT 
+        rs.name as status,
+        COUNT(*) as count
+      FROM discrepancy_note dn
+      JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+      WHERE dn.study_id = $1
+      GROUP BY rs.resolution_status_id, rs.name
+      ORDER BY rs.resolution_status_id
+    `, [studyId]);
+    
+    return result.rows;
+  } catch (error) {
+    logger.error('Failed to get query stats', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get user activity statistics
+ */
+export async function getUserActivity(
+  studyId: number,
+  days: number = 30
+): Promise<any> {
+  try {
+    const result = await db.query(`
+      SELECT 
+        ua.user_id,
+        ua.user_name,
+        ua.first_name,
+        ua.last_name,
+        COUNT(DISTINCT ale.audit_id) as total_actions,
+        MAX(ale.audit_date) as last_activity,
+        COUNT(DISTINCT DATE(ale.audit_date)) as active_days
+      FROM audit_log_event ale
+      JOIN user_account ua ON ale.user_id = ua.user_id
+      WHERE ale.study_id = $1
+        AND ale.audit_date >= NOW() - INTERVAL '${days} days'
+      GROUP BY ua.user_id, ua.user_name, ua.first_name, ua.last_name
+      ORDER BY total_actions DESC
+      LIMIT 20
+    `, [studyId]);
+    
+    return result.rows;
+  } catch (error) {
+    logger.error('Failed to get user activity', {
+      error: (error as Error).message
+    });
+    throw error;
+  }
+}
+```
+
+[CONTINUE IN NEXT PART FOR CONTROLLERS, ROUTES, AND ANGULAR INTEGRATION...]
+
+================================================================================
+END OF PART 3 - SEE PART 4 FOR CONTROLLERS & ANGULAR INTEGRATION
+================================================================================
+

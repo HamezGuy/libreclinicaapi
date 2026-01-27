@@ -151,14 +151,15 @@ async function testSoapConnection(): Promise<boolean> {
       });
       return true;
     } else {
-      logger.warn('SOAP connection test failed', {
+      // SOAP is optional - the API works fine with direct database access
+      logger.info('SOAP unavailable - using direct database access (this is normal for local development)', {
         url: config.libreclinica.soapUrl
       });
       return false;
     }
   } catch (error: any) {
-    logger.warn('SOAP connection test error', {
-      error: error.message,
+    // SOAP is optional - the API works fine with direct database access
+    logger.info('SOAP unavailable - using direct database access (this is normal for local development)', {
       url: config.libreclinica.soapUrl
     });
     // Don't fail startup on SOAP error - it might not be available yet

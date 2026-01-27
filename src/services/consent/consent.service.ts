@@ -339,13 +339,13 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
         witness_name, witness_relationship, witness_signature_data, witness_signed_at,
         lar_name, lar_relationship, lar_signature_data, lar_signed_at, lar_reason,
         presented_at, time_spent_reading, pages_viewed, acknowledgments_checked,
-        questions_asked, consented_by, date_created, date_updated
+        questions_asked, form_data, template_id, consented_by, date_created, date_updated
       ) VALUES (
         $1, $2, $3, 'consented',
         $4, $5, CURRENT_TIMESTAMP, $6, $7,
         $8, $9, $10, CASE WHEN $8 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
         $11, $12, $13, CASE WHEN $11 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END, $14,
-        CURRENT_TIMESTAMP, $15, $16, $17, $18, $19,
+        CURRENT_TIMESTAMP, $15, $16, $17, $18, $19, $20, $21,
         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING consent_id
@@ -370,6 +370,8 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
       JSON.stringify(consent.pagesViewed),
       JSON.stringify(consent.acknowledgementsChecked),
       consent.questionsAsked || null,
+      consent.formData ? JSON.stringify(consent.formData) : null,
+      consent.templateId || null,
       consent.consentedBy
     ]);
 
@@ -793,6 +795,8 @@ function mapRowToSubjectConsent(row: any): SubjectConsent {
     pagesViewed: row.pages_viewed,
     acknowledgementsChecked: row.acknowledgments_checked,
     questionsAsked: row.questions_asked,
+    formData: row.form_data,
+    templateId: row.template_id,
     copyEmailedTo: row.copy_emailed_to,
     copyEmailedAt: row.copy_emailed_at,
     pdfFilePath: row.pdf_file_path,

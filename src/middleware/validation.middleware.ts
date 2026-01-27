@@ -247,10 +247,10 @@ export const formSchemas = {
     subjectId: Joi.number().integer().positive().required(),
     
     // Event ID - accept both frontend and backend naming conventions
-    eventId: Joi.number().integer().positive().optional(),
-    studyEventDefinitionId: Joi.number().integer().positive().optional(),
-    studyEventId: Joi.number().integer().positive().optional(),
-    eventCrfId: Joi.number().integer().positive().optional(),
+    eventId: Joi.number().integer().positive().optional().allow(null),
+    studyEventDefinitionId: Joi.number().integer().positive().optional().allow(null),
+    studyEventId: Joi.number().integer().positive().optional().allow(null),
+    eventCrfId: Joi.number().integer().positive().optional().allow(null),
     
     // Form ID - accept both frontend and backend naming conventions
     formId: Joi.number().integer().positive().optional(),
@@ -622,7 +622,16 @@ export const querySchemas = {
         'string.max': 'Response must not exceed 1000 characters'
       }),
     detailedNotes: Joi.string().optional().max(2000),
-    newStatusId: Joi.number().integer().min(1).max(5).optional()  // Optional: change status when responding
+    newStatusId: Joi.number().integer().min(1).max(5).optional(),  // Optional: change status when responding
+    // Data correction fields - enable queries to update form values
+    correctedValue: Joi.string().optional().max(4000)  // The new value to set on the linked item_data
+      .messages({
+        'string.max': 'Corrected value must not exceed 4000 characters'
+      }),
+    correctionReason: Joi.string().optional().max(500)  // Reason for the correction (for audit trail)
+      .messages({
+        'string.max': 'Correction reason must not exceed 500 characters'
+      })
   }).or('description', 'response'),  // Require at least one of description or response
 
   updateStatus: Joi.object({

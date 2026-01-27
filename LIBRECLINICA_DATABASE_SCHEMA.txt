@@ -1,0 +1,912 @@
+================================================================================
+                    LIBRECLINICA DATABASE SCHEMA REFERENCE
+================================================================================
+                    Generated from LibreClinica Source Code
+                    Date: November 2024
+================================================================================
+
+This document provides a comprehensive reference of all database tables used in
+LibreClinica. The API services should match these table and column definitions.
+
+================================================================================
+                              CORE LOOKUP TABLES
+================================================================================
+
+TABLE: status
+-------------
+  status_id             SERIAL PRIMARY KEY
+  name                  VARCHAR(255) NOT NULL
+  description           TEXT
+
+Standard Values:
+  1 = 'available'       - Active/Available
+  2 = 'pending'         - Pending
+  3 = 'unavailable'     - Unavailable  
+  4 = 'private'         - Private
+  5 = 'removed'         - Removed/Deleted
+  6 = 'locked'          - Locked
+  7 = 'auto-removed'    - Auto-removed
+  8 = 'signed'          - Signed
+  9 = 'frozen'          - Frozen
+
+TABLE: study_type
+-----------------
+  study_type_id         SERIAL PRIMARY KEY
+  name                  VARCHAR(255) NOT NULL
+  description           TEXT
+
+Standard Values:
+  1 = 'genetic'         - Genetic Study
+  2 = 'observational'   - Observational Study
+  3 = 'interventional'  - Interventional Study
+  4 = 'other'           - Other
+
+================================================================================
+                            USER MANAGEMENT TABLES
+================================================================================
+
+TABLE: user_account
+-------------------
+  user_id                   SERIAL PRIMARY KEY
+  user_name                 VARCHAR(64) UNIQUE NOT NULL
+  passwd                    VARCHAR(255) NOT NULL
+  first_name                VARCHAR(50)
+  last_name                 VARCHAR(50)
+  email                     VARCHAR(120) UNIQUE NOT NULL
+  institutional_affiliation VARCHAR(255)
+  active_study              INTEGER (FK -> study.study_id)
+  user_type_id              INTEGER (FK -> user_type.user_type_id) DEFAULT 2
+  status_id                 INTEGER (FK -> status.status_id) DEFAULT 1
+  owner_id                  INTEGER (FK -> user_account.user_id) DEFAULT 1
+  date_created              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated              TIMESTAMP
+  date_lastvisit            TIMESTAMP
+  passwd_timestamp          TIMESTAMP
+  passwd_challenge_question VARCHAR(64)
+  passwd_challenge_answer   VARCHAR(255)
+  phone                     VARCHAR(64)
+  enabled                   BOOLEAN DEFAULT true
+  account_non_locked        BOOLEAN DEFAULT true
+  lock_counter              INTEGER DEFAULT 0
+  run_webservices           BOOLEAN DEFAULT false
+  update_id                 INTEGER (FK -> user_account.user_id)
+  enable_api_key            BOOLEAN DEFAULT false
+  api_key                   VARCHAR(255)
+  time_zone                 VARCHAR(255)
+  access_code               VARCHAR(64)
+  authtype                  VARCHAR(255)
+  authsecret                VARCHAR(255)
+
+TABLE: user_type
+----------------
+  user_type_id          SERIAL PRIMARY KEY
+  user_type             VARCHAR(50) NOT NULL
+
+Standard Values:
+  1 = 'admin'           - Administrator
+  2 = 'user'            - Regular User
+  3 = 'tech-admin'      - Technical Admin
+  4 = 'sysadmin'        - System Admin
+
+TABLE: authorities
+------------------
+  username              VARCHAR(255) (FK -> user_account.user_name)
+  authority             VARCHAR(255)
+
+TABLE: study_user_role
+----------------------
+  role_name             VARCHAR(40) - Part of composite primary key
+  study_id              INTEGER - Part of composite PK (FK -> study.study_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  owner_id              INTEGER (FK -> user_account.user_id)
+  date_created          DATE
+  date_updated          DATE
+  update_id             INTEGER (FK -> user_account.user_id)
+  user_name             VARCHAR(40) - Part of composite PK (FK -> user_account.user_name)
+
+NOTE: LibreClinica does NOT have a separate 'user_role' lookup table!
+Roles are defined as constants in code (Role.java) and stored as strings.
+
+LIBRECLINICA ROLE DEFINITIONS (from Role.java):
+  ID  | Name         | Description               | Permissions
+  ----|--------------|---------------------------|------------------------------------------
+  0   | invalid      | Invalid Role              | None
+  1   | admin        | System_Administrator      | All permissions
+  2   | coordinator  | Study_Coordinator         | Submit, Extract, Manage Study
+  3   | director     | Study_Director            | Submit, Extract, Manage Study
+  4   | Investigator | Investigator              | Submit, Extract
+  5   | ra           | Data_Entry_Person         | Submit only
+  6   | monitor      | Monitor                   | Monitor only
+  7   | ra2          | site_Data_Entry_Person2   | Submit only
+
+SITE-LEVEL ROLE NAMES (for child studies/sites):
+  - site_Study_Coordinator
+  - site_Study_Director
+  - site_investigator
+  - site_Data_Entry_Person
+  - site_monitor
+  - site_Data_Entry_Person2
+
+================================================================================
+                              STUDY TABLES
+================================================================================
+
+TABLE: study
+------------
+  study_id                      SERIAL PRIMARY KEY
+  parent_study_id               INTEGER (FK -> study.study_id, for sites)
+  unique_identifier             VARCHAR(30) UNIQUE NOT NULL
+  secondary_identifier          VARCHAR(255)
+  name                          VARCHAR(255) NOT NULL
+  summary                       TEXT
+  date_planned_start            DATE
+  date_planned_end              DATE
+  date_created                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated                  TIMESTAMP
+  owner_id                      INTEGER (FK -> user_account.user_id)
+  update_id                     INTEGER (FK -> user_account.user_id)
+  status_id                     INTEGER DEFAULT 1 (FK -> status.status_id)
+  
+  -- Protocol Information
+  protocol_type                 VARCHAR(30)
+  protocol_description          VARCHAR(1000)
+  protocol_date_verification    DATE
+  phase                         VARCHAR(30)
+  expected_total_enrollment     INTEGER
+  sponsor                       VARCHAR(255)
+  collaborators                 VARCHAR(1000)
+  principal_investigator        VARCHAR(255)
+  
+  -- Publication/Reference Information
+  medline_identifier            VARCHAR(255)
+  url                           VARCHAR(255)
+  url_description               VARCHAR(255)
+  official_title                TEXT
+  results_reference             BOOLEAN
+  
+  -- Eligibility Criteria
+  conditions                    VARCHAR(500)
+  keywords                      VARCHAR(255)
+  eligibility                   VARCHAR(500)
+  gender                        VARCHAR(30)
+  age_max                       VARCHAR(3)
+  age_min                       VARCHAR(3)
+  healthy_volunteer_accepted    BOOLEAN
+  
+  -- Study Design
+  purpose                       VARCHAR(64)
+  allocation                    VARCHAR(64)
+  masking                       VARCHAR(30)
+  control                       VARCHAR(30)
+  assignment                    VARCHAR(30)
+  endpoint                      VARCHAR(64)
+  interventions                 VARCHAR(1000)
+  duration                      VARCHAR(30)
+  selection                     VARCHAR(30)
+  timing                        VARCHAR(30)
+  
+  -- Facility Information
+  facility_name                 VARCHAR(255)
+  facility_city                 VARCHAR(255)
+  facility_state                VARCHAR(20)
+  facility_zip                  VARCHAR(64)
+  facility_country              VARCHAR(64)
+  facility_recruitment_status   VARCHAR(60)
+  facility_contact_name         VARCHAR(255)
+  facility_contact_degree       VARCHAR(255)
+  facility_contact_phone        VARCHAR(255)
+  facility_contact_email        VARCHAR(255)
+  
+  -- System Fields
+  oc_oid                        VARCHAR(40) UNIQUE NOT NULL
+  old_status_id                 INTEGER
+  mail_notification             VARCHAR(255)
+  contact_email                 VARCHAR(255)
+
+TABLE: study_parameter
+----------------------
+  study_parameter_id    SERIAL PRIMARY KEY
+  handle                VARCHAR(255) UNIQUE NOT NULL
+  name                  VARCHAR(255)
+  description           TEXT
+
+TABLE: study_parameter_value
+----------------------------
+  study_parameter_value_id  SERIAL PRIMARY KEY
+  study_id                  INTEGER (FK -> study.study_id)
+  study_parameter_id        INTEGER (FK -> study_parameter.study_parameter_id)
+  value                     VARCHAR(255)
+
+================================================================================
+                           SUBJECT TABLES
+================================================================================
+
+TABLE: subject
+--------------
+  subject_id            SERIAL PRIMARY KEY
+  father_id             INTEGER (FK -> subject.subject_id)
+  mother_id             INTEGER (FK -> subject.subject_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  owner_id              INTEGER (FK -> user_account.user_id)
+  date_updated          TIMESTAMP
+  update_id             INTEGER (FK -> user_account.user_id)
+  gender                CHAR(1)  -- 'm' or 'f'
+  unique_identifier     VARCHAR(255)
+  date_of_birth         DATE
+
+TABLE: study_subject
+--------------------
+  study_subject_id      SERIAL PRIMARY KEY
+  label                 VARCHAR(30) NOT NULL
+  secondary_label       VARCHAR(30)
+  subject_id            INTEGER (FK -> subject.subject_id)
+  study_id              INTEGER NOT NULL (FK -> study.study_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  enrollment_date       DATE
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  owner_id              INTEGER (FK -> user_account.user_id)
+  update_id             INTEGER (FK -> user_account.user_id)
+  oc_oid                VARCHAR(40) UNIQUE NOT NULL
+
+================================================================================
+                           EVENT/VISIT TABLES
+================================================================================
+
+TABLE: study_event_definition
+-----------------------------
+  study_event_definition_id  SERIAL PRIMARY KEY
+  study_id                   INTEGER NOT NULL (FK -> study.study_id)
+  name                       VARCHAR(2000) NOT NULL
+  description                VARCHAR(2000)
+  repeating                  BOOLEAN DEFAULT false
+  type                       VARCHAR(20)  -- 'scheduled', 'unscheduled', 'common'
+  category                   VARCHAR(2000)
+  ordinal                    INTEGER
+  date_created               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated               TIMESTAMP
+  owner_id                   INTEGER (FK -> user_account.user_id)
+  update_id                  INTEGER (FK -> user_account.user_id)
+  status_id                  INTEGER DEFAULT 1 (FK -> status.status_id)
+  oc_oid                     VARCHAR(40) UNIQUE NOT NULL
+
+TABLE: study_event
+------------------
+  study_event_id               SERIAL PRIMARY KEY
+  study_event_definition_id    INTEGER NOT NULL (FK -> study_event_definition.study_event_definition_id)
+  study_subject_id             INTEGER NOT NULL (FK -> study_subject.study_subject_id)
+  location                     VARCHAR(2000)
+  sample_ordinal               INTEGER
+  date_start                   TIMESTAMP
+  date_end                     TIMESTAMP
+  owner_id                     INTEGER (FK -> user_account.user_id)
+  status_id                    INTEGER DEFAULT 1 (FK -> status.status_id)
+  date_created                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated                 TIMESTAMP
+  update_id                    INTEGER (FK -> user_account.user_id)
+  subject_event_status_id      INTEGER (FK -> subject_event_status.subject_event_status_id)
+  start_time_flag              BOOLEAN DEFAULT false
+  end_time_flag                BOOLEAN DEFAULT false
+  reference_visit_id           INTEGER
+
+TABLE: subject_event_status (lookup)
+------------------------------------
+  subject_event_status_id   SERIAL PRIMARY KEY
+  name                      VARCHAR(255)
+  description               TEXT
+
+Standard Values:
+  1 = 'scheduled'           - Scheduled
+  2 = 'not_scheduled'       - Not Scheduled
+  3 = 'data_entry_started'  - Data Entry Started
+  4 = 'completed'           - Completed
+  5 = 'stopped'             - Stopped
+  6 = 'skipped'             - Skipped
+  7 = 'locked'              - Locked
+  8 = 'signed'              - Signed
+  9 = 'sourced'             - Sourced
+  10 = 'removed'            - Removed
+
+NOTE: This table may not exist in all LibreClinica installations.
+      Check your specific database before using.
+
+================================================================================
+                           CRF/FORM TABLES
+================================================================================
+
+TABLE: crf
+----------
+  crf_id                SERIAL PRIMARY KEY
+  name                  VARCHAR(255) NOT NULL
+  description           VARCHAR(2000)
+  owner_id              INTEGER (FK -> user_account.user_id)
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  update_id             INTEGER (FK -> user_account.user_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  oc_oid                VARCHAR(40) UNIQUE NOT NULL
+  source_study_id       INTEGER (FK -> study.study_id)
+  study_id              INTEGER (FK -> study.study_id)
+
+TABLE: crf_version
+------------------
+  crf_version_id        SERIAL PRIMARY KEY
+  crf_id                INTEGER NOT NULL (FK -> crf.crf_id)
+  name                  VARCHAR(255)
+  description           VARCHAR(4000)
+  revision_notes        VARCHAR(255)
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  owner_id              INTEGER (FK -> user_account.user_id)
+  update_id             INTEGER (FK -> user_account.user_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  oc_oid                VARCHAR(40) UNIQUE NOT NULL
+  xform                 TEXT
+  xform_name            VARCHAR(255)
+
+TABLE: event_definition_crf
+---------------------------
+  event_definition_crf_id    SERIAL PRIMARY KEY
+  study_event_definition_id  INTEGER NOT NULL (FK -> study_event_definition.study_event_definition_id)
+  study_id                   INTEGER (FK -> study.study_id)
+  crf_id                     INTEGER NOT NULL (FK -> crf.crf_id)
+  required_crf               BOOLEAN DEFAULT false
+  double_entry               BOOLEAN DEFAULT false
+  require_all_text_filled    BOOLEAN DEFAULT false
+  hide_crf                   BOOLEAN DEFAULT false
+  ordinal                    INTEGER
+  owner_id                   INTEGER (FK -> user_account.user_id)
+  date_created               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  status_id                  INTEGER DEFAULT 1 (FK -> status.status_id)
+  default_version_id         INTEGER (FK -> crf_version.crf_version_id)
+  electronic_signature       BOOLEAN DEFAULT false
+  source_data_verification   INTEGER
+
+TABLE: event_crf
+----------------
+  event_crf_id            SERIAL PRIMARY KEY
+  study_event_id          INTEGER NOT NULL (FK -> study_event.study_event_id)
+  crf_version_id          INTEGER NOT NULL (FK -> crf_version.crf_version_id)
+  study_subject_id        INTEGER (FK -> study_subject.study_subject_id)
+  date_interviewed        DATE
+  interviewer_name        VARCHAR(255)
+  completion_status_id    INTEGER (FK -> completion_status.completion_status_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+  annotations             TEXT
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  owner_id                INTEGER (FK -> user_account.user_id)
+  update_id               INTEGER (FK -> user_account.user_id)
+  validate_string         VARCHAR(256)
+  validator_annotations   TEXT
+  validator_id            INTEGER (FK -> user_account.user_id)
+  date_validate           TIMESTAMP
+  date_validate_completed TIMESTAMP
+  sdv_status              BOOLEAN DEFAULT false
+  sdv_update_id           INTEGER (FK -> user_account.user_id)
+  old_status_id           INTEGER
+
+TABLE: completion_status (lookup)
+---------------------------------
+  completion_status_id  SERIAL PRIMARY KEY
+  name                  VARCHAR(255)
+  description           TEXT
+
+Standard Values:
+  1 = 'initial_data_entry'     - Initial Data Entry
+  2 = 'complete'               - Complete
+  3 = 'data_entry_complete'    - Data Entry Complete
+  4 = 'double_data_entry'      - Double Data Entry
+  5 = 'signed'                 - Signed
+
+================================================================================
+                           ITEM/QUESTION TABLES
+================================================================================
+
+TABLE: item
+-----------
+  item_id               SERIAL PRIMARY KEY
+  name                  VARCHAR(255) NOT NULL
+  description           VARCHAR(4000)
+  units                 VARCHAR(64)
+  phi_status            BOOLEAN DEFAULT false
+  item_data_type_id     INTEGER (FK -> item_data_type.item_data_type_id)
+  item_reference_type_id INTEGER (FK -> item_reference_type.item_reference_type_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  owner_id              INTEGER (FK -> user_account.user_id)
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  update_id             INTEGER (FK -> user_account.user_id)
+  oc_oid                VARCHAR(40) UNIQUE NOT NULL
+
+TABLE: item_data_type (lookup)
+------------------------------
+  item_data_type_id     SERIAL PRIMARY KEY
+  name                  VARCHAR(255) NOT NULL
+  description           TEXT
+
+Standard Values:
+  1 = 'BL'  - Boolean
+  2 = 'INT' - Integer
+  3 = 'ST'  - String
+  4 = 'REAL' - Real/Float
+  5 = 'DATE' - Date
+  6 = 'FILE' - File
+
+TABLE: item_group
+-----------------
+  item_group_id         SERIAL PRIMARY KEY
+  name                  VARCHAR(255) NOT NULL
+  crf_id                INTEGER (FK -> crf.crf_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  owner_id              INTEGER (FK -> user_account.user_id)
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  update_id             INTEGER (FK -> user_account.user_id)
+  oc_oid                VARCHAR(40) UNIQUE NOT NULL
+
+TABLE: item_group_metadata
+--------------------------
+  item_group_metadata_id  SERIAL PRIMARY KEY
+  item_group_id           INTEGER (FK -> item_group.item_group_id)
+  crf_version_id          INTEGER (FK -> crf_version.crf_version_id)
+  item_id                 INTEGER (FK -> item.item_id)
+  header                  VARCHAR(255)
+  subheader               VARCHAR(255)
+  layout                  VARCHAR(50)
+  repeat_number           INTEGER
+  repeat_max              INTEGER
+  repeat_array            VARCHAR(255)
+  row_start_number        INTEGER
+  show_group              BOOLEAN DEFAULT true
+  ordinal                 INTEGER
+
+TABLE: item_form_metadata
+-------------------------
+  item_form_metadata_id   SERIAL PRIMARY KEY
+  item_id                 INTEGER (FK -> item.item_id)
+  crf_version_id          INTEGER (FK -> crf_version.crf_version_id)
+  section_id              INTEGER (FK -> section.section_id)
+  parent_id               INTEGER
+  ordinal                 INTEGER
+  header                  VARCHAR(2000)
+  subheader               VARCHAR(240)
+  left_item_text          VARCHAR(4000)
+  right_item_text         VARCHAR(2000)
+  item_group_id           INTEGER (FK -> item_group.item_group_id)
+  response_set_id         INTEGER (FK -> response_set.response_set_id)
+  regexp                  VARCHAR(1000)
+  regexp_error_msg        VARCHAR(255)
+  required                BOOLEAN DEFAULT false
+  default_value           VARCHAR(4000)
+  width_decimal           VARCHAR(10)
+  show_item               BOOLEAN DEFAULT true
+  phi_status              BOOLEAN DEFAULT false
+
+TABLE: item_data
+----------------
+  item_data_id          SERIAL PRIMARY KEY
+  item_id               INTEGER NOT NULL (FK -> item.item_id)
+  event_crf_id          INTEGER NOT NULL (FK -> event_crf.event_crf_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  value                 TEXT
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  owner_id              INTEGER (FK -> user_account.user_id)
+  update_id             INTEGER (FK -> user_account.user_id)
+  ordinal               INTEGER
+  old_status_id         INTEGER
+  deleted               BOOLEAN DEFAULT false
+
+TABLE: section
+--------------
+  section_id            SERIAL PRIMARY KEY
+  crf_version_id        INTEGER (FK -> crf_version.crf_version_id)
+  status_id             INTEGER DEFAULT 1 (FK -> status.status_id)
+  label                 VARCHAR(2000)
+  title                 VARCHAR(2000)
+  subtitle              VARCHAR(2000)
+  instructions          TEXT
+  page_number_label     VARCHAR(5)
+  ordinal               INTEGER
+  parent_id             INTEGER
+  date_created          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated          TIMESTAMP
+  owner_id              INTEGER (FK -> user_account.user_id)
+  update_id             INTEGER (FK -> user_account.user_id)
+  borders               INTEGER
+
+TABLE: response_set
+-------------------
+  response_set_id       SERIAL PRIMARY KEY
+  response_type_id      INTEGER (FK -> response_type.response_type_id)
+  label                 VARCHAR(80)
+  options_text          TEXT
+  options_values        TEXT
+  version_id            INTEGER
+
+TABLE: response_type (lookup)
+-----------------------------
+  response_type_id      SERIAL PRIMARY KEY
+  name                  VARCHAR(255)
+  description           TEXT
+
+Standard Values:
+  1 = 'text'            - Text input
+  2 = 'textarea'        - Text area
+  3 = 'checkbox'        - Checkbox
+  4 = 'radio'           - Radio button
+  5 = 'single-select'   - Single select dropdown
+  6 = 'multi-select'    - Multi select
+  7 = 'calculation'     - Calculated field
+  8 = 'file'            - File upload
+
+================================================================================
+                    DISCREPANCY NOTE (QUERY) TABLES
+================================================================================
+
+TABLE: discrepancy_note_type (lookup)
+-------------------------------------
+  discrepancy_note_type_id  SERIAL PRIMARY KEY
+  name                      VARCHAR(50) NOT NULL
+  description               VARCHAR(255)
+
+Standard Values:
+  1 = 'Failed Validation Check'
+  2 = 'Annotation'
+  3 = 'Query'
+  4 = 'Reason for Change'
+
+TABLE: resolution_status (lookup)
+---------------------------------
+  resolution_status_id  SERIAL PRIMARY KEY
+  name                  VARCHAR(50) NOT NULL
+  description           VARCHAR(255)
+
+Standard Values:
+  1 = 'New'
+  2 = 'Updated'
+  3 = 'Resolution Proposed'
+  4 = 'Closed'
+  5 = 'Not Applicable'
+
+TABLE: discrepancy_note
+-----------------------
+  discrepancy_note_id       SERIAL PRIMARY KEY
+  description               VARCHAR(255)
+  discrepancy_note_type_id  INTEGER (FK -> discrepancy_note_type.discrepancy_note_type_id)
+  resolution_status_id      INTEGER DEFAULT 1 (FK -> resolution_status.resolution_status_id)
+  detailed_notes            TEXT
+  date_created              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  owner_id                  INTEGER (FK -> user_account.user_id)
+  parent_dn_id              INTEGER (FK -> discrepancy_note.discrepancy_note_id)
+  entity_type               VARCHAR(30)  -- 'item_data', 'event_crf', 'study_subject', 'study_event'
+  study_id                  INTEGER (FK -> study.study_id)
+  assigned_user_id          INTEGER (FK -> user_account.user_id)
+  thread_number             INTEGER
+  thread_uuid               VARCHAR(255)
+  entity_id                 INTEGER
+
+-- Mapping tables for discrepancy notes
+TABLE: dn_item_data_map
+-----------------------
+  discrepancy_note_id     INTEGER (FK -> discrepancy_note.discrepancy_note_id)
+  item_data_id            INTEGER (FK -> item_data.item_data_id)
+  column_name             VARCHAR(255)
+  study_subject_id        INTEGER (FK -> study_subject.study_subject_id)
+
+TABLE: dn_event_crf_map
+-----------------------
+  discrepancy_note_id     INTEGER (FK -> discrepancy_note.discrepancy_note_id)
+  event_crf_id            INTEGER (FK -> event_crf.event_crf_id)
+  column_name             VARCHAR(255)
+  study_subject_id        INTEGER (FK -> study_subject.study_subject_id)
+
+TABLE: dn_study_subject_map
+---------------------------
+  discrepancy_note_id     INTEGER (FK -> discrepancy_note.discrepancy_note_id)
+  study_subject_id        INTEGER (FK -> study_subject.study_subject_id)
+  column_name             VARCHAR(255)
+
+TABLE: dn_study_event_map
+-------------------------
+  discrepancy_note_id     INTEGER (FK -> discrepancy_note.discrepancy_note_id)
+  study_event_id          INTEGER (FK -> study_event.study_event_id)
+  column_name             VARCHAR(255)
+  study_subject_id        INTEGER (FK -> study_subject.study_subject_id)
+
+TABLE: dn_subject_map
+---------------------
+  discrepancy_note_id     INTEGER (FK -> discrepancy_note.discrepancy_note_id)
+  subject_id              INTEGER (FK -> subject.subject_id)
+  column_name             VARCHAR(255)
+  study_subject_id        INTEGER (FK -> study_subject.study_subject_id)
+
+================================================================================
+                           AUDIT TRAIL TABLES
+================================================================================
+
+TABLE: audit_log_event
+----------------------
+  audit_id                  SERIAL PRIMARY KEY
+  audit_date                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  audit_table               VARCHAR(500)
+  user_id                   INTEGER (FK -> user_account.user_id)
+  entity_id                 INTEGER
+  entity_name               VARCHAR(500)
+  old_value                 TEXT
+  new_value                 TEXT
+  event_type_id             INTEGER
+  reason_for_change         VARCHAR(1000)
+  audit_log_event_type_id   INTEGER (FK -> audit_log_event_type.audit_log_event_type_id)
+  change_details            TEXT
+  user_account_id           INTEGER (FK -> user_account.user_id)
+  study_id                  INTEGER (FK -> study.study_id)
+  event_crf_id              INTEGER (FK -> event_crf.event_crf_id)
+
+TABLE: audit_log_event_type (lookup)
+------------------------------------
+  audit_log_event_type_id  SERIAL PRIMARY KEY
+  name                     VARCHAR(255)
+  description              TEXT
+
+TABLE: audit_user_login
+-----------------------
+  user_account_id         INTEGER NOT NULL (FK -> user_account.user_id)
+  login_attempt_date      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  login_status_code       VARCHAR(50)
+  ip_address              VARCHAR(50)
+
+TABLE: audit_event
+------------------
+  audit_id                SERIAL PRIMARY KEY
+  audit_date              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  audit_table             VARCHAR(500)
+  user_id                 INTEGER
+  entity_id               INTEGER
+  reason_for_change       VARCHAR(1000)
+
+================================================================================
+                        RANDOMIZATION/GROUP TABLES
+================================================================================
+
+TABLE: study_group_class
+------------------------
+  study_group_class_id    SERIAL PRIMARY KEY
+  name                    VARCHAR(30) NOT NULL
+  study_id                INTEGER NOT NULL (FK -> study.study_id)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+  subject_assignment      VARCHAR(30)
+  group_class_type_id     INTEGER (FK -> group_class_types.group_class_type_id)
+
+TABLE: group_class_types (lookup)
+---------------------------------
+  group_class_type_id     SERIAL PRIMARY KEY
+  name                    VARCHAR(255)
+  description             TEXT
+
+TABLE: study_group
+------------------
+  study_group_id          SERIAL PRIMARY KEY
+  name                    VARCHAR(255) NOT NULL
+  description             VARCHAR(1000)
+  study_group_class_id    INTEGER NOT NULL (FK -> study_group_class.study_group_class_id)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+
+TABLE: subject_group_map
+------------------------
+  subject_group_map_id    SERIAL PRIMARY KEY
+  study_group_id          INTEGER NOT NULL (FK -> study_group.study_group_id)
+  study_subject_id        INTEGER NOT NULL (FK -> study_subject.study_subject_id)
+  notes                   VARCHAR(255)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+
+================================================================================
+                              RULE TABLES
+================================================================================
+
+TABLE: rule
+-----------
+  rule_id                 SERIAL PRIMARY KEY
+  name                    VARCHAR(255)
+  description             VARCHAR(2000)
+  oc_oid                  VARCHAR(40)
+  enabled                 BOOLEAN
+  rule_expression_id      INTEGER (FK -> rule_expression.rule_expression_id)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+
+TABLE: rule_expression
+----------------------
+  rule_expression_id      SERIAL PRIMARY KEY
+  value                   TEXT
+  context                 VARCHAR(255)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+
+TABLE: rule_set
+---------------
+  rule_set_id             SERIAL PRIMARY KEY
+  rule_expression_id      INTEGER (FK -> rule_expression.rule_expression_id)
+  study_event_definition_id INTEGER (FK -> study_event_definition.study_event_definition_id)
+  crf_id                  INTEGER (FK -> crf.crf_id)
+  crf_version_id          INTEGER (FK -> crf_version.crf_version_id)
+  study_id                INTEGER (FK -> study.study_id)
+  item_id                 INTEGER (FK -> item.item_id)
+  item_group_id           INTEGER (FK -> item_group.item_group_id)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+
+TABLE: rule_set_rule
+--------------------
+  rule_set_rule_id        SERIAL PRIMARY KEY
+  rule_set_id             INTEGER (FK -> rule_set.rule_set_id)
+  rule_id                 INTEGER (FK -> rule.rule_id)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+
+TABLE: rule_action
+------------------
+  rule_action_id          SERIAL PRIMARY KEY
+  rule_set_rule_id        INTEGER (FK -> rule_set_rule.rule_set_rule_id)
+  action_type             VARCHAR(50)
+  expression_evaluates_to BOOLEAN
+  message                 TEXT
+  email_to                VARCHAR(255)
+  owner_id                INTEGER (FK -> user_account.user_id)
+  date_created            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  date_updated            TIMESTAMP
+  update_id               INTEGER (FK -> user_account.user_id)
+  status_id               INTEGER DEFAULT 1 (FK -> status.status_id)
+
+================================================================================
+                           VERSIONING/METADATA
+================================================================================
+
+TABLE: versioning_map
+---------------------
+  crf_version_id          INTEGER (FK -> crf_version.crf_version_id)
+  item_id                 INTEGER (FK -> item.item_id)
+
+TABLE: openclinica_version
+--------------------------
+  id                      SERIAL PRIMARY KEY
+  name                    VARCHAR(255)
+  build_number            VARCHAR(1000)
+  version_comment         VARCHAR(1000)
+  update_timestamp        TIMESTAMP
+
+TABLE: measurement_unit
+-----------------------
+  measurement_unit_id     SERIAL PRIMARY KEY
+  name                    VARCHAR(255)
+  oc_oid                  VARCHAR(40)
+
+================================================================================
+                               IMPORTANT NOTES
+================================================================================
+
+1. FOREIGN KEY RELATIONSHIPS:
+   - All FK references are enforced at the database level
+   - Cascading deletes are NOT automatic - use soft delete (status_id = 5)
+   
+2. OC_OID FIELDS:
+   - Used for CDISC ODM compliance
+   - Format: <EntityType>_<UniqueIdentifier>
+   - Examples: S_STUDY001, SS_SUBJ001, SE_SCREENING
+
+3. STATUS VALUES (status_id):
+   - 1 = Available (active)
+   - 5 = Removed (soft delete)
+   - 6 = Locked
+   - 8 = Signed
+
+4. COMPLETION STATUS (event_crf):
+   - 1 = Initial Data Entry
+   - 2 = Complete
+   - 5 = Signed
+
+5. PASSWORD HASHING:
+   - LibreClinica uses MD5 hashing (legacy)
+   - API layer adds additional security
+
+6. TIMESTAMP HANDLING:
+   - All timestamps stored in database timezone
+   - API should handle timezone conversion
+
+================================================================================
+                         API FIXES APPLIED (Nov 2024)
+================================================================================
+
+The following issues were identified and fixed in the API services:
+
+1. DUPLICATE FUNCTIONS MERGED:
+   - getStudyForms() was duplicated in study.service.ts and form.service.ts
+   - Removed from study.service.ts, now re-exports from form.service.ts
+
+2. INCORRECT COLUMN NAMES FIXED:
+   - audit_log_event table: Changed 'event_type_id' to 'audit_log_event_type_id'
+   - user_account table: Changed 'failed_login_attempts' to 'lock_counter'
+   - user_account table: Removed non-existent 'lockout_time' column
+   - study table: Removed non-existent 'type_id' column (use protocol_type instead)
+
+3. NON-EXISTENT COLUMNS REMOVED:
+   - audit_log_event DOES NOT have 'study_id' column
+   - audit_log_event DOES NOT have 'subject_id' column
+   - discrepancy_note DOES NOT have 'study_subject_id' column
+     (use mapping tables: dn_study_subject_map, dn_item_data_map, etc.)
+   - user_role table DOES NOT exist (role_name is stored as string in study_user_role)
+
+4. AUDIT LOG INSERTS FIXED:
+   - All audit_log_event INSERTs now include audit_log_event_type_id (required FK)
+   - Fixed in: sdv.service.ts, data-locks.service.ts, randomization.service.ts
+
+5. QUERY FIXES:
+   - report.service.ts: Fixed query report to use dn_study_subject_map
+   - dashboard.service.ts: Fixed query rate calculation
+   - Fixed user activity stats to not rely on audit_log_event.study_id
+
+Affected files: audit.service.ts, dashboard.service.ts, auth.service.ts,
+     user.service.ts, study.service.ts, event.service.ts, query.service.ts
+
+3. DISCREPANCY_NOTE SCHEMA FIXED:
+   - discrepancy_note table does NOT have direct entity ID columns
+   - Entity links are through mapping tables: dn_item_data_map, dn_event_crf_map,
+     dn_study_subject_map, dn_study_event_map, dn_subject_map
+   - createQuery() in query.service.ts fixed to use proper mapping tables
+
+================================================================================
+                           API SCHEMA ALIGNMENT NOTES
+================================================================================
+
+The following tables are referenced by the API services:
+
+SERVICES/DATABASE:
+- user.service.ts        -> user_account, user_type, study_user_role
+- auth.service.ts        -> user_account, audit_log_event
+- dashboard.service.ts   -> study_subject, event_crf, discrepancy_note
+- data-locks.service.ts  -> event_crf (status_id = 6 for locked)
+- sdv.service.ts         -> event_crf (sdv_status field)
+- query.service.ts       -> discrepancy_note, resolution_status
+- audit.service.ts       -> audit_log_event, audit_log_event_type
+- randomization.service.ts -> subject_group_map, study_group, study_group_class
+
+SERVICES/HYBRID:
+- study.service.ts       -> study, study_subject, study_event_definition, crf
+- subject.service.ts     -> study_subject, subject, study_event
+- event.service.ts       -> study_event, study_event_definition, event_crf
+- form.service.ts        -> crf, crf_version, item, item_data, event_crf
+
+SERVICES/SOAP:
+- Use LibreClinica SOAP API (ODM 1.3 XML format)
+- Translate between JSON and ODM XML
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
+

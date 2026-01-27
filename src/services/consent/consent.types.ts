@@ -153,6 +153,10 @@ export interface SubjectConsent {
   acknowledgementsChecked?: any;
   questionsAsked?: string;
   
+  // Form data from template (if using form builder)
+  formData?: any;
+  templateId?: number;
+  
   // Copy
   copyEmailedTo?: string;
   copyEmailedAt?: Date;
@@ -197,6 +201,10 @@ export interface SubjectConsentCreate {
   pagesViewed: any;
   acknowledgementsChecked: any;
   questionsAsked?: string;
+  
+  // Form data from template (if using form builder)
+  formData?: any;
+  templateId?: number;
   
   // Staff who obtained consent
   consentedBy: number;

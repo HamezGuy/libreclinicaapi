@@ -200,7 +200,8 @@ export class SoapClient {
 
       return body;
     } catch (error: any) {
-      logger.error('Failed to parse SOAP response', { error: error.message });
+      // Don't log error - SOAP is optional and parsing failures are expected when SOAP is unavailable
+      logger.debug('Failed to parse SOAP response (SOAP is optional)', { error: error.message });
       throw error;
     }
   }
@@ -258,7 +259,9 @@ export class SoapClient {
         const statusCode = error.response?.status;
         const responseData = error.response?.data;
 
-        logger.warn(`SOAP request failed (attempt ${attempt}/${this.config.maxRetries})`, {
+        // Use debug level for connection test failures (SOAP is optional)
+        const logLevel = methodName === 'listAll' ? 'debug' : 'warn';
+        logger[logLevel](`SOAP request failed (attempt ${attempt}/${this.config.maxRetries})`, {
           serviceName,
           methodName,
           error: error.message,
@@ -288,7 +291,9 @@ export class SoapClient {
       }
     }
 
-    logger.error('SOAP request failed after all retries', {
+    // Use debug level for connection test failures (SOAP is optional)
+    const logLevel = methodName === 'listAll' ? 'debug' : 'error';
+    logger[logLevel]('SOAP request failed after all retries', {
       serviceName,
       methodName,
       error: lastError.message
@@ -319,14 +324,18 @@ export class SoapClient {
         parameters: {}
       });
 
-      logger.info(`SOAP connection test: ${result.success ? 'SUCCESS' : 'FAILED'}`, {
-        serviceName: testService,
-        success: result.success
-      });
+      // Only log success - failure is handled at server level
+      if (result.success) {
+        logger.info('SOAP connection test: SUCCESS', {
+          serviceName: testService,
+          success: result.success
+        });
+      }
 
       return result.success;
     } catch (error: any) {
-      logger.error(`SOAP connection test failed`, {
+      // Don't log error - SOAP is optional and failures are expected in dev
+      logger.debug('SOAP connection test failed (SOAP is optional)', {
         error: error.message
       });
       return false;

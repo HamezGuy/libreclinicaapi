@@ -1,0 +1,1381 @@
+================================================================================
+                    LIBRECLINICA API - COMPLETE DOCUMENTATION
+================================================================================
+                      Generated: November 28, 2025
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. API Overview
+2. Base Configuration
+3. Authentication Endpoints (/api/auth)
+4. Study Endpoints (/api/studies)
+5. Subject/Patient Endpoints (/api/subjects)
+6. Form Endpoints (/api/forms)
+7. Event Endpoints (/api/events)
+8. Query Endpoints (/api/queries)
+9. Dashboard Endpoints (/api/dashboard)
+10. User Endpoints (/api/users)
+11. Workflow Endpoints (/api/workflows)
+12. Audit Endpoints (/api/audit)
+13. SDV Endpoints (/api/sdv)
+14. Randomization Endpoints (/api/randomization)
+15. Monitoring Endpoints (/api/monitoring)
+16. Coding Endpoints (/api/coding)
+17. Data Locks Endpoints (/api/data-locks)
+18. AI Assistant Endpoints (/api/ai)
+
+================================================================================
+1. API OVERVIEW
+================================================================================
+
+Base URL: http://localhost:3001/api (development)
+          https://api.accuratrials.com/api (production)
+
+Security Features:
+- JWT Authentication (Bearer token)
+- Rate Limiting (100 req/15min for general, 10 req/15min for auth)
+- CORS enabled for localhost:4200 and accuratrials.com
+- Helmet security headers
+- Audit logging on all requests
+
+Response Format:
+{
+  "success": boolean,
+  "data": any,
+  "message": string (optional),
+  "pagination": { page, limit, total } (for lists)
+}
+
+================================================================================
+2. BASE CONFIGURATION
+================================================================================
+
+Environment Variables Required:
+- DATABASE_URL: PostgreSQL connection string to LibreClinica DB
+- JWT_SECRET: Secret for JWT token signing
+- JWT_EXPIRES_IN: Token expiration (default: 15m)
+- JWT_REFRESH_EXPIRES_IN: Refresh token expiration (default: 7d)
+- SOAP_ENDPOINT: LibreClinica SOAP endpoint
+- SOAP_USERNAME: SOAP service username
+- SOAP_PASSWORD: SOAP service password
+
+================================================================================
+3. AUTHENTICATION ENDPOINTS (/api/auth)
+================================================================================
+
+POST /api/auth/login
+--------------------
+Purpose: Username/password authentication
+Rate Limit: 10 requests per 15 minutes
+Request Body:
+  {
+    "username": string,
+    "password": string
+  }
+Response:
+  {
+    "success": true,
+    "accessToken": "jwt_token",
+    "refreshToken": "refresh_token",
+    "expiresIn": 900,
+    "user": {
+      "userId": number,
+      "username": string,
+      "firstName": string,
+      "lastName": string,
+      "email": string,
+      "role": string,
+      "studyIds": number[]
+    }
+  }
+
+POST /api/auth/google
+---------------------
+Purpose: Google OAuth authentication
+Request Body:
+  {
+    "idToken": string
+  }
+Response: Same as /login
+
+POST /api/auth/refresh
+----------------------
+Purpose: Refresh access token
+Request Body:
+  {
+    "refreshToken": string
+  }
+Response:
+  {
+    "success": true,
+    "accessToken": "new_jwt_token",
+    "refreshToken": "new_refresh_token",
+    "expiresIn": 900
+  }
+
+GET /api/auth/verify
+--------------------
+Purpose: Verify current token validity
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "user": {
+      "userId": number,
+      "username": string,
+      "email": string,
+      "userType": string
+    }
+  }
+
+POST /api/auth/logout
+---------------------
+Purpose: Logout user (client-side token invalidation)
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "message": "Logged out successfully"
+  }
+
+================================================================================
+4. STUDY ENDPOINTS (/api/studies)
+================================================================================
+
+GET /api/studies
+----------------
+Purpose: List all studies user has access to
+Auth Required: Yes
+Query Parameters:
+  - status: string (filter by status)
+  - page: number (default: 1)
+  - limit: number (default: 20)
+Response:
+  {
+    "success": true,
+    "data": [Study],
+    "pagination": { page, limit, total }
+  }
+
+GET /api/studies/:id
+--------------------
+Purpose: Get single study details
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "studyId": number,
+      "name": string,
+      "uniqueIdentifier": string,
+      "summary": string,
+      "status": string,
+      ...
+    }
+  }
+
+GET /api/studies/:id/metadata
+-----------------------------
+Purpose: Get study metadata (uses SOAP)
+Auth Required: Yes
+Response: Full study metadata from LibreClinica
+
+GET /api/studies/:id/forms
+--------------------------
+Purpose: Get CRFs assigned to study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [CRF objects]
+  }
+
+GET /api/studies/:id/sites
+--------------------------
+Purpose: Get study sites (child studies)
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [{
+      "id": string,
+      "siteNumber": string,
+      "siteName": string,
+      "status": string,
+      "address": { facility, city, state, country },
+      "contact": { email, phone },
+      "targetEnrollment": number,
+      "actualEnrollment": number
+    }]
+  }
+
+GET /api/studies/:id/events
+---------------------------
+Purpose: Get study event definitions (phases)
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [{
+      "id": string,
+      "oid": string,
+      "name": string,
+      "type": string,
+      "repeating": boolean,
+      "order": number,
+      "formCount": number
+    }]
+  }
+
+GET /api/studies/:id/stats
+--------------------------
+Purpose: Get study statistics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "enrollment": { target, actual, active, completed, percentage },
+      "queries": { total, open, closed },
+      "sites": number,
+      "events": number,
+      "forms": number
+    }
+  }
+
+GET /api/studies/:id/users
+--------------------------
+Purpose: Get users assigned to study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [{
+      "userId": number,
+      "username": string,
+      "firstName": string,
+      "lastName": string,
+      "email": string,
+      "role": string,
+      "assignedDate": date
+    }]
+  }
+
+POST /api/studies
+-----------------
+Purpose: Create new study
+Auth Required: Yes
+Roles: admin, coordinator
+Request Body:
+  {
+    "name": string,
+    "uniqueIdentifier": string,
+    "summary": string,
+    "datePlannedStart": date,
+    "datePlannedEnd": date,
+    "expectedTotalEnrollment": number,
+    ...
+  }
+Response:
+  {
+    "success": true,
+    "data": { studyId: number }
+  }
+
+PUT /api/studies/:id
+--------------------
+Purpose: Update study
+Auth Required: Yes
+Roles: admin, coordinator
+Request Body: Partial study object
+Response:
+  {
+    "success": true,
+    "message": "Study updated successfully"
+  }
+
+DELETE /api/studies/:id
+-----------------------
+Purpose: Delete study (soft delete)
+Auth Required: Yes
+Roles: admin
+Response:
+  {
+    "success": true,
+    "message": "Study deleted successfully"
+  }
+
+================================================================================
+5. SUBJECT/PATIENT ENDPOINTS (/api/subjects)
+================================================================================
+
+GET /api/subjects
+-----------------
+Purpose: List subjects
+Auth Required: Yes
+Query Parameters:
+  - studyId: number (required)
+  - status: string
+  - page: number
+  - limit: number
+  - search: string
+Response:
+  {
+    "success": true,
+    "data": [Subject],
+    "pagination": { page, limit, total }
+  }
+
+GET /api/subjects/:id
+---------------------
+Purpose: Get subject details
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "studySubjectId": number,
+      "label": string,
+      "enrollmentDate": date,
+      "studyId": number,
+      "statusId": number,
+      ...
+    }
+  }
+
+GET /api/subjects/:id/progress
+------------------------------
+Purpose: Get subject progress/completion
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "totalEvents": number,
+      "completedEvents": number,
+      "totalForms": number,
+      "completedForms": number,
+      "percentComplete": number
+    }
+  }
+
+GET /api/subjects/:id/events
+----------------------------
+Purpose: Get subject's scheduled events
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [{
+      "id": string,
+      "eventDefinitionId": string,
+      "name": string,
+      "status": string,
+      "startDate": date,
+      "totalForms": number,
+      "completedForms": number
+    }]
+  }
+
+GET /api/subjects/:id/forms
+---------------------------
+Purpose: Get subject's forms
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [{
+      "id": string,
+      "eventId": string,
+      "formName": string,
+      "completionStatus": string,
+      "dateCreated": date
+    }]
+  }
+
+POST /api/subjects
+------------------
+Purpose: Create new subject (uses SOAP for GxP compliance)
+Auth Required: Yes
+Roles: coordinator, investigator
+Request Body:
+  {
+    "studyId": number,
+    "studySubjectId": string,  // Label/patient number
+    "secondaryId": string,
+    "enrollmentDate": string,  // YYYY-MM-DD
+    "gender": string,          // 'm', 'f', or ''
+    "dateOfBirth": string      // YYYY-MM-DD
+  }
+Response:
+  {
+    "success": true,
+    "studySubjectId": number,
+    "label": string,
+    "message": "Subject created successfully"
+  }
+
+PUT /api/subjects/:id
+---------------------
+Purpose: Update subject
+Auth Required: Yes
+Roles: coordinator, investigator
+Request Body:
+  {
+    "secondaryLabel": string,
+    "dateOfBirth": string,
+    "gender": string
+  }
+Response:
+  {
+    "success": true,
+    "data": Subject,
+    "message": "Subject updated successfully"
+  }
+
+PUT /api/subjects/:id/status
+----------------------------
+Purpose: Update subject status
+Auth Required: Yes
+Roles: coordinator, investigator
+Request Body:
+  {
+    "statusId": number,
+    "reason": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "Subject status updated successfully"
+  }
+
+DELETE /api/subjects/:id
+------------------------
+Purpose: Soft delete subject
+Auth Required: Yes
+Roles: admin, coordinator
+Response:
+  {
+    "success": true,
+    "message": "Subject removed successfully"
+  }
+
+================================================================================
+6. FORM ENDPOINTS (/api/forms)
+================================================================================
+
+GET /api/forms
+--------------
+Purpose: List all CRFs
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [CRF],
+    "total": number
+  }
+
+GET /api/forms/by-study?studyId=X
+---------------------------------
+Purpose: Get CRFs for a specific study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [CRF],
+    "total": number
+  }
+
+GET /api/forms/:id
+------------------
+Purpose: Get CRF by ID
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": CRF
+  }
+
+GET /api/forms/:crfId/metadata
+------------------------------
+Purpose: Get CRF metadata/structure
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "crfId": number,
+      "name": string,
+      "versions": [{ versionId, name, status }],
+      "sections": [{ name, items: [] }]
+    }
+  }
+
+POST /api/forms/save
+--------------------
+Purpose: Save form data (uses SOAP ODM import)
+Auth Required: Yes
+Roles: data_entry, investigator
+Request Body:
+  {
+    "studyId": number,
+    "subjectId": number,
+    "eventId": number,
+    "formId": number,
+    "data": { [itemOid]: value },
+    "interviewDate": string,
+    "interviewerName": string
+  }
+Response:
+  {
+    "success": true,
+    "eventCrfId": number,
+    "message": "Form data saved successfully"
+  }
+
+GET /api/forms/data/:eventCrfId
+-------------------------------
+Purpose: Get form data
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "eventCrfId": number,
+      "items": [{ itemId, value, status }]
+    }
+  }
+
+GET /api/forms/status/:eventCrfId
+---------------------------------
+Purpose: Get form completion status
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "completionStatusId": number,
+      "status": string,
+      "sdvStatus": boolean,
+      "locked": boolean
+    }
+  }
+
+================================================================================
+7. EVENT ENDPOINTS (/api/events)
+================================================================================
+
+GET /api/events/study/:studyId
+------------------------------
+Purpose: Get event definitions for a study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [EventDefinition],
+    "total": number
+  }
+
+GET /api/events/:id
+-------------------
+Purpose: Get event by ID
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": EventDefinition
+  }
+
+GET /api/events/:id/crfs
+------------------------
+Purpose: Get CRFs for an event
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [EventCRF]
+  }
+
+GET /api/events/subject/:subjectId
+----------------------------------
+Purpose: Get events for a subject
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [SubjectEvent]
+  }
+
+POST /api/events
+----------------
+Purpose: Create event definition
+Auth Required: Yes
+Roles: admin, coordinator
+Request Body:
+  {
+    "studyId": number,
+    "name": string,
+    "description": string,
+    "ordinal": number,
+    "type": string,
+    "repeating": boolean
+  }
+Response:
+  {
+    "success": true,
+    "data": { eventId: number }
+  }
+
+PUT /api/events/:id
+-------------------
+Purpose: Update event definition
+Auth Required: Yes
+Roles: admin, coordinator
+Response:
+  {
+    "success": true,
+    "message": "Event updated"
+  }
+
+DELETE /api/events/:id
+----------------------
+Purpose: Delete event definition
+Auth Required: Yes
+Roles: admin
+Response:
+  {
+    "success": true,
+    "message": "Event deleted"
+  }
+
+POST /api/events/schedule
+-------------------------
+Purpose: Schedule event for a subject (uses SOAP)
+Auth Required: Yes
+Roles: coordinator, data_entry, investigator
+Request Body:
+  {
+    "studySubjectId": number,
+    "studyEventDefinitionId": number,
+    "startDate": string,
+    "location": string
+  }
+Response:
+  {
+    "success": true,
+    "data": { studyEventId: number }
+  }
+
+================================================================================
+8. QUERY ENDPOINTS (/api/queries)
+================================================================================
+
+GET /api/queries
+----------------
+Purpose: List queries/discrepancy notes
+Auth Required: Yes
+Query Parameters:
+  - studyId: number
+  - subjectId: number
+  - status: string
+  - page: number
+  - limit: number
+Response:
+  {
+    "success": true,
+    "data": [Query],
+    "pagination": { page, limit, total }
+  }
+
+GET /api/queries/stats?studyId=X
+--------------------------------
+Purpose: Get query statistics for a study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "total": number,
+      "open": number,
+      "closed": number,
+      "byType": [{ type, count }],
+      "byStatus": [{ status, count }]
+    }
+  }
+
+GET /api/queries/:id
+--------------------
+Purpose: Get query details
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": QueryWithDetails
+  }
+
+POST /api/queries
+-----------------
+Purpose: Create new query
+Auth Required: Yes
+Roles: data_entry, investigator, monitor
+Request Body:
+  {
+    "studyId": number,
+    "entityType": string,
+    "entityId": number,
+    "typeId": number,
+    "description": string,
+    "detailedNotes": string,
+    "assignedUserId": number
+  }
+Response:
+  {
+    "success": true,
+    "data": { queryId: number }
+  }
+
+POST /api/queries/:id/respond
+-----------------------------
+Purpose: Respond to a query
+Auth Required: Yes
+Request Body:
+  {
+    "response": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "Response added"
+  }
+
+PUT /api/queries/:id/status
+---------------------------
+Purpose: Update query status
+Auth Required: Yes
+Roles: monitor, coordinator, admin
+Request Body:
+  {
+    "statusId": number  // 1=New, 2=Updated, 3=Resolution Proposed, 4=Closed, 5=N/A
+  }
+Response:
+  {
+    "success": true,
+    "message": "Status updated"
+  }
+
+================================================================================
+9. DASHBOARD ENDPOINTS (/api/dashboard)
+================================================================================
+
+GET /api/dashboard/enrollment?studyId=X&startDate=Y&endDate=Z
+-------------------------------------------------------------
+Purpose: Get enrollment statistics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "totalEnrolled": number,
+      "targetEnrollment": number,
+      "enrolledThisWeek": number,
+      "enrolledThisMonth": number,
+      "sites": [{ siteId, siteName, enrolled, target }]
+    }
+  }
+
+GET /api/dashboard/completion?studyId=X
+---------------------------------------
+Purpose: Get form completion statistics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "totalSubjects": number,
+      "completedSubjects": number,
+      "completionRate": number,
+      "forms": [{ crfName, total, completed, completionRate }]
+    }
+  }
+
+GET /api/dashboard/queries?studyId=X&timeframe=month
+----------------------------------------------------
+Purpose: Get query statistics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "totalQueries": number,
+      "openQueries": number,
+      "closedQueries": number,
+      "avgResolutionTime": number,
+      "queriesByType": [],
+      "queriesByStatus": []
+    }
+  }
+
+GET /api/dashboard/activity?studyId=X&days=30
+---------------------------------------------
+Purpose: Get user activity statistics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "activeUsersToday": number,
+      "activeUsersThisWeek": number,
+      "topUsers": [{ userId, username, actionCount }]
+    }
+  }
+
+================================================================================
+10. USER ENDPOINTS (/api/users)
+================================================================================
+
+All user endpoints require admin or coordinator role.
+
+GET /api/users
+--------------
+Purpose: List users
+Auth Required: Yes
+Roles: admin, coordinator
+Query Parameters:
+  - studyId: number
+  - role: string
+  - enabled: boolean
+  - page: number
+  - limit: number
+Response:
+  {
+    "success": true,
+    "data": [User],
+    "pagination": { page, limit, total, totalPages }
+  }
+
+GET /api/users/:id
+------------------
+Purpose: Get user by ID
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": User
+  }
+
+POST /api/users
+---------------
+Purpose: Create new user
+Auth Required: Yes
+Roles: admin, coordinator
+Request Body:
+  {
+    "username": string,
+    "firstName": string,
+    "lastName": string,
+    "email": string,
+    "password": string,
+    "phone": string,
+    "institutionalAffiliation": string,
+    "role": string
+  }
+Response:
+  {
+    "success": true,
+    "data": { userId: number }
+  }
+
+PUT /api/users/:id
+------------------
+Purpose: Update user
+Auth Required: Yes
+Request Body: Partial user object
+Response:
+  {
+    "success": true,
+    "message": "User updated"
+  }
+
+DELETE /api/users/:id
+---------------------
+Purpose: Delete/disable user
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "message": "User deleted"
+  }
+
+GET /api/users/meta/roles
+-------------------------
+Purpose: Get available roles
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": ["admin", "coordinator", "investigator", "monitor", "data_entry"]
+  }
+
+POST /api/users/:id/assign-study
+--------------------------------
+Purpose: Assign user to study with role
+Auth Required: Yes
+Request Body:
+  {
+    "studyId": number,
+    "roleName": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "User assigned to study"
+  }
+
+GET /api/users/:id/role/:studyId
+--------------------------------
+Purpose: Get user's role for a study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": { roleName: string }
+  }
+
+================================================================================
+11. WORKFLOW ENDPOINTS (/api/workflows)
+================================================================================
+
+GET /api/workflows
+------------------
+Purpose: Get all workflows
+Auth Required: Yes
+Roles: admin, coordinator, data_entry
+Query Parameters:
+  - status: string
+  - priority: string
+  - assignedTo: string
+  - studyId: number
+Response:
+  {
+    "success": true,
+    "data": [Workflow]
+  }
+
+GET /api/workflows/user/:userId
+-------------------------------
+Purpose: Get workflows for user
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [Workflow]
+  }
+
+GET /api/workflows/user/:userId/summary
+---------------------------------------
+Purpose: Get task summary for user
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "totalTasks": number,
+      "pendingTasks": number,
+      "inProgressTasks": number,
+      "awaitingApprovalTasks": number,
+      "completedTasks": number,
+      "overdueTasks": number
+    }
+  }
+
+POST /api/workflows
+-------------------
+Purpose: Create workflow
+Auth Required: Yes
+Roles: admin, coordinator
+Request Body:
+  {
+    "title": string,
+    "description": string,
+    "type": string,
+    "priority": string,
+    "assignedTo": string[],
+    "dueDate": date,
+    "studyId": number
+  }
+Response:
+  {
+    "success": true,
+    "data": { id: number }
+  }
+
+PUT /api/workflows/:id/status
+-----------------------------
+Purpose: Update workflow status
+Auth Required: Yes
+Request Body:
+  {
+    "status": string  // pending, in_progress, awaiting_approval, completed, cancelled
+  }
+Response:
+  {
+    "success": true,
+    "message": "Status updated"
+  }
+
+POST /api/workflows/:id/complete
+--------------------------------
+Purpose: Complete workflow
+Auth Required: Yes
+Request Body:
+  {
+    "signature": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "Workflow completed"
+  }
+
+POST /api/workflows/:id/approve
+-------------------------------
+Purpose: Approve workflow
+Auth Required: Yes
+Roles: admin, investigator
+Request Body:
+  {
+    "reason": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "Workflow approved"
+  }
+
+POST /api/workflows/:id/reject
+------------------------------
+Purpose: Reject workflow
+Auth Required: Yes
+Roles: admin, investigator
+Request Body:
+  {
+    "reason": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "Workflow rejected"
+  }
+
+POST /api/workflows/:id/handoff
+-------------------------------
+Purpose: Handoff to another user
+Auth Required: Yes
+Request Body:
+  {
+    "toUserId": string,
+    "reason": string
+  }
+Response:
+  {
+    "success": true,
+    "message": "Workflow handed off"
+  }
+
+================================================================================
+12. AUDIT ENDPOINTS (/api/audit)
+================================================================================
+
+GET /api/audit
+--------------
+Purpose: Get audit trail
+Auth Required: Yes
+Query Parameters:
+  - studyId: number
+  - subjectId: number
+  - userId: number
+  - eventType: string
+  - startDate: string
+  - endDate: string
+  - page: number
+  - limit: number (default: 50)
+Response:
+  {
+    "success": true,
+    "data": [AuditLog],
+    "pagination": { page, limit, total }
+  }
+
+GET /api/audit/export?studyId=X&startDate=Y&endDate=Z
+-----------------------------------------------------
+Purpose: Export audit logs to CSV
+Auth Required: Yes
+Roles: admin, monitor
+Response: CSV file download
+
+GET /api/audit/subject/:id
+--------------------------
+Purpose: Get audit trail for subject
+Auth Required: Yes
+Query Parameters:
+  - page: number
+  - limit: number
+Response:
+  {
+    "success": true,
+    "data": [AuditLog]
+  }
+
+================================================================================
+13. SDV ENDPOINTS (/api/sdv)
+================================================================================
+
+GET /api/sdv
+------------
+Purpose: List SDV records
+Auth Required: Yes
+Query Parameters:
+  - studyId: number
+  - status: string (pending/verified)
+  - page: number
+  - limit: number
+Response:
+  {
+    "success": true,
+    "data": [SDVRecord],
+    "pagination": { page, limit, total }
+  }
+
+GET /api/sdv/:id
+----------------
+Purpose: Get SDV record by ID
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": SDVRecord
+  }
+
+PUT /api/sdv/:id/verify
+-----------------------
+Purpose: Verify SDV item
+Auth Required: Yes
+Roles: monitor, admin
+Response:
+  {
+    "success": true,
+    "message": "SDV verified"
+  }
+
+================================================================================
+14. RANDOMIZATION ENDPOINTS (/api/randomization)
+================================================================================
+
+GET /api/randomization
+----------------------
+Purpose: List randomizations
+Auth Required: Yes
+Query Parameters:
+  - studyId: number
+  - page: number
+  - limit: number
+Response:
+  {
+    "success": true,
+    "data": [RandomizationRecord],
+    "pagination": { page, limit, total }
+  }
+
+POST /api/randomization
+-----------------------
+Purpose: Randomize a subject
+Auth Required: Yes
+Roles: investigator, coordinator, admin
+Request Body:
+  {
+    "studySubjectId": number,
+    "studyGroupId": number
+  }
+Response:
+  {
+    "success": true,
+    "data": RandomizationRecord
+  }
+
+GET /api/randomization/groups/:studyId
+--------------------------------------
+Purpose: Get treatment groups for study
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [TreatmentGroup]
+  }
+
+================================================================================
+15. MONITORING ENDPOINTS (/api/monitoring)
+================================================================================
+
+GET /api/monitoring/stats
+-------------------------
+Purpose: Get system statistics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "systemHealth": { status, uptime, lastCheck },
+      "activeUsers": number,
+      "activeStudies": number,
+      "dataQuality": { completeness, accuracy }
+    }
+  }
+
+GET /api/monitoring/alerts
+--------------------------
+Purpose: Get system alerts
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [Alert]
+  }
+
+GET /api/monitoring/metrics?timeRange=24h
+-----------------------------------------
+Purpose: Get system metrics
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": {
+      "timeRange": string,
+      "metrics": { total_forms, verified_forms }
+    }
+  }
+
+================================================================================
+16. CODING ENDPOINTS (/api/coding)
+================================================================================
+
+GET /api/coding
+---------------
+Purpose: List coded terms
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": [],
+    "message": "Medical coding integration pending"
+  }
+
+POST /api/coding
+----------------
+Purpose: Submit term for coding
+Auth Required: Yes
+Request Body:
+  {
+    "verbatimTerm": string,
+    "dictionary": string  // MedDRA, WHO Drug
+  }
+Response:
+  {
+    "success": true,
+    "data": {
+      "verbatimTerm": string,
+      "dictionary": string,
+      "status": "pending"
+    }
+  }
+
+================================================================================
+17. DATA LOCKS ENDPOINTS (/api/data-locks)
+================================================================================
+
+GET /api/data-locks
+-------------------
+Purpose: List locked records
+Auth Required: Yes
+Query Parameters:
+  - studyId: number
+  - page: number
+  - limit: number
+Response:
+  {
+    "success": true,
+    "data": [LockedRecord],
+    "pagination": { page, limit, total }
+  }
+
+POST /api/data-locks
+--------------------
+Purpose: Lock a record
+Auth Required: Yes
+Roles: monitor, coordinator, admin
+Request Body:
+  {
+    "eventCrfId": number
+  }
+Response:
+  {
+    "success": true,
+    "message": "Record locked"
+  }
+
+DELETE /api/data-locks/:eventCrfId
+----------------------------------
+Purpose: Unlock a record
+Auth Required: Yes
+Roles: admin
+Response:
+  {
+    "success": true,
+    "message": "Record unlocked"
+  }
+
+================================================================================
+18. AI ASSISTANT ENDPOINTS (/api/ai)
+================================================================================
+
+POST /api/ai/chat
+-----------------
+Purpose: Send message to AI assistant
+Auth Required: Yes
+Request Body:
+  {
+    "message": string,
+    "context": object
+  }
+Response:
+  {
+    "success": true,
+    "type": "answer",
+    "message": string,
+    "data": object
+  }
+
+GET /api/ai/history
+-------------------
+Purpose: Get chat history
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "data": []
+  }
+
+DELETE /api/ai/history
+----------------------
+Purpose: Clear chat history
+Auth Required: Yes
+Response:
+  {
+    "success": true,
+    "message": "History cleared"
+  }
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
+

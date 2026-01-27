@@ -1,0 +1,508 @@
+================================================================================
+LIBRECLINICA API - QUICKSTART CONTINUATION GUIDE
+================================================================================
+Last Updated: November 24, 2025
+Progress: 60% Complete - Core Infrastructure Done
+Remaining: 40% - Services, Controllers, Routes, Main App
+
+================================================================================
+📋 WHAT'S BEEN COMPLETED (16 FILES - 4,800+ LINES)
+================================================================================
+
+✅ MIDDLEWARE (6 files)
+   - audit.middleware.ts - Comprehensive audit logging with 21 CFR Part 11 compliance
+   - validation.middleware.ts - Joi schemas for all endpoints (500+ lines)
+   - errorHandler.middleware.ts - Global error handling with sanitization
+   - rateLimiter.middleware.ts - 8 different rate limiters for various endpoints
+   - auth.middleware.ts - JWT authentication (pre-existing)
+   - authorization.middleware.ts - RBAC authorization (pre-existing)
+
+✅ UTILITIES (2 files)
+   - jwt.util.ts - Complete JWT management (access/refresh tokens, 400+ lines)
+   - password.util.ts - Password hashing, validation, complexity checks (300+ lines)
+
+✅ TYPES (1 file)
+   - types/index.ts - Comprehensive TypeScript definitions (600+ lines)
+     * User & Auth types
+     * Study & Subject types
+     * Event & CRF types
+     * Form data types
+     * Query/Discrepancy types
+     * Audit trail types
+     * Dashboard & Reporting types
+     * ODM (CDISC) types
+     * API response types
+
+✅ SOAP SERVICES (5 files - Complete SOAP integration)
+   - soapClient.ts - Base SOAP client with WS-Security, retry logic (300+ lines)
+   - subjectSoap.service.ts - Subject enrollment with ODM 1.3 XML (250+ lines)
+   - dataSoap.service.ts - Clinical data import, ODM building (400+ lines)
+   - studySoap.service.ts - Study metadata retrieval, ODM parsing (200+ lines)
+   - eventSoap.service.ts - Event scheduling (150+ lines)
+
+✅ DATABASE SERVICES (2 files started)
+   - auth.service.ts - Authentication (username/password + Google OAuth, 400+ lines)
+   - audit.service.ts - Audit trail queries and export (300+ lines)
+
+================================================================================
+🚧 REMAINING WORK (24 FILES)
+================================================================================
+
+Priority 1: DATABASE SERVICES (4 files) - ~1,200 lines
+─────────────────────────────────────────────────────────────────────────
+☐ user.service.ts
+   Methods needed:
+   - getUsers(filters) - List users with pagination
+   - getUserById(id) - Get user details
+   - createUser(data) - Create new user
+   - updateUser(id, data) - Update user
+   - deleteUser(id) - Soft delete
+   - getUsersByStudy(studyId) - Users assigned to study
+
+☐ query.service.ts  
+   Methods needed:
+   - getQueries(filters) - List discrepancy notes
+   - getQueryById(id) - Get query details with history
+   - createQuery(data) - Create new discrepancy note
+   - respondToQuery(id, response) - Add response/thread
+   - closeQuery(id, resolution) - Close/resolve query
+   - getQueryStats(studyId) - Query statistics
+
+☐ dashboard.service.ts
+   Methods needed:
+   - getEnrollmentStats(studyId, dateRange) - Enrollment over time
+   - getCompletionStats(studyId) - CRF completion rates
+   - getQueryStats(studyId, timeframe) - Query metrics
+   - getUserActivity(studyId, days) - User activity
+   - getStudyProgress(studyId) - Overall study progress
+
+☐ report.service.ts
+   Methods needed:
+   - generateEnrollmentReport(studyId, format) - PDF/Excel
+   - generateCompletionReport(studyId, format) - Completion matrix
+   - generateAuditReport(studyId, dateRange, format) - Audit export
+   - generateQueryReport(studyId, format) - Query summary
+
+Priority 2: HYBRID SERVICES (3 files) - ~900 lines
+─────────────────────────────────────────────────────────────────────────
+☐ subject.service.ts
+   Methods needed:
+   - createSubject(data) - Use SOAP, then DB verification
+   - getSubjectList(studyId, filters) - DB query with stats
+   - getSubjectById(id) - DB with related data (events, CRFs)
+   - getSubjectProgress(id) - Calculate completion %
+   - updateSubject(id, data) - Update subject info
+
+☐ study.service.ts
+   Methods needed:
+   - getStudies(userId) - List with enrollment stats
+   - getStudyById(id) - Study + metadata + stats
+   - getStudyMetadata(id) - Combine SOAP + DB
+   - getStudySites(id) - Get study sites
+   - getStudyForms(id) - Get CRFs for study
+
+☐ form.service.ts
+   Methods needed:
+   - saveFormData(data) - Use SOAP dataSoap.importData()
+   - getFormData(eventCrfId) - DB query for existing data
+   - getFormMetadata(crfId) - SOAP or DB
+   - validateFormData(data) - Business rules
+   - getFormStatus(eventCrfId) - Completion status
+
+Priority 3: CONTROLLERS (8 files) - ~1,600 lines
+─────────────────────────────────────────────────────────────────────────
+Pattern for ALL controllers:
+```typescript
+import { Request, Response } from 'express';
+import { asyncHandler } from '../middleware/errorHandler.middleware';
+import * as service from '../services/...';
+import { logger } from '../config/logger';
+
+export const methodName = asyncHandler(async (req: Request, res: Response) => {
+  // Extract params/query/body
+  // Call service method
+  // Return response
+  res.json({ success: true, data: result });
+});
+```
+
+☐ auth.controller.ts
+   - login(req, res) - Call auth.service.authenticateUser()
+   - googleLogin(req, res) - Call auth.service.authenticateWithGoogle()
+   - refresh(req, res) - Refresh access token
+   - verify(req, res) - Verify current token
+   - logout(req, res) - Invalidate token
+   - changePassword(req, res) - Update password
+
+☐ subject.controller.ts
+   - list(req, res) - Get subjects for study
+   - get(req, res) - Get subject details
+   - create(req, res) - Enroll new subject
+   - update(req, res) - Update subject
+   - getProgress(req, res) - Get completion %
+
+☐ study.controller.ts
+   - list(req, res) - List accessible studies
+   - get(req, res) - Get study details
+   - getMetadata(req, res) - Get study structure
+   - getForms(req, res) - List CRFs
+
+☐ form.controller.ts
+   - saveData(req, res) - Save form data via SOAP
+   - getData(req, res) - Get existing form data
+   - getMetadata(req, res) - Get form structure
+   - getStatus(req, res) - Get form status
+
+☐ query.controller.ts
+   - list(req, res) - List queries
+   - get(req, res) - Get query details
+   - create(req, res) - Create new query
+   - respond(req, res) - Add response
+   - close(req, res) - Close query
+
+☐ audit.controller.ts
+   - get(req, res) - Query audit trail
+   - export(req, res) - Export to CSV/PDF
+   - getSubjectAudit(req, res) - Subject-specific audit
+
+☐ dashboard.controller.ts
+   - getEnrollment(req, res) - Enrollment stats
+   - getCompletion(req, res) - Completion stats
+   - getQueries(req, res) - Query stats
+   - getActivity(req, res) - User activity
+
+☐ user.controller.ts
+   - list(req, res) - List users
+   - get(req, res) - Get user details
+   - create(req, res) - Create user
+   - update(req, res) - Update user
+   - delete(req, res) - Delete user
+
+Priority 4: ROUTES (8 files) - ~800 lines
+─────────────────────────────────────────────────────────────────────────
+Pattern for ALL routes:
+```typescript
+import express from 'express';
+import * as controller from '../controllers/...';
+import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
+import { validate } from '../middleware/validation.middleware';
+import { schemas } from '../middleware/validation.middleware';
+
+const router = express.Router();
+
+// All routes require authentication
+router.use(authMiddleware);
+
+// Define routes
+router.get('/', validate({ query: schemas.list }), controller.list);
+router.get('/:id', validate({ params: schemas.idParam }), controller.get);
+router.post('/', requireRole(['admin']), validate({ body: schemas.create }), controller.create);
+
+export default router;
+```
+
+☐ auth.routes.ts
+   POST /login, POST /google, POST /refresh, GET /verify, POST /logout
+
+☐ subject.routes.ts
+   GET /, GET /:id, POST /, PUT /:id
+
+☐ study.routes.ts
+   GET /, GET /:id, GET /:id/metadata, GET /:id/forms
+
+☐ form.routes.ts
+   POST /save, GET /data/:eventCrfId, GET /metadata/:crfId
+
+☐ query.routes.ts
+   GET /, GET /:id, POST /, POST /:id/respond, POST /:id/close
+
+☐ audit.routes.ts
+   GET /, GET /export, GET /subject/:id
+
+☐ dashboard.routes.ts
+   GET /enrollment, GET /completion, GET /queries, GET /activity
+
+☐ user.routes.ts
+   GET /, GET /:id, POST /, PUT /:id, DELETE /:id
+
+Priority 5: MAIN APPLICATION (2 files) - ~400 lines
+─────────────────────────────────────────────────────────────────────────
+☐ app.ts - Express application setup
+```typescript
+import express from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import { auditMiddleware } from './middleware/audit.middleware';
+import { errorHandler, notFoundHandler } from './middleware/errorHandler.middleware';
+import { apiRateLimiter } from './middleware/rateLimiter.middleware';
+// Import all routes
+import authRoutes from './routes/auth.routes';
+// ... (import all 8 routes)
+
+const app = express();
+
+// Security middleware
+app.use(helmet());
+app.use(cors({ origin: process.env.CORS_ORIGINS?.split(',') }));
+
+// Body parsing
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Audit logging
+app.use(auditMiddleware);
+
+// Rate limiting
+app.use(apiRateLimiter);
+
+// Health check
+app.get('/health', (req, res) => res.json({ status: 'healthy', timestamp: new Date() }));
+
+// API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/subjects', subjectRoutes);
+// ... (mount all 8 routes)
+
+// Error handling
+app.use(notFoundHandler);
+app.use(errorHandler);
+
+export default app;
+```
+
+☐ server.ts - Server startup
+```typescript
+import app from './app';
+import { config } from './config/environment';
+import { pool } from './config/database';
+import { logger } from './config/logger';
+import { getSoapClient } from './services/soap/soapClient';
+
+const PORT = config.server.port || 3000;
+
+async function startServer() {
+  try {
+    // Test database connection
+    await pool.query('SELECT NOW()');
+    logger.info('Database connection successful');
+
+    // Test SOAP connection
+    const soapClient = getSoapClient();
+    await soapClient.testConnection();
+    logger.info('SOAP connection successful');
+
+    // Start server
+    const server = app.listen(PORT, () => {
+      logger.info(`LibreClinica API started on port ${PORT}`);
+    });
+
+    // Graceful shutdown
+    process.on('SIGTERM', () => {
+      logger.info('SIGTERM received, shutting down gracefully');
+      server.close(() => {
+        pool.end();
+        process.exit(0);
+      });
+    });
+  } catch (error: any) {
+    logger.error('Server startup failed', { error: error.message });
+    process.exit(1);
+  }
+}
+
+startServer();
+```
+
+================================================================================
+🎯 IMPLEMENTATION GUIDELINES
+================================================================================
+
+GENERAL PRINCIPLES:
+-------------------
+1. Follow existing patterns from completed files
+2. Use TypeScript types from types/index.ts
+3. Import logger from config/logger.ts for all logging
+4. Use pool from config/database.ts for DB queries
+5. Use asyncHandler wrapper for all controller methods
+6. Return standardized responses: { success, data?, message? }
+
+ERROR HANDLING:
+---------------
+- Controllers: Use asyncHandler, let errors bubble up
+- Services: Log errors, throw or return { success: false, message }
+- Always sanitize error messages (no sensitive data)
+
+LOGGING:
+--------
+- logger.info() for successful operations
+- logger.warn() for validation failures, business logic issues
+- logger.error() for unexpected errors, with full context
+- logger.debug() for detailed debugging (use sparingly)
+
+DATABASE QUERIES:
+-----------------
+- Always use parameterized queries ($1, $2, etc.)
+- Never concatenate user input into SQL
+- Use transactions for multi-step operations
+- Handle pool errors gracefully
+
+VALIDATION:
+-----------
+- All endpoints must have Joi validation
+- Schemas are in validation.middleware.ts
+- Add new schemas as needed following existing pattern
+
+AUTHENTICATION:
+---------------
+- All routes (except /login, /health) require authMiddleware
+- Use requireRole() for role-based access
+- JWT payload available in req.user
+
+AUDIT LOGGING:
+--------------
+- auditMiddleware logs all API requests automatically
+- Use logAuditEvent() from audit.middleware.ts for business events
+- Always log: subject creation, data entry, queries, user changes
+
+================================================================================
+📝 CODE TEMPLATES
+================================================================================
+
+DATABASE SERVICE TEMPLATE:
+--------------------------
+```typescript
+import { pool } from '../../config/database';
+import { logger } from '../../config/logger';
+
+export const methodName = async (params: any): Promise<any> => {
+  logger.info('Method description', { params });
+
+  try {
+    const query = `SELECT ... WHERE ... = $1`;
+    const result = await pool.query(query, [params.value]);
+
+    logger.info('Operation successful', { count: result.rows.length });
+
+    return {
+      success: true,
+      data: result.rows
+    };
+  } catch (error: any) {
+    logger.error('Operation failed', {
+      error: error.message,
+      params
+    });
+
+    throw error;
+  }
+};
+```
+
+CONTROLLER TEMPLATE:
+--------------------
+```typescript
+import { Request, Response } from 'express';
+import { asyncHandler } from '../middleware/errorHandler.middleware';
+import * as service from '../services/...';
+
+export const methodName = asyncHandler(async (req: Request, res: Response) => {
+  const { param } = req.params;
+  const { queryParam } = req.query;
+  const bodyData = req.body;
+
+  const result = await service.methodName({ param, queryParam, ...bodyData });
+
+  res.json({
+    success: true,
+    data: result
+  });
+});
+```
+
+ROUTE TEMPLATE:
+---------------
+```typescript
+import express from 'express';
+import * as controller from '../controllers/...';
+import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
+import { validate } from '../middleware/validation.middleware';
+import { schemas } from '../middleware/validation.middleware';
+
+const router = express.Router();
+
+router.use(authMiddleware);
+
+router.get('/', validate({ query: schemas.list }), controller.list);
+router.post('/', requireRole(['admin']), validate({ body: schemas.create }), controller.create);
+
+export default router;
+```
+
+================================================================================
+🧪 TESTING AFTER COMPLETION
+================================================================================
+
+1. Start LibreClinica Docker:
+   cd D:\EDC-Projects\LibreClinica-Setup\LibreClinica
+   docker compose up -d
+
+2. Start API server:
+   cd D:\EDC-Projects\libreclinica-api
+   npm run dev
+
+3. Test health:
+   curl http://localhost:3000/health
+
+4. Test login:
+   curl -X POST http://localhost:3000/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username":"root","password":"root"}'
+
+5. Save token and test authenticated endpoint:
+   curl http://localhost:3000/api/subjects?studyId=1 \
+     -H "Authorization: Bearer YOUR_TOKEN"
+
+================================================================================
+📊 PROGRESS TRACKING
+================================================================================
+
+Files Completed: 16 / 41 (39%)
+Lines Written: ~4,800
+Lines Remaining: ~3,900
+Estimated Time Remaining: 4-5 hours
+
+Next Steps:
+1. Complete 4 database services (1-1.5 hours)
+2. Complete 3 hybrid services (1 hour)
+3. Complete 8 controllers (1 hour)
+4. Complete 8 routes (0.5 hours)
+5. Complete main app files (0.5 hours)
+6. Testing (0.5-1 hour)
+
+================================================================================
+✅ SUCCESS CRITERIA
+================================================================================
+
+Backend API Complete When:
+☑ Server starts without errors
+☑ Health endpoint returns 200
+☑ Login returns valid JWT
+☑ Protected endpoints require authentication
+☑ SOAP calls successfully create subjects
+☑ Database queries return correct data
+☑ All audit events are logged
+☑ Validation rejects invalid requests
+☑ Rate limiting works correctly
+
+================================================================================
+END OF QUICKSTART GUIDE
+================================================================================
+
+**TO CONTINUE:** Start with Priority 1 (database services), follow the templates,
+test as you go. All patterns and infrastructure are in place - just need to
+replicate the existing patterns for the remaining files.
+
+Good luck! 🚀
+

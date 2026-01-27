@@ -1,0 +1,893 @@
+================================================================================
+                    INTEGRATION STEPS - DETAILED PLAN
+================================================================================
+                      Generated: November 28, 2025
+================================================================================
+
+OVERVIEW
+--------
+This document outlines the step-by-step process to fully integrate the 
+LibreClinica API with the Angular frontend. Each step includes the files 
+to modify and the exact changes needed.
+
+================================================================================
+STEP 1: UPDATE ENVIRONMENT CONFIGURATION
+================================================================================
+
+File: src/environments/environment.ts
+
+CURRENT:
+```
+export const environment = {
+  production: false,
+  apiUrl: 'https://api.accuratrials.com/api',
+  aiBackendUrl: 'https://api.accuratrials.com/api/ai',
+  firebase: { ... }
+};
+```
+
+CHANGE TO:
+```
+export const environment = {
+  production: false,
+  
+  // Base API URL
+  apiUrl: 'http://localhost:3001/api',  // Development
+  // apiUrl: 'https://api.accuratrials.com/api',  // Production
+  
+  // LibreClinica API Base
+  libreclinicaApiUrl: 'http://localhost:3001/api',
+  
+  // Specific endpoint URLs
+  studyApiUrl: 'http://localhost:3001/api/studies',
+  subjectApiUrl: 'http://localhost:3001/api/subjects',
+  formApiUrl: 'http://localhost:3001/api/forms',
+  queryApiUrl: 'http://localhost:3001/api/queries',
+  dashboardApiUrl: 'http://localhost:3001/api/dashboard',
+  userApiUrl: 'http://localhost:3001/api/users',
+  auditApiUrl: 'http://localhost:3001/api/audit',
+  workflowApiUrl: 'http://localhost:3001/api/workflows',
+  sdvApiUrl: 'http://localhost:3001/api/sdv',
+  randomizationApiUrl: 'http://localhost:3001/api/randomization',
+  monitoringApiUrl: 'http://localhost:3001/api/monitoring',
+  dataLocksApiUrl: 'http://localhost:3001/api/data-locks',
+  
+  // AI Backend
+  aiBackendUrl: 'http://localhost:3001/api/ai',
+  
+  // Firebase (for fallback auth if needed)
+  firebase: {
+    apiKey: "AIzaSyBARccskboYtfXkAwJyNlnUEGc93C8PZhc",
+    authDomain: "data-entry-project-465905.firebaseapp.com",
+    projectId: "data-entry-project-465905",
+    storageBucket: "data-entry-project-465905.firebasestorage.app",
+    messagingSenderId: "587973351862",
+    appId: "1:587973351862:web:9b8002d856e79799858917"
+  }
+};
+```
+
+Also update: src/environments/environment.prod.ts with production URLs
+
+================================================================================
+STEP 2: CREATE DATA LOCK SERVICE
+================================================================================
+
+File: src/app/services/libreclinica-data-lock.service.ts
+
+CREATE NEW FILE:
+```typescript
+import { Injectable, inject } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable, of } from 'rxjs';
+import { catchError, map } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
+
+export interface DataLockRecord {
+  event_crf_id: number;
+  study_subject_id: number;
+  subject_label: string;
+  crf_name: string;
+  locked_date: string;
+  locked_by: string;
+  locked: boolean;
+}
+
+export interface ApiResponse<T = any> {
+  success: boolean;
+  message?: string;
+  data?: T;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class LibreClinicaDataLockService {
+  private http = inject(HttpClient);
+  private apiUrl = `${environment.apiUrl}/data-locks`;
+
+  getLockedRecords(filters?: {
+    studyId?: number;
+    page?: number;
+    limit?: number;
+  }): Observable<ApiResponse<DataLockRecord[]>> {
+    let params = new HttpParams();
+    if (filters?.studyId) params = params.set('studyId', filters.studyId.toString());
+    if (filters?.page) params = params.set('page', filters.page.toString());
+    if (filters?.limit) params = params.set('limit', filters.limit.toString());
+
+    return this.http.get<ApiResponse<DataLockRecord[]>>(this.apiUrl, { params }).pipe(
+      catchError(error => {
+        console.error('Error fetching locked records:', error);
+        return of({ success: false, data: [] });
+      })
+    );
+  }
+
+  lockRecord(eventCrfId: number): Observable<ApiResponse> {
+    return this.http.post<ApiResponse>(this.apiUrl, { eventCrfId }).pipe(
+      catchError(error => {
+        console.error('Error locking record:', error);
+        return of({ success: false, message: 'Failed to lock record' });
+      })
+    );
+  }
+
+  unlockRecord(eventCrfId: number): Observable<ApiResponse> {
+    return this.http.delete<ApiResponse>(`${this.apiUrl}/${eventCrfId}`).pipe(
+      catchError(error => {
+        console.error('Error unlocking record:', error);
+        return of({ success: false, message: 'Failed to unlock record' });
+      })
+    );
+  }
+}
+```
+
+================================================================================
+STEP 3: CREATE MONITORING SERVICE
+================================================================================
+
+File: src/app/services/libreclinica-monitoring.service.ts
+
+CREATE NEW FILE:
+```typescript
+import { Injectable, inject } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable, of } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
+
+export interface SystemStats {
+  systemHealth: {
+    status: string;
+    uptime: number;
+    lastCheck: string;
+  };
+  activeUsers: number;
+  activeStudies: number;
+  dataQuality: {
+    completeness: number;
+    accuracy: number;
+  };
+}
+
+export interface ApiResponse<T = any> {
+  success: boolean;
+  message?: string;
+  data?: T;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class LibreClinicaMonitoringService {
+  private http = inject(HttpClient);
+  private apiUrl = `${environment.apiUrl}/monitoring`;
+
+  getSystemStats(): Observable<ApiResponse<SystemStats>> {
+    return this.http.get<ApiResponse<SystemStats>>(`${this.apiUrl}/stats`).pipe(
+      catchError(error => {
+        console.error('Error fetching system stats:', error);
+        return of({ success: false, data: null } as any);
+      })
+    );
+  }
+
+  getAlerts(): Observable<ApiResponse<any[]>> {
+    return this.http.get<ApiResponse<any[]>>(`${this.apiUrl}/alerts`).pipe(
+      catchError(error => {
+        console.error('Error fetching alerts:', error);
+        return of({ success: false, data: [] });
+      })
+    );
+  }
+
+  getMetrics(timeRange: string = '24h'): Observable<ApiResponse<any>> {
+    const params = new HttpParams().set('timeRange', timeRange);
+    return this.http.get<ApiResponse<any>>(`${this.apiUrl}/metrics`, { params }).pipe(
+      catchError(error => {
+        console.error('Error fetching metrics:', error);
+        return of({ success: false, data: null });
+      })
+    );
+  }
+}
+```
+
+================================================================================
+STEP 4: UPDATE QUERIES DASHBOARD COMPONENT
+================================================================================
+
+File: src/app/components/queries-dashboard/queries-dashboard.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaQueryService } from '../../services/libreclinica-query.service';
+```
+
+ADD INJECTION:
+```typescript
+private queryService = inject(LibreClinicaQueryService);
+```
+
+UPDATE ngOnInit():
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadQueries();
+}
+
+async loadQueries(): Promise<void> {
+  this.loading = true;
+  try {
+    const response = await firstValueFrom(
+      this.queryService.getQueries({
+        studyId: this.selectedStudyId,
+        page: 1,
+        pageSize: 50
+      })
+    );
+    
+    if (response.success) {
+      this.queries = response.queries || [];
+    }
+    
+    // Load stats
+    if (this.selectedStudyId) {
+      const statsResponse = await firstValueFrom(
+        this.queryService.getQueryStats(this.selectedStudyId)
+      );
+      if (statsResponse.success) {
+        this.queryStats = statsResponse.data;
+      }
+    }
+  } catch (error) {
+    console.error('Error loading queries:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+```
+
+ADD CREATE METHOD:
+```typescript
+async createQuery(queryData: any): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.queryService.createQuery({
+        studyId: this.selectedStudyId,
+        entityType: queryData.entityType,
+        entityId: queryData.entityId,
+        typeId: queryData.typeId,
+        description: queryData.description,
+        detailedNotes: queryData.notes,
+        assignedUserId: queryData.assignedTo
+      })
+    );
+    
+    if (response.success) {
+      this.toastService.success('Query created successfully');
+      await this.loadQueries();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to create query');
+  }
+}
+```
+
+================================================================================
+STEP 5: UPDATE SDV DASHBOARD COMPONENT
+================================================================================
+
+File: src/app/components/sdv-dashboard/sdv-dashboard.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaSDVService } from '../../services/libreclinica-sdv.service';
+```
+
+ADD INJECTION:
+```typescript
+private sdvService = inject(LibreClinicaSDVService);
+```
+
+UPDATE DATA LOADING:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadSDVData();
+}
+
+async loadSDVData(): Promise<void> {
+  this.loading = true;
+  try {
+    const [recordsResponse, statsResponse] = await Promise.all([
+      firstValueFrom(this.sdvService.getSDVRecords({
+        studyId: this.selectedStudyId,
+        status: this.statusFilter,
+        page: 1,
+        limit: 50
+      })),
+      firstValueFrom(this.sdvService.getSDVStats(this.selectedStudyId))
+    ]);
+    
+    if (recordsResponse.success) {
+      this.sdvRecords = recordsResponse.data;
+    }
+    if (statsResponse.success) {
+      this.sdvStats = statsResponse.data;
+    }
+  } catch (error) {
+    console.error('Error loading SDV data:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+
+async verifyRecord(eventCrfId: number): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.sdvService.verifySDV(eventCrfId)
+    );
+    if (response.success) {
+      this.toastService.success('SDV verified successfully');
+      await this.loadSDVData();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to verify SDV');
+  }
+}
+```
+
+================================================================================
+STEP 6: UPDATE RANDOMIZATION DASHBOARD COMPONENT
+================================================================================
+
+File: src/app/components/randomization-dashboard/randomization-dashboard.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaRandomizationService } from '../../services/libreclinica-randomization.service';
+```
+
+ADD INJECTION:
+```typescript
+private randomizationService = inject(LibreClinicaRandomizationService);
+```
+
+UPDATE DATA LOADING:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadRandomizationData();
+}
+
+async loadRandomizationData(): Promise<void> {
+  this.loading = true;
+  try {
+    const [randomizationsResponse, groupsResponse, statsResponse] = await Promise.all([
+      firstValueFrom(this.randomizationService.getRandomizations({
+        studyId: this.selectedStudyId,
+        page: 1,
+        limit: 50
+      })),
+      firstValueFrom(this.randomizationService.getTreatmentGroups(this.selectedStudyId)),
+      firstValueFrom(this.randomizationService.getRandomizationStats(this.selectedStudyId))
+    ]);
+    
+    if (randomizationsResponse.success) {
+      this.randomizations = randomizationsResponse.data;
+    }
+    if (groupsResponse.success) {
+      this.treatmentGroups = groupsResponse.data;
+    }
+    if (statsResponse.success) {
+      this.stats = statsResponse.data;
+    }
+  } catch (error) {
+    console.error('Error loading randomization data:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+
+async randomizeSubject(studySubjectId: number, groupId: number): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.randomizationService.randomizeSubject(studySubjectId, groupId)
+    );
+    if (response.success) {
+      this.toastService.success('Subject randomized successfully');
+      await this.loadRandomizationData();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to randomize subject');
+  }
+}
+```
+
+================================================================================
+STEP 7: UPDATE WORKFLOW MANAGEMENT COMPONENT
+================================================================================
+
+File: src/app/components/workflow-management/workflow-management.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaWorkflowService } from '../../services/libreclinica-workflow.service';
+```
+
+ADD INJECTION:
+```typescript
+private workflowService = inject(LibreClinicaWorkflowService);
+```
+
+UPDATE DATA LOADING AND CRUD:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadWorkflows();
+}
+
+async loadWorkflows(): Promise<void> {
+  this.loading = true;
+  try {
+    const response = await firstValueFrom(
+      this.workflowService.getAllWorkflows({
+        status: this.statusFilter,
+        studyId: this.selectedStudyId
+      })
+    );
+    
+    if (response.success) {
+      this.workflows = response.data || [];
+    }
+  } catch (error) {
+    console.error('Error loading workflows:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+
+async createWorkflow(workflowData: any): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.workflowService.createWorkflow(workflowData)
+    );
+    if (response.success) {
+      this.toastService.success('Workflow created successfully');
+      await this.loadWorkflows();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to create workflow');
+  }
+}
+
+async updateWorkflowStatus(workflowId: string, status: string): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.workflowService.updateWorkflowStatus(workflowId, status as any)
+    );
+    if (response.success) {
+      this.toastService.success('Status updated');
+      await this.loadWorkflows();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to update status');
+  }
+}
+```
+
+================================================================================
+STEP 8: UPDATE MY TASKS COMPONENT
+================================================================================
+
+File: src/app/components/my-tasks/my-tasks.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaWorkflowService } from '../../services/libreclinica-workflow.service';
+import { LibreClinicaAuthService } from '../../services/libreclinica-auth.service';
+```
+
+ADD INJECTIONS:
+```typescript
+private workflowService = inject(LibreClinicaWorkflowService);
+private authService = inject(LibreClinicaAuthService);
+```
+
+UPDATE DATA LOADING:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadMyTasks();
+}
+
+async loadMyTasks(): Promise<void> {
+  this.loading = true;
+  try {
+    const user = this.authService.getCurrentUser();
+    if (!user) return;
+
+    const [tasksResponse, summaryResponse] = await Promise.all([
+      firstValueFrom(this.workflowService.getUserWorkflows(user.username)),
+      firstValueFrom(this.workflowService.getUserTaskSummary(user.username))
+    ]);
+    
+    if (tasksResponse.success) {
+      this.myTasks = tasksResponse.data || [];
+    }
+    if (summaryResponse.success) {
+      this.taskSummary = summaryResponse.data;
+    }
+  } catch (error) {
+    console.error('Error loading tasks:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+
+async completeTask(taskId: string): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.workflowService.completeWorkflow(taskId)
+    );
+    if (response.success) {
+      this.toastService.success('Task completed');
+      await this.loadMyTasks();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to complete task');
+  }
+}
+```
+
+================================================================================
+STEP 9: UPDATE USER MANAGEMENT COMPONENT
+================================================================================
+
+File: src/app/components/user-management/user-management.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaUserService } from '../../services/libreclinica-user.service';
+```
+
+ADD INJECTION:
+```typescript
+private userService = inject(LibreClinicaUserService);
+```
+
+UPDATE DATA LOADING AND CRUD:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadUsers();
+  await this.loadRoles();
+}
+
+async loadUsers(): Promise<void> {
+  this.loading = true;
+  try {
+    const response = await firstValueFrom(
+      this.userService.getUsers({
+        studyId: this.selectedStudyId,
+        page: 1,
+        limit: 50
+      })
+    );
+    
+    if (response.success) {
+      this.users = response.data || [];
+    }
+  } catch (error) {
+    console.error('Error loading users:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+
+async loadRoles(): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.userService.getAvailableRolesFromApi()
+    );
+    if (response.success) {
+      this.availableRoles = response.data || [];
+    }
+  } catch (error) {
+    // Fallback to default roles
+    this.availableRoles = this.userService.getDefaultRoles();
+  }
+}
+
+async createUser(userData: any): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.userService.createUser(userData)
+    );
+    if (response.success) {
+      this.toastService.success('User created successfully');
+      await this.loadUsers();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to create user');
+  }
+}
+
+async updateUser(userId: number, userData: any): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.userService.updateUser(userId, userData)
+    );
+    if (response.success) {
+      this.toastService.success('User updated successfully');
+      await this.loadUsers();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to update user');
+  }
+}
+
+async deleteUser(userId: number): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.userService.deleteUser(userId)
+    );
+    if (response.success) {
+      this.toastService.success('User deleted');
+      await this.loadUsers();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to delete user');
+  }
+}
+```
+
+================================================================================
+STEP 10: UPDATE DATA LOCK MANAGEMENT COMPONENT
+================================================================================
+
+File: src/app/components/data-lock-management/data-lock-management.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaDataLockService } from '../../services/libreclinica-data-lock.service';
+```
+
+ADD INJECTION:
+```typescript
+private dataLockService = inject(LibreClinicaDataLockService);
+```
+
+UPDATE DATA LOADING:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadLockedRecords();
+}
+
+async loadLockedRecords(): Promise<void> {
+  this.loading = true;
+  try {
+    const response = await firstValueFrom(
+      this.dataLockService.getLockedRecords({
+        studyId: this.selectedStudyId,
+        page: 1,
+        limit: 50
+      })
+    );
+    
+    if (response.success) {
+      this.lockedRecords = response.data || [];
+    }
+  } catch (error) {
+    console.error('Error loading locked records:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+
+async lockRecord(eventCrfId: number): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.dataLockService.lockRecord(eventCrfId)
+    );
+    if (response.success) {
+      this.toastService.success('Record locked');
+      await this.loadLockedRecords();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to lock record');
+  }
+}
+
+async unlockRecord(eventCrfId: number): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.dataLockService.unlockRecord(eventCrfId)
+    );
+    if (response.success) {
+      this.toastService.success('Record unlocked');
+      await this.loadLockedRecords();
+    }
+  } catch (error) {
+    this.toastService.error('Failed to unlock record');
+  }
+}
+```
+
+================================================================================
+STEP 11: UPDATE MONITORING DASHBOARD COMPONENT
+================================================================================
+
+File: src/app/components/monitoring-dashboard/monitoring-dashboard.component.ts
+
+ADD IMPORTS:
+```typescript
+import { LibreClinicaMonitoringService } from '../../services/libreclinica-monitoring.service';
+```
+
+ADD INJECTION:
+```typescript
+private monitoringService = inject(LibreClinicaMonitoringService);
+```
+
+UPDATE DATA LOADING:
+```typescript
+async ngOnInit(): Promise<void> {
+  await this.loadMonitoringData();
+}
+
+async loadMonitoringData(): Promise<void> {
+  this.loading = true;
+  try {
+    const [statsResponse, alertsResponse, metricsResponse] = await Promise.all([
+      firstValueFrom(this.monitoringService.getSystemStats()),
+      firstValueFrom(this.monitoringService.getAlerts()),
+      firstValueFrom(this.monitoringService.getMetrics(this.selectedTimeRange))
+    ]);
+    
+    if (statsResponse.success) {
+      this.systemStats = statsResponse.data;
+    }
+    if (alertsResponse.success) {
+      this.alerts = alertsResponse.data || [];
+    }
+    if (metricsResponse.success) {
+      this.metrics = metricsResponse.data;
+    }
+  } catch (error) {
+    console.error('Error loading monitoring data:', error);
+  } finally {
+    this.loading = false;
+  }
+}
+```
+
+================================================================================
+STEP 12: UPDATE AI ASSISTANT COMPONENT
+================================================================================
+
+File: src/app/components/ai-assistant/ai-assistant.component.ts
+
+UPDATE to use real API:
+```typescript
+// In the service or component
+async sendMessage(message: string): Promise<void> {
+  try {
+    const response = await firstValueFrom(
+      this.http.post<any>(`${environment.aiBackendUrl}/chat`, {
+        message,
+        context: {
+          userId: this.currentUser?.uid,
+          studyId: this.selectedStudyId
+        }
+      })
+    );
+    
+    if (response.success) {
+      this.addMessage({
+        role: 'assistant',
+        content: response.message,
+        timestamp: new Date()
+      });
+    }
+  } catch (error) {
+    console.error('Error sending message:', error);
+  }
+}
+```
+
+================================================================================
+STEP 13: ENSURE WRITE OPERATIONS WORK
+================================================================================
+
+Key Write Operations to Test:
+
+1. CREATE SUBJECT:
+   - Component: patient-enrollment-modal
+   - Service: LibreClinicaSubjectService.createSubject()
+   - API: POST /api/subjects
+
+2. UPDATE SUBJECT:
+   - Component: patient-enrollment-modal (edit mode)
+   - Service: LibreClinicaSubjectService.updateSubject()
+   - API: PUT /api/subjects/:id
+
+3. SAVE FORM DATA:
+   - Component: patient-form-modal or form components
+   - Service: LibreClinicaFormService.saveFormData()
+   - API: POST /api/forms/save
+
+4. CREATE QUERY:
+   - Component: query-creation-modal
+   - Service: LibreClinicaQueryService.createQuery()
+   - API: POST /api/queries
+
+5. CREATE STUDY:
+   - Component: study-creation-modal
+   - Service: LibreClinicaStudyService (needs create method)
+   - API: POST /api/studies
+
+6. CREATE USER:
+   - Component: user-management
+   - Service: LibreClinicaUserService.createUser()
+   - API: POST /api/users
+
+7. RANDOMIZE SUBJECT:
+   - Component: patient-randomization-modal
+   - Service: LibreClinicaRandomizationService.randomizeSubject()
+   - API: POST /api/randomization
+
+8. VERIFY SDV:
+   - Component: sdv-dashboard
+   - Service: LibreClinicaSDVService.verifySDV()
+   - API: PUT /api/sdv/:id/verify
+
+9. LOCK/UNLOCK DATA:
+   - Component: data-lock-management
+   - Service: LibreClinicaDataLockService
+   - API: POST/DELETE /api/data-locks
+
+10. CREATE/UPDATE WORKFLOW:
+    - Component: workflow-management
+    - Service: LibreClinicaWorkflowService
+    - API: POST/PUT /api/workflows
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+
+After implementing each step, verify:
+
+[ ] API server is running (npm start in libreclinica-api)
+[ ] Database connection works
+[ ] Authentication works (login/logout)
+[ ] Token is being sent with requests (check Network tab)
+[ ] CORS is not blocking requests
+[ ] Data is being retrieved correctly
+[ ] Create operations work
+[ ] Update operations work
+[ ] Delete operations work
+[ ] Error handling shows appropriate messages
+[ ] Loading states work correctly
+
+================================================================================
+END OF INTEGRATION STEPS
+================================================================================
+

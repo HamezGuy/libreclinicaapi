@@ -75,6 +75,14 @@ import printRoutes from './routes/print.routes';
 import ddeRoutes from './routes/dde.routes';
 // CRF/Item Flagging (uses LibreClinica native tables: event_crf_flag, item_data_flag)
 import flaggingRoutes from './routes/flagging.routes';
+// Training Records (21 CFR Part 11 §11.10(i) & HIPAA §164.308(a)(5))
+import trainingRoutes from './routes/training.routes';
+// HIPAA Individual Rights (PHI access, amendments, disclosures)
+import phiRightsRoutes from './routes/phi-rights.routes';
+// Device Fingerprinting (21 CFR Part 11 §11.10(d))
+import deviceRoutes from './routes/device.routes';
+// Document Approval Workflow (21 CFR Part 11 compliant)
+import documentApprovalRoutes from './routes/document-approval.routes';
 // Organization management, invite codes, access requests
 // import organizationRoutes from './routes/organization.routes';
 // // Skip Logic and Form Linking
@@ -292,6 +300,14 @@ app.use('/api/print', printRoutes);
 app.use('/api/dde', ddeRoutes);
 // CRF/Item Flagging (Part 11 compliant - uses native LibreClinica tables)
 app.use('/api/flagging', flaggingRoutes);
+// Training Records (Part 11 §11.10(i) & HIPAA §164.308(a)(5))
+app.use('/api/training', trainingRoutes);
+// HIPAA Individual Rights (PHI access, amendments, disclosures)
+app.use('/api/phi-rights', phiRightsRoutes);
+// Device Fingerprinting (Part 11 §11.10(d) - device checks)
+app.use('/api/devices', deviceRoutes);
+// Document Approval Workflow (Part 11 compliant - formal approval chains)
+app.use('/api/document-approval', documentApprovalRoutes);
 // Organization management, invite codes, access requests
 // app.use('/api/organizations', organizationRoutes);
 // // Skip Logic, Form Linking, and Branching

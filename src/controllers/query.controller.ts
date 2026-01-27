@@ -53,10 +53,21 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
   res.status(statusCode).json(result);
 });
 
+/**
+ * Respond to a query
+ * 
+ * POST /api/queries/:id/respond
+ * Body: { response, detailedNotes?, newStatusId?, correctedValue?, correctionReason? }
+ * 
+ * If correctedValue is provided, the linked item_data record will be updated
+ * with the new value, enabling queries to actually change form values.
+ * 
+ * 21 CFR Part 11 compliant - maintains full audit trail for corrections.
+ */
 export const respond = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { id } = req.params;
-  const { response, description, detailedNotes, newStatusId } = req.body;
+  const { response, description, detailedNotes, newStatusId, correctedValue, correctionReason } = req.body;
 
   // Validate that we have a response/description
   if (!response && !description) {
@@ -69,7 +80,9 @@ export const respond = asyncHandler(async (req: Request, res: Response) => {
     {
       description: response || description,
       detailedNotes,
-      newStatusId
+      newStatusId,
+      correctedValue,
+      correctionReason
     }, 
     user.userId
   );
@@ -79,6 +92,8 @@ export const respond = asyncHandler(async (req: Request, res: Response) => {
   if (!result.success) {
     if (result.message?.includes('not found')) {
       statusCode = 404;
+    } else if (result.message?.includes('locked')) {
+      statusCode = 403; // Forbidden - record is locked
     } else {
       statusCode = 500; // Server error for database issues
     }

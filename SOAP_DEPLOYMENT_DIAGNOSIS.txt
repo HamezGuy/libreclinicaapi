@@ -1,0 +1,216 @@
+================================================================================
+SOAP DEPLOYMENT DIAGNOSIS - CRITICAL ISSUE
+================================================================================
+Date: December 5, 2025
+Server: AWS Lightsail - 18.225.57.5
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+SOAP endpoints are returning 404 because the LibreClinica WAR file is NOT 
+properly expanding/deploying in Tomcat. The WEB-INF directory does not exist
+in the deployed application folder.
+
+ROOT CAUSE: The mounted LibreClinica-soap-fixed.war is being mounted as a 
+READ-ONLY bind mount, but Tomcat cannot extract/expand a read-only WAR file.
+
+================================================================================
+CURRENT DEPLOYMENT STATE
+================================================================================
+
+1. CONTAINERS RUNNING:
+   - libreclinica_api (Node.js API on port 3000)
+   - libreclinica_core (Tomcat on port 8080 internal)
+   - libreclinica_db (PostgreSQL)
+   - libreclinica_nginx (Nginx on ports 80/443)
+   - libreclinica_certbot
+
+2. DOCKER-COMPOSE MOUNT CONFIGURATION:
+   The docker-compose.yml has:
+   ```
+   volumes:
+     - ./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
+   ```
+   
+   Problem: ":ro" (read-only) prevents Tomcat from expanding the WAR!
+
+3. WEBAPPS FOLDER CURRENT STATE:
+   /usr/local/tomcat/webapps/
+   ├── libreclinica/          <- IMPROPERLY EXPANDED (no WEB-INF!)
+   ├── libreclinica.war       <- Our mounted fixed WAR (78MB)
+   ├── libreclinica-ws/       <- FAILED TO START (from base image)
+   └── libreclinica-ws.war    <- Original broken SOAP WAR (81MB, from base image)
+
+4. API CONTAINER ENVIRONMENT:
+   LIBRECLINICA_SOAP_URL=http://libreclinica_core:8080/libreclinica-ws/ws
+   
+   This URL points to /libreclinica-ws/ws which is WRONG!
+   The fixed WAR has SOAP at /libreclinica/ws (embedded in main app)
+
+================================================================================
+DETAILED PROBLEM ANALYSIS
+================================================================================
+
+PROBLEM 1: WAR FILE NOT EXPANDING PROPERLY
+------------------------------------------
+Evidence:
+  - docker exec libreclinica_core test -d /usr/local/tomcat/webapps/libreclinica/WEB-INF
+  - Result: "WEB-INF DOES NOT EXIST"
+  
+The libreclinica folder shows files but with Windows backslashes being treated
+as part of filenames instead of directory separators:
+  - "WEB-INF\web.xml" exists as a FILE named "WEB-INF\web.xml"
+  - Instead of: WEB-INF/web.xml as a file in a directory
+
+This happens because:
+  1. The WAR was created on Windows with backslash paths
+  2. The WAR is mounted as read-only (:ro)
+  3. Tomcat cannot properly extract to its normal directory structure
+
+PROBLEM 2: WRONG SOAP URL
+-------------------------
+API container has: LIBRECLINICA_SOAP_URL=http://libreclinica_core:8080/libreclinica-ws/ws
+
+This is WRONG because:
+  - libreclinica-ws.war is the ORIGINAL broken WAR from the base image
+  - libreclinica-ws fails to start (NoClassDefFoundError for commons-pool)
+  - Our FIXED WAR mounts as libreclinica.war, so SOAP would be at /libreclinica/ws
+
+Correct URL should be: http://libreclinica_core:8080/libreclinica/ws
+
+PROBLEM 3: libreclinica-ws.war FROM BASE IMAGE IS BROKEN
+--------------------------------------------------------
+Tomcat logs show:
+  SEVERE: Context [/libreclinica-ws] startup failed due to previous errors
+  NoClassDefFoundError: org/apache/commons/pool/impl/CursorableLinkedList$Cursor
+
+The base jaspersnel/libreclinica:latest image ships with a broken libreclinica-ws.war
+that's missing dependencies. This is WHY we need the fixed WAR.
+
+================================================================================
+WHAT THE FIXED WAR CONTAINS
+================================================================================
+
+Location on server: /home/ubuntu/libreclinicaapi/LibreClinica-soap-fixed.war
+Size: 78,344,222 bytes
+Status: Valid ZIP/WAR file (verified with file header PK)
+
+WAR Contents include:
+  - WEB-INF\web.xml (98KB) - Has /ws/* servlet mapping
+  - WEB-INF\ws-servlet-config.xml (5.7KB) - SOAP endpoint configuration
+  - WEB-INF\lib\spring-ws-core-3.0.7.RELEASE.jar
+  - WEB-INF\lib\spring-ws-support-3.0.7.RELEASE.jar  
+  - WEB-INF\lib\spring-xml-3.0.7.RELEASE.jar
+  - WEB-INF\lib\wsdl4j-1.6.3.jar
+  - All Spring Web Services dependencies
+
+SOAP Endpoints defined (from ws-servlet-config.xml):
+  - /ws/study/v1 (study metadata)
+  - /ws/studySubject/v1 (subject management)
+  - /ws/event/v1 (event scheduling)
+  - /ws/crf/v1 (CRF data)
+
+================================================================================
+FIX REQUIRED
+================================================================================
+
+STEP 1: Fix the WAR file (re-create with forward slashes)
+---------------------------------------------------------
+The WAR file needs to be recreated with proper forward slash paths.
+This can be done by:
+  a) Extracting the WAR on Linux
+  b) Re-packaging with proper paths
+  
+OR simply copying the WAR directly into the container (not as mount)
+
+STEP 2: Update docker-compose.yml
+---------------------------------
+Option A: Don't mount as read-only (remove :ro)
+  volumes:
+    - ./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war
+
+Option B: Copy WAR instead of mount (in Dockerfile or entrypoint)
+
+Option C: Remove the libreclinica-ws.war from the image to prevent conflicts
+
+STEP 3: Update SOAP URL in API container
+----------------------------------------
+Change from:
+  LIBRECLINICA_SOAP_URL=http://libreclinica_core:8080/libreclinica-ws/ws
+  
+To:
+  LIBRECLINICA_SOAP_URL=http://libreclinica_core:8080/libreclinica/ws
+
+================================================================================
+IMMEDIATE FIX COMMANDS (Execute on Server)
+================================================================================
+
+# 1. Stop containers
+cd /home/ubuntu/libreclinicaapi/production-deployment
+docker-compose down
+
+# 2. Re-create WAR with proper paths
+cd /home/ubuntu
+mkdir -p libreclinica-war-fix
+cd libreclinica-war-fix
+unzip ../libreclinicaapi/LibreClinica-soap-fixed.war
+# This extracts with proper directory structure
+zip -r ../LibreClinica-soap-fixed-linux.war .
+cd ..
+cp LibreClinica-soap-fixed-linux.war libreclinicaapi/production-deployment/
+
+# 3. Update docker-compose.yml to not use :ro
+# Change the core service volume from:
+#   - ./LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
+# To:
+#   - ./LibreClinica-soap-fixed-linux.war:/usr/local/tomcat/webapps/libreclinica.war
+
+# 4. Also remove the broken libreclinica-ws.war by adding to volumes:
+#   - /dev/null:/usr/local/tomcat/webapps/libreclinica-ws.war:ro
+
+# 5. Update API environment in docker-compose.yml:
+#   LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica/ws
+
+# 6. Restart
+docker-compose up -d
+
+# 7. Wait and verify
+sleep 60
+docker exec libreclinica_core curl -s 'http://localhost:8080/libreclinica/ws/study/v1?wsdl' | head -10
+
+================================================================================
+CODE CHANGES ALREADY MADE (may need to be reverted)
+================================================================================
+
+Files I modified (may be wrong):
+  - src/config/environment.ts - Changed default SOAP URL
+  - src/services/soap/soapClient.ts - Changed default SOAP URL  
+  - production-deployment/docker-compose.yml - Changed SOAP URL
+  - src/services/soap/subjectSoap.service.ts - Changed default SOAP URL
+
+These changes assumed the problem was the URL path, but the REAL issue is:
+  1. The WAR file path format (backslashes)
+  2. The read-only mount preventing expansion
+  3. The broken libreclinica-ws.war from base image interfering
+
+================================================================================
+VERIFICATION STEPS AFTER FIX
+================================================================================
+
+1. Check WAR expanded properly:
+   docker exec libreclinica_core ls -la /usr/local/tomcat/webapps/libreclinica/WEB-INF/
+   (Should show: web.xml, ws-servlet-config.xml, lib/, classes/, etc.)
+
+2. Test SOAP WSDL endpoint:
+   docker exec libreclinica_core curl -s 'http://localhost:8080/libreclinica/ws/study/v1?wsdl'
+   (Should return XML starting with <?xml version="1.0" encoding="UTF-8"?>)
+
+3. Check API logs:
+   docker logs libreclinica_api --tail 20
+   (Should show: "SOAP connection successful")
+
+4. Test from API container:
+   Use wget or node to test SOAP from within API container to core
+
+================================================================================
+

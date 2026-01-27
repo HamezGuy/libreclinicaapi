@@ -300,6 +300,21 @@ export const applyElectronicSignature = async (
       signedBy: request.username
     });
 
+    // Auto-trigger workflow completion for signature tasks
+    // This follows real EDC patterns - signature completion closes signature workflow tasks
+    try {
+      await triggerSignatureWorkflowCompletion(
+        request.entityType,
+        request.entityId,
+        request.userId
+      );
+    } catch (workflowError: any) {
+      // Don't fail the signature if workflow update fails
+      logger.warn('Failed to trigger signature workflow completion', { 
+        error: workflowError.message 
+      });
+    }
+
     return {
       success: true,
       data: { signatureId },
@@ -726,6 +741,52 @@ const logSignatureAttempt = async (
   }
 };
 
+/**
+ * Trigger signature workflow completion
+ * When e-signature is applied, auto-complete any pending signature workflow tasks
+ * 
+ * 21 CFR Part 11 §11.10(e) - Audit trail for workflow completion
+ */
+export const triggerSignatureWorkflowCompletion = async (
+  entityType: SignableEntityType,
+  entityId: number,
+  userId: number
+): Promise<void> => {
+  try {
+    logger.info('Triggering signature workflow completion', { entityType, entityId, userId });
+    
+    // Auto-complete any pending signature tasks for this entity
+    // Only if acc_workflow_tasks table exists
+    try {
+      const result = await pool.query(`
+        UPDATE acc_workflow_tasks
+        SET status = 'completed', 
+            completed_at = NOW(), 
+            completed_by = $1,
+            updated_at = NOW()
+        WHERE event_crf_id = $2 
+          AND type = 'signature' 
+          AND status IN ('pending', 'in_progress', 'awaiting_approval')
+        RETURNING id
+      `, [userId, entityId]);
+      
+      if (result.rowCount && result.rowCount > 0) {
+        logger.info('Auto-completed signature workflow tasks', { 
+          entityType, 
+          entityId, 
+          count: result.rowCount 
+        });
+      }
+    } catch (taskError: any) {
+      if (taskError.code !== '42P01') {
+        throw taskError;
+      }
+    }
+  } catch (error: any) {
+    logger.warn('Failed to trigger signature workflow completion', { error: error.message });
+  }
+};
+
 export default {
   verifyPasswordForSignature,
   applyElectronicSignature,
@@ -733,6 +794,7 @@ export default {
   getSignatureHistory,
   getPendingSignatures,
   certifyUser,
-  getStudySignatureRequirements
+  getStudySignatureRequirements,
+  triggerSignatureWorkflowCompletion
 };
 

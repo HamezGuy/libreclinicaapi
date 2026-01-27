@@ -177,8 +177,8 @@ export const getPatientEventCRFs = async (studyEventId: number): Promise<any[]> 
         ec.date_validate,
         ec.sdv_status,
         u.user_name as owner_name,
-        -- Count of filled fields
-        (SELECT COUNT(*) FROM item_data id WHERE id.event_crf_id = ec.event_crf_id AND id.deleted = false) as filled_fields,
+        -- Count of filled fields (status_id = 1 means available/active, 5 means removed)
+        (SELECT COUNT(*) FROM item_data id WHERE id.event_crf_id = ec.event_crf_id AND id.status_id = 1) as filled_fields,
         -- Total fields in this CRF version
         (SELECT COUNT(DISTINCT i.item_id) 
          FROM item i 

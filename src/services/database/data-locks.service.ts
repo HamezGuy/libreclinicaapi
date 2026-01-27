@@ -396,6 +396,68 @@ export const unlockSubjectData = async (
   }
 };
 
+/**
+ * Unlock all data for a study event (visit)
+ * 21 CFR Part 11 §11.10(e) - Audit trail for unlock actions
+ */
+export const unlockEventData = async (
+  studyEventId: number,
+  userId: number,
+  reason: string
+): Promise<{ success: boolean; message: string; unlockedCount?: number }> => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Unlock all event CRFs for this event
+    const unlockQuery = `
+      UPDATE event_crf
+      SET status_id = 2, update_id = $2, date_updated = CURRENT_TIMESTAMP
+      WHERE study_event_id = $1
+        AND status_id = 6
+      RETURNING event_crf_id
+    `;
+    const unlockResult = await client.query(unlockQuery, [studyEventId, userId]);
+    const unlockedCount = unlockResult.rowCount || 0;
+
+    // Get event name for audit
+    const eventQuery = `
+      SELECT sed.name, ss.label as subject_label
+      FROM study_event se
+      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      WHERE se.study_event_id = $1
+    `;
+    const eventResult = await client.query(eventQuery, [studyEventId]);
+    const eventName = eventResult.rows[0]?.name || studyEventId;
+    const subjectLabel = eventResult.rows[0]?.subject_label;
+
+    // Audit log
+    await client.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+      VALUES (CURRENT_TIMESTAMP, 'study_event', $1, $2, $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+    `, [userId, studyEventId, `Event ${eventName} data UNLOCKED for ${subjectLabel}`, reason]);
+
+    await client.query('COMMIT');
+
+    logger.info('Event data unlocked', { studyEventId, userId, unlockedCount });
+
+    return {
+      success: true,
+      message: `Successfully unlocked ${unlockedCount} forms for event ${eventName}`,
+      unlockedCount
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Unlock event data error', { studyEventId, error: error.message });
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // EXISTING FUNCTIONS (Enhanced)
 // ═══════════════════════════════════════════════════════════════════

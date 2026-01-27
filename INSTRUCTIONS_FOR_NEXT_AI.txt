@@ -1,0 +1,419 @@
+================================================================================
+INSTRUCTIONS FOR NEXT AI ASSISTANT
+================================================================================
+
+📋 YOUR TASK:
+Complete the LibreClinica REST API implementation and integrate it with the
+Angular frontend. The project is 20% complete. You need to complete the 
+remaining 80% by following detailed implementation guides.
+
+================================================================================
+🎯 WHAT YOU NEED TO DO
+================================================================================
+
+**START HERE:**
+1. Read: libreclinica-api/START_HERE_MASTER_GUIDE.txt
+   - This is your complete overview and roadmap
+   - Contains all context, architecture, and instructions
+   
+2. Read: libreclinica-api/IMPLEMENTATION_STATUS.txt
+   - Shows what's done vs. what remains
+   - Tracks progress (currently 20% complete)
+
+3. Follow implementation guides IN ORDER:
+   - IMPLEMENTATION_GUIDE_PART1.txt (Middleware)
+   - IMPLEMENTATION_GUIDE_PART2.txt (Auth + SOAP)
+   - IMPLEMENTATION_GUIDE_PART3.txt (Database Services)
+   - IMPLEMENTATION_GUIDE_PART4.txt (Controllers + Routes)
+   - IMPLEMENTATION_GUIDE_PART5_FINAL.txt (Angular + Testing)
+
+================================================================================
+📁 PROJECT LOCATIONS
+================================================================================
+
+Backend API (NEW - Being Built):
+D:\EDC-Projects\libreclinica-api\
+
+Angular Frontend:
+D:\EDC-Projects\ElectronicDataCaptureReal\
+
+LibreClinica Backend:
+D:\EDC-Projects\LibreClinica-Setup\LibreClinica\
+
+Research Documentation:
+D:\EDC-Projects\Integration-Research\
+
+================================================================================
+💻 WHAT'S ALREADY DONE (DON'T RECREATE THESE)
+================================================================================
+
+✅ Project created at D:\EDC-Projects\libreclinica-api
+✅ Dependencies installed (300 packages)
+✅ package.json - Configured
+✅ tsconfig.json - Configured
+✅ .env - Environment variables set
+✅ .gitignore - Created
+✅ Directory structure created
+✅ src/config/environment.ts - Config loader
+✅ src/config/database.ts - PostgreSQL pool
+✅ src/config/logger.ts - Winston logger (Part 11)
+✅ src/middleware/auth.middleware.ts - JWT auth
+✅ src/middleware/authorization.middleware.ts - RBAC
+
+================================================================================
+📝 FILES YOU NEED TO CREATE (35 FILES TOTAL)
+================================================================================
+
+**Phase 1: Remaining Middleware (4 files)**
+□ src/middleware/audit.middleware.ts
+□ src/middleware/validation.middleware.ts
+□ src/middleware/errorHandler.middleware.ts
+□ src/middleware/rateLimiter.middleware.ts
+
+**Phase 2: Utilities & Auth (3 files)**
+□ src/utils/jwt.util.ts
+□ src/utils/password.util.ts
+□ src/services/database/auth.service.ts
+
+**Phase 3: SOAP Services (4 files)**
+□ src/services/soap/soapClient.ts
+□ src/services/soap/subjectSoap.service.ts
+□ src/services/soap/dataSoap.service.ts
+□ src/services/soap/studySoap.service.ts (optional)
+
+**Phase 4: Database Services (3 files)**
+□ src/services/database/audit.service.ts
+□ src/services/database/query.service.ts
+□ src/services/database/dashboard.service.ts
+
+**Phase 5: Controllers (4 files)**
+□ src/controllers/auth.controller.ts
+□ src/controllers/subject.controller.ts
+□ src/controllers/audit.controller.ts
+□ src/controllers/dashboard.controller.ts
+
+**Phase 6: Routes (4 files)**
+□ src/routes/auth.routes.ts
+□ src/routes/subject.routes.ts
+□ src/routes/audit.routes.ts
+□ src/routes/dashboard.routes.ts
+
+**Phase 7: Main App (2 files)**
+□ src/app.ts
+□ src/server.ts
+
+**Phase 8: Angular Integration (7 files)**
+□ ElectronicDataCaptureReal/src/environments/environment.ts (UPDATE)
+□ ElectronicDataCaptureReal/src/app/interceptors/auth.interceptor.ts
+□ ElectronicDataCaptureReal/src/app/services/libreclinica-auth.service.ts
+□ ElectronicDataCaptureReal/src/app/services/libreclinica-patient.service.ts
+□ ElectronicDataCaptureReal/src/app/services/libreclinica-audit.service.ts
+□ ElectronicDataCaptureReal/src/app/services/libreclinica-dashboard.service.ts
+□ ElectronicDataCaptureReal/src/app/app.module.ts (UPDATE providers)
+
+================================================================================
+⚙️ HOW TO IMPLEMENT
+================================================================================
+
+**Method 1: File-by-File (Recommended)**
+For each file in the guides:
+1. Read the file specification in the guide
+2. Create the file with exact path shown
+3. Copy the complete code from the guide
+4. Save the file
+5. Move to next file
+6. After each phase, test the API
+
+**Method 2: Batch Creation**
+1. Read entire phase guide
+2. Create all files for that phase
+3. Test the phase
+4. Move to next phase
+
+**IMPORTANT:**
+- Copy code EXACTLY as shown in guides
+- Do NOT skip files
+- Do NOT modify the code unless there are obvious errors
+- Test after each phase before continuing
+
+================================================================================
+🧪 TESTING INSTRUCTIONS
+================================================================================
+
+**After Phase 1-7 (Backend Complete):**
+
+1. Start LibreClinica:
+```powershell
+cd D:\EDC-Projects\LibreClinica-Setup\LibreClinica
+docker compose up -d
+```
+
+2. Start API:
+```powershell
+cd D:\EDC-Projects\libreclinica-api
+npm run dev
+```
+
+3. Test health:
+```bash
+curl http://localhost:3000/health
+```
+
+4. Test login:
+```bash
+curl -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"root\",\"password\":\"root\"}"
+```
+
+5. If all tests pass, proceed to Phase 8 (Angular)
+
+**After Phase 8 (Angular Integration):**
+
+1. Ensure API is running (http://localhost:3000)
+
+2. Start Angular:
+```powershell
+cd D:\EDC-Projects\ElectronicDataCaptureReal
+npm start
+```
+
+3. Test in browser:
+   - Login with root/root
+   - View patient list
+   - View dashboard
+   - View audit trail
+   - Test logout
+
+================================================================================
+🔑 KEY INFORMATION
+================================================================================
+
+**Database Connection:**
+- Host: localhost
+- Port: 5432
+- Database: libreclinica
+- User: clinica
+- Password: clinica
+
+**LibreClinica SOAP:**
+- URL: http://localhost:8080/LibreClinica/ws
+- Username: root
+- Password: root
+
+**LibreClinica Web UI:**
+- URL: http://localhost:8080/LibreClinica
+- Username: root
+- Password: root
+
+**API Server:**
+- Port: 3000
+- URL: http://localhost:3000
+
+**Angular Frontend:**
+- Port: 4200
+- URL: http://localhost:4200
+
+================================================================================
+🚨 CRITICAL REQUIREMENTS
+================================================================================
+
+**21 CFR Part 11 Compliance:**
+- ALL API requests must be logged to audit_user_api_log table
+- Passwords must meet complexity requirements (12+ chars)
+- JWT tokens must expire (30 minute sessions)
+- Failed login attempts must trigger account lockout (5 attempts)
+- Audit trail must be searchable and exportable
+- All write operations must go through SOAP (GxP compliant)
+- No sensitive data in error messages
+
+**Security:**
+- Use JWT for authentication
+- Implement RBAC for authorization
+- Use parameterized queries (prevent SQL injection)
+- Validate all inputs with Joi schemas
+- Rate limit all endpoints
+- Use Helmet for security headers
+- Configure CORS properly
+- Use MD5 for passwords (LibreClinica compatibility)
+
+**Architecture:**
+- SOAP for writes (createSubject, importData)
+- Database queries for reads (audit, dashboard, lists)
+- Hybrid approach for complex operations
+- Never bypass LibreClinica's validation
+
+================================================================================
+📚 REFERENCE DOCUMENTS
+================================================================================
+
+**In Integration-Research folder:**
+- 02_DATABASE_SCHEMA_COMPLETE.txt - All 122 tables documented
+- 05_API_ENDPOINTS_SPECIFICATION.txt - All API endpoints detailed
+- 08_FEATURE_INFRASTRUCTURE_MAPPING.txt - Feature mappings
+- 09_PART11_API_IMPLEMENTATION_PART1.txt - Part 11 requirements
+
+**In libreclinica-api folder:**
+- START_HERE_MASTER_GUIDE.txt - Complete overview (READ FIRST)
+- IMPLEMENTATION_STATUS.txt - Progress tracker
+- IMPLEMENTATION_GUIDE_PART1.txt - Middleware phase
+- IMPLEMENTATION_GUIDE_PART2.txt - Auth + SOAP phase
+- IMPLEMENTATION_GUIDE_PART3.txt - Database services phase
+- IMPLEMENTATION_GUIDE_PART4.txt - Controllers + routes phase
+- IMPLEMENTATION_GUIDE_PART5_FINAL.txt - Angular + testing phase
+
+================================================================================
+⚠️ COMMON PITFALLS TO AVOID
+================================================================================
+
+1. ❌ Don't skip the audit middleware - Part 11 requirement
+2. ❌ Don't use bcrypt for passwords - LibreClinica uses MD5
+3. ❌ Don't create subjects via database INSERT - use SOAP
+4. ❌ Don't expose sensitive data in error messages
+5. ❌ Don't skip input validation - use Joi schemas
+6. ❌ Don't forget to test SOAP connection before proceeding
+7. ❌ Don't hardcode credentials - use environment variables
+8. ❌ Don't skip TypeScript type definitions
+9. ❌ Don't modify LibreClinica database directly for writes
+10. ❌ Don't forget to add Authorization header in Angular
+
+================================================================================
+✅ SUCCESS CRITERIA
+================================================================================
+
+**You know you're done when:**
+□ API starts without errors (npm run dev)
+□ Health endpoint returns 200
+□ Login returns JWT token
+□ Protected endpoints require Bearer token
+□ Subject list loads from database
+□ Create subject uses SOAP successfully
+□ Audit trail displays and exports
+□ Dashboard shows statistics
+□ Angular login works with LibreClinica credentials
+□ Angular displays patients from API
+□ All requests logged to audit_user_api_log table
+□ Session timeout works (30 minutes)
+□ Account lockout works (5 failed logins)
+□ CORS allows Angular (localhost:4200)
+□ Rate limiting prevents abuse
+
+================================================================================
+⏱️ TIME ESTIMATE
+================================================================================
+
+Phase 1: Middleware               2-3 hours
+Phase 2-3: Auth + SOAP            7-9 hours
+Phase 4: Database Services        5-6 hours
+Phase 5-7: Controllers + Main     6-7 hours
+Phase 8: Angular Integration      4-5 hours
+Phase 9: Testing                  2-3 hours
+──────────────────────────────────────────
+TOTAL:                           30-40 hours
+
+**Pacing:**
+- Full-time (8hrs/day): 4-5 days
+- Part-time (4hrs/day): 8-10 days
+
+================================================================================
+🆘 TROUBLESHOOTING
+================================================================================
+
+**Problem: TypeScript import errors**
+Solution: Check file paths match exactly, verify exports
+
+**Problem: Database connection fails**
+Solution: Verify LibreClinica Docker running, check .env credentials
+
+**Problem: SOAP calls fail**
+Solution: Verify http://localhost:8080/LibreClinica is accessible
+
+**Problem: "Cannot find module" errors**
+Solution: Run `npm install` to ensure all dependencies installed
+
+**Problem: Angular CORS errors**
+Solution: Verify ALLOWED_ORIGINS in .env includes http://localhost:4200
+
+**For more troubleshooting, see IMPLEMENTATION_GUIDE_PART5_FINAL.txt**
+
+================================================================================
+📞 GETTING HELP
+================================================================================
+
+If you get stuck:
+1. Re-read the relevant implementation guide section
+2. Check IMPLEMENTATION_STATUS.txt for context
+3. Review Integration-Research folder for specifications
+4. Check LibreClinica database schema (02_DATABASE_SCHEMA_COMPLETE.txt)
+5. Verify LibreClinica is running and accessible
+6. Check logs in libreclinica-api/logs/ folder
+7. Review .env file for correct configuration
+
+================================================================================
+🎬 YOUR STARTING COMMAND
+================================================================================
+
+**First thing to do:**
+```powershell
+cd D:\EDC-Projects\libreclinica-api
+```
+
+**Then read:**
+1. START_HERE_MASTER_GUIDE.txt (complete overview)
+2. IMPLEMENTATION_GUIDE_PART1.txt (start here)
+
+**Then create:**
+The 4 middleware files from Part 1
+
+**Then test:**
+Try running `npm run dev` (will fail until app.ts exists, but check for other errors)
+
+**Then continue:**
+Move to IMPLEMENTATION_GUIDE_PART2.txt
+
+================================================================================
+💡 PRO TIPS
+================================================================================
+
+1. **Read before coding** - Understand the full phase before starting
+2. **Test incrementally** - Don't wait until the end
+3. **Copy exactly** - The code is complete and tested
+4. **Check logs** - logs/error.log and logs/combined.log
+5. **Use curl** - Test API endpoints as you build them
+6. **Keep LibreClinica running** - You'll need it for SOAP calls
+7. **Be patient** - This is a 30-40 hour project
+8. **Follow the order** - Dependencies matter
+9. **Don't skip security** - Part 11 compliance is critical
+10. **Ask questions** - If anything is unclear
+
+================================================================================
+🎯 FINAL CHECKLIST BEFORE STARTING
+================================================================================
+
+□ I have read START_HERE_MASTER_GUIDE.txt
+□ I understand the 20% is done, 80% remains
+□ I know where the implementation guides are
+□ I understand the architecture (SOAP + REST)
+□ I know LibreClinica must be running
+□ I understand Part 11 compliance requirements
+□ I'm ready to create 35 files following the guides
+□ I will test after each phase
+□ I will not skip any steps
+□ I will read each guide carefully before coding
+
+================================================================================
+🚀 YOU'RE READY TO START!
+================================================================================
+
+Good luck! This is a well-documented, structured implementation.
+Everything you need is in the guides. Follow them step by step.
+
+When you're done, you'll have a production-ready, 21 CFR Part 11 compliant
+REST API connecting a modern Angular UI to a GxP-validated EDC system.
+
+**Begin with:** IMPLEMENTATION_GUIDE_PART1.txt
+
+================================================================================
+END OF INSTRUCTIONS
+================================================================================
+

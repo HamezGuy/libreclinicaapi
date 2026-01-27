@@ -1,0 +1,121 @@
+services:
+  # ==========================================
+  # 1. Database (PostgreSQL)
+  # ==========================================
+  postgres:
+    image: postgres:14-alpine
+    container_name: libreclinica_db
+    restart: always
+    environment:
+      POSTGRES_DB: libreclinica
+      POSTGRES_USER: libreclinica
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-libreclinica}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - lc_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U libreclinica -d libreclinica"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ==========================================
+  # 2. LibreClinica Core (Java/Tomcat)
+  # ==========================================
+  core:
+    image: jaspersnel/libreclinica:latest
+    container_name: libreclinica_core
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      dbType: postgres
+      dbHost: postgres
+      dbPort: 5432
+      dbName: libreclinica
+      dbUser: libreclinica
+      dbPass: ${DB_PASSWORD:-libreclinica}
+      sysURL: http://18.225.57.5:8080/libreclinica
+      supportURL: http://18.225.57.5
+    volumes:
+      - core_data:/usr/local/tomcat/libreclinica.data
+    ports:
+      - "8080:8080"
+    networks:
+      - lc_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/libreclinica/pages/login/login || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+
+  # ==========================================
+  # 3. LibreClinica API (Node.js) - Using pre-built image
+  # ==========================================
+  api:
+    image: node:18-alpine
+    container_name: libreclinica_api
+    restart: always
+    working_dir: /app
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DEMO_MODE: "true"
+      LIBRECLINICA_DB_HOST: postgres
+      LIBRECLINICA_DB_PORT: 5432
+      LIBRECLINICA_DB_NAME: libreclinica
+      LIBRECLINICA_DB_USER: libreclinica
+      LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
+      LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
+      SOAP_USERNAME: root
+      SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
+      DISABLE_SOAP: "true"
+      JWT_SECRET: ${JWT_SECRET:-accuratrials_secure_jwt_secret_2024}
+      ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
+      ENABLE_EMAIL_NOTIFICATIONS: "true"
+      ENABLE_SUBJECT_TRANSFERS: "true"
+      ENABLE_ECONSENT: "true"
+      ENABLE_EPRO: "true"
+      ENABLE_RTSM: "true"
+    volumes:
+      - ./api-source:/app
+    command: sh -c "npm install --production && npm run build 2>/dev/null || true && node dist/server.js 2>/dev/null || npm start"
+    networks:
+      - lc_network
+
+  # ==========================================
+  # 4. Nginx (Reverse Proxy with SSL)
+  # ==========================================
+  nginx:
+    image: nginx:alpine
+    container_name: libreclinica_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf/live:/etc/letsencrypt/live:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - api
+      - core
+    networks:
+      - lc_network
+
+volumes:
+  db_data:
+  core_data:
+
+networks:
+  lc_network:
+    driver: bridge

@@ -31,6 +31,17 @@ import {
 import * as workflowService from '../database/workflow.service';
 
 /**
+ * Get local date string (YYYY-MM-DD) without UTC conversion
+ * This prevents off-by-one day issues when storing dates
+ */
+function getLocalDateString(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
  * Request type for creating a subject
  * 
  * Database Schema Reference:
@@ -174,7 +185,7 @@ const createSubjectDirect = async (
     
     if (duplicateCheck.rows.length > 0) {
       await client.query('ROLLBACK');
-      client.release();
+      // Don't release here - let the finally block handle it
       logger.warn('Subject label already exists in study', { 
         label: request.studySubjectId, 
         studyId: request.studyId,
@@ -319,7 +330,7 @@ const createSubjectDirect = async (
       request.secondaryId || '',
       subjectId,
       request.studyId,
-      request.enrollmentDate || new Date().toISOString().split('T')[0],
+      request.enrollmentDate || getLocalDateString(),
       timeZone,
       userId,
       ocOid
@@ -372,7 +383,7 @@ const createSubjectDirect = async (
     // This implements the COPY PHASES TO PATIENT requirement
     let scheduledEventIds: number[] = [];
     let totalFormsCreated = 0;
-    const enrollmentDate = request.enrollmentDate || new Date().toISOString().split('T')[0];
+    const enrollmentDate = request.enrollmentDate || getLocalDateString();
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
     // Get all study event definitions for this study
@@ -413,7 +424,7 @@ const createSubjectDirect = async (
             eventDef.study_event_definition_id,
             studySubjectId,
             request.scheduleEvent?.location || '',
-            eventStartDate.toISOString().split('T')[0],
+            getLocalDateString(eventStartDate),
             userId
           ]);
           
@@ -526,7 +537,7 @@ const createSubjectDirect = async (
         newValue: JSON.stringify({
           label: request.studySubjectId,
           studyId: request.studyId,
-          enrollmentDate: request.enrollmentDate || new Date().toISOString().split('T')[0],
+          enrollmentDate: request.enrollmentDate || getLocalDateString(),
           gender: request.gender,
           dateOfBirth: request.dateOfBirth
         }),

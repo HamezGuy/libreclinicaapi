@@ -625,21 +625,30 @@ async function logSuccessfulLogin(userId: number, username: string, ipAddress: s
  */
 async function logFailedLogin(username: string, ipAddress: string, reason: string): Promise<void> {
   // Insert into audit_user_login with login_status_code 0 (failed)
+  // First try to get the user_account_id if user exists
+  let userAccountId: number | null = null;
+  try {
+    const userResult = await pool.query(
+      'SELECT user_id FROM user_account WHERE user_name = $1 LIMIT 1',
+      [username]
+    );
+    if (userResult.rows.length > 0) {
+      userAccountId = userResult.rows[0].user_id;
+    }
+  } catch (e) {
+    // Ignore - user may not exist
+  }
+  
   const loginAuditQuery = `
     INSERT INTO audit_user_login (
       user_name, user_account_id, login_attempt_date, login_status_code, details, version
     ) VALUES (
-      $1, 
-      (SELECT user_id FROM user_account WHERE user_name = $1 LIMIT 1),
-      NOW(), 
-      0, 
-      $2, 
-      1
+      $1, $2, NOW(), 0, $3, 1
     )
   `;
   
   try {
-    await pool.query(loginAuditQuery, [username, `Failed: ${reason} from ${ipAddress}`]);
+    await pool.query(loginAuditQuery, [username, userAccountId, `Failed: ${reason} from ${ipAddress}`]);
     logger.warn('Failed login audit recorded to audit_user_login', { username, ipAddress, reason });
   } catch (error: any) {
     logger.error('Failed to log failed login to audit_user_login', {
