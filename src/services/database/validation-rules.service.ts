@@ -268,7 +268,8 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
           r.study_id,
           re.value as expression,
           re.context as expression_context,
-          rs.target as target_oid,
+          i.oc_oid as target_oid,
+          i.name as item_name,
           rs.study_event_definition_id,
           rs.crf_id,
           rs.crf_version_id,
@@ -282,6 +283,7 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
         INNER JOIN rule_set rs ON rs.study_id = r.study_id
         INNER JOIN rule_set_rule rsr ON rsr.rule_set_id = rs.id AND rsr.rule_id = r.id
         LEFT JOIN rule_action ra ON ra.rule_set_rule_id = rsr.id
+        LEFT JOIN item i ON rs.item_id = i.item_id
         WHERE rs.crf_id = $1 AND r.enabled = true
         ORDER BY r.name
       `;
@@ -728,6 +730,7 @@ export const validateFormData = async (
       const itemDataId = getItemDataId(rule.fieldPath, itemDataMap);
 
       if (rule.severity === 'error') {
+        // HARD VALIDATION ERROR: Blocks form submission
         const error: { fieldPath: string; message: string; severity: string; queryId?: number; itemDataId?: number } = {
           fieldPath: rule.fieldPath,
           message: rule.errorMessage,
@@ -735,7 +738,7 @@ export const validateFormData = async (
           itemDataId
         };
 
-        // Create query for validation failure if requested
+        // Create query for hard validation failure if requested
         if (options?.createQueries && options.studyId && options.userId) {
           try {
             const queryId = await createValidationQuery({
@@ -761,10 +764,39 @@ export const validateFormData = async (
 
         errors.push(error);
       } else {
-        warnings.push({
+        // SOFT VALIDATION WARNING: Does NOT block form submission, but creates a query
+        const warning: { fieldPath: string; message: string; queryId?: number } = {
           fieldPath: rule.fieldPath,
           message: rule.warningMessage || rule.errorMessage
-        });
+        };
+
+        // Create query for SOFT validation failure - users can submit but must address the query
+        if (options?.createQueries && options.studyId && options.userId) {
+          try {
+            const queryId = await createValidationQuery({
+              studyId: options.studyId,
+              subjectId: options.subjectId,
+              eventCrfId: options.eventCrfId,
+              itemDataId: itemDataId,
+              itemId: rule.itemId,
+              fieldPath: rule.fieldPath,
+              ruleName: rule.name,
+              errorMessage: rule.warningMessage || rule.errorMessage,
+              value: value,
+              userId: options.userId,
+              severity: 'warning' // Mark as warning-level query
+            });
+            if (queryId) {
+              (warning as any).queryId = queryId;
+              queriesCreated++;
+              logger.info('Created query for soft validation warning', { fieldPath: rule.fieldPath, queryId });
+            }
+          } catch (e: any) {
+            logger.error('Failed to create validation query for warning:', e.message);
+          }
+        }
+
+        warnings.push(warning);
       }
     }
   }
@@ -1142,6 +1174,7 @@ async function createValidationQuery(params: {
   value: any;
   userId: number;
   assignedUserId?: number;
+  severity?: 'error' | 'warning'; // 'error' = hard validation, 'warning' = soft validation
 }): Promise<number | null> {
   const client = await pool.connect();
   
@@ -1191,8 +1224,10 @@ async function createValidationQuery(params: {
       assignedUserId = await findDefaultAssignee(client, params.studyId, params.subjectId);
     }
     
-    const description = `Validation Error: ${params.ruleName}`;
-    const detailedNotes = `Field: ${params.fieldPath}\nValue: ${JSON.stringify(params.value)}\nError: ${params.errorMessage}`;
+    // Distinguish between hard errors and soft warnings in the query description
+    const severityLabel = params.severity === 'warning' ? 'Warning' : 'Error';
+    const description = `Validation ${severityLabel}: ${params.ruleName}`;
+    const detailedNotes = `Field: ${params.fieldPath}\nValue: ${JSON.stringify(params.value)}\n${severityLabel}: ${params.errorMessage}\nSeverity: ${params.severity || 'error'}`;
 
     // Discrepancy note type 1 = "Failed Validation Check" in LibreClinica
     // Resolution status 1 = "New"

@@ -409,6 +409,24 @@ export const triggerFormSubmittedWorkflow = async (
     );
     const subjectLabel = subjectResult.rows[0]?.label || `Subject ${subjectId}`;
 
+    // Find monitors/coordinators for this study to auto-assign SDV tasks
+    // Look for users with monitor, coordinator, or admin roles for this study
+    const assigneesResult = await pool.query(`
+      SELECT DISTINCT u.user_id::text as user_id
+      FROM user_account u
+      INNER JOIN study_user_role sur ON u.user_id = sur.user_id
+      INNER JOIN role r ON sur.role_id = r.role_id
+      WHERE sur.study_id = $1
+        AND u.status_id = 1
+        AND lower(r.name) IN ('monitor', 'study_coordinator', 'clinical_research_coordinator', 'administrator', 'study_director')
+      ORDER BY u.user_id
+      LIMIT 5
+    `, [studyId]);
+    
+    // Get the user IDs to assign (or empty array if none found)
+    const assignedUserIds = assigneesResult.rows.map(r => r.user_id);
+    logger.info('Auto-assigning SDV task to users', { studyId, assignedUserIds });
+
     // Create SDV workflow task in acc_workflow_tasks table
     try {
       await pool.query(`
@@ -419,20 +437,21 @@ export const triggerFormSubmittedWorkflow = async (
           created_by, created_by_username, created_at, updated_at
         ) VALUES (
           $1, $2, 'sdv', 'medium', 'pending',
-          ARRAY[]::TEXT[], $3, 'event_crf', $4, $5,
+          $3, $4, 'event_crf', $5, $6,
           false, false,
-          $6, $7, NOW(), NOW()
+          $7, $8, NOW(), NOW()
         )
       `, [
         `SDV Required: ${formName} - ${subjectLabel}`,
         `Source data verification required for ${formName} submitted by ${username}`,
+        assignedUserIds,
         studyId,
         eventCrfId,
         eventCrfId,
         userId,
         username
       ]);
-      logger.info('Created SDV workflow task', { eventCrfId, formName });
+      logger.info('Created SDV workflow task', { eventCrfId, formName, assignedTo: assignedUserIds });
     } catch (taskError: any) {
       // If acc_workflow_tasks doesn't exist, fall through to audit log only
       if (taskError.code !== '42P01') {

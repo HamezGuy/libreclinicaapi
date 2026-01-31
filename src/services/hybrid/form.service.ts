@@ -116,12 +116,15 @@ export const saveFormData = async (
   }
 
   // Normalize request for SOAP service
-  const normalizedRequest: FormDataRequest = {
+  // Include eventCrfId if provided (for updating existing forms)
+  const normalizedRequest: FormDataRequest & { eventCrfId?: number; studyEventId?: number } = {
     studyId: request.studyId,
     subjectId: request.subjectId,
     studyEventDefinitionId: eventDefId,
     crfId: crfId,
-    formData: formData || {}
+    formData: formData || {},
+    eventCrfId: (request as any).eventCrfId,
+    studyEventId: (request as any).studyEventId
   };
 
   // Try SOAP service first for GxP-compliant data entry
@@ -146,14 +149,16 @@ export const saveFormData = async (
  * 21 CFR Part 11 compliant with proper audit logging
  */
 const saveFormDataDirect = async (
-  request: FormDataRequest,
+  request: FormDataRequest & { eventCrfId?: number; studyEventId?: number },
   userId: number,
   username: string
 ): Promise<ApiResponse<any>> => {
   logger.info('Saving form data directly to database', {
     studyId: request.studyId,
     subjectId: request.subjectId,
-    crfId: request.crfId
+    crfId: request.crfId,
+    existingEventCrfId: request.eventCrfId,
+    existingStudyEventId: request.studyEventId
   });
 
   const client = await pool.connect();
@@ -202,43 +207,74 @@ const saveFormDataDirect = async (
     const crfVersionId = crfVersionResult.rows[0].crf_version_id;
 
     // 3. Find or create the event_crf
-    let eventCrfId: number | null = null;
-    const eventCrfResult = await client.query(`
-      SELECT event_crf_id FROM event_crf
-      WHERE study_event_id = $1 AND crf_version_id = $2
-      LIMIT 1
-    `, [studyEventId, crfVersionId]);
-
-    if (eventCrfResult.rows.length > 0) {
-      eventCrfId = eventCrfResult.rows[0].event_crf_id;
-      
-      // CHECK IF RECORD IS LOCKED - status_id = 6 means locked
-      // This is critical for 21 CFR Part 11 compliance (§11.10(d))
-      const lockCheckResult = await client.query(`
-        SELECT status_id FROM event_crf WHERE event_crf_id = $1
+    // IMPORTANT: If eventCrfId is passed in the request, use it directly (updating existing form)
+    let eventCrfId: number | null = request.eventCrfId || null;
+    
+    if (eventCrfId) {
+      // Verify the eventCrfId exists and get its details
+      logger.info('Using existing eventCrfId from request', { eventCrfId });
+      const existingCrfCheck = await client.query(`
+        SELECT event_crf_id, status_id, crf_version_id FROM event_crf
+        WHERE event_crf_id = $1
       `, [eventCrfId]);
       
-      if (lockCheckResult.rows.length > 0 && lockCheckResult.rows[0].status_id === 6) {
-        await client.query('ROLLBACK');
-        logger.warn('Attempted to edit locked record', { eventCrfId, userId });
-        return {
-          success: false,
-          message: 'Cannot edit data - this record is locked. Request an unlock through the Data Lock Management system.',
-          errors: ['RECORD_LOCKED']
-        };
+      if (existingCrfCheck.rows.length === 0) {
+        logger.warn('Provided eventCrfId does not exist, will create new', { eventCrfId });
+        eventCrfId = null;
+      } else {
+        // CHECK IF RECORD IS LOCKED - status_id = 6 means locked
+        if (existingCrfCheck.rows[0].status_id === 6) {
+          await client.query('ROLLBACK');
+          logger.warn('Attempted to edit locked record', { eventCrfId, userId });
+          return {
+            success: false,
+            message: 'Cannot edit data - this record is locked. Request an unlock through the Data Lock Management system.',
+            errors: ['RECORD_LOCKED']
+          };
+        }
       }
-    } else {
-      // Create the event_crf
-      const createEventCrfResult = await client.query(`
-        INSERT INTO event_crf (
-          study_event_id, crf_version_id, study_subject_id,
-          date_interviewed, interviewer_name,
-          completion_status_id, status_id, owner_id, date_created
-        ) VALUES ($1, $2, $3, CURRENT_DATE, $4, 1, 1, $5, NOW())
-        RETURNING event_crf_id
-      `, [studyEventId, crfVersionId, request.subjectId, username, userId]);
-      eventCrfId = createEventCrfResult.rows[0].event_crf_id;
-      logger.info('Created event_crf', { eventCrfId });
+    }
+    
+    // If no valid eventCrfId, try to find by study_event_id and crf_version_id
+    if (!eventCrfId) {
+      const eventCrfResult = await client.query(`
+        SELECT event_crf_id FROM event_crf
+        WHERE study_event_id = $1 AND crf_version_id = $2
+        LIMIT 1
+      `, [studyEventId, crfVersionId]);
+
+      if (eventCrfResult.rows.length > 0) {
+        eventCrfId = eventCrfResult.rows[0].event_crf_id;
+        logger.info('Found existing eventCrfId by study_event/crf_version', { eventCrfId, studyEventId, crfVersionId });
+        
+        // CHECK IF RECORD IS LOCKED - status_id = 6 means locked
+        // This is critical for 21 CFR Part 11 compliance (§11.10(d))
+        const lockCheckResult = await client.query(`
+          SELECT status_id FROM event_crf WHERE event_crf_id = $1
+        `, [eventCrfId]);
+        
+        if (lockCheckResult.rows.length > 0 && lockCheckResult.rows[0].status_id === 6) {
+          await client.query('ROLLBACK');
+          logger.warn('Attempted to edit locked record', { eventCrfId, userId });
+          return {
+            success: false,
+            message: 'Cannot edit data - this record is locked. Request an unlock through the Data Lock Management system.',
+            errors: ['RECORD_LOCKED']
+          };
+        }
+      } else {
+        // Create the event_crf
+        const createEventCrfResult = await client.query(`
+          INSERT INTO event_crf (
+            study_event_id, crf_version_id, study_subject_id,
+            date_interviewed, interviewer_name,
+            completion_status_id, status_id, owner_id, date_created
+          ) VALUES ($1, $2, $3, CURRENT_DATE, $4, 1, 1, $5, NOW())
+          RETURNING event_crf_id
+        `, [studyEventId, crfVersionId, request.subjectId, username, userId]);
+        eventCrfId = createEventCrfResult.rows[0].event_crf_id;
+        logger.info('Created new event_crf', { eventCrfId, studyEventId, crfVersionId });
+      }
     }
 
     // 4. Get item mappings for this CRF version
@@ -327,11 +363,14 @@ const saveFormDataDirect = async (
     }
 
     // 6. Update event_crf completion status
+    // Status values: 1=placeholder, 2=not_started, 3=initial_data_entry, 4=complete
+    // If all required fields are filled, mark as complete (4), otherwise in_progress (3)
+    const completionStatusId = savedCount > 0 ? 4 : 3; // 4 = complete after saving data
     await client.query(`
       UPDATE event_crf
-      SET completion_status_id = 2, date_updated = NOW(), update_id = $1
-      WHERE event_crf_id = $2
-    `, [userId, eventCrfId]);
+      SET completion_status_id = $1, date_updated = NOW(), update_id = $2, date_completed = NOW()
+      WHERE event_crf_id = $3
+    `, [completionStatusId, userId, eventCrfId]);
 
     await client.query('COMMIT');
 
@@ -697,12 +736,27 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       
       // Determine field type from:
       // 1. Extended props (preserves frontend types like 'yesno', 'textarea')
-      // 2. Response type (LibreClinica's UI type)
-      // 3. Data type code (fallback)
-      const fieldType = extendedProps.type 
+      // 2. If has options but type is 'text', infer as 'radio' or 'select'
+      // 3. Response type (LibreClinica's UI type)
+      // 4. Data type code (fallback)
+      let fieldType = extendedProps.type 
         || mapResponseTypeToFieldType(item.response_type) 
         || item.data_type_code?.toLowerCase() 
         || 'text';
+      
+      // If field has options but type is 'text', upgrade to radio/select
+      if (options && options.length > 0 && fieldType === 'text') {
+        // Use radio for 2-4 options, select for more
+        fieldType = options.length <= 4 ? 'radio' : 'select';
+      }
+      
+      // Handle date types - ensure proper type for date fields
+      if (item.data_type_code?.toLowerCase() === 'date' || item.data_type?.toLowerCase()?.includes('date')) {
+        fieldType = 'date';
+      }
+      if (item.data_type_code?.toLowerCase() === 'pdate') {
+        fieldType = 'date';
+      }
       
       return {
         // Core identifiers
