@@ -629,9 +629,8 @@ CREATE TABLE audit_user_login (
     id SERIAL PRIMARY KEY,
     user_name VARCHAR(255),
     user_account_id INTEGER,
-    audit_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     login_attempt_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    login_status INTEGER,
+    login_status_code INTEGER,
     details VARCHAR(255),
     version INTEGER
 );

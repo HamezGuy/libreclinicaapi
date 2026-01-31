@@ -564,7 +564,7 @@ export const getComplianceReport = async (request: {
       SELECT 
         aul.login_attempt_date,
         aul.user_name,
-        aul.login_status
+        aul.login_status_code as login_status
       FROM audit_user_login aul
       WHERE aul.login_attempt_date >= $1 AND aul.login_attempt_date <= $2
       ORDER BY aul.login_attempt_date DESC
