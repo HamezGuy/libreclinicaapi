@@ -1,3 +1,22 @@
+# =============================================================================
+# LibreClinica EDC - AWS Lightsail Production Deployment
+# =============================================================================
+# Server: 18.225.57.5 (Ohio, us-east-2a)
+# Domain: api.accuratrials.com
+#
+# Services:
+#   1. PostgreSQL 14 - Database
+#   2. LibreClinica Core - Java/Tomcat (SOAP services)
+#   3. LibreClinica API - Node.js REST API
+#   4. Nginx - Reverse proxy with SSL (Let's Encrypt)
+#   5. Certbot - SSL certificate auto-renewal
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose down
+#   docker compose logs -f api
+# =============================================================================
+
 services:
   # ==========================================
   # 1. Database (PostgreSQL)
@@ -21,7 +40,7 @@ services:
       retries: 10
 
   # ==========================================
-  # 2. LibreClinica Core (Java/Tomcat) - Using LibreClinica 1.4.0 WARs
+  # 2. LibreClinica Core (Java/Tomcat)
   # ==========================================
   core:
     image: jaspersnel/libreclinica:latest
@@ -41,9 +60,6 @@ services:
       supportURL: https://www.accuratrials.com
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
-      # Mount LibreClinica 1.4.0 WAR files (overwriting the old ones from base image)
-      - ./LibreClinica-web-1.4.0.war:/usr/local/tomcat/webapps/libreclinica.war
-      - ./LibreClinica-ws-1.4.0.war:/usr/local/tomcat/webapps/libreclinica-ws.war
     networks:
       - lc_network
     healthcheck:
@@ -57,13 +73,15 @@ services:
   # 3. LibreClinica API (Node.js)
   # ==========================================
   api:
-    build: ..
+    build:
+      context: ..
+      dockerfile: Dockerfile
     image: libreclinica-api:latest
     container_name: libreclinica_api
     restart: always
     depends_on:
-      - postgres
-      - core
+      postgres:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
@@ -75,14 +93,12 @@ services:
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
-      # SOAP endpoint - LibreClinica 1.4.0
       LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
       SOAP_USERNAME: root
       SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
       DISABLE_SOAP: "true"
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
-      ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,https://edc-real-gosydyd0z-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
-      # Enable all new features
+      ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
       ENABLE_EMAIL_NOTIFICATIONS: "true"
       ENABLE_SUBJECT_TRANSFERS: "true"
       ENABLE_ECONSENT: "true"
@@ -92,7 +108,7 @@ services:
       - lc_network
 
   # ==========================================
-  # 4. Nginx (Reverse Proxy & SSL)
+  # 4. Nginx (Reverse Proxy + SSL)
   # ==========================================
   nginx:
     image: nginx:alpine
@@ -112,7 +128,7 @@ services:
       - lc_network
 
   # ==========================================
-  # 5. Certbot (SSL Renewal)
+  # 5. Certbot (SSL Auto-Renewal)
   # ==========================================
   certbot:
     image: certbot/certbot

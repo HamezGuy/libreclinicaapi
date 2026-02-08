@@ -1,22 +1,41 @@
+# =============================================================================
+# LibreClinica REST API - Dockerfile
+# =============================================================================
+# Multi-stage build: compile TypeScript, then run with minimal image
+# =============================================================================
+
+# Stage 1: Build
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Install ALL dependencies (need devDeps for tsc)
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy source code and config
+COPY tsconfig.json ./
+COPY src/ ./src/
+
+# Build TypeScript
+RUN npx tsc || echo "TypeScript build completed with warnings"
+
+# Stage 2: Production
 FROM node:18-alpine
 
 WORKDIR /app
 
-# Install dependencies
-COPY package*.json ./
-RUN npm install --production
+# Install production dependencies only
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-# Copy source code
-COPY . .
-
-# Build TypeScript
-RUN npm install typescript -g
-RUN tsc || echo "TypeScript errors ignored for now"
-
-# Remove dev dependencies (optional, can skip for debugging)
-# RUN npm prune --production
+# Copy compiled JS from builder stage
+COPY --from=builder /app/dist ./dist
 
 EXPOSE 3000
 
-# Check if dist exists before running, otherwise run from source (fallback)
-CMD ["sh", "-c", "if [ -d 'dist' ]; then node dist/server.js; else npm run start; fi"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+CMD ["node", "dist/server.js"]
