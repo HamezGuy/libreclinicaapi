@@ -936,18 +936,52 @@ export interface DiscrepancyNote {
   dateUpdated?: Date | string;
 }
 
+/**
+ * DiscrepancyNoteType - matches discrepancy_note_type table in LibreClinica
+ * 
+ * Database IDs (discrepancy_note_type table):
+ *   1 = 'Failed Validation Check'
+ *   2 = 'Annotation'
+ *   3 = 'Query'
+ *   4 = 'Reason for Change'
+ */
 export type DiscrepancyNoteType = 
-  | 'Query'                     // 1
-  | 'Failed Validation Check'   // 2
-  | 'Annotation'                // 3
+  | 'Failed Validation Check'   // 1
+  | 'Annotation'                // 2
+  | 'Query'                     // 3
   | 'Reason for Change';        // 4
 
+export const DISCREPANCY_NOTE_TYPE_MAP: Record<number, DiscrepancyNoteType> = {
+  1: 'Failed Validation Check',
+  2: 'Annotation',
+  3: 'Query',
+  4: 'Reason for Change'
+};
+
+/**
+ * ResolutionStatus - matches resolution_status table in LibreClinica
+ * 
+ * Database IDs (resolution_status table):
+ *   1 = 'New'
+ *   2 = 'Updated'
+ *   3 = 'Resolution Proposed'
+ *   4 = 'Closed'
+ *   5 = 'Not Applicable'
+ */
 export type ResolutionStatus =
-  | 'New'             // 1
-  | 'Updated'         // 2
-  | 'Resolved'        // 3
-  | 'Closed'          // 4
-  | 'Not Applicable'; // 5
+  | 'New'                  // 1
+  | 'Updated'              // 2
+  | 'Resolution Proposed'  // 3
+  | 'Closed'               // 4
+  | 'Not Applicable';      // 5
+
+export const RESOLUTION_STATUS_MAP: Record<number, ResolutionStatus> = {
+  1: 'New',
+  2: 'Updated',
+  3: 'Resolution Proposed',
+  4: 'Closed',
+  5: 'Not Applicable'
+};
 
 // =============================================================================
 // STUDY GROUP TYPES (from StudyGroupBean.java, StudyGroupClassBean.java)

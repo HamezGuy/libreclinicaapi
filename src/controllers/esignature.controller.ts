@@ -21,7 +21,7 @@ import { logger } from '../config/logger';
  */
 export const verifyPassword = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { password } = req.body;
+  const { password, username } = req.body;
 
   if (!password) {
     res.status(400).json({
@@ -31,9 +31,12 @@ export const verifyPassword = asyncHandler(async (req: Request, res: Response) =
     return;
   }
 
+  // Use username from request body (frontend sends it per §11.200) or fall back to JWT
+  const effectiveUsername = username || user.userName || user.username;
+
   const result = await esignatureService.verifyPasswordForSignature(
     user.userId,
-    user.username,
+    effectiveUsername,
     password
   );
 
@@ -243,6 +246,81 @@ export const getStudyRequirements = asyncHandler(async (req: Request, res: Respo
   res.json(result);
 });
 
+/**
+ * Invalidate a signature when the signed record is modified
+ * 21 CFR Part 11 §11.70 - Signature/record linking
+ */
+export const invalidateSignature = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { entityType, entityId, reason } = req.body;
+
+  if (!entityType || !entityId || !reason) {
+    res.status(400).json({
+      success: false,
+      message: 'entityType, entityId, and reason are required'
+    });
+    return;
+  }
+
+  const result = await esignatureService.invalidateSignature(
+    entityType,
+    parseInt(entityId),
+    reason,
+    user.userName || user.username
+  );
+
+  if (result.success) {
+    logger.info('Signature invalidated', {
+      userId: user.userId,
+      entityType,
+      entityId,
+      reason,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  res.json(result);
+});
+
+/**
+ * Get certification status for current user
+ * 21 CFR Part 11 §11.100(c)
+ */
+export const getCertificationStatus = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+
+  const result = await esignatureService.getCertificationStatus(user.userId);
+
+  res.json(result);
+});
+
+/**
+ * Log a failed signature attempt from the frontend
+ * 21 CFR Part 11 §11.10(e) - Audit trail for failed attempts
+ */
+export const logFailedAttempt = asyncHandler(async (req: Request, res: Response) => {
+  const { entityType, entityId, username, reason, userAgent, timestamp } = req.body;
+
+  if (!entityType || !entityId || !username) {
+    res.status(400).json({
+      success: false,
+      message: 'entityType, entityId, and username are required'
+    });
+    return;
+  }
+
+  const result = await esignatureService.logFailedSignatureAttempt(
+    entityType,
+    parseInt(entityId),
+    username,
+    reason || 'Unknown failure',
+    userAgent,
+    timestamp
+  );
+
+  res.json(result);
+});
+
 export default {
   verifyPassword,
   applySignature,
@@ -250,6 +328,9 @@ export default {
   getSignatureHistory,
   getPendingSignatures,
   certifySignature,
-  getStudyRequirements
+  getStudyRequirements,
+  invalidateSignature,
+  getCertificationStatus,
+  logFailedAttempt
 };
 

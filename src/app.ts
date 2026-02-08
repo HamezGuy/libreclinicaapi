@@ -76,13 +76,13 @@ import ddeRoutes from './routes/dde.routes';
 // CRF/Item Flagging (uses LibreClinica native tables: event_crf_flag, item_data_flag)
 import flaggingRoutes from './routes/flagging.routes';
 // Organization management, invite codes, access requests
-// import organizationRoutes from './routes/organization.routes';
-// // Skip Logic and Form Linking
+import organizationRoutes from './routes/organization.routes';
+// // Skip Logic and Form Linking (client-side only - no backend needed)
 // import skipLogicRoutes from './routes/skip-logic.routes';
-// // Site/Location Management
-// import siteRoutes from './routes/site.routes';
-// // Form Layout (column configuration)
-// import formLayoutRoutes from './routes/form-layout.routes';
+// Site/Location Management (sites are child studies in LibreClinica)
+import siteRoutes from './routes/site.routes';
+// Form Layout (column configuration - uses item_form_metadata native table)
+import formLayoutRoutes from './routes/form-layout.routes';
 
 // ============================================================================
 // FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
@@ -293,12 +293,13 @@ app.use('/api/dde', ddeRoutes);
 // CRF/Item Flagging (Part 11 compliant - uses native LibreClinica tables)
 app.use('/api/flagging', flaggingRoutes);
 // Organization management, invite codes, access requests
-// app.use('/api/organizations', organizationRoutes);
-// // Skip Logic, Form Linking, and Branching
+app.use('/api/organizations', organizationRoutes);
+// // Skip Logic, Form Linking, and Branching (evaluated client-side)
 // app.use('/api/skip-logic', skipLogicRoutes);
-// // Site/Location Management
-// app.use('/api/sites', siteRoutes);
-// app.use('/api/form-layout', formLayoutRoutes);
+// Site/Location Management (child studies in LibreClinica)
+app.use('/api/sites', siteRoutes);
+// Form Layout (column configuration from item_form_metadata)
+app.use('/api/form-layout', formLayoutRoutes);
 
 // ============================================================================
 // CONDITIONAL ROUTES - Require custom acc_* tables

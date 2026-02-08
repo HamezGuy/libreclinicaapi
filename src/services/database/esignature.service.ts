@@ -80,7 +80,7 @@ export const verifyPasswordForSignature = async (
   userId: number,
   username: string,
   password: string
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: boolean; data?: { valid: boolean }; message?: string }> => {
   logger.info('Verifying password for e-signature', { userId, username });
 
   try {
@@ -95,7 +95,7 @@ export const verifyPasswordForSignature = async (
 
     if (result.rows.length === 0) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'User not found');
-      return { success: false, message: 'User not found' };
+      return { success: false, data: { valid: false }, message: 'User not found' };
     }
 
     const user = result.rows[0];
@@ -103,7 +103,7 @@ export const verifyPasswordForSignature = async (
     // Check if user account is enabled
     if (!user.enabled) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'Account disabled');
-      return { success: false, message: 'Account is disabled' };
+      return { success: false, data: { valid: false }, message: 'Account is disabled' };
     }
 
     // Hash the provided password using MD5 (LibreClinica compatibility)
@@ -112,17 +112,17 @@ export const verifyPasswordForSignature = async (
     // Compare with stored hash
     if (passwordHash !== user.passwd) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'Invalid password');
-      return { success: false, message: 'Invalid password' };
+      return { success: true, data: { valid: false }, message: 'Invalid password' };
     }
 
     // Log successful verification
     await logSignatureAttempt(userId, username, 'password_verification', 0, true, 'Password verified');
 
-    return { success: true, message: 'Password verified successfully' };
+    return { success: true, data: { valid: true }, message: 'Password verified successfully' };
 
   } catch (error: any) {
     logger.error('Password verification error', { error: error.message, userId });
-    return { success: false, message: 'Verification failed' };
+    return { success: false, data: { valid: false }, message: 'Verification failed' };
   }
 };
 
@@ -146,16 +146,16 @@ export const applyElectronicSignature = async (
   try {
     await client.query('BEGIN');
 
-    // Step 1: Verify password first
+    // Step 1: Verify password first (§11.200 - two distinct identification components)
     const passwordVerification = await verifyPasswordForSignature(
       request.userId,
       request.username,
       request.password
     );
 
-    if (!passwordVerification.success) {
+    if (!passwordVerification.data?.valid) {
       await client.query('ROLLBACK');
-      return { success: false, message: passwordVerification.message };
+      return { success: false, message: passwordVerification.message || 'Password verification failed' };
     }
 
     // Step 2: Update the entity's electronic signature status
@@ -563,11 +563,11 @@ export const certifyUser = async (
   try {
     await client.query('BEGIN');
 
-    // Verify password first
+    // Verify password first (§11.200 - two distinct identification components)
     const passwordVerification = await verifyPasswordForSignature(userId, username, password);
-    if (!passwordVerification.success) {
+    if (!passwordVerification.data?.valid) {
       await client.query('ROLLBACK');
-      return { success: false, message: passwordVerification.message };
+      return { success: false, message: passwordVerification.message || 'Password verification failed' };
     }
 
     // Record certification in audit trail
@@ -726,6 +726,189 @@ const logSignatureAttempt = async (
   }
 };
 
+/**
+ * Invalidate a signature when the signed record is modified
+ * 21 CFR Part 11 §11.70 - Signatures must be linked to records;
+ * modification of a signed record invalidates the signature.
+ */
+export const invalidateSignature = async (
+  entityType: string,
+  entityId: number,
+  reason: string,
+  invalidatedBy?: string
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Invalidating signature', { entityType, entityId, reason });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Update entity signature status if applicable
+    if (entityType === 'event_crf') {
+      await client.query(`
+        UPDATE event_crf 
+        SET electronic_signature_status = false,
+            date_updated = CURRENT_TIMESTAMP
+        WHERE event_crf_id = $1
+      `, [entityId]);
+    }
+
+    // Record invalidation in audit trail
+    const invalidationData = JSON.stringify({
+      type: 'signature_invalidation',
+      version: '1.0',
+      entity_type: entityType,
+      entity_id: entityId,
+      reason: reason,
+      invalidated_by: invalidatedBy || 'system',
+      invalidated_at: new Date().toISOString(),
+      cfr_compliance: {
+        '11.70': 'Signature invalidated due to record modification'
+      }
+    });
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date,
+        audit_table,
+        user_id,
+        entity_id,
+        entity_name,
+        new_value,
+        audit_log_event_type_id,
+        reason_for_change
+      )
+      VALUES (
+        CURRENT_TIMESTAMP,
+        $1,
+        (SELECT user_id FROM user_account WHERE user_name = $4 LIMIT 1),
+        $2,
+        'Electronic Signature Invalidated',
+        $3,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
+        $5
+      )
+    `, [entityType, entityId, invalidationData, invalidatedBy || 'system', reason]);
+
+    await client.query('COMMIT');
+
+    logger.info('Signature invalidated successfully', { entityType, entityId });
+    return { success: true, message: 'Signature invalidated successfully' };
+
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Failed to invalidate signature', { error: error.message });
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Check if a user has certified their electronic signature
+ * 21 CFR Part 11 §11.100(c) - Must be certified before first use
+ */
+export const getCertificationStatus = async (
+  userId: number
+): Promise<{ success: boolean; data?: { isCertified: boolean; certifiedAt?: string }; message?: string }> => {
+  logger.info('Checking certification status', { userId });
+
+  try {
+    const query = `
+      SELECT 
+        ale.audit_date as certified_at,
+        ale.new_value as certification_data
+      FROM audit_log_event ale
+      WHERE ale.audit_table = 'user_account'
+        AND ale.entity_id = $1
+        AND ale.entity_name = 'E-Signature Certification'
+      ORDER BY ale.audit_date DESC
+      LIMIT 1
+    `;
+
+    const result = await pool.query(query, [userId]);
+
+    if (result.rows.length === 0) {
+      return {
+        success: true,
+        data: { isCertified: false }
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        isCertified: true,
+        certifiedAt: result.rows[0].certified_at
+      }
+    };
+
+  } catch (error: any) {
+    logger.error('Get certification status error', { error: error.message });
+    return { success: false, message: error.message };
+  }
+};
+
+/**
+ * Log a failed signature attempt
+ * 21 CFR Part 11 §11.10(e) - All failed signature attempts must be recorded
+ */
+export const logFailedSignatureAttempt = async (
+  entityType: string,
+  entityId: number,
+  username: string,
+  reason: string,
+  userAgent?: string,
+  timestamp?: string
+): Promise<{ success: boolean; message?: string }> => {
+  logger.warn('Logging failed signature attempt', { entityType, entityId, username, reason });
+
+  try {
+    const failureData = JSON.stringify({
+      type: 'failed_signature_attempt',
+      entity_type: entityType,
+      entity_id: entityId,
+      username: username,
+      reason: reason || 'Unknown failure',
+      user_agent: userAgent,
+      timestamp: timestamp || new Date().toISOString(),
+      cfr_compliance: {
+        '11.10(e)': 'Failed signature attempt recorded in audit trail'
+      }
+    });
+
+    await pool.query(`
+      INSERT INTO audit_log_event (
+        audit_date,
+        audit_table,
+        user_id,
+        entity_id,
+        entity_name,
+        new_value,
+        audit_log_event_type_id,
+        reason_for_change
+      )
+      VALUES (
+        CURRENT_TIMESTAMP,
+        $1,
+        (SELECT user_id FROM user_account WHERE user_name = $3 LIMIT 1),
+        $2,
+        'Failed Signature Attempt',
+        $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Failed Login Attempt' LIMIT 1),
+        $5
+      )
+    `, [entityType, entityId, username, failureData, reason]);
+
+    return { success: true, message: 'Failed attempt logged' };
+
+  } catch (error: any) {
+    logger.error('Failed to log signature attempt', { error: error.message });
+    return { success: false, message: error.message };
+  }
+};
+
 export default {
   verifyPasswordForSignature,
   applyElectronicSignature,
@@ -733,6 +916,9 @@ export default {
   getSignatureHistory,
   getPendingSignatures,
   certifyUser,
-  getStudySignatureRequirements
+  getStudySignatureRequirements,
+  invalidateSignature,
+  getCertificationStatus,
+  logFailedSignatureAttempt
 };
 

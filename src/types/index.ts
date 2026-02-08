@@ -400,7 +400,7 @@ export interface QueryResponse {
 export interface QueryListQuery {
   studyId?: number;
   subjectId?: number;
-  status?: 'New' | 'Updated' | 'Resolved' | 'Closed' | 'Not Applicable';
+  status?: 'New' | 'Updated' | 'Resolution Proposed' | 'Closed' | 'Not Applicable';
   page?: number;
   limit?: number;
 }

@@ -637,7 +637,7 @@ export const querySchemas = {
   list: Joi.object({
     studyId: Joi.number().integer().positive().optional(),
     subjectId: Joi.number().integer().positive().optional(),
-    status: Joi.string().valid('New', 'Updated', 'Resolved', 'Closed', 'Not Applicable').optional(),
+    status: Joi.string().valid('New', 'Updated', 'Resolution Proposed', 'Closed', 'Not Applicable').optional(),
     page: Joi.number().integer().min(1).default(1),
     limit: Joi.number().integer().min(1).max(100).default(20)
   })

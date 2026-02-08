@@ -70,5 +70,26 @@ router.post('/certify', controller.certifySignature);
  */
 router.get('/requirements/:studyId', controller.getStudyRequirements);
 
+/**
+ * POST /api/esignature/invalidate
+ * Invalidate a signature when the signed record is modified
+ * 21 CFR Part 11 §11.70 - Signature/record linking
+ */
+router.post('/invalidate', controller.invalidateSignature);
+
+/**
+ * GET /api/esignature/certification-status
+ * Check if current user has certified their e-signature
+ * 21 CFR Part 11 §11.100(c)
+ */
+router.get('/certification-status', controller.getCertificationStatus);
+
+/**
+ * POST /api/esignature/audit/failed-attempt
+ * Log a failed signature attempt from the frontend
+ * 21 CFR Part 11 §11.10(e) - Audit trail
+ */
+router.post('/audit/failed-attempt', controller.logFailedAttempt);
+
 export default router;
 

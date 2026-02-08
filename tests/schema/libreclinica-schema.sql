@@ -50,16 +50,23 @@ CREATE TABLE status (
     description TEXT
 );
 
+-- Status values match LibreClinica Status.java EXACTLY:
+-- INVALID=0, AVAILABLE=1, UNAVAILABLE=2, PRIVATE=3, PENDING=4,
+-- DELETED=5, LOCKED=6, AUTO_DELETED=7, SIGNED=8, FROZEN=9,
+-- SOURCE_DATA_VERIFICATION=10, RESET=11
 INSERT INTO status (status_id, name, description) VALUES
+(0, 'invalid', 'Invalid'),
 (1, 'available', 'Available'),
-(2, 'pending', 'Pending'),
-(3, 'unavailable', 'Unavailable'),
-(4, 'private', 'Private'),
-(5, 'removed', 'Removed'),
+(2, 'unavailable', 'Unavailable'),
+(3, 'private', 'Private'),
+(4, 'pending', 'Pending'),
+(5, 'removed', 'Removed/Deleted'),
 (6, 'locked', 'Locked'),
-(7, 'auto-removed', 'Auto-removed'),
+(7, 'auto-removed', 'Auto-removed/Auto-deleted'),
 (8, 'signed', 'Signed'),
-(9, 'frozen', 'Frozen');
+(9, 'frozen', 'Frozen'),
+(10, 'source_data_verification', 'Source Data Verification'),
+(11, 'reset', 'Reset');
 
 CREATE TABLE study_type (
     study_type_id SERIAL PRIMARY KEY,
@@ -90,11 +97,13 @@ CREATE TABLE discrepancy_note_type (
     description VARCHAR(255)
 );
 
+-- Matches real LibreClinica DiscrepancyNoteType.java:
+-- 1=Failed Validation Check, 2=Annotation, 3=Query, 4=Reason for Change
 INSERT INTO discrepancy_note_type (discrepancy_note_type_id, name, description) VALUES
-(1, 'Failed Validation Check', 'Failed Validation Check'),
-(2, 'Annotation', 'Annotation'),
-(3, 'Query', 'Query'),
-(4, 'Reason for Change', 'Reason for Change');
+(1, 'Failed Validation Check', 'Automatic validation check failure'),
+(2, 'Annotation', 'Manual annotation by user'),
+(3, 'Query', 'Data query raised by reviewer/monitor'),
+(4, 'Reason for Change', 'Reason for data modification');
 
 CREATE TABLE resolution_status (
     resolution_status_id SERIAL PRIMARY KEY,
@@ -102,12 +111,13 @@ CREATE TABLE resolution_status (
     description VARCHAR(255)
 );
 
+-- Matches real LibreClinica resolution status IDs
 INSERT INTO resolution_status (resolution_status_id, name, description) VALUES
-(1, 'New', 'New'),
-(2, 'Updated', 'Updated'),
-(3, 'Resolution Proposed', 'Resolution Proposed'),
-(4, 'Closed', 'Closed'),
-(5, 'Not Applicable', 'Not Applicable');
+(1, 'New', 'New query/note'),
+(2, 'Updated', 'Updated with response'),
+(3, 'Resolution Proposed', 'Resolution has been proposed'),
+(4, 'Closed', 'Closed/resolved'),
+(5, 'Not Applicable', 'Not applicable');
 
 CREATE TABLE audit_log_event_type (
     audit_log_event_type_id SERIAL PRIMARY KEY,
@@ -131,6 +141,9 @@ CREATE TABLE subject_event_status (
     name VARCHAR(50) NOT NULL
 );
 
+-- Matches SubjectEventStatus.java EXACTLY:
+-- 1=scheduled, 2=not_scheduled, 3=data_entry_started, 4=completed,
+-- 5=stopped, 6=skipped, 7=locked, 8=signed
 INSERT INTO subject_event_status (subject_event_status_id, name) VALUES
 (1, 'scheduled'),
 (2, 'not_scheduled'),
@@ -138,8 +151,8 @@ INSERT INTO subject_event_status (subject_event_status_id, name) VALUES
 (4, 'completed'),
 (5, 'stopped'),
 (6, 'skipped'),
-(7, 'signed'),
-(8, 'locked');
+(7, 'locked'),
+(8, 'signed');
 
 CREATE TABLE completion_status (
     completion_status_id SERIAL PRIMARY KEY,
@@ -185,7 +198,10 @@ CREATE TABLE user_account (
     update_id INTEGER DEFAULT 1,
     enable_api_key BOOLEAN DEFAULT false,
     api_key VARCHAR(255),
-    time_zone_id VARCHAR(255)
+    access_code VARCHAR(64),
+    authtype VARCHAR(64) DEFAULT 'STANDARD',
+    authsecret VARCHAR(255),
+    time_zone VARCHAR(255)  -- matches toUserAccount() converter: row.time_zone
 );
 
 -- ============================================================================
@@ -458,6 +474,8 @@ CREATE TABLE event_crf (
     date_validate TIMESTAMP,
     date_validate_completed TIMESTAMP,
     study_subject_id INTEGER REFERENCES study_subject(study_subject_id),
+    date_completed TIMESTAMP,
+    electronic_signature_status BOOLEAN DEFAULT false,
     sdv_status BOOLEAN DEFAULT false,
     sdv_update_id INTEGER,
     old_status_id INTEGER
@@ -543,6 +561,7 @@ CREATE TABLE item_data (
     owner_id INTEGER REFERENCES user_account(user_id),
     update_id INTEGER,
     ordinal INTEGER,
+    deleted BOOLEAN DEFAULT false,
     old_status_id INTEGER
 );
 
@@ -629,9 +648,8 @@ CREATE TABLE audit_user_login (
     id SERIAL PRIMARY KEY,
     user_name VARCHAR(255),
     user_account_id INTEGER,
-    audit_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     login_attempt_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    login_status INTEGER,
+    login_status_code INTEGER,  -- 0=failed, 1=success, 2=logout (matches backend auth.service.ts)
     details VARCHAR(255),
     version INTEGER
 );
