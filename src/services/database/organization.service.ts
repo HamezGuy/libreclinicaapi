@@ -37,6 +37,18 @@ export const registerOrganization = async (
     const passwordHash = crypto.createHash('md5').update(admin.password).digest('hex');
     const username = admin.username || admin.email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
 
+    // Pre-check: LibreClinica's user_account has no unique constraint on user_name or email
+    const existingUser = await client.query(`SELECT user_id FROM user_account WHERE user_name = $1`, [username]);
+    if (existingUser.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Username already exists' };
+    }
+    const existingEmail = await client.query(`SELECT user_id FROM user_account WHERE email = $1`, [admin.email]);
+    if (existingEmail.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Email already exists' };
+    }
+
     const userResult = await client.query(`
       INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, institutional_affiliation, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
       VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1, 1, NOW(), true, true)
@@ -73,7 +85,7 @@ export const registerOrganization = async (
     try {
       const { buildJwtPayload } = await import('./auth.service');
       const { generateTokenPair } = await import('../../utils/jwt.util');
-      const user = { user_id: userId, user_name: username, email: admin.email, first_name: admin.firstName, last_name: admin.lastName, user_type_id: 1 } as any;
+      const user = { user_id: userId, user_name: username, email: admin.email, first_name: admin.firstName, last_name: admin.lastName, user_type_id: 1, user_type: 'admin' } as any;
       const payload = await buildJwtPayload(user);
       const tokens = generateTokenPair(payload);
       accessToken = tokens.accessToken;
@@ -106,19 +118,19 @@ export const registerOrganization = async (
   }
 };
 
-export const getMyOrganizations = async (userId: number): Promise<{ success: boolean; data?: any[] }> => {
+export const getMyOrganizations = async (userId: number): Promise<{ success: boolean; data?: any[]; message?: string }> => {
   try {
     const result = await pool.query(`
-      SELECT o.organization_id, o.name, m.role, m.status
+      SELECT o.organization_id, o.name, o.type, o.status as org_status, m.role, m.status
       FROM acc_organization o
       INNER JOIN acc_organization_member m ON o.organization_id = m.organization_id
       WHERE m.user_id = $1 AND m.status = 'active'
       ORDER BY o.name
     `, [userId]);
-    return { success: true, data: result.rows.map(r => ({ organizationId: r.organization_id, name: r.name, role: r.role, status: r.status })) };
+    return { success: true, data: result.rows.map(r => ({ organizationId: r.organization_id, name: r.name, type: r.type, orgStatus: r.org_status, role: r.role, status: r.status })) };
   } catch (error: any) {
-    logger.error('getMyOrganizations error', { error: error.message });
-    return { success: true, data: [] };
+    logger.error('getMyOrganizations error', { error: error.message, userId });
+    return { success: false, data: [], message: error.message };
   }
 };
 
@@ -144,6 +156,31 @@ export const listOrganizations = async (filters: any): Promise<{ success: boolea
   } catch (error: any) {
     logger.error('listOrganizations error', { error: error.message });
     return { success: true, data: [], pagination: { total: 0, page: 1, limit: 20 } };
+  }
+};
+
+export const listPublicOrganizations = async (): Promise<{ success: boolean; data?: any[] }> => {
+  try {
+    const result = await pool.query(`
+      SELECT organization_id, name, type, city, country
+      FROM acc_organization
+      WHERE status = 'active'
+      ORDER BY name
+      LIMIT 200
+    `);
+    return {
+      success: true,
+      data: result.rows.map(r => ({
+        organizationId: r.organization_id,
+        name: r.name,
+        type: r.type,
+        city: r.city,
+        country: r.country
+      }))
+    };
+  } catch (error: any) {
+    logger.error('listPublicOrganizations error', { error: error.message });
+    return { success: true, data: [] };
   }
 };
 
@@ -174,6 +211,19 @@ export const addMember = async (orgId: number, memberData: any, creatorId: numbe
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Pre-check: LibreClinica's user_account has no unique constraint on user_name or email
+    const existingUser = await client.query(`SELECT user_id FROM user_account WHERE user_name = $1`, [memberData.username]);
+    if (existingUser.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Username already exists' };
+    }
+    const existingEmail = await client.query(`SELECT user_id FROM user_account WHERE email = $1`, [memberData.email]);
+    if (existingEmail.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Email already exists' };
+    }
+
     const passwordHash = crypto.createHash('md5').update(memberData.password).digest('hex');
     const userResult = await client.query(`
       INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, institutional_affiliation, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
@@ -199,17 +249,18 @@ export const addMember = async (orgId: number, memberData: any, creatorId: numbe
   }
 };
 
-export const getMembers = async (orgId: number): Promise<{ success: boolean; data?: any[] }> => {
+export const getMembers = async (orgId: number): Promise<{ success: boolean; data?: any[]; message?: string }> => {
   try {
     const result = await pool.query(`
       SELECT u.user_id, u.user_name as username, u.first_name, u.last_name, u.email, m.role, m.status, m.date_joined
       FROM acc_organization_member m
       INNER JOIN user_account u ON m.user_id = u.user_id
-      WHERE m.organization_id = $1 ORDER BY m.date_joined
+      WHERE m.organization_id = $1 AND m.status = 'active' ORDER BY m.date_joined
     `, [orgId]);
     return { success: true, data: result.rows.map(r => ({ userId: r.user_id, username: r.username, firstName: r.first_name, lastName: r.last_name, email: r.email, role: r.role, status: r.status, dateJoined: r.date_joined })) };
   } catch (error: any) {
-    return { success: true, data: [] };
+    logger.error('getMembers error', { error: error.message, orgId });
+    return { success: false, data: [], message: error.message };
   }
 };
 
@@ -225,9 +276,11 @@ export const updateMemberRole = async (orgId: number, userId: number, role: stri
 export const removeMember = async (orgId: number, userId: number, reason: string): Promise<{ success: boolean; message?: string }> => {
   try {
     await pool.query(`UPDATE acc_organization_member SET status = 'removed', date_updated = NOW() WHERE organization_id = $1 AND user_id = $2`, [orgId, userId]);
-    await pool.query(`UPDATE user_account SET status_id = 5, date_updated = NOW() WHERE user_id = $1`, [userId]);
+    await pool.query(`UPDATE user_account SET status_id = 5, date_updated = CURRENT_DATE WHERE user_id = $1`, [userId]);
+    logger.info('Member removed', { orgId, userId, reason });
     return { success: true, message: 'Member removed' };
   } catch (error: any) {
+    logger.error('removeMember error', { error: error.message, orgId, userId });
     return { success: false, message: error.message };
   }
 };
@@ -263,6 +316,13 @@ export const registerWithCode = async (data: any): Promise<{ success: boolean; d
 
     const passwordHash = crypto.createHash('md5').update(data.password).digest('hex');
     const username = data.email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+
+    // Pre-check for duplicate username/email
+    const existingUser = await client.query(`SELECT user_id FROM user_account WHERE user_name = $1`, [username]);
+    if (existingUser.rows.length > 0) { await client.query('ROLLBACK'); return { success: false, message: 'Username already exists' }; }
+    const existingEmail = await client.query(`SELECT user_id FROM user_account WHERE email = $1`, [data.email]);
+    if (existingEmail.rows.length > 0) { await client.query('ROLLBACK'); return { success: false, message: 'Email already exists' }; }
+
     const userResult = await client.query(`
       INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
       VALUES ($1, $2, $3, $4, $5, $6, 2, 1, 1, NOW(), true, true) RETURNING user_id
@@ -296,12 +356,13 @@ export const generateCode = async (orgId: number, creatorId: number, data: any):
   }
 };
 
-export const listCodes = async (orgId: number): Promise<{ success: boolean; data?: any[] }> => {
+export const listCodes = async (orgId: number): Promise<{ success: boolean; data?: any[]; message?: string }> => {
   try {
     const result = await pool.query(`SELECT * FROM acc_organization_code WHERE organization_id = $1 ORDER BY date_created DESC`, [orgId]);
     return { success: true, data: result.rows };
   } catch (error: any) {
-    return { success: true, data: [] };
+    logger.error('listCodes error', { error: error.message, orgId });
+    return { success: false, data: [], message: error.message };
   }
 };
 
@@ -351,19 +412,33 @@ export const listAccessRequests = async (filters: any): Promise<{ success: boole
   }
 };
 
-export const reviewAccessRequest = async (requestId: number, decision: string, reviewerId: number, notes?: string): Promise<{ success: boolean; data?: any; message?: string }> => {
+export const reviewAccessRequest = async (requestId: number, decision: string, reviewerId: number, notes?: string, password?: string): Promise<{ success: boolean; data?: any; message?: string }> => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query(`UPDATE acc_access_request SET status = $1, reviewed_by = $2, reviewed_at = NOW(), review_notes = $3 WHERE request_id = $4`, [decision, reviewerId, notes, requestId]);
 
     let userId;
+    let tempPassword: string | undefined;
     if (decision === 'approved') {
       const req = await client.query(`SELECT * FROM acc_access_request WHERE request_id = $1`, [requestId]);
       if (req.rows.length > 0) {
         const r = req.rows[0];
-        const passwordHash = crypto.createHash('md5').update(crypto.randomBytes(16).toString('hex')).digest('hex');
+        // Use admin-provided password, or generate a temporary one and return it
+        if (password) {
+          tempPassword = password;
+        } else {
+          tempPassword = crypto.randomBytes(8).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) + 'A1!';
+        }
+        const passwordHash = crypto.createHash('md5').update(tempPassword).digest('hex');
         const username = r.email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+
+        // Pre-check for duplicate username/email
+        const existingUser = await client.query(`SELECT user_id FROM user_account WHERE user_name = $1`, [username]);
+        if (existingUser.rows.length > 0) { await client.query('ROLLBACK'); return { success: false, message: 'Username already exists for this email prefix' }; }
+        const existingEmail = await client.query(`SELECT user_id FROM user_account WHERE email = $1`, [r.email]);
+        if (existingEmail.rows.length > 0) { await client.query('ROLLBACK'); return { success: false, message: 'Email already exists' }; }
+
         const userResult = await client.query(`
           INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
           VALUES ($1, $2, $3, $4, $5, $6, 2, 1, $7, NOW(), true, true) RETURNING user_id
@@ -377,7 +452,7 @@ export const reviewAccessRequest = async (requestId: number, decision: string, r
       }
     }
     await client.query('COMMIT');
-    return { success: true, data: { userId }, message: `Request ${decision}` };
+    return { success: true, data: { userId, username: userId ? (await pool.query(`SELECT user_name FROM user_account WHERE user_id = $1`, [userId])).rows[0]?.user_name : undefined, tempPassword }, message: `Request ${decision}` };
   } catch (error: any) {
     await client.query('ROLLBACK');
     return { success: false, message: error.message };
@@ -398,7 +473,7 @@ export const createInvitation = async (data: any, invitedById: number): Promise<
       INSERT INTO acc_user_invitation (email, token, organization_id, study_id, role, expires_at, invited_by, message, date_created)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING invitation_id
     `, [data.email, token, data.organizationId, data.studyId, data.role || 'data_entry', expiresAt, invitedById, data.message]);
-    const invitationLink = `${process.env.FRONTEND_URL || 'http://localhost:4200'}/accept-invitation?token=${token}`;
+    const invitationLink = `${process.env.FRONTEND_URL || 'http://localhost:4200'}/register/invitation/${token}`;
     return { success: true, data: { token, invitationId: result.rows[0].invitation_id, invitationLink } };
   } catch (error: any) {
     return { success: false, message: error.message };
@@ -436,6 +511,13 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
 
     const passwordHash = crypto.createHash('md5').update(data.password).digest('hex');
     const username = invitation.email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+
+    // Pre-check for duplicate username/email
+    const existingUser = await client.query(`SELECT user_id FROM user_account WHERE user_name = $1`, [username]);
+    if (existingUser.rows.length > 0) { await client.query('ROLLBACK'); return { success: false, message: 'Username already exists' }; }
+    const existingEmail = await client.query(`SELECT user_id FROM user_account WHERE email = $1`, [invitation.email]);
+    if (existingEmail.rows.length > 0) { await client.query('ROLLBACK'); return { success: false, message: 'Email already exists' }; }
+
     const userResult = await client.query(`
       INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
       VALUES ($1, $2, $3, $4, $5, $6, 2, 1, 1, NOW(), true, true) RETURNING user_id
@@ -462,7 +544,7 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
 // Role Permissions
 // ============================================================================
 
-export const getRolePermissions = async (orgId: number): Promise<{ success: boolean; data?: any[] }> => {
+export const getRolePermissions = async (orgId: number): Promise<{ success: boolean; data?: any[]; message?: string }> => {
   try {
     const result = await pool.query(`SELECT role_name, permission_key, allowed FROM acc_role_permission WHERE organization_id = $1 ORDER BY role_name`, [orgId]);
     // Group by role
@@ -473,7 +555,8 @@ export const getRolePermissions = async (orgId: number): Promise<{ success: bool
     }
     return { success: true, data: Object.values(grouped) };
   } catch (error: any) {
-    return { success: true, data: [] };
+    logger.error('getRolePermissions error', { error: error.message, orgId });
+    return { success: false, data: [], message: error.message };
   }
 };
 
@@ -501,7 +584,7 @@ export const updateRolePermissions = async (orgId: number, rolePermissions: any[
 };
 
 export default {
-  registerOrganization, getMyOrganizations, listOrganizations, getOrganization, updateOrganizationStatus,
+  registerOrganization, getMyOrganizations, listOrganizations, listPublicOrganizations, getOrganization, updateOrganizationStatus,
   addMember, getMembers, updateMemberRole, removeMember,
   validateCode, registerWithCode, generateCode, listCodes, deactivateCode,
   createAccessRequest, listAccessRequests, reviewAccessRequest,

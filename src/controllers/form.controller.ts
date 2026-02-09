@@ -456,6 +456,17 @@ export const validateField = asyncHandler(async (req: Request, res: Response) =>
   res.json(result);
 });
 
+// Reference data endpoints
+export const getNullValueTypes = asyncHandler(async (req: Request, res: Response) => {
+  const data = await formService.getNullValueTypes();
+  res.json({ success: true, data });
+});
+
+export const getMeasurementUnits = asyncHandler(async (req: Request, res: Response) => {
+  const data = await formService.getMeasurementUnits();
+  res.json({ success: true, data });
+});
+
 export default { 
   saveData, getData, getMetadata, getStatus, 
   list, get, getByStudy, 
@@ -465,6 +476,8 @@ export default {
   // Forking/Versioning
   getVersions, createVersion, fork,
   // Field-level operations with validation
-  updateField, validateField
+  updateField, validateField,
+  // Reference data
+  getNullValueTypes, getMeasurementUnits
 };
 

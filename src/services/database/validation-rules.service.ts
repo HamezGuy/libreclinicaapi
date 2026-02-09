@@ -1627,6 +1627,89 @@ export const validateEventCrf = async (
   }
 };
 
+/**
+ * Get rule execution history from rule_action_run table
+ * Returns history of when validation rules were executed and what actions were taken
+ */
+export const getRuleExecutionHistory = async (
+  studyId: number,
+  options?: { limit?: number; offset?: number; ruleId?: number }
+): Promise<{ success: boolean; data: any[]; total: number }> => {
+  try {
+    const limit = options?.limit || 50;
+    const offset = options?.offset || 0;
+
+    // Check if rule_action_run table exists (it's a LibreClinica Core table)
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'rule_action_run'
+      ) as exists
+    `);
+
+    if (!tableCheck.rows[0].exists) {
+      return { success: true, data: [], total: 0 };
+    }
+
+    let whereClause = 'WHERE rs.study_id = $1';
+    const params: any[] = [studyId];
+    let paramIdx = 2;
+
+    if (options?.ruleId) {
+      whereClause += ` AND r.rule_id = $${paramIdx++}`;
+      params.push(options.ruleId);
+    }
+
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM rule_action_run rar
+      INNER JOIN rule_action ra ON rar.rule_action_id = ra.rule_action_id
+      INNER JOIN rule_set_rule rsr ON ra.rule_set_rule_id = rsr.rule_set_rule_id
+      INNER JOIN rule_set rs ON rsr.rule_set_id = rs.rule_set_id
+      INNER JOIN rule r ON rsr.rule_id = r.rule_id
+      ${whereClause}
+    `, params);
+
+    params.push(limit, offset);
+    const result = await pool.query(`
+      SELECT 
+        rar.id as run_id,
+        rar.token,
+        rar.run_time,
+        rar.status as run_status,
+        ra.action_type,
+        ra.message,
+        r.name as rule_name,
+        r.description as rule_description,
+        re.value as rule_expression,
+        rsr.rule_set_rule_id,
+        rs.study_id,
+        rs.study_event_definition_id,
+        rs.crf_id,
+        rs.crf_version_id,
+        rs.item_id
+      FROM rule_action_run rar
+      INNER JOIN rule_action ra ON rar.rule_action_id = ra.rule_action_id
+      INNER JOIN rule_set_rule rsr ON ra.rule_set_rule_id = rsr.rule_set_rule_id
+      INNER JOIN rule_set rs ON rsr.rule_set_id = rs.rule_set_id
+      INNER JOIN rule r ON rsr.rule_id = r.rule_id
+      LEFT JOIN rule_expression re ON r.rule_expression_id = re.rule_expression_id
+      ${whereClause}
+      ORDER BY rar.run_time DESC
+      LIMIT $${paramIdx++} OFFSET $${paramIdx}
+    `, params);
+
+    return {
+      success: true,
+      data: result.rows,
+      total: parseInt(countResult.rows[0].total)
+    };
+  } catch (error: any) {
+    logger.warn('getRuleExecutionHistory error', { error: error.message });
+    return { success: true, data: [], total: 0 };
+  }
+};
+
 export default {
   initializeValidationRulesTable,
   getRulesForCrf,
@@ -1639,6 +1722,7 @@ export default {
   deleteRule,
   validateFormData,
   validateFieldChange,
-  validateEventCrf
+  validateEventCrf,
+  getRuleExecutionHistory
 };
 

@@ -597,6 +597,47 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       scdByItemId.set(scd.target_item_id, conditions);
     }
 
+    // Get allowed null value types for this CRF version
+    // LibreClinica stores allowed null values in event_definition_crf.null_values as comma-separated codes
+    let allowedNullValues: any[] = [];
+    try {
+      const nullValueQuery = `
+        SELECT DISTINCT edc.null_values
+        FROM event_definition_crf edc
+        WHERE edc.crf_id = $1 AND edc.null_values IS NOT NULL AND edc.null_values != ''
+        LIMIT 1
+      `;
+      const nullValueResult = await pool.query(nullValueQuery, [crfId]);
+      if (nullValueResult.rows.length > 0 && nullValueResult.rows[0].null_values) {
+        // Get the full null_value_type definitions for the allowed codes
+        const codes = nullValueResult.rows[0].null_values.split(',').map((c: string) => c.trim());
+        const nvtQuery = `SELECT null_value_type_id, code, name, definition FROM null_value_type WHERE code = ANY($1) ORDER BY null_value_type_id`;
+        const nvtResult = await pool.query(nvtQuery, [codes]);
+        allowedNullValues = nvtResult.rows.map((nv: any) => ({
+          id: nv.null_value_type_id,
+          code: nv.code,
+          name: nv.name,
+          definition: nv.definition
+        }));
+      }
+    } catch (nvError: any) {
+      logger.warn('Could not load null value types', { error: nvError.message });
+    }
+
+    // Also load the full null_value_type reference data for UI dropdowns
+    let nullValueTypes: any[] = [];
+    try {
+      const allNvtResult = await pool.query(`SELECT null_value_type_id, code, name, definition FROM null_value_type ORDER BY null_value_type_id`);
+      nullValueTypes = allNvtResult.rows.map((nv: any) => ({
+        id: nv.null_value_type_id,
+        code: nv.code,
+        name: nv.name,
+        definition: nv.definition
+      }));
+    } catch (e: any) {
+      // Not critical
+    }
+
     // Parse items with all properties including extended props
     const items = itemsResult.rows.map(item => {
       // Parse options
@@ -869,11 +910,50 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       itemGroups: itemGroupsResult.rows,
       items,
       // LibreClinica decision conditions for forking/branching
-      decisionConditions
+      decisionConditions,
+      // Null value types - allowed missing data reasons (21 CFR Part 11 compliant)
+      // allowedNullValues: codes configured for this specific CRF
+      // nullValueTypes: full reference table for UI display
+      allowedNullValues,
+      nullValueTypes
     };
   } catch (error: any) {
     logger.error('Get form metadata error', { error: error.message });
     throw error;
+  }
+};
+
+/**
+ * Get null value types (missing data reasons)
+ * Returns the LibreClinica null_value_type reference table
+ * Used for Part 11 compliant missing data documentation
+ */
+export const getNullValueTypes = async (): Promise<any[]> => {
+  try {
+    const result = await pool.query(`SELECT null_value_type_id, code, name, definition FROM null_value_type ORDER BY null_value_type_id`);
+    return result.rows.map((nv: any) => ({
+      id: nv.null_value_type_id,
+      code: nv.code,
+      name: nv.name,
+      definition: nv.definition || nv.name
+    }));
+  } catch (error: any) {
+    logger.warn('Could not load null value types', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Get measurement units reference data
+ * Returns the LibreClinica measurement_unit table
+ */
+export const getMeasurementUnits = async (): Promise<any[]> => {
+  try {
+    const result = await pool.query(`SELECT id, oc_oid, name, description FROM measurement_unit ORDER BY name`);
+    return result.rows;
+  } catch (error: any) {
+    logger.warn('Could not load measurement units', { error: error.message });
+    return [];
   }
 };
 
@@ -3363,6 +3443,9 @@ export default {
   createFormVersion,
   forkForm,
   // Field-level operations
-  updateFieldData
+  updateFieldData,
+  // Reference data
+  getNullValueTypes,
+  getMeasurementUnits
 };
 

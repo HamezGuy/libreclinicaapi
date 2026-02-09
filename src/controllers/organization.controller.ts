@@ -32,6 +32,11 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
   res.json(result);
 });
 
+export const listPublic = asyncHandler(async (req: Request, res: Response) => {
+  const result = await orgService.listPublicOrganizations();
+  res.json(result);
+});
+
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const result = await orgService.getOrganization(parseInt(req.params.id));
   res.status(result.success ? 200 : 404).json(result);
@@ -119,7 +124,7 @@ export const listAccessRequests = asyncHandler(async (req: Request, res: Respons
 export const reviewAccessRequest = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { decision, notes, password } = req.body;
-  const result = await orgService.reviewAccessRequest(parseInt(req.params.requestId), decision, user.userId, notes);
+  const result = await orgService.reviewAccessRequest(parseInt(req.params.requestId), decision, user.userId, notes, password);
   res.json(result);
 });
 
@@ -159,7 +164,7 @@ export const updateRolePermissions = asyncHandler(async (req: Request, res: Resp
 });
 
 export default {
-  register, getMyOrganizations, list, get, updateStatus,
+  register, getMyOrganizations, list, listPublic, get, updateStatus,
   addMember, getMembers, updateMemberRole, removeMember,
   validateCode, registerWithCode, generateCode, listCodes, deactivateCode,
   createAccessRequest, listAccessRequests, reviewAccessRequest,

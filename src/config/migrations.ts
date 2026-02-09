@@ -506,18 +506,48 @@ async function createOrganizationTables(pool: any): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS acc_access_request (
       request_id SERIAL PRIMARY KEY,
-      organization_id INTEGER NOT NULL,
-      user_id INTEGER NOT NULL,
-      requested_role VARCHAR(50) DEFAULT 'member',
-      message TEXT,
-      status VARCHAR(30) DEFAULT 'pending',
+      email VARCHAR(255) NOT NULL,
+      first_name VARCHAR(50) NOT NULL,
+      last_name VARCHAR(50) NOT NULL,
+      phone VARCHAR(64),
+      organization_name VARCHAR(255),
+      professional_title VARCHAR(100),
+      credentials VARCHAR(255),
+      reason TEXT,
+      organization_id INTEGER,
+      requested_role VARCHAR(50) DEFAULT 'data_entry',
+      status VARCHAR(30) NOT NULL DEFAULT 'pending',
       reviewed_by INTEGER,
       reviewed_at TIMESTAMP,
-      reviewer_notes TEXT,
-      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      review_notes TEXT,
+      user_id INTEGER,
+      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Upgrade existing tables that were created with the old minimal schema
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS first_name VARCHAR(50)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS last_name VARCHAR(50)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS phone VARCHAR(64)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS organization_name VARCHAR(255)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS professional_title VARCHAR(100)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS credentials VARCHAR(255)`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS reason TEXT`);
+  await pool.query(`ALTER TABLE acc_access_request ADD COLUMN IF NOT EXISTS review_notes TEXT`);
+  await pool.query(`ALTER TABLE acc_access_request ALTER COLUMN organization_id DROP NOT NULL`);
+  await pool.query(`ALTER TABLE acc_access_request ALTER COLUMN user_id DROP NOT NULL`);
+
+  // Rename reviewer_notes → review_notes if old column exists
+  try {
+    const colCheck = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='acc_access_request' AND column_name='reviewer_notes'`);
+    if (colCheck.rows.length > 0) {
+      await pool.query(`ALTER TABLE acc_access_request RENAME COLUMN reviewer_notes TO review_notes`);
+    }
+  } catch (e: any) { /* column may not exist or already renamed */ }
+
+  // Ensure user_account has a unique index on user_name to prevent duplicate users
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_account_user_name_unique ON user_account(user_name)`);
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_org_member_org ON acc_organization_member(organization_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_org_member_user ON acc_organization_member(user_id)`);

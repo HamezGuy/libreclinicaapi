@@ -31,6 +31,10 @@ router.get('/archived',
   controller.getArchivedForms
 );
 
+// Reference data endpoints (MUST be before /:id to avoid parameter matching)
+router.get('/null-value-types', controller.getNullValueTypes);
+router.get('/measurement-units', controller.getMeasurementUnits);
+
 // Form templates (CRFs) - read operations (no signature required)
 router.get('/', controller.list);
 router.get('/by-study', controller.getByStudy);

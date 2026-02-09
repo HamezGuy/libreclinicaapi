@@ -28,6 +28,9 @@ router.post('/codes/register', controller.registerWithCode);
 // Access requests (public submission)
 router.post('/access-requests', controller.createAccessRequest);
 
+// Public organization directory (for access request form - returns only name/type of active orgs)
+router.get('/public', controller.listPublic);
+
 // Invitation validation and acceptance (public)
 router.get('/invitations/:token/validate', controller.validateInvitation);
 router.post('/invitations/:token/accept', controller.acceptInvitation);
