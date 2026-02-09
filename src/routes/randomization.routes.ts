@@ -12,13 +12,14 @@
  * 
  * Endpoints:
  *   Configuration:
- *     GET    /api/randomization/config/:studyId       - Get config for study
- *     POST   /api/randomization/config                - Create config
- *     PUT    /api/randomization/config/:configId       - Update config (if not locked)
- *     POST   /api/randomization/config/:configId/generate  - Generate sealed list
- *     POST   /api/randomization/config/:configId/activate  - Activate scheme
- *     POST   /api/randomization/config/:configId/test      - Test/preview scheme
- *     GET    /api/randomization/config/:configId/stats     - List usage stats
+ *     GET    /api/randomization/config/:studyId            - Get config for study
+ *     POST   /api/randomization/config                     - Create config
+ *     PUT    /api/randomization/config/:configId            - Update config (if not locked)
+ *     DELETE /api/randomization/config/:configId            - Delete draft config (admin only)
+ *     POST   /api/randomization/config/:configId/generate   - Generate sealed list
+ *     POST   /api/randomization/config/:configId/activate   - Activate scheme
+ *     POST   /api/randomization/config/:configId/test       - Test/preview scheme
+ *     GET    /api/randomization/config/:configId/stats      - List usage stats
  * 
  *   Randomization Actions:
  *     POST   /api/randomization/randomize             - Randomize a subject (server-assigned)
@@ -63,6 +64,12 @@ router.post('/config',
 router.put('/config/:configId',
   requireRole('investigator', 'admin'),
   randomizationController.updateConfig
+);
+
+// Delete a draft config (only if not locked/active)
+router.delete('/config/:configId',
+  requireRole('admin'),
+  randomizationController.deleteConfig
 );
 
 // Generate the sealed randomization list

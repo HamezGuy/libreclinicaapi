@@ -566,6 +566,12 @@ export const generateList = async (configId: number, userId: number): Promise<{ 
       }
     }
 
+    // Lock the config now that the list is generated (but don't activate yet)
+    await client.query(
+      'UPDATE acc_randomization_config SET is_locked = true, date_updated = CURRENT_TIMESTAMP WHERE config_id = $1',
+      [configId]
+    );
+
     // Audit log — use type 28 (Subject Group Assignment)
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
@@ -574,7 +580,7 @@ export const generateList = async (configId: number, userId: number): Promise<{ 
 
     await client.query('COMMIT');
 
-    logger.info('Randomization list generated', { configId, totalEntries, strata: stratumKeys.length });
+    logger.info('Randomization list generated and config locked', { configId, totalEntries, strata: stratumKeys.length });
 
     return { success: true, totalEntries };
   } catch (error: any) {
@@ -903,6 +909,70 @@ export const getListStats = async (configId: number): Promise<{
   } catch (error: any) {
     logger.error('Failed to get list stats', { configId, error: error.message });
     return { total: 0, used: 0, available: 0, byStratum: [], byGroup: [] };
+  }
+};
+
+/**
+ * Delete a draft randomization config and its associated list entries
+ * Only works if config is not active or locked
+ */
+export const deleteConfig = async (configId: number, userId: number): Promise<{ success: boolean; message?: string }> => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Verify the config exists and is deletable
+    const configResult = await client.query(
+      'SELECT config_id, is_active, is_locked, study_id, name FROM acc_randomization_config WHERE config_id = $1',
+      [configId]
+    );
+
+    if (configResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Config not found' };
+    }
+
+    const config = configResult.rows[0];
+
+    if (config.is_active || config.is_locked) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Cannot delete an active or locked configuration' };
+    }
+
+    // Check if any list entries have been used
+    const usedCheck = await client.query(
+      'SELECT COUNT(*) as used_count FROM acc_randomization_list WHERE config_id = $1 AND is_used = true',
+      [configId]
+    );
+
+    if (parseInt(usedCheck.rows[0].used_count) > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Cannot delete configuration with used randomization slots' };
+    }
+
+    // Delete list entries first
+    await client.query('DELETE FROM acc_randomization_list WHERE config_id = $1', [configId]);
+
+    // Delete the config
+    await client.query('DELETE FROM acc_randomization_config WHERE config_id = $1', [configId]);
+
+    // Audit log
+    await client.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
+      VALUES (CURRENT_TIMESTAMP, 'acc_randomization_config', $1, $2, $3, 'Existed', 'Deleted', 30)
+    `, [userId, configId, `Randomization config deleted: ${config.name}`]);
+
+    await client.query('COMMIT');
+
+    logger.info('Randomization config deleted', { configId, userId, studyId: config.study_id });
+    return { success: true, message: 'Configuration deleted successfully' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Failed to delete config', { configId, error: error.message });
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
   }
 };
 

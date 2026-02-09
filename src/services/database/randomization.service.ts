@@ -284,13 +284,14 @@ export const removeRandomization = async (subjectId: number, userId: number) => 
 };
 
 /**
- * Get unblinded subjects (for unblinding functionality)
+ * Get unblinding events (for unblinding functionality)
  */
 export const getUnblindingEvents = async (studyId: number) => {
   logger.info('Getting unblinding events', { studyId });
 
   try {
-    // Get audit events related to unblinding
+    // Get audit events related to unblinding, filtered by study
+    // entity_id in the audit log references subject_group_map_id
     const query = `
       SELECT 
         ale.audit_id,
@@ -299,20 +300,27 @@ export const getUnblindingEvents = async (studyId: number) => {
         ale.old_value,
         ale.new_value,
         u.user_name,
-        u.first_name || ' ' || u.last_name as user_full_name
+        u.first_name || ' ' || u.last_name as user_full_name,
+        ss.label as subject_label,
+        sg.name as group_name
       FROM audit_log_event ale
       LEFT JOIN user_account u ON ale.user_id = u.user_id
+      LEFT JOIN subject_group_map sgm ON ale.entity_id = sgm.subject_group_map_id
+      LEFT JOIN study_subject ss ON sgm.study_subject_id = ss.study_subject_id
+      LEFT JOIN study_group sg ON sgm.study_group_id = sg.study_group_id
+      LEFT JOIN study_group_class sgc ON sg.study_group_class_id = sgc.study_group_class_id
       WHERE ale.audit_table = 'subject_group_map'
         AND ale.entity_name LIKE '%Unblind%'
+        AND sgc.study_id = $1
       ORDER BY ale.audit_date DESC
       LIMIT 100
     `;
 
-    const result = await pool.query(query);
+    const result = await pool.query(query, [studyId]);
 
     return { success: true, data: result.rows };
   } catch (error: any) {
-    logger.error('Get unblinding events error', { error: error.message });
+    logger.error('Get unblinding events error', { studyId, error: error.message });
     return { success: true, data: [] };
   }
 };

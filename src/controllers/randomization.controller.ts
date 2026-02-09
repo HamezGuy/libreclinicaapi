@@ -27,9 +27,9 @@ export const getConfig = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  // If active, also get list stats
+  // Get list stats for any config with a generated list (locked or active)
   let listStats = null;
-  if (config.configId && config.isActive) {
+  if (config.configId && (config.isActive || config.isLocked)) {
     listStats = await engine.getListStats(config.configId);
   }
 
@@ -112,9 +112,9 @@ export const generateList = asyncHandler(async (req: Request, res: Response) => 
   const result = await engine.generateList(parseInt(configId), user.userId);
 
   if (result.success) {
-    res.json(result);
+    res.json({ success: true, data: { totalEntries: result.totalEntries } });
   } else {
-    res.status(400).json(result);
+    res.status(400).json({ success: false, message: result.message });
   }
 });
 
@@ -186,7 +186,9 @@ export const randomize = asyncHandler(async (req: Request, res: Response) => {
   );
 
   if (result.success) {
-    res.status(201).json({ success: true, data: result });
+    // Extract fields for clean response — don't double-wrap success
+    const { success: _, ...data } = result;
+    res.status(201).json({ success: true, data });
   } else {
     res.status(400).json({ success: false, message: result.message });
   }
@@ -305,8 +307,36 @@ export const unblind = asyncHandler(async (req: Request, res: Response) => {
   res.json(result);
 });
 
+/**
+ * Delete a draft randomization config (only if not locked/active)
+ */
+export const deleteConfig = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { configId } = req.params;
+
+  const config = await engine.getConfigById(parseInt(configId));
+
+  if (!config) {
+    res.status(404).json({ success: false, message: 'Config not found' });
+    return;
+  }
+
+  if (config.isActive || config.isLocked) {
+    res.status(400).json({ success: false, message: 'Cannot delete an active or locked configuration' });
+    return;
+  }
+
+  const result = await engine.deleteConfig(parseInt(configId), user.userId);
+
+  if (result.success) {
+    res.json(result);
+  } else {
+    res.status(400).json(result);
+  }
+});
+
 export default {
-  getConfig, createConfig, updateConfig, generateList, activateConfig, testConfig, getListStats,
+  getConfig, createConfig, updateConfig, deleteConfig, generateList, activateConfig, testConfig, getListStats,
   randomize,
   list, create, getGroups, getStats, canRandomize, getSubjectRandomization,
   remove, getUnblindingEvents, unblind
