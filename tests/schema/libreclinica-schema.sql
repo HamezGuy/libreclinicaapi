@@ -855,6 +855,57 @@ INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, user_name
 VALUES ('admin', 1, 1, 1, 'root', NOW());
 
 -- ============================================================================
+-- RANDOMIZATION ENGINE (acc_randomization_*)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS acc_randomization_config (
+    config_id SERIAL PRIMARY KEY,
+    study_id INTEGER NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    randomization_type VARCHAR(50) NOT NULL DEFAULT 'block',
+    blinding_level VARCHAR(50) NOT NULL DEFAULT 'double_blind',
+    block_size INTEGER DEFAULT 4,
+    block_size_varied BOOLEAN DEFAULT false,
+    block_sizes_list TEXT,
+    allocation_ratios JSONB NOT NULL DEFAULT '{}',
+    stratification_factors JSONB,
+    study_group_class_id INTEGER,
+    seed VARCHAR(128),
+    total_slots INTEGER DEFAULT 100,
+    is_active BOOLEAN DEFAULT false,
+    is_locked BOOLEAN DEFAULT false,
+    drug_kit_management BOOLEAN DEFAULT false,
+    drug_kit_prefix VARCHAR(50),
+    site_specific BOOLEAN DEFAULT false,
+    created_by INTEGER,
+    date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS acc_randomization_list (
+    list_entry_id SERIAL PRIMARY KEY,
+    config_id INTEGER NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    study_group_id INTEGER NOT NULL,
+    stratum_key VARCHAR(255) DEFAULT 'default',
+    site_id INTEGER,
+    block_number INTEGER DEFAULT 0,
+    is_used BOOLEAN DEFAULT false,
+    used_by_subject_id INTEGER,
+    used_at TIMESTAMP,
+    used_by_user_id INTEGER,
+    randomization_number VARCHAR(50),
+    date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rand_config_study ON acc_randomization_config(study_id);
+CREATE INDEX IF NOT EXISTS idx_rand_config_active ON acc_randomization_config(study_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_rand_list_config ON acc_randomization_list(config_id);
+CREATE INDEX IF NOT EXISTS idx_rand_list_available ON acc_randomization_list(config_id, stratum_key, is_used, sequence_number);
+CREATE INDEX IF NOT EXISTS idx_rand_list_subject ON acc_randomization_list(used_by_subject_id);
+
+-- ============================================================================
 -- END OF SCHEMA
 -- ============================================================================
 

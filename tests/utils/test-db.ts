@@ -86,6 +86,9 @@ class TestDatabase {
   public async cleanDatabase(): Promise<void> {
     // Order matters due to foreign key constraints
     const tables = [
+      // Randomization engine tables
+      'acc_randomization_list',
+      'acc_randomization_config',
       // Child tables first
       'dn_item_data_map',
       'dn_event_crf_map',
@@ -136,7 +139,13 @@ class TestDatabase {
       'study_event_definition_study_event_definition_id_seq',
       'study_event_study_event_id_seq',
       'event_crf_event_crf_id_seq',
-      'item_data_item_data_id_seq'
+      'item_data_item_data_id_seq',
+      'acc_randomization_config_config_id_seq',
+      'acc_randomization_list_list_entry_id_seq',
+      'subject_subject_id_seq',
+      'study_group_class_study_group_class_id_seq',
+      'study_group_study_group_id_seq',
+      'subject_group_map_subject_group_map_id_seq'
     ];
 
     for (const seq of sequences) {

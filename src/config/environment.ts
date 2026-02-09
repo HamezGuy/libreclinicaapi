@@ -53,12 +53,13 @@ export const config = {
     // Database Configuration - connects to LibreClinica's PostgreSQL database
     database: {
       host: process.env.LIBRECLINICA_DB_HOST || 'localhost',
-      // Port 5434 = LibreClinica's production database (libreclinica-postgres container)
+      // Port 5432 = unified docker-compose (edc-postgres container)
+      // Port 5434 = standalone API docker-compose (libreclinica-postgres container)
       // Port 5433 = Test database for unit tests only (api-test-db container) - DO NOT USE IN PROD
-      port: parseInt(process.env.LIBRECLINICA_DB_PORT || '5434'),
+      port: parseInt(process.env.LIBRECLINICA_DB_PORT || '5432'),
       database: process.env.LIBRECLINICA_DB_NAME || 'libreclinica',
-      user: process.env.LIBRECLINICA_DB_USER || 'libreclinica',
-      password: process.env.LIBRECLINICA_DB_PASSWORD || 'libreclinica',
+      user: process.env.LIBRECLINICA_DB_USER || 'postgres',
+      password: process.env.LIBRECLINICA_DB_PASSWORD || 'password',
       max: parseInt(process.env.LIBRECLINICA_DB_MAX_CONNECTIONS || '20'),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: parseInt(process.env.LIBRECLINICA_DB_CONNECTION_TIMEOUT || '10000'),

@@ -1,17 +1,18 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# LibreClinica Docker Compose
+# LibreClinica Docker Compose (Standalone API Development)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # ARCHITECTURE:
 # ─────────────────────────────────────────────────────────────────────────────
-# This file sets up the complete LibreClinica stack:
+# This file sets up the LibreClinica stack for standalone API development:
 #
-# 1. libreclinica-postgres (Port 5434) - PRODUCTION DATABASE
-#    └── The ONLY database used by both LibreClinica and our API
-#    └── Schema created automatically by LibreClinica Tomcat app
+# 1. libreclinica-postgres (Port 5434) - DATABASE
+#    └── The database used by both LibreClinica and the API
+#    └── Schema created automatically by LibreClinica Tomcat on first boot
 #    └── All SOAP/API operations use this database
 #
 # 2. libreclinica-test-app (Port 8090) - LibreClinica Web UI + SOAP Services
+#    └── Built from ../libreclinica-core source (includes SOAP WS fix)
 #    └── http://localhost:8090/libreclinica/ - Web UI
 #    └── http://localhost:8090/libreclinica-ws/ws/{service}/v1 - SOAP
 #
@@ -19,9 +20,6 @@
 #    └── Separate database for unit tests that need to reset data
 #    └── Uses our schema files, NOT the production schema
 #    └── NEVER used in production or integration tests
-#
-# IMPORTANT: The default jaspersnel/libreclinica image has BROKEN SOAP!
-# We mount a patched WAR file that includes Spring Web Services dependencies.
 #
 # 21 CFR Part 11 Compliant Features:
 # - PostgreSQL database with audit logging
@@ -43,19 +41,18 @@ services:
     container_name: libreclinica-postgres
     environment:
       POSTGRES_DB: libreclinica
-      POSTGRES_USER: libreclinica
-      POSTGRES_PASSWORD: libreclinica
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
       # Enable WAL archiving for point-in-time recovery (Part 11 compliance)
       POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
       - libreclinica-db-data:/var/lib/postgresql/data
-      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
       # Backup volume for database dumps
       - libreclinica-backups:/backups
     ports:
       - "5434:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U libreclinica -d libreclinica"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d libreclinica"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -64,22 +61,22 @@ services:
 
   # ==========================================================================
   # LibreClinica Application Server (Tomcat)
-  # 
-  # IMPORTANT: The default jaspersnel/libreclinica image has BROKEN SOAP!
-  # It's missing Spring Web Services dependencies.
-  # 
-  # We mount the patched WAR file that includes all dependencies.
+  # Built from ../libreclinica-core source with SOAP WS fix already applied
+  # in ws/src/main/webapp/WEB-INF/ws-servlet-config.xml
   # ==========================================================================
   libreclinica:
-    image: jaspersnel/libreclinica:latest
+    build:
+      context: ../libreclinica-core
+      dockerfile: Dockerfile
+    image: libreclinica-core:1.4.0
     container_name: libreclinica-test-app
     environment:
       dbType: postgres
       dbHost: postgres
       dbPort: 5432
       dbName: libreclinica
-      dbUser: libreclinica
-      dbPass: libreclinica
+      dbUser: postgres
+      dbPass: password
       sysURL: http://localhost:8090/libreclinica
       supportURL: http://localhost:8090
       filePath: /usr/local/tomcat/libreclinica.data/
@@ -100,8 +97,6 @@ services:
       - libreclinica-test-network
     volumes:
       - libreclinica-data:/usr/local/tomcat/libreclinica.data
-      # Mount the PATCHED WAR file that has working SOAP dependencies
-      - ../libreclinica-fix/LibreClinica-soap-fixed.war:/usr/local/tomcat/webapps/libreclinica.war:ro
 
   # ==========================================================================
   # UNIT TEST DATABASE ONLY - DO NOT USE FOR PRODUCTION/INTEGRATION

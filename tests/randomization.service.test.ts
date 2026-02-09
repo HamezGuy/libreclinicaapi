@@ -34,10 +34,9 @@ describe('Randomization Service', () => {
     });
 
     // Create study group class
-    // Note: study_group_class uses subject_assignment and group_class_type_id, NOT type
     const groupClassResult = await testDb.pool.query(`
-      INSERT INTO study_group_class (study_id, name, subject_assignment, status_id, date_created, owner_id)
-      VALUES ($1, 'Treatment Arms', 'Arm', 1, NOW(), $2)
+      INSERT INTO study_group_class (study_id, name, group_class_type_id, subject_assignment, status_id, date_created, owner_id)
+      VALUES ($1, 'Treatment Arms', 1, 'Required', 1, NOW(), $2)
       RETURNING study_group_class_id
     `, [testStudyId, rootUserId]);
 
@@ -56,24 +55,31 @@ describe('Randomization Service', () => {
   });
 
   afterAll(async () => {
-    // Cleanup
-    if (testRandomizationIds.length > 0) {
-      await testDb.pool.query('DELETE FROM subject_group_map WHERE subject_group_map_id = ANY($1)', [testRandomizationIds]);
-    }
-    if (testGroupId) {
-      await testDb.pool.query('DELETE FROM study_group WHERE study_group_class_id = $1', [testGroupClassId]);
-    }
-    if (testGroupClassId) {
-      await testDb.pool.query('DELETE FROM study_group_class WHERE study_group_class_id = $1', [testGroupClassId]);
-    }
-    if (testSubjectId) {
-      await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [testSubjectId]);
-    }
-    if (testStudyId) {
+    // Cleanup in correct FK order
+    try {
+      // 1. Remove all randomizations (subject_group_map) for this study
+      await testDb.pool.query(`
+        DELETE FROM subject_group_map WHERE study_group_class_id IN 
+        (SELECT study_group_class_id FROM study_group_class WHERE study_id = $1)
+      `, [testStudyId]);
+      // 2. Remove audit logs
+      await testDb.pool.query(`DELETE FROM audit_log_event WHERE audit_table = 'subject_group_map'`);
+      // 3. Remove study groups
+      await testDb.pool.query(`
+        DELETE FROM study_group WHERE study_group_class_id IN 
+        (SELECT study_group_class_id FROM study_group_class WHERE study_id = $1)
+      `, [testStudyId]);
+      // 4. Remove study group classes
+      await testDb.pool.query('DELETE FROM study_group_class WHERE study_id = $1', [testStudyId]);
+      // 5. Remove all subjects for this study  
+      await testDb.pool.query('DELETE FROM study_subject WHERE study_id = $1', [testStudyId]);
+      await testDb.pool.query('DELETE FROM subject WHERE subject_id NOT IN (SELECT subject_id FROM study_subject)');
+      // 6. Remove study user roles and study
       await testDb.pool.query('DELETE FROM study_user_role WHERE study_id = $1', [testStudyId]);
       await testDb.pool.query('DELETE FROM study WHERE study_id = $1', [testStudyId]);
+    } catch (error: any) {
+      console.warn('Cleanup warning:', error.message);
     }
-    await testDb.pool.end();
   });
 
   afterEach(async () => {
@@ -217,9 +223,6 @@ describe('Randomization Service', () => {
       if (result.data) {
         testRandomizationIds.push(result.data.subject_group_map_id);
       }
-
-      // Cleanup
-      await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [newSubjectId]);
     });
 
     it('should set owner_id correctly', async () => {
@@ -236,9 +239,6 @@ describe('Randomization Service', () => {
         testRandomizationIds.push(result.data.subject_group_map_id);
         expect(result.data.owner_id).toBe(rootUserId);
       }
-
-      // Cleanup
-      await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [newSubjectId]);
     });
 
     it('should create audit log entry', async () => {
@@ -262,9 +262,6 @@ describe('Randomization Service', () => {
         expect(auditResult.rows.length).toBeGreaterThan(0);
         expect(auditResult.rows[0].entity_name).toBe('Subject Randomized');
       }
-
-      // Cleanup
-      await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [newSubjectId]);
     });
 
     it('should verify randomization in database', async () => {
@@ -289,9 +286,6 @@ describe('Randomization Service', () => {
         expect(dbResult.rows[0].study_subject_id).toBe(newSubjectId);
         expect(dbResult.rows[0].study_group_id).toBe(testGroupId);
       }
-
-      // Cleanup
-      await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [newSubjectId]);
     });
   });
 });

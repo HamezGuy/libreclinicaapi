@@ -14,6 +14,7 @@ import { pool } from './config/database';
 import { logger } from './config/logger';
 import { getSoapClient } from './services/soap/soapClient';
 import { initializeScheduler } from './services/backup/backup-scheduler.service';
+import { runStartupMigrations } from './config/migrations';
 
 const PORT = config.server.port || 3000;
 const HOST = '0.0.0.0';
@@ -55,34 +56,10 @@ async function verifyAuditTables(): Promise<void> {
     `);
     
     if (!tableCheck.rows[0].exists) {
-      logger.warn('audit_user_login table not found - creating...');
-      
-      // Create the table if it doesn't exist
-      // Note: LibreClinica uses login_status_code (not login_status)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS audit_user_login (
-          id SERIAL PRIMARY KEY,
-          user_name VARCHAR(255),
-          user_account_id INTEGER,
-          login_attempt_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          login_status_code INTEGER,
-          details VARCHAR(500),
-          version INTEGER DEFAULT 1
-        )
-      `);
-      
-      // Create index for performance
-      await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_audit_user_login_date 
-        ON audit_user_login(login_attempt_date)
-      `);
-      
-      await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_audit_user_login_user 
-        ON audit_user_login(user_account_id)
-      `);
-      
-      logger.info('audit_user_login table created successfully');
+      // audit_user_login is a LibreClinica Core table created by Liquibase.
+      // Do NOT create it here - it would conflict with Liquibase migrations.
+      // If missing, LibreClinica Core hasn't finished initializing yet.
+      logger.warn('audit_user_login table not found - LibreClinica Core may still be initializing. Login audit will be unavailable until the table exists.');
     } else {
       // Verify the table has data
       const countResult = await pool.query('SELECT COUNT(*) as count FROM audit_user_login');
@@ -196,6 +173,9 @@ async function startServer() {
 
     // Verify audit tables exist (21 CFR Part 11 compliance)
     await verifyAuditTables();
+
+    // Run startup migrations for acc_* extension tables
+    await runStartupMigrations(pool);
 
     // Test SOAP connection (warning only)
     await testSoapConnection();

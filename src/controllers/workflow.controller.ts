@@ -31,7 +31,7 @@ export class WorkflowController {
       const { status, priority, assignedTo, studyId, type, limit, offset } = req.query;
       
       const result = await workflowService.getAllWorkflows({
-        status: status as workflowService.WorkflowStatus,
+        status: status as unknown as workflowService.WorkflowStatus,
         priority: priority as workflowService.WorkflowPriority,
         assignedTo: assignedTo as string,
         studyId: studyId ? parseInt(studyId as string) : undefined,

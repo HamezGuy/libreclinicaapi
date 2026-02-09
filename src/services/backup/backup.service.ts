@@ -308,7 +308,7 @@ export const performBackup = async (
     let checksum = await calculateChecksum(primaryBackupPath);
     
     // Encryption
-    let encryptionMetadata: EncryptedFileMetadata | undefined;
+    let encryptionMetadata: any;
     let finalBackupPath = primaryBackupPath;
     
     if (isEncryptionEnabled() && !options.skipEncryption) {

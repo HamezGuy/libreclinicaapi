@@ -1,20 +1,24 @@
 # =============================================================================
 # LibreClinica EDC - AWS Lightsail Production Deployment
 # =============================================================================
-# Server: 18.225.57.5 (Ohio, us-east-2a)
 # Domain: api.accuratrials.com
 #
 # Services:
 #   1. PostgreSQL 14 - Database
-#   2. LibreClinica Core - Java/Tomcat (SOAP services)
+#   2. LibreClinica Core - Java/Tomcat (schema creation + SOAP services)
 #   3. LibreClinica API - Node.js REST API
 #   4. Nginx - Reverse proxy with SSL (Let's Encrypt)
 #   5. Certbot - SSL certificate auto-renewal
 #
 # Usage:
-#   docker compose up -d --build
-#   docker compose down
-#   docker compose logs -f api
+#   ./deploy.sh                        # First-time deploy (handles SSL bootstrap)
+#   docker compose up -d --build       # Rebuild and restart
+#   docker compose down                # Stop all
+#   docker compose logs -f api         # Follow API logs
+#
+# Prerequisites:
+#   - Create .env file with DB_PASSWORD and JWT_SECRET
+#   - See README.md for full setup instructions
 # =============================================================================
 
 services:
@@ -41,6 +45,9 @@ services:
 
   # ==========================================
   # 2. LibreClinica Core (Java/Tomcat)
+  # Creates 100+ database tables on first boot.
+  # Provides SOAP web services for GxP-compliant writes.
+  # Takes ~2-4 minutes to fully start.
   # ==========================================
   core:
     image: jaspersnel/libreclinica:latest
@@ -58,6 +65,9 @@ services:
       dbPass: ${DB_PASSWORD:-libreclinica}
       sysURL: https://api.accuratrials.com/libreclinica
       supportURL: https://www.accuratrials.com
+      filePath: /usr/local/tomcat/libreclinica.data/
+      userAccountNotification: email
+      adminEmail: ${ADMIN_EMAIL:-admin@accuratrials.com}
     volumes:
       - core_data:/usr/local/tomcat/libreclinica.data
     networks:
@@ -67,10 +77,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 30
-      start_period: 120s
+      start_period: 180s
 
   # ==========================================
   # 3. LibreClinica API (Node.js)
+  # REST API bridging Angular frontend to LibreClinica.
+  # Auto-creates supplementary acc_* tables on startup.
   # ==========================================
   api:
     build:
@@ -87,23 +99,36 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      DEMO_MODE: "true"
+      DEMO_MODE: "false"
+      # Database
       LIBRECLINICA_DB_HOST: postgres
       LIBRECLINICA_DB_PORT: 5432
       LIBRECLINICA_DB_NAME: libreclinica
       LIBRECLINICA_DB_USER: libreclinica
       LIBRECLINICA_DB_PASSWORD: ${DB_PASSWORD:-libreclinica}
+      # SOAP (disabled - using direct DB; enable when LibreClinica Core SOAP is needed)
       LIBRECLINICA_SOAP_URL: http://core:8080/libreclinica-ws/ws
       SOAP_USERNAME: root
-      SOAP_PASSWORD: 25d55ad283aa400af464c76d713c07ad
+      SOAP_PASSWORD: ${SOAP_PASSWORD:-25d55ad283aa400af464c76d713c07ad}
       DISABLE_SOAP: "true"
+      # Auth
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
+      # CORS - all allowed frontend origins
       ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
+      # Backup container name (must match postgres container_name)
+      BACKUP_CONTAINER: libreclinica_db
+      # Feature flags
       ENABLE_EMAIL_NOTIFICATIONS: "true"
       ENABLE_SUBJECT_TRANSFERS: "true"
       ENABLE_ECONSENT: "true"
       ENABLE_EPRO: "true"
       ENABLE_RTSM: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - lc_network
 
@@ -136,6 +161,8 @@ services:
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
+    networks:
+      - lc_network
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
 
 volumes:

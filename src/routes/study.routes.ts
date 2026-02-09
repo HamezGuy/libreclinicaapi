@@ -24,6 +24,10 @@ router.use(authMiddleware);
 
 // Read operations - all authenticated users (no signature required)
 router.get('/', validate({ query: studySchemas.list }), controller.list);
+
+// Get archived studies list (must be before /:id to avoid being caught by param route)
+router.get('/archived/list', controller.getArchived);
+
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/metadata', validate({ params: commonSchemas.idParam }), controller.getMetadata);
 router.get('/:id/forms', validate({ params: commonSchemas.idParam }), controller.getForms);
@@ -51,6 +55,20 @@ router.delete('/:id',
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.STUDY_DELETE),
   controller.remove
+);
+
+// Archive/Restore (separate from delete for clarity)
+router.post('/:id/archive', 
+  requireRole('admin', 'coordinator'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor('I authorize archiving this study'),
+  controller.archive
+);
+router.post('/:id/restore', 
+  requireRole('admin'), 
+  validate({ params: commonSchemas.idParam }), 
+  requireSignatureFor('I authorize restoring this archived study'),
+  controller.restore
 );
 
 export default router;

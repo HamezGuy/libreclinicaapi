@@ -64,13 +64,11 @@ export const createTestStudy = async (
   const ocOid = `S_${uniqueId.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 35)}`;
 
   // Note: study table does NOT have type_id column - using protocol_type instead
-  // Use ON CONFLICT to handle potential duplicates gracefully
   const result = await pool.query(`
     INSERT INTO study (
       unique_identifier, name, summary, principal_investigator, sponsor,
       status_id, owner_id, date_created, oc_oid, protocol_type
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, 'interventional')
-    ON CONFLICT (oc_oid) DO UPDATE SET date_updated = NOW()
     RETURNING study_id
   `, [
     uniqueId,

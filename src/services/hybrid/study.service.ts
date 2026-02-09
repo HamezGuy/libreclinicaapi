@@ -145,6 +145,10 @@ export const getStudies = async (
     if (status) {
       conditions.push(`st.name = $${paramIndex++}`);
       params.push(status);
+    } else {
+      // By default, exclude archived/removed studies (status_id = 5 and 7)
+      // Users must explicitly request status='removed' to see archived studies
+      conditions.push(`s.status_id NOT IN (5, 7)`);
     }
 
     const whereClause = conditions.join(' AND ');
@@ -1637,65 +1641,214 @@ export const updateStudy = async (
 /**
  * Delete study (set status to removed)
  */
-export const deleteStudy = async (
+/**
+ * Archive a study (soft delete).
+ * Sets status to 'removed' (status_id = 5) which hides it from normal listings.
+ * Works even if the study has enrolled subjects — data is preserved, just hidden.
+ * This is the standard EDC approach: studies are never hard-deleted.
+ */
+export const archiveStudy = async (
   studyId: number,
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Deleting study', { studyId, userId });
+  logger.info('Archiving study', { studyId, userId });
 
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // Check if study has subjects
-    const subjectsQuery = `SELECT COUNT(*) as count FROM study_subject WHERE study_id = $1`;
-    const subjectsResult = await client.query(subjectsQuery, [studyId]);
+    // Verify the study exists and get current status
+    const studyCheck = await client.query(
+      'SELECT study_id, name, status_id FROM study WHERE study_id = $1',
+      [studyId]
+    );
 
-    if (parseInt(subjectsResult.rows[0].count) > 0) {
-      return {
-        success: false,
-        message: 'Cannot delete study with enrolled subjects. Set status to locked or removed instead.'
-      };
+    if (studyCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Study not found' };
     }
 
-    // Soft delete (set status to removed = 5)
+    const study = studyCheck.rows[0];
+
+    if (study.status_id === 5) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Study is already archived' };
+    }
+
+    // Archive the study (set status to removed = 5)
     await client.query(`
       UPDATE study
       SET status_id = 5, date_updated = NOW(), update_id = $1
       WHERE study_id = $2
     `, [userId, studyId]);
 
+    // Also archive any child sites (studies with parent_study_id = this study)
+    await client.query(`
+      UPDATE study
+      SET status_id = 5, date_updated = NOW(), update_id = $1
+      WHERE parent_study_id = $2
+    `, [userId, studyId]);
+
     // Log audit event
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value,
         audit_log_event_type_id
       ) VALUES (
-        NOW(), 'study', $1, $2, 'Study',
+        NOW(), 'study', $1, $2, $3,
+        'status_id: ' || $4::text, 'status_id: 5 (archived)',
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Study Updated' LIMIT 1)
       )
-    `, [userId, studyId]);
+    `, [userId, studyId, study.name, study.status_id]);
 
     await client.query('COMMIT');
 
-    logger.info('Study deleted successfully', { studyId });
+    logger.info('Study archived successfully', { studyId, studyName: study.name });
 
     return {
       success: true,
-      message: 'Study deleted successfully'
+      message: `Study "${study.name}" has been archived and will no longer appear in study listings`
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
-    logger.error('Delete study error', { error: error.message, studyId });
+    logger.error('Archive study error', { error: error.message, studyId });
 
     return {
       success: false,
-      message: `Failed to delete study: ${error.message}`
+      message: `Failed to archive study: ${error.message}`
     };
   } finally {
     client.release();
   }
+};
+
+/**
+ * Restore an archived study (unarchive).
+ * Sets status back to 'available' (status_id = 1).
+ */
+export const restoreStudy = async (
+  studyId: number,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Restoring study', { studyId, userId });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const studyCheck = await client.query(
+      'SELECT study_id, name, status_id FROM study WHERE study_id = $1',
+      [studyId]
+    );
+
+    if (studyCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Study not found' };
+    }
+
+    const study = studyCheck.rows[0];
+
+    if (study.status_id !== 5) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Study is not archived' };
+    }
+
+    // Restore the study
+    await client.query(`
+      UPDATE study
+      SET status_id = 1, date_updated = NOW(), update_id = $1
+      WHERE study_id = $2
+    `, [userId, studyId]);
+
+    // Restore child sites
+    await client.query(`
+      UPDATE study
+      SET status_id = 1, date_updated = NOW(), update_id = $1
+      WHERE parent_study_id = $2 AND status_id = 5
+    `, [userId, studyId]);
+
+    // Audit
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'study', $1, $2, $3,
+        'status_id: 5 (archived)', 'status_id: 1 (available)',
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Study Updated' LIMIT 1)
+      )
+    `, [userId, studyId, study.name]);
+
+    await client.query('COMMIT');
+
+    logger.info('Study restored successfully', { studyId });
+
+    return {
+      success: true,
+      message: `Study "${study.name}" has been restored`
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Restore study error', { error: error.message, studyId });
+    return { success: false, message: `Failed to restore study: ${error.message}` };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Get archived studies for a user
+ */
+export const getArchivedStudies = async (
+  userId: number
+): Promise<{ success: boolean; data: any[] }> => {
+  try {
+    const query = `
+      SELECT 
+        s.study_id, s.name, s.unique_identifier, s.summary,
+        s.date_created, s.date_updated,
+        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as subject_count,
+        (SELECT COUNT(DISTINCT s2.study_id) FROM study s2 WHERE s2.parent_study_id = s.study_id) as site_count
+      FROM study s
+      WHERE s.status_id = 5
+        AND s.parent_study_id IS NULL
+      ORDER BY s.date_updated DESC
+    `;
+
+    const result = await pool.query(query);
+
+    return {
+      success: true,
+      data: result.rows.map(row => ({
+        studyId: row.study_id,
+        name: row.name,
+        identifier: row.unique_identifier,
+        summary: row.summary,
+        dateCreated: row.date_created,
+        dateArchived: row.date_updated,
+        subjectCount: parseInt(row.subject_count) || 0,
+        siteCount: parseInt(row.site_count) || 0
+      }))
+    };
+  } catch (error: any) {
+    logger.error('Get archived studies error', { error: error.message });
+    return { success: true, data: [] };
+  }
+};
+
+/**
+ * Delete study (backward compatible — calls archiveStudy).
+ * @deprecated Use archiveStudy() instead
+ */
+export const deleteStudy = async (
+  studyId: number,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  return archiveStudy(studyId, userId);
 };
 
 /**

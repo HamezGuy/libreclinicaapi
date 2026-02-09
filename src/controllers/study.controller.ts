@@ -103,7 +103,42 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { id } = req.params;
 
-  const result = await studyService.deleteStudy(parseInt(id), user.userId);
+  const result = await studyService.archiveStudy(parseInt(id), user.userId);
+
+  res.json(result);
+});
+
+/**
+ * Archive a study (hide from listings, preserve all data)
+ */
+export const archive = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+
+  const result = await studyService.archiveStudy(parseInt(id), user.userId);
+
+  res.json(result);
+});
+
+/**
+ * Restore an archived study
+ */
+export const restore = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+
+  const result = await studyService.restoreStudy(parseInt(id), user.userId);
+
+  res.json(result);
+});
+
+/**
+ * Get archived studies
+ */
+export const getArchived = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+
+  const result = await studyService.getArchivedStudies(user.userId);
 
   res.json(result);
 });
@@ -367,6 +402,9 @@ export default {
   getUsers, 
   create, 
   update, 
-  remove 
+  remove,
+  archive,
+  restore,
+  getArchived
 };
 

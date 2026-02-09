@@ -98,12 +98,12 @@ echo ""
 echo "Step 3: Uploading application files..."
 
 # Create a tarball of the API (excluding node_modules)
-echo "Creating libreclinica-api archive..."
+echo "Creating libreclinicaapi archive..."
 cd "$(dirname "$0")"
-tar --exclude='node_modules' --exclude='coverage' --exclude='logs' -czf /tmp/libreclinica-api.tar.gz .
+tar --exclude='node_modules' --exclude='coverage' --exclude='logs' -czf /tmp/libreclinicaapi.tar.gz .
 
 # Upload the archive
-$SCP_CMD /tmp/libreclinica-api.tar.gz $LIGHTSAIL_USER@$LIGHTSAIL_IP:$REMOTE_DIR/
+$SCP_CMD /tmp/libreclinicaapi.tar.gz $LIGHTSAIL_USER@$LIGHTSAIL_IP:$REMOTE_DIR/
 
 echo ""
 echo "Step 4: Deploying on server..."
@@ -114,13 +114,13 @@ set -e
 cd ~/edc-app
 
 # Extract API
-echo "Extracting libreclinica-api..."
-mkdir -p libreclinica-api
-tar -xzf libreclinica-api.tar.gz -C libreclinica-api
-rm libreclinica-api.tar.gz
+echo "Extracting libreclinicaapi..."
+mkdir -p libreclinicaapi
+tar -xzf libreclinicaapi.tar.gz -C libreclinicaapi
+rm libreclinicaapi.tar.gz
 
 # Install dependencies
-cd libreclinica-api
+cd libreclinicaapi
 echo "Installing dependencies..."
 npm install --production
 
@@ -134,37 +134,43 @@ cat > .env << 'ENVFILE'
 # LibreClinica API Configuration
 PORT=3000
 NODE_ENV=production
+DEMO_MODE=false
 
 # Database - LibreClinica PostgreSQL
-DATABASE_HOST=localhost
-DATABASE_PORT=5434
-DATABASE_NAME=libreclinica
-DATABASE_USER=libreclinica
-DATABASE_PASSWORD=libreclinica
+LIBRECLINICA_DB_HOST=localhost
+LIBRECLINICA_DB_PORT=5434
+LIBRECLINICA_DB_NAME=libreclinica
+LIBRECLINICA_DB_USER=libreclinica
+LIBRECLINICA_DB_PASSWORD=libreclinica
 
 # SOAP Configuration - LibreClinica Web Services
-LIBRECLINICA_URL=http://localhost:8090/libreclinica-ws/ws
-LIBRECLINICA_STUDY_SOAP_URL=http://localhost:8090/libreclinica-ws/ws/study/v1
-LIBRECLINICA_SUBJECT_SOAP_URL=http://localhost:8090/libreclinica-ws/ws/studySubject/v1
-LIBRECLINICA_EVENT_SOAP_URL=http://localhost:8090/libreclinica-ws/ws/event/v1
-LIBRECLINICA_DATA_SOAP_URL=http://localhost:8090/libreclinica-ws/ws/data/v1
-LIBRECLINICA_CRF_SOAP_URL=http://localhost:8090/libreclinica-ws/ws/crf/v1
+LIBRECLINICA_SOAP_URL=http://localhost:8090/libreclinica-ws/ws
+DISABLE_SOAP=true
+SOAP_USERNAME=root
+SOAP_PASSWORD=25d55ad283aa400af464c76d713c07ad
 
 # Security
 JWT_SECRET=your-production-jwt-secret-change-me-now
 JWT_EXPIRES_IN=24h
 
-# CORS - Allow Vercel frontend
-CORS_ORIGIN=*
+# CORS - Allow Vercel frontend (restrict to actual origins)
+ALLOWED_ORIGINS=https://www.accuratrials.com,https://accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app
+
+# Feature Flags
+ENABLE_EMAIL_NOTIFICATIONS=true
+ENABLE_SUBJECT_TRANSFERS=true
+ENABLE_ECONSENT=true
+ENABLE_EPRO=true
+ENABLE_RTSM=true
 
 # Rate Limiting
 RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX=1000
+RATE_LIMIT_MAX_REQUESTS=1000
 ENVFILE
 
 # Start LibreClinica with Docker
 echo "Starting LibreClinica Docker containers..."
-cd ~/edc-app/libreclinica-api
+cd ~/edc-app/libreclinicaapi
 docker-compose -f docker-compose.libreclinica.yml up -d || echo "Docker compose may need manual start"
 
 # Wait for services to start

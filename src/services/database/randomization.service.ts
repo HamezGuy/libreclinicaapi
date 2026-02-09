@@ -97,7 +97,7 @@ export const createRandomization = async (data: {
     // Insert with all required fields including study_group_class_id and status_id
     const insertQuery = `
       INSERT INTO subject_group_map (study_subject_id, study_group_id, study_group_class_id, owner_id, status_id, date_created)
-      VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP)
+      VALUES ($1, $2, $3, $4, 1, CURRENT_DATE)
       RETURNING *
     `;
 
@@ -106,8 +106,7 @@ export const createRandomization = async (data: {
     // Audit log - audit_log_event requires audit_log_event_type_id (FK to audit_log_event_type)
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
-      VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Randomized',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Created' LIMIT 1))
+      VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Randomized', 28)
     `, [userId, result.rows[0].subject_group_map_id]);
 
     await client.query('COMMIT');
@@ -266,8 +265,7 @@ export const removeRandomization = async (subjectId: number, userId: number) => 
     if (result.rows.length > 0) {
       await client.query(`
         INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
-        VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Randomization Removed',
-          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Deleted' LIMIT 1))
+        VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Randomization Removed', 29)
       `, [userId, result.rows[0].subject_group_map_id]);
     }
 
@@ -338,8 +336,7 @@ export const unblindSubject = async (subjectId: number, userId: number, reason: 
     // Log the unblinding event
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
-      VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Unblinded', 'Blinded', $3,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Unblinded', 'Blinded', $3, 29)
     `, [userId, randomization.data.subject_group_map_id, `Unblinded - Reason: ${reason}`]);
 
     await client.query('COMMIT');
