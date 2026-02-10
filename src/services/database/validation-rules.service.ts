@@ -192,6 +192,21 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
   await initializeValidationRulesTable();
 
   try {
+    // Org-scoping: verify the CRF belongs to the caller's org before returning ANY rules
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        const crfOwnerCheck = await pool.query(
+          `SELECT cv.owner_id FROM crf_version cv WHERE cv.crf_id = $1 LIMIT 1`,
+          [crfId]
+        );
+        if (crfOwnerCheck.rows.length > 0 && !orgUserIds.includes(crfOwnerCheck.rows[0].owner_id)) {
+          logger.info('CRF not owned by caller org, returning empty rules', { crfId, callerUserId });
+          return [];
+        }
+      }
+    }
+
     // First get rules from the custom validation_rules table
     const customRulesQuery = `
       SELECT 
@@ -224,16 +239,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
 
     let customRules: ValidationRule[] = [];
     try {
-      let customResult = await pool.query(customRulesQuery, [crfId]);
-      
-      // Org-scoping: filter custom rules by owner
-      if (callerUserId) {
-        const orgUserIds = await getOrgMemberUserIds(callerUserId);
-        if (orgUserIds) {
-          customResult = { ...customResult, rows: customResult.rows.filter((r: any) => orgUserIds.includes(r.created_by)) };
-        }
-      }
-      
+      const customResult = await pool.query(customRulesQuery, [crfId]);
       customRules = customResult.rows.map(mapDbRowToRule);
     } catch (e: any) {
       // Table might not exist yet
@@ -410,17 +416,28 @@ export const getRulesForStudy = async (studyId: number, callerUserId?: number): 
     let crfsResult = await pool.query(combinedCrfsQuery, [studyId]);
     logger.info('Study CRFs (combined query)', { studyId, count: crfsResult.rows.length });
 
-    // Fallback: Get ALL available CRFs if none found for this study
+    // Fallback: Get available CRFs if none found for this study (org-scoped)
     if (crfsResult.rows.length === 0) {
+      let orgCrfFilter = '';
+      const fallbackParams: any[] = [];
+
+      if (callerUserId) {
+        const orgUserIds = await getOrgMemberUserIds(callerUserId);
+        if (orgUserIds) {
+          orgCrfFilter = ` AND c.crf_id IN (SELECT cv2.crf_id FROM crf_version cv2 WHERE cv2.owner_id = ANY($1::int[]))`;
+          fallbackParams.push(orgUserIds);
+        }
+      }
+
       const allCrfsQuery = `
-        SELECT DISTINCT crf_id, name
-        FROM crf
-        WHERE status_id = 1
-        ORDER BY name
+        SELECT DISTINCT c.crf_id, c.name
+        FROM crf c
+        WHERE c.status_id = 1${orgCrfFilter}
+        ORDER BY c.name
         LIMIT 50
       `;
-      crfsResult = await pool.query(allCrfsQuery);
-      logger.info('All available CRFs (fallback)', { count: crfsResult.rows.length });
+      crfsResult = await pool.query(allCrfsQuery, fallbackParams);
+      logger.info('Available CRFs (fallback, org-scoped)', { count: crfsResult.rows.length });
     }
 
     // Use Map to ensure uniqueness by crf_id
