@@ -1772,11 +1772,21 @@ export const createForm = async (
         let widthDecimal = null;
         
         if (field.validationRules && field.validationRules.length > 0) {
-          // Pattern validation
-          const patternRule = field.validationRules.find(r => r.type === 'pattern');
-          if (patternRule) {
-            regexpPattern = patternRule.value;
-            regexpErrorMsg = patternRule.message || 'Invalid format';
+          // Excel formula validation (new primary method)
+          const formulaRule = field.validationRules.find(r => r.type === 'formula');
+          if (formulaRule) {
+            // Store formula with =FORMULA: prefix so backend distinguishes from regex
+            regexpPattern = `=FORMULA:${formulaRule.value}`;
+            regexpErrorMsg = formulaRule.message || 'Validation failed';
+          }
+          
+          // Legacy regex pattern validation (fallback)
+          if (!regexpPattern) {
+            const patternRule = field.validationRules.find(r => r.type === 'pattern');
+            if (patternRule) {
+              regexpPattern = patternRule.value;
+              regexpErrorMsg = patternRule.message || 'Invalid format';
+            }
           }
           
           // Min/Max validation - build pattern if needed
@@ -2216,10 +2226,20 @@ export const updateForm = async (
         let widthDecimal = null;
         
         if (field.validationRules && field.validationRules.length > 0) {
-          const patternRule = field.validationRules.find(r => r.type === 'pattern');
-          if (patternRule) {
-            regexpPattern = patternRule.value;
-            regexpErrorMsg = patternRule.message || 'Invalid format';
+          // Excel formula validation (new primary method)
+          const formulaRule = field.validationRules.find(r => r.type === 'formula');
+          if (formulaRule) {
+            regexpPattern = `=FORMULA:${formulaRule.value}`;
+            regexpErrorMsg = formulaRule.message || 'Validation failed';
+          }
+          
+          // Legacy regex pattern validation (fallback)
+          if (!regexpPattern) {
+            const patternRule = field.validationRules.find(r => r.type === 'pattern');
+            if (patternRule) {
+              regexpPattern = patternRule.value;
+              regexpErrorMsg = patternRule.message || 'Invalid format';
+            }
           }
           
           const minRule = field.validationRules.find(r => r.type === 'min');

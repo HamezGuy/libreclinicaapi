@@ -15,6 +15,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { Parser as FormulaParser } from 'hot-formula-parser';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -42,7 +43,7 @@ export interface ValidationRule {
   itemId?: number;
   name: string;
   description: string;
-  ruleType: 'range' | 'format' | 'required' | 'consistency' | 'business_logic' | 'cross_form';
+  ruleType: 'range' | 'format' | 'required' | 'consistency' | 'business_logic' | 'cross_form' | 'formula';
   fieldPath: string;
   severity: 'error' | 'warning';
   errorMessage: string;
@@ -247,6 +248,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
     }
 
     // Also extract rules from item_form_metadata
+    // Detect =FORMULA: prefix to distinguish Excel formulas from regex patterns
     const itemRulesQuery = `
       SELECT 
         ifm.item_id as id,
@@ -256,6 +258,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         i.name,
         i.description,
         CASE 
+          WHEN ifm.regexp IS NOT NULL AND ifm.regexp LIKE '=FORMULA:%' THEN 'formula'
           WHEN ifm.regexp IS NOT NULL THEN 'format'
           WHEN ifm.required = true THEN 'required'
           ELSE NULL
@@ -267,7 +270,10 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         true as active,
         NULL as min_value,
         NULL as max_value,
-        ifm.regexp as pattern,
+        CASE 
+          WHEN ifm.regexp LIKE '=FORMULA:%' THEN SUBSTRING(ifm.regexp FROM 10)
+          ELSE ifm.regexp
+        END as pattern,
         NULL as operator,
         NULL as compare_field_path,
         NULL as custom_expression,
@@ -1463,6 +1469,13 @@ function applyRule(
 
     case 'format':
       if (!rule.pattern) return { valid: true };
+      // Check if this is actually an Excel formula stored as format type
+      if (rule.pattern.startsWith('=FORMULA:') || rule.pattern.startsWith('=')) {
+        const formula = rule.pattern.startsWith('=FORMULA:') 
+          ? rule.pattern.substring(9) 
+          : rule.pattern;
+        return evaluateExcelFormula(formula, value, allData);
+      }
       try {
         const regex = new RegExp(rule.pattern);
         return { valid: regex.test(String(value)) };
@@ -1474,12 +1487,27 @@ function applyRule(
       const compareValue = getNestedValue(allData, rule.compareFieldPath || '');
       return { valid: compareValues(value, compareValue, rule.operator || '==') };
 
+    case 'formula':
+      // Excel formula validation using hot-formula-parser
+      if (rule.pattern) {
+        return evaluateExcelFormula(rule.pattern, value, allData);
+      }
+      if (rule.customExpression) {
+        return evaluateExcelFormula(rule.customExpression, value, allData);
+      }
+      return { valid: true };
+
     case 'business_logic':
     case 'cross_form':
-      // Custom expression evaluation would go here
+      // Custom expression evaluation - try Excel formula first, fall back to JS
       if (rule.customExpression) {
+        // Try Excel formula evaluation first
+        const formulaResult = evaluateExcelFormula(rule.customExpression, value, allData);
+        if (formulaResult.valid !== undefined) {
+          return formulaResult;
+        }
         try {
-          // Safe evaluation using Function constructor
+          // Fall back to JS evaluation
           const evalFn = new Function('value', 'data', `return ${rule.customExpression}`);
           return { valid: Boolean(evalFn(value, allData)) };
         } catch {
@@ -1490,6 +1518,106 @@ function applyRule(
 
     default:
       return { valid: true };
+  }
+}
+
+/**
+ * Evaluate an Excel-style formula for validation using hot-formula-parser.
+ * 
+ * Supports all standard Excel functions: IF, AND, OR, NOT, LEN, LEFT, RIGHT, MID,
+ * TRIM, UPPER, LOWER, CONCATENATE, EXACT, FIND, SEARCH, SUBSTITUTE, ISNUMBER,
+ * ISTEXT, ISBLANK, VALUE, SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, ABS, ROUND,
+ * MOD, POWER, SQRT, TODAY, NOW, YEAR, MONTH, DAY, DATE, DATEDIF, etc.
+ * 
+ * Field references use {fieldName} syntax or are passed as Excel variables.
+ * The current field value is available as {value} or {VALUE}.
+ * 
+ * Examples:
+ *   =AND({age}>=18, {age}<=120)
+ *   =LEN({value})>=5
+ *   =OR({gender}="M", {gender}="F", {gender}="O")
+ *   =IF({pregnant}="yes", {age}>=18, TRUE)
+ *   =AND(ISNUMBER({weight}), {weight}>0, {weight}<500)
+ *   =NOT(ISBLANK({value}))
+ *   =EXACT(LEFT({value},3),"ABC")
+ */
+function evaluateExcelFormula(
+  formula: string,
+  currentValue: any,
+  allData: Record<string, any>
+): { valid: boolean } {
+  try {
+    const parser = new FormulaParser();
+
+    // Build a lookup map: lowercase field name -> value
+    const fieldValues: Record<string, any> = {};
+    for (const [key, val] of Object.entries(allData)) {
+      fieldValues[key.toLowerCase()] = val;
+      fieldValues[key] = val;
+    }
+    // Make current field value available
+    fieldValues['value'] = currentValue;
+    fieldValues['VALUE'] = currentValue;
+
+    // Replace {fieldName} placeholders with cell-safe variable names
+    // e.g., {age} -> __age__, {blood_pressure} -> __blood_pressure__
+    let processedFormula = formula;
+    // Strip leading = if present
+    if (processedFormula.startsWith('=')) {
+      processedFormula = processedFormula.substring(1);
+    }
+
+    // Replace {fieldName} references with parser variable names
+    const fieldRefs = processedFormula.match(/\{([^}]+)\}/g) || [];
+    const varMap: Record<string, string> = {};
+    for (const ref of fieldRefs) {
+      const fieldName = ref.slice(1, -1); // Remove { and }
+      const varName = fieldName.replace(/[^a-zA-Z0-9]/g, '_');
+      varMap[varName] = fieldName;
+      processedFormula = processedFormula.split(ref).join(varName);
+    }
+
+    // Hook into the parser's variable resolution
+    parser.on('callVariable', function(name: string, done: (val: any) => void) {
+      // Check the var map first (for {fieldName} references)
+      const mappedName = varMap[name];
+      if (mappedName !== undefined) {
+        const val = fieldValues[mappedName] ?? fieldValues[mappedName.toLowerCase()];
+        done(val !== undefined && val !== null && val !== '' ? val : '');
+        return;
+      }
+      // Direct field name lookup
+      const val = fieldValues[name] ?? fieldValues[name.toLowerCase()];
+      done(val !== undefined && val !== null && val !== '' ? val : '');
+    });
+
+    // Parse and evaluate the formula
+    const result = parser.parse(processedFormula);
+
+    if (result.error) {
+      logger.warn('Excel formula parse error', { formula, error: result.error });
+      return { valid: true }; // Don't fail validation on formula errors
+    }
+
+    // The formula should return a boolean (TRUE/FALSE)
+    // If it returns a number, treat 0 as false and anything else as true
+    if (typeof result.result === 'boolean') {
+      return { valid: result.result };
+    }
+    if (typeof result.result === 'number') {
+      return { valid: result.result !== 0 };
+    }
+    if (typeof result.result === 'string') {
+      const lower = result.result.toLowerCase();
+      if (lower === 'true' || lower === 'yes') return { valid: true };
+      if (lower === 'false' || lower === 'no') return { valid: false };
+    }
+
+    // Any non-null result is considered valid
+    return { valid: result.result != null };
+  } catch (error: any) {
+    logger.warn('Excel formula evaluation error', { formula, error: error.message });
+    return { valid: true }; // Don't fail validation on errors
   }
 }
 
@@ -1763,6 +1891,19 @@ export const getRuleExecutionHistory = async (
   }
 };
 
+/**
+ * Public wrapper around applyRule for direct rule testing.
+ * Used by the testRule controller endpoint to evaluate any rule type
+ * (including formula rules) without needing a CRF in the database.
+ */
+export const testRuleDirectly = (
+  rule: ValidationRule,
+  value: any,
+  allData: Record<string, any>
+): { valid: boolean } => {
+  return applyRule(rule, value, allData);
+};
+
 export default {
   initializeValidationRulesTable,
   getRulesForCrf,
@@ -1776,6 +1917,7 @@ export default {
   validateFormData,
   validateFieldChange,
   validateEventCrf,
-  getRuleExecutionHistory
+  getRuleExecutionHistory,
+  testRuleDirectly
 };
 

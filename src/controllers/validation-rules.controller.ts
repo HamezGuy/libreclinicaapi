@@ -283,6 +283,7 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
       pattern: rule.pattern,
       operator: rule.operator,
       compareFieldPath: rule.compareFieldPath,
+      customExpression: rule.customExpression,
       dateCreated: new Date(),
       createdBy: 0
     };
@@ -293,39 +294,15 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
       data.testField = testValue;
     }
 
-    // Validate
-    const result = await validationRulesService.validateFormData(0, {
-      [rule.fieldPath || 'testField']: testValue,
-      ...testData
-    });
-
-    // Since we're testing a single rule, manually check
-    let valid = true;
-    
-    if (rule.ruleType === 'required') {
-      valid = testValue !== null && testValue !== undefined && testValue !== '';
-    } else if (rule.ruleType === 'range') {
-      const numValue = Number(testValue);
-      if (isNaN(numValue)) {
-        valid = false;
-      } else {
-        if (rule.minValue !== undefined && numValue < rule.minValue) valid = false;
-        if (rule.maxValue !== undefined && numValue > rule.maxValue) valid = false;
-      }
-    } else if (rule.ruleType === 'format' && rule.pattern) {
-      try {
-        const regex = new RegExp(rule.pattern);
-        valid = regex.test(String(testValue));
-      } catch {
-        valid = true;
-      }
-    }
+    // Use the service's testRuleDirectly for consistent evaluation
+    // This handles all rule types: required, range, format, formula, etc.
+    const testResult = validationRulesService.testRuleDirectly(mockRule, testValue, data);
 
     res.json({
       success: true,
       data: {
-        valid,
-        message: valid ? 'Validation passed' : rule.errorMessage
+        valid: testResult.valid,
+        message: testResult.valid ? 'Validation passed' : rule.errorMessage
       }
     });
   } catch (error) {
