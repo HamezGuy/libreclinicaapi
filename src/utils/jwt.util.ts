@@ -25,6 +25,8 @@ export interface JwtPayload {
   role: string;
   userType?: string; // User type from user_type table (admin, user, sysadmin, etc.)
   studyIds?: number[];
+  organizationIds?: number[]; // Organization IDs the user belongs to
+  organizationDetails?: { organizationId: number; organizationName: string; role: string }[]; // Full org info for login response (not stored in JWT)
 }
 
 /**

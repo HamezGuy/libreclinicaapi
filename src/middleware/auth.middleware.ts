@@ -11,6 +11,7 @@ export interface AuthRequest extends Request {
     userType: string;
     role: string;
     studyIds?: number[];
+    organizationIds?: number[];
   };
 }
 
@@ -72,7 +73,8 @@ export const authMiddleware = (
       email: decoded.email,
       userType: decoded.userType,
       role: decoded.role || decoded.userType, // Use role from token, fallback to userType
-      studyIds: decoded.studyIds
+      studyIds: decoded.studyIds,
+      organizationIds: decoded.organizationIds || []
     };
     
     logger.debug('User authenticated', { 
@@ -119,7 +121,8 @@ export const optionalAuthMiddleware = (
         email: decoded.email,
         userType: decoded.userType,
         role: decoded.role || decoded.userType,
-        studyIds: decoded.studyIds
+        studyIds: decoded.studyIds,
+        organizationIds: decoded.organizationIds || []
       };
     } catch (error) {
       // Ignore errors for optional auth

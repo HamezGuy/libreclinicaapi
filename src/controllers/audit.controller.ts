@@ -8,6 +8,7 @@ import * as auditService from '../services/database/audit.service';
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, subjectId, userId, eventType, startDate, endDate, page, limit } = req.query;
+  const caller = (req as any).user;
 
   const result = await auditService.getAuditTrail({
     studyId: studyId ? parseInt(studyId as string) : undefined,
@@ -18,20 +19,21 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
     endDate: endDate as string,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 50
-  });
+  }, caller?.userId);
 
   res.json(result);
 });
 
 export const exportCsv = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, startDate, endDate } = req.query;
+  const caller = (req as any).user;
 
   const csv = await auditService.exportAuditTrailCSV({
     studyId: parseInt(studyId as string),
     startDate: startDate as string,
     endDate: endDate as string,
     format: 'csv'
-  });
+  }, caller?.userId);
 
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename=audit-trail-${Date.now()}.csv`);
@@ -41,11 +43,13 @@ export const exportCsv = asyncHandler(async (req: Request, res: Response) => {
 export const getSubjectAudit = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { page, limit } = req.query;
+  const caller = (req as any).user;
 
   const result = await auditService.getSubjectAudit(
     parseInt(id),
     parseInt(page as string) || 1,
-    parseInt(limit as string) || 100
+    parseInt(limit as string) || 100,
+    caller?.userId
   );
 
   res.json(result);
@@ -72,9 +76,11 @@ export const getTables = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getStats = asyncHandler(async (req: Request, res: Response) => {
   const { days } = req.query;
+  const caller = (req as any).user;
 
   const result = await auditService.getAuditStatistics(
-    parseInt(days as string) || 30
+    parseInt(days as string) || 30,
+    caller?.userId
   );
 
   res.json({ success: true, data: result });
@@ -85,8 +91,9 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getFormAudit = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const caller = (req as any).user;
 
-  const result = await auditService.getFormAudit(parseInt(eventCrfId));
+  const result = await auditService.getFormAudit(parseInt(eventCrfId), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -96,6 +103,7 @@ export const getFormAudit = asyncHandler(async (req: Request, res: Response) => 
  */
 export const getSummary = asyncHandler(async (req: Request, res: Response) => {
   const { startDate, endDate } = req.query;
+  const caller = (req as any).user;
 
   if (!startDate || !endDate) {
     res.status(400).json({ success: false, message: 'startDate and endDate are required' });
@@ -104,7 +112,8 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await auditService.getAuditSummary(
     startDate as string,
-    endDate as string
+    endDate as string,
+    caller?.userId
   );
 
   res.json(result);
@@ -115,6 +124,7 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getComplianceReport = asyncHandler(async (req: Request, res: Response) => {
   const { startDate, endDate, studyId } = req.query;
+  const caller = (req as any).user;
 
   if (!startDate || !endDate) {
     res.status(400).json({ success: false, message: 'startDate and endDate are required' });
@@ -125,7 +135,7 @@ export const getComplianceReport = asyncHandler(async (req: Request, res: Respon
     startDate: startDate as string,
     endDate: endDate as string,
     studyId: studyId ? parseInt(studyId as string) : undefined
-  });
+  }, caller?.userId);
 
   res.json(result);
 });
@@ -135,9 +145,11 @@ export const getComplianceReport = asyncHandler(async (req: Request, res: Respon
  */
 export const getRecent = asyncHandler(async (req: Request, res: Response) => {
   const { limit } = req.query;
+  const caller = (req as any).user;
 
   const result = await auditService.getRecentAuditEvents(
-    parseInt(limit as string) || 50
+    parseInt(limit as string) || 50,
+    caller?.userId
   );
 
   res.json({ success: true, data: result });
@@ -151,6 +163,7 @@ export const getRecent = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getLoginHistory = asyncHandler(async (req: Request, res: Response) => {
   const { userId, username, startDate, endDate, status, limit, offset } = req.query;
+  const caller = (req as any).user;
 
   const result = await auditService.getLoginHistory({
     userId: userId ? parseInt(userId as string) : undefined,
@@ -160,7 +173,7 @@ export const getLoginHistory = asyncHandler(async (req: Request, res: Response) 
     status: status as 'success' | 'failed' | 'logout' | 'all',
     limit: parseInt(limit as string) || 100,
     offset: parseInt(offset as string) || 0
-  });
+  }, caller?.userId);
 
   res.json(result);
 });
@@ -171,9 +184,11 @@ export const getLoginHistory = asyncHandler(async (req: Request, res: Response) 
  */
 export const getLoginStats = asyncHandler(async (req: Request, res: Response) => {
   const { days } = req.query;
+  const caller = (req as any).user;
 
   const result = await auditService.getLoginStatistics(
-    parseInt(days as string) || 30
+    parseInt(days as string) || 30,
+    caller?.userId
   );
 
   res.json(result);

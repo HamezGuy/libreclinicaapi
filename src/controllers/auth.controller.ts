@@ -50,8 +50,14 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       lastName: result.data.last_name,
       email: result.data.email,
       role: jwtPayload.role,
-      studyIds: jwtPayload.studyIds
-    }
+      studyIds: jwtPayload.studyIds,
+      organizationIds: jwtPayload.organizationIds || []
+    },
+    organizations: (jwtPayload.organizationDetails || []).map(o => ({
+      organizationId: String(o.organizationId),
+      organizationName: o.organizationName,
+      role: o.role
+    }))
   });
 });
 
@@ -87,8 +93,14 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
       lastName: result.data.last_name,
       email: result.data.email,
       role: jwtPayload.role,
-      studyIds: jwtPayload.studyIds
-    }
+      studyIds: jwtPayload.studyIds,
+      organizationIds: jwtPayload.organizationIds || []
+    },
+    organizations: (jwtPayload.organizationDetails || []).map(o => ({
+      organizationId: String(o.organizationId),
+      organizationName: o.organizationName,
+      role: o.role
+    }))
   });
 });
 
@@ -146,7 +158,8 @@ export const verify = asyncHandler(async (req: Request, res: Response) => {
       userId: user.userId,
       username: user.userName || user.username,
       email: user.email,
-      userType: user.userType
+      userType: user.userType,
+      organizationIds: user.organizationIds || []
     }
   });
 });

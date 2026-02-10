@@ -422,7 +422,28 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
   // Get user type from database if not already present
   let userType = (user as any).user_type || 'user';
   
-  logger.info('JWT payload built', { userId: user.user_id, role: primaryRole, studyIds, roleNames });
+  // Fetch organization membership so it's embedded in the JWT
+  let organizationIds: number[] = [];
+  let organizationDetails: { organizationId: number; organizationName: string; role: string }[] = [];
+  try {
+    const orgResult = await pool.query(
+      `SELECT m.organization_id, o.name as organization_name, m.role
+       FROM acc_organization_member m
+       INNER JOIN acc_organization o ON m.organization_id = o.organization_id
+       WHERE m.user_id = $1 AND m.status = 'active'`,
+      [user.user_id]
+    );
+    organizationIds = orgResult.rows.map((r: any) => r.organization_id);
+    organizationDetails = orgResult.rows.map((r: any) => ({
+      organizationId: r.organization_id,
+      organizationName: r.organization_name,
+      role: r.role
+    }));
+  } catch (e: any) {
+    logger.warn('Could not fetch org membership for JWT', { error: e.message });
+  }
+
+  logger.info('JWT payload built', { userId: user.user_id, role: primaryRole, studyIds, roleNames, organizationIds });
   
   return {
     userId: user.user_id,
@@ -431,7 +452,9 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
     email: user.email,
     role: primaryRole,
     userType: userType, // Include user type for authorization checks
-    studyIds
+    studyIds,
+    organizationIds,
+    organizationDetails
   };
 };
 

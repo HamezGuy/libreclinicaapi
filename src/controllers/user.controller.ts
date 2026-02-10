@@ -8,6 +8,7 @@ import * as userService from '../services/database/user.service';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, role, enabled, page, limit } = req.query;
+  const user = (req as any).user;
 
   const result = await userService.getUsers({
     studyId: studyId ? parseInt(studyId as string) : undefined,
@@ -15,15 +16,16 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     enabled: enabled !== undefined ? enabled === 'true' : undefined,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 20
-  });
+  }, user?.userId);
 
   res.json(result);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const caller = (req as any).user;
 
-  const result = await userService.getUserById(parseInt(id));
+  const result = await userService.getUserById(parseInt(id), caller?.userId);
 
   if (!result) {
     res.status(404).json({ success: false, message: 'User not found' });

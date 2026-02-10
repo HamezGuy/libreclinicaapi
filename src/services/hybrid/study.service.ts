@@ -110,7 +110,7 @@ export const getStudies = async (
     const params: any[] = [];
     let paramIndex = 1;
 
-    // Check if user is admin - admins can see all studies
+    // Check if user is admin AND whether they belong to an organization
     const adminCheckQuery = `
       SELECT u.user_type_id, ut.user_type 
       FROM user_account u 
@@ -123,10 +123,51 @@ export const getStudies = async (
                    adminCheck.rows[0]?.user_type === 'admin' ||
                    adminCheck.rows[0]?.user_type === 'sysadmin';
 
-    // Only filter by user access for non-admin users
-    if (!isAdmin) {
-      // Filter by user access OR owner
-      // User can see studies they own OR are assigned to
+    // Check organization membership to scope studies
+    const orgCheck = await pool.query(
+      `SELECT organization_id, role FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    );
+    const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+    const belongsToOrg = userOrgIds.length > 0;
+    const isOrgAdmin = orgCheck.rows.some((r: any) => r.role === 'admin');
+
+    logger.info('📋 Study access check', { userId, isAdmin, belongsToOrg, isOrgAdmin, orgIds: userOrgIds });
+
+    if (belongsToOrg) {
+      // User belongs to an organization — scope studies to their org members
+      if (isOrgAdmin || isAdmin) {
+        // Org admin: see studies owned by ANY member of their organization(s)
+        // plus studies they are directly assigned to via study_user_role
+        conditions.push(`(
+          s.owner_id IN (
+            SELECT m.user_id FROM acc_organization_member m
+            WHERE m.organization_id = ANY($${paramIndex++}::int[])
+              AND m.status = 'active'
+          )
+          OR EXISTS (
+            SELECT 1 FROM study_user_role sur
+            WHERE sur.study_id = s.study_id
+              AND sur.user_name = (SELECT user_name FROM user_account WHERE user_id = $${paramIndex++})
+              AND sur.status_id = 1
+          )
+        )`);
+        params.push(userOrgIds, userId);
+      } else {
+        // Regular org member: see only studies they own or are assigned to
+        conditions.push(`(
+          s.owner_id = $${paramIndex++}
+          OR EXISTS (
+            SELECT 1 FROM study_user_role sur
+            WHERE sur.study_id = s.study_id
+              AND sur.user_name = (SELECT user_name FROM user_account WHERE user_id = $${paramIndex++})
+              AND sur.status_id = 1
+          )
+        )`);
+        params.push(userId, userId);
+      }
+    } else if (!isAdmin) {
+      // No org membership and not a system admin: filter by own/assigned studies
       conditions.push(`(
         s.owner_id = $${paramIndex++}
         OR EXISTS (
@@ -138,6 +179,7 @@ export const getStudies = async (
       )`);
       params.push(userId, userId);
     }
+    // else: system admin with no org membership — sees all studies (root admin)
 
     // Only show parent studies (not sites which have parent_study_id set)
     conditions.push(`s.parent_study_id IS NULL`);
@@ -232,6 +274,37 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
   logger.info('Getting study details with full data', { studyId, userId });
 
   try {
+    // Org-scoping: if caller belongs to an org, verify the study is accessible
+    const orgCheck = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    );
+    const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+    if (userOrgIds.length > 0) {
+      const studyOwnerCheck = await pool.query(
+        `SELECT s.owner_id FROM study s WHERE s.study_id = $1`, [studyId]
+      );
+      if (studyOwnerCheck.rows.length > 0) {
+        const studyOwnerId = studyOwnerCheck.rows[0].owner_id;
+        // Check if study owner is in the same org(s) OR if caller is directly assigned
+        const ownerInOrg = await pool.query(
+          `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+          [studyOwnerId, userOrgIds]
+        );
+        if (ownerInOrg.rows.length === 0) {
+          // Also check if user is directly assigned via study_user_role
+          const directAssign = await pool.query(
+            `SELECT 1 FROM study_user_role sur INNER JOIN user_account u ON sur.user_name = u.user_name WHERE u.user_id = $1 AND sur.study_id = $2 AND sur.status_id = 1 LIMIT 1`,
+            [userId, studyId]
+          );
+          if (directAssign.rows.length === 0) {
+            logger.warn('getStudyById org-scoping denied', { studyId, userId, userOrgIds });
+            return null;
+          }
+        }
+      }
+    }
+
     // Get all study columns explicitly
     const query = `
       SELECT 
@@ -1807,6 +1880,24 @@ export const getArchivedStudies = async (
   userId: number
 ): Promise<{ success: boolean; data: any[] }> => {
   try {
+    // Check organization membership to scope archived studies
+    const orgCheck = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    );
+    const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+    let orgFilter = '';
+    const params: any[] = [];
+
+    if (userOrgIds.length > 0) {
+      params.push(userOrgIds);
+      orgFilter = `AND s.owner_id IN (
+        SELECT m.user_id FROM acc_organization_member m
+        WHERE m.organization_id = ANY($1::int[]) AND m.status = 'active'
+      )`;
+    }
+
     const query = `
       SELECT 
         s.study_id, s.name, s.unique_identifier, s.summary,
@@ -1816,10 +1907,11 @@ export const getArchivedStudies = async (
       FROM study s
       WHERE s.status_id = 5
         AND s.parent_study_id IS NULL
+        ${orgFilter}
       ORDER BY s.date_updated DESC
     `;
 
-    const result = await pool.query(query);
+    const result = await pool.query(query, params);
 
     return {
       success: true,

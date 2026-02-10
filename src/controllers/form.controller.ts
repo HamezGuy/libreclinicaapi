@@ -90,7 +90,8 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const result = await formService.getAllForms();
+  const user = (req as any).user;
+  const result = await formService.getAllForms(user?.userId);
   
   res.json({ 
     success: true, 
@@ -101,8 +102,9 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const user = (req as any).user;
 
-  const result = await formService.getFormById(parseInt(id));
+  const result = await formService.getFormById(parseInt(id), user?.userId);
 
   if (!result) {
     res.status(404).json({ success: false, message: 'Form not found' });
@@ -262,7 +264,7 @@ export const getArchivedForms = asyncHandler(async (req: Request, res: Response)
   const user = (req as any).user;
 
   const parsedStudyId = studyId ? parseInt(studyId as string) : undefined;
-  const result = await formService.getArchivedForms(parsedStudyId);
+  const result = await formService.getArchivedForms(parsedStudyId, user?.userId);
 
   // Track admin access to archived forms
   await trackDocumentAccess(

@@ -28,7 +28,8 @@ export const getMyOrganizations = asyncHandler(async (req: Request, res: Respons
 });
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const result = await orgService.listOrganizations(req.query);
+  const user = (req as any).user;
+  const result = await orgService.listOrganizations(req.query, user?.userId);
   res.json(result);
 });
 
@@ -117,7 +118,8 @@ export const createAccessRequest = asyncHandler(async (req: Request, res: Respon
 });
 
 export const listAccessRequests = asyncHandler(async (req: Request, res: Response) => {
-  const result = await orgService.listAccessRequests(req.query);
+  const user = (req as any).user;
+  const result = await orgService.listAccessRequests(req.query, user?.userId);
   res.json(result);
 });
 

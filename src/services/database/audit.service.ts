@@ -15,13 +15,32 @@ import { logger } from '../../config/logger';
 import { AuditQuery, AuditLogEvent, PaginatedResponse, AuditExportRequest } from '../../types';
 
 /**
+ * Helper: get org member user IDs for the caller.
+ * Returns null if the caller has no org membership (root admin sees all).
+ */
+const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
+  const orgCheck = await pool.query(
+    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+    [callerUserId]
+  );
+  if (orgCheck.rows.length === 0) return null; // no org = root admin
+  const orgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  const memberCheck = await pool.query(
+    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
+    [orgIds]
+  );
+  return memberCheck.rows.map((r: any) => r.user_id);
+};
+
+/**
  * Get audit trail with filters
  * Main method for querying audit history
  */
 export const getAuditTrail = async (
-  query: AuditQuery
+  query: AuditQuery,
+  callerUserId?: number
 ): Promise<PaginatedResponse<AuditLogEvent>> => {
-  logger.info('Querying audit trail', query);
+  logger.info('Querying audit trail', { ...query, callerUserId });
 
   try {
     const {
@@ -41,6 +60,15 @@ export const getAuditTrail = async (
     const conditions: string[] = ['1=1'];
     const params: any[] = [];
     let paramIndex = 1;
+
+    // Org-scoping: only show audit events from users in the same org
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        conditions.push(`ale.user_id = ANY($${paramIndex++}::int[])`);
+        params.push(orgUserIds);
+      }
+    }
 
     // Note: audit_log_event table doesn't have direct study_id or subject_id columns
     // These would need to be joined through related tables if needed
@@ -141,15 +169,16 @@ export const getAuditTrail = async (
 export const getSubjectAudit = async (
   subjectId: number,
   page: number = 1,
-  limit: number = 100
+  limit: number = 100,
+  callerUserId?: number
 ): Promise<PaginatedResponse<AuditLogEvent>> => {
-  logger.info('Querying subject audit trail', { subjectId });
+  logger.info('Querying subject audit trail', { subjectId, callerUserId });
 
   return await getAuditTrail({
     subjectId,
     page,
     limit
-  });
+  }, callerUserId);
 };
 
 /**
@@ -158,11 +187,26 @@ export const getSubjectAudit = async (
  * COMBINES: audit_log_event (data changes) + audit_user_login (login/logout events)
  */
 export const getRecentAuditEvents = async (
-  limit: number = 50
+  limit: number = 50,
+  callerUserId?: number
 ): Promise<AuditLogEvent[]> => {
-  logger.info('Querying recent audit events', { limit });
+  logger.info('Querying recent audit events', { limit, callerUserId });
 
   try {
+    // Org-scoping
+    let orgDataFilter = '';
+    let orgLoginFilter = '';
+    const params: any[] = [limit];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgDataFilter = ` WHERE ale.user_id = ANY($2::int[])`;
+        orgLoginFilter = ` WHERE aul.user_account_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     // Combined query: data events + login events
     const query = `
       (
@@ -182,6 +226,7 @@ export const getRecentAuditEvents = async (
         FROM audit_log_event ale
         LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
         LEFT JOIN user_account u ON ale.user_id = u.user_id
+        ${orgDataFilter}
       )
       UNION ALL
       (
@@ -204,12 +249,13 @@ export const getRecentAuditEvents = async (
           'login' as event_category
         FROM audit_user_login aul
         LEFT JOIN user_account u ON aul.user_account_id = u.user_id
+        ${orgLoginFilter}
       )
       ORDER BY audit_date DESC
       LIMIT $1
     `;
 
-    const result = await pool.query(query, [limit]);
+    const result = await pool.query(query, params);
 
     return result.rows;
   } catch (error: any) {
@@ -227,12 +273,24 @@ export const getRecentAuditEvents = async (
  * We filter by audit_table and date range instead
  */
 export const exportAuditTrailCSV = async (
-  request: AuditExportRequest
+  request: AuditExportRequest,
+  callerUserId?: number
 ): Promise<string> => {
-  logger.info('Exporting audit trail to CSV', request);
+  logger.info('Exporting audit trail to CSV', { ...request, callerUserId });
 
   try {
     const { startDate, endDate } = request;
+
+    // Org-scoping
+    let orgFilter = '';
+    const params: any[] = [startDate, endDate];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND ale.user_id = ANY($3::int[])`;
+        params.push(orgUserIds);
+      }
+    }
 
     const query = `
       SELECT 
@@ -250,11 +308,11 @@ export const exportAuditTrailCSV = async (
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
       LEFT JOIN user_account u ON ale.user_id = u.user_id
       WHERE ale.audit_date >= $1
-        AND ale.audit_date <= $2
+        AND ale.audit_date <= $2${orgFilter}
       ORDER BY ale.audit_date ASC
     `;
 
-    const result = await pool.query(query, [startDate, endDate]);
+    const result = await pool.query(query, params);
 
     // Build CSV
     const headers = [
@@ -309,13 +367,30 @@ export const exportAuditTrailCSV = async (
  * COMBINES: audit_log_event (data changes) + audit_user_login (login/logout events)
  */
 export const getAuditStatistics = async (
-  days: number = 30
+  days: number = 30,
+  callerUserId?: number
 ): Promise<any> => {
-  logger.info('Calculating audit statistics', { days });
+  logger.info('Calculating audit statistics', { days, callerUserId });
 
   try {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
+
+    // Org-scoping
+    let orgUserFilter = '';
+    let orgLoginFilter = '';
+    const dataParams: any[] = [startDate];
+    const loginParams: any[] = [startDate];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgUserFilter = ` AND ale.user_id = ANY($2::int[])`;
+        orgLoginFilter = ` AND user_account_id = ANY($2::int[])`;
+        dataParams.push(orgUserIds);
+        loginParams.push(orgUserIds);
+      }
+    }
 
     // Get data event stats
     const dataEventsQuery = `
@@ -328,7 +403,7 @@ export const getAuditStatistics = async (
         COUNT(CASE WHEN alet.name LIKE '%SDV%' OR alet.name LIKE '%Verif%' THEN 1 END) as sdv_events
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
-      WHERE ale.audit_date >= $1
+      WHERE ale.audit_date >= $1${orgUserFilter}
     `;
 
     // Get login event stats from audit_user_login
@@ -340,12 +415,12 @@ export const getAuditStatistics = async (
         COUNT(CASE WHEN login_status_code = 0 THEN 1 END) as failed_logins,
         COUNT(CASE WHEN login_status_code = 2 THEN 1 END) as logouts
       FROM audit_user_login
-      WHERE login_attempt_date >= $1
+      WHERE login_attempt_date >= $1${orgLoginFilter}
     `;
 
     const [dataResult, loginResult] = await Promise.all([
-      pool.query(dataEventsQuery, [startDate]),
-      pool.query(loginEventsQuery, [startDate])
+      pool.query(dataEventsQuery, dataParams),
+      pool.query(loginEventsQuery, loginParams)
     ]);
 
     const dataStats = dataResult.rows[0] || {};
@@ -427,10 +502,21 @@ export const getAuditableTables = async (): Promise<any[]> => {
 /**
  * Get form/CRF specific audit trail
  */
-export const getFormAudit = async (eventCrfId: number): Promise<any[]> => {
-  logger.info('Getting form audit', { eventCrfId });
+export const getFormAudit = async (eventCrfId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting form audit', { eventCrfId, callerUserId });
 
   try {
+    // Org-scoping
+    let orgFilter = '';
+    const params: any[] = [eventCrfId];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND ale.user_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         ale.audit_id,
@@ -447,11 +533,11 @@ export const getFormAudit = async (eventCrfId: number): Promise<any[]> => {
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
       LEFT JOIN user_account u ON ale.user_id = u.user_id
-      WHERE ale.event_crf_id = $1
+      WHERE ale.event_crf_id = $1${orgFilter}
       ORDER BY ale.audit_date DESC
     `;
 
-    const result = await pool.query(query, [eventCrfId]);
+    const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get form audit error', { error: error.message });
@@ -462,10 +548,21 @@ export const getFormAudit = async (eventCrfId: number): Promise<any[]> => {
 /**
  * Get audit by date range with summary
  */
-export const getAuditSummary = async (startDate: string, endDate: string): Promise<any> => {
-  logger.info('Getting audit summary', { startDate, endDate });
+export const getAuditSummary = async (startDate: string, endDate: string, callerUserId?: number): Promise<any> => {
+  logger.info('Getting audit summary', { startDate, endDate, callerUserId });
 
   try {
+    // Org-scoping
+    let orgFilter = '';
+    const params: any[] = [startDate, endDate];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND ale.user_id = ANY($3::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         DATE(ale.audit_date) as date,
@@ -473,12 +570,12 @@ export const getAuditSummary = async (startDate: string, endDate: string): Promi
         COUNT(*) as count
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
-      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2${orgFilter}
       GROUP BY DATE(ale.audit_date), alet.name
       ORDER BY date DESC, count DESC
     `;
 
-    const result = await pool.query(query, [startDate, endDate]);
+    const result = await pool.query(query, params);
 
     // Group by date
     const summary: any = {};
@@ -509,11 +606,24 @@ export const getComplianceReport = async (request: {
   startDate: string;
   endDate: string;
   studyId?: number;
-}): Promise<any> => {
-  logger.info('Generating compliance report', request);
+}, callerUserId?: number): Promise<any> => {
+  logger.info('Generating compliance report', { ...request, callerUserId });
 
   try {
     const { startDate, endDate } = request;
+
+    // Org-scoping
+    let orgDataFilter = '';
+    let orgLoginFilter = '';
+    const baseParams: any[] = [startDate, endDate];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgDataFilter = ` AND ale.user_id = ANY($3::int[])`;
+        orgLoginFilter = ` AND aul.user_account_id = ANY($3::int[])`;
+        baseParams.push(orgUserIds);
+      }
+    }
 
     // Get summary statistics
     const statsQuery = `
@@ -524,10 +634,10 @@ export const getComplianceReport = async (request: {
         MIN(ale.audit_date) as first_event,
         MAX(ale.audit_date) as last_event
       FROM audit_log_event ale
-      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2${orgDataFilter}
     `;
 
-    const statsResult = await pool.query(statsQuery, [startDate, endDate]);
+    const statsResult = await pool.query(statsQuery, baseParams);
     const stats = statsResult.rows[0];
 
     // Get events by type
@@ -537,12 +647,12 @@ export const getComplianceReport = async (request: {
         COUNT(*) as count
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
-      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2${orgDataFilter}
       GROUP BY alet.name
       ORDER BY count DESC
     `;
 
-    const typeResult = await pool.query(typeQuery, [startDate, endDate]);
+    const typeResult = await pool.query(typeQuery, baseParams);
 
     // Get user activity
     const userQuery = `
@@ -552,12 +662,12 @@ export const getComplianceReport = async (request: {
         COUNT(*) as event_count
       FROM audit_log_event ale
       INNER JOIN user_account u ON ale.user_id = u.user_id
-      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2
+      WHERE ale.audit_date >= $1 AND ale.audit_date <= $2${orgDataFilter}
       GROUP BY u.user_name, u.first_name, u.last_name
       ORDER BY event_count DESC
     `;
 
-    const userResult = await pool.query(userQuery, [startDate, endDate]);
+    const userResult = await pool.query(userQuery, baseParams);
 
     // Get login events
     const loginQuery = `
@@ -566,12 +676,12 @@ export const getComplianceReport = async (request: {
         aul.user_name,
         aul.login_status
       FROM audit_user_login aul
-      WHERE aul.login_attempt_date >= $1 AND aul.login_attempt_date <= $2
+      WHERE aul.login_attempt_date >= $1 AND aul.login_attempt_date <= $2${orgLoginFilter}
       ORDER BY aul.login_attempt_date DESC
       LIMIT 100
     `;
 
-    const loginResult = await pool.query(loginQuery, [startDate, endDate]);
+    const loginResult = await pool.query(loginQuery, baseParams);
 
     return {
       success: true,
@@ -831,6 +941,7 @@ export const getAuditLogs = async (params: {
   endDate?: string;
   limit?: number;
   offset?: number;
+  callerUserId?: number;
 }): Promise<any> => {
   const page = Math.floor((params.offset || 0) / (params.limit || 50)) + 1;
   return getAuditTrail({
@@ -841,15 +952,15 @@ export const getAuditLogs = async (params: {
     endDate: params.endDate,
     limit: params.limit || 50,
     page
-  });
+  }, params.callerUserId);
 };
 
 /**
  * Get subject audit trail
  * Alias for getSubjectAudit with API response format
  */
-export const getSubjectAuditTrail = async (subjectId: number): Promise<any> => {
-  const result = await getSubjectAudit(subjectId);
+export const getSubjectAuditTrail = async (subjectId: number, callerUserId?: number): Promise<any> => {
+  const result = await getSubjectAudit(subjectId, 1, 100, callerUserId);
   return {
     success: result.success,
     data: result.data,
@@ -861,8 +972,8 @@ export const getSubjectAuditTrail = async (subjectId: number): Promise<any> => {
  * Get form audit trail
  * Alias for getFormAudit with API response format
  */
-export const getFormAuditTrail = async (eventCrfId: number): Promise<any> => {
-  const data = await getFormAudit(eventCrfId);
+export const getFormAuditTrail = async (eventCrfId: number, callerUserId?: number): Promise<any> => {
+  const data = await getFormAudit(eventCrfId, callerUserId);
   return {
     success: true,
     data,
@@ -934,8 +1045,8 @@ export const recordElectronicSignature = async (data: {
 /**
  * Get audit statistics for dashboard
  */
-export const getAuditStats = async (days: number = 30): Promise<any> => {
-  const stats = await getAuditStatistics(days);
+export const getAuditStats = async (days: number = 30, callerUserId?: number): Promise<any> => {
+  const stats = await getAuditStatistics(days, callerUserId);
   return {
     success: true,
     data: {
@@ -961,7 +1072,8 @@ export const exportAuditLogs = async (
     startDate?: string;
     endDate?: string;
   },
-  format: 'csv' | 'json' = 'csv'
+  format: 'csv' | 'json' = 'csv',
+  callerUserId?: number
 ): Promise<any> => {
   if (format === 'csv') {
     const csv = await exportAuditTrailCSV({
@@ -969,7 +1081,7 @@ export const exportAuditLogs = async (
       startDate: params.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
       endDate: params.endDate || new Date().toISOString(),
       format: 'csv'
-    });
+    }, callerUserId);
     return { success: true, data: csv, format: 'csv' };
   } else {
     const result = await getAuditTrail({
@@ -977,7 +1089,7 @@ export const exportAuditLogs = async (
       startDate: params.startDate,
       endDate: params.endDate,
       limit: 10000
-    });
+    }, callerUserId);
     return { success: true, data: result.data, format: 'json' };
   }
 };
@@ -1003,17 +1115,26 @@ export const getLoginHistory = async (params: {
   status?: 'success' | 'failed' | 'logout' | 'all';
   limit?: number;
   offset?: number;
-}): Promise<{
+}, callerUserId?: number): Promise<{
   success: boolean;
   data: any[];
   pagination: { total: number; limit: number; offset: number };
 }> => {
-  logger.info('Querying login history', params);
+  logger.info('Querying login history', { ...params, callerUserId });
 
   try {
     const conditions: string[] = ['1=1'];
     const queryParams: any[] = [];
     let paramIndex = 1;
+
+    // Org-scoping
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        conditions.push(`aul.user_account_id = ANY($${paramIndex++}::int[])`);
+        queryParams.push(orgUserIds);
+      }
+    }
 
     if (params.userId) {
       conditions.push(`aul.user_account_id = $${paramIndex++}`);
@@ -1118,7 +1239,7 @@ export const getLoginHistory = async (params: {
  * Get login statistics for compliance reporting
  * Returns counts of successful logins, failed attempts, and logouts
  */
-export const getLoginStatistics = async (days: number = 30): Promise<{
+export const getLoginStatistics = async (days: number = 30, callerUserId?: number): Promise<{
   success: boolean;
   data: {
     successfulLogins: number;
@@ -1128,11 +1249,22 @@ export const getLoginStatistics = async (days: number = 30): Promise<{
     byDay: Array<{ date: string; success: number; failed: number; logout: number }>;
   };
 }> => {
-  logger.info('Calculating login statistics', { days });
+  logger.info('Calculating login statistics', { days, callerUserId });
 
   try {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
+
+    // Org-scoping
+    let orgFilter = '';
+    const params: any[] = [startDate];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND user_account_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
 
     // Get summary stats
     // Note: column is login_status_code (not login_status)
@@ -1143,9 +1275,9 @@ export const getLoginStatistics = async (days: number = 30): Promise<{
         COUNT(CASE WHEN login_status_code = 2 THEN 1 END) as logouts,
         COUNT(DISTINCT user_account_id) FILTER (WHERE user_account_id IS NOT NULL) as unique_users
       FROM audit_user_login
-      WHERE login_attempt_date >= $1
+      WHERE login_attempt_date >= $1${orgFilter}
     `;
-    const summaryResult = await pool.query(summaryQuery, [startDate]);
+    const summaryResult = await pool.query(summaryQuery, params);
     const summary = summaryResult.rows[0];
 
     // Get daily breakdown
@@ -1156,11 +1288,11 @@ export const getLoginStatistics = async (days: number = 30): Promise<{
         COUNT(CASE WHEN login_status_code = 0 THEN 1 END) as failed,
         COUNT(CASE WHEN login_status_code = 2 THEN 1 END) as logout
       FROM audit_user_login
-      WHERE login_attempt_date >= $1
+      WHERE login_attempt_date >= $1${orgFilter}
       GROUP BY DATE(login_attempt_date)
       ORDER BY date DESC
     `;
-    const dailyResult = await pool.query(dailyQuery, [startDate]);
+    const dailyResult = await pool.query(dailyQuery, params);
 
     return {
       success: true,

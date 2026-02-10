@@ -87,6 +87,9 @@ export const registerOrganization = async (
       const { generateTokenPair } = await import('../../utils/jwt.util');
       const user = { user_id: userId, user_name: username, email: admin.email, first_name: admin.firstName, last_name: admin.lastName, user_type_id: 1, user_type: 'admin' } as any;
       const payload = await buildJwtPayload(user);
+      // buildJwtPayload queries outside the transaction, so org membership
+      // isn't visible yet. Manually set it since we just created it above.
+      payload.organizationIds = [organizationId];
       const tokens = generateTokenPair(payload);
       accessToken = tokens.accessToken;
       refreshToken = tokens.refreshToken;
@@ -134,11 +137,25 @@ export const getMyOrganizations = async (userId: number): Promise<{ success: boo
   }
 };
 
-export const listOrganizations = async (filters: any): Promise<{ success: boolean; data?: any[]; pagination?: any }> => {
+export const listOrganizations = async (filters: any, callerUserId?: number): Promise<{ success: boolean; data?: any[]; pagination?: any }> => {
   try {
     const where: string[] = [];
     const params: any[] = [];
     let idx = 1;
+
+    // Org-scoping: if caller belongs to an org, only show their own org(s)
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      if (callerOrgIds.length > 0) {
+        where.push(`o.organization_id = ANY($${idx++}::int[])`);
+        params.push(callerOrgIds);
+      }
+    }
+
     if (filters.status) { where.push(`o.status = $${idx++}`); params.push(filters.status); }
     if (filters.type) { where.push(`o.type = $${idx++}`); params.push(filters.type); }
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -332,8 +349,29 @@ export const registerWithCode = async (data: any): Promise<{ success: boolean; d
     await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [codeRow.organization_id, userId, codeRow.default_role || 'data_entry']);
     await client.query(`UPDATE acc_organization_code SET current_uses = current_uses + 1 WHERE code_id = $1`, [codeRow.code_id]);
 
+    // Generate JWT tokens for auto-login
+    let accessToken: string | undefined;
+    let refreshToken: string | undefined;
+    try {
+      const { buildJwtPayload } = await import('./auth.service');
+      const { generateTokenPair } = await import('../../utils/jwt.util');
+      const user = { user_id: userId, user_name: username, email: data.email, first_name: data.firstName, last_name: data.lastName, user_type_id: 2, user_type: 'user' } as any;
+      const payload = await buildJwtPayload(user);
+      // buildJwtPayload queries outside the transaction, so org membership
+      // isn't visible yet. Manually set it since we just created it above.
+      payload.organizationIds = [codeRow.organization_id];
+      const tokens = generateTokenPair(payload);
+      accessToken = tokens.accessToken;
+      refreshToken = tokens.refreshToken;
+    } catch (e: any) {
+      logger.warn('Could not generate auto-login tokens for code registration', { error: e.message });
+    }
+
     await client.query('COMMIT');
-    return { success: true, data: { userId, organizationId: codeRow.organization_id } };
+
+    logger.info('User registered with code', { userId, username, organizationId: codeRow.organization_id });
+
+    return { success: true, data: { userId, username, organizationId: codeRow.organization_id, accessToken, refreshToken } };
   } catch (error: any) {
     await client.query('ROLLBACK');
     return { success: false, message: error.message };
@@ -391,11 +429,25 @@ export const createAccessRequest = async (data: any): Promise<{ success: boolean
   }
 };
 
-export const listAccessRequests = async (filters: any): Promise<{ success: boolean; data?: any[]; pagination?: any }> => {
+export const listAccessRequests = async (filters: any, callerUserId?: number): Promise<{ success: boolean; data?: any[]; pagination?: any }> => {
   try {
     const where: string[] = [];
     const params: any[] = [];
     let idx = 1;
+
+    // Org-scoping: if caller belongs to an org, only show requests targeting their org(s)
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      if (callerOrgIds.length > 0) {
+        where.push(`organization_id = ANY($${idx++}::int[])`);
+        params.push(callerOrgIds);
+      }
+    }
+
     if (filters.status) { where.push(`status = $${idx++}`); params.push(filters.status); }
     if (filters.organizationId) { where.push(`organization_id = $${idx++}`); params.push(filters.organizationId); }
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -530,8 +582,31 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
       await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [invitation.organization_id, userId, invitation.role || 'data_entry']);
     }
 
+    // Generate JWT tokens for auto-login
+    let accessToken: string | undefined;
+    let refreshToken: string | undefined;
+    try {
+      const { buildJwtPayload } = await import('./auth.service');
+      const { generateTokenPair } = await import('../../utils/jwt.util');
+      const user = { user_id: userId, user_name: username, email: invitation.email, first_name: data.firstName, last_name: data.lastName, user_type_id: 2, user_type: 'user' } as any;
+      const payload = await buildJwtPayload(user);
+      // buildJwtPayload queries outside the transaction, so org membership
+      // isn't visible yet. Manually set it since we just created it above.
+      if (invitation.organization_id) {
+        payload.organizationIds = [invitation.organization_id];
+      }
+      const tokens = generateTokenPair(payload);
+      accessToken = tokens.accessToken;
+      refreshToken = tokens.refreshToken;
+    } catch (e: any) {
+      logger.warn('Could not generate auto-login tokens for invitation acceptance', { error: e.message });
+    }
+
     await client.query('COMMIT');
-    return { success: true, data: { userId } };
+
+    logger.info('Invitation accepted', { userId, username, organizationId: invitation.organization_id });
+
+    return { success: true, data: { userId, username, organizationId: invitation.organization_id, accessToken, refreshToken } };
   } catch (error: any) {
     await client.query('ROLLBACK');
     return { success: false, message: error.message };

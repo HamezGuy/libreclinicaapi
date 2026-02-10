@@ -1066,8 +1066,8 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
  * Get all CRFs (templates) - includes drafts and published
  * Status IDs: 1=available, 2=unavailable/locked, 5=removed
  */
-export const getAllForms = async (): Promise<any[]> => {
-  logger.info('Getting all forms');
+export const getAllForms = async (userId?: number): Promise<any[]> => {
+  logger.info('Getting all forms', { userId });
 
   try {
     // Check if category column exists in crf table
@@ -1076,6 +1076,41 @@ export const getAllForms = async (): Promise<any[]> => {
       WHERE table_name = 'crf' AND column_name = 'category'
     `);
     const hasCategoryColumn = columnCheck.rows.length > 0;
+
+    // Build org-scoping filter
+    let orgFilter = '';
+    const params: any[] = [];
+
+    if (userId) {
+      // Check organization membership
+      const orgCheck = await pool.query(
+        `SELECT organization_id, role FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [userId]
+      );
+      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+      if (userOrgIds.length > 0) {
+        // User belongs to an org — only show forms owned by org members
+        // or forms linked to studies owned by org members
+        params.push(userOrgIds);
+        orgFilter = `AND (
+          c.owner_id IN (
+            SELECT m.user_id FROM acc_organization_member m
+            WHERE m.organization_id = ANY($1::int[])
+              AND m.status = 'active'
+          )
+          OR c.source_study_id IN (
+            SELECT s2.study_id FROM study s2
+            WHERE s2.owner_id IN (
+              SELECT m2.user_id FROM acc_organization_member m2
+              WHERE m2.organization_id = ANY($1::int[])
+                AND m2.status = 'active'
+            )
+          )
+        )`;
+      }
+      // else: no org membership — if admin, see all forms (no filter added)
+    }
 
     const query = `
       SELECT 
@@ -1096,11 +1131,12 @@ export const getAllForms = async (): Promise<any[]> => {
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN study st ON c.source_study_id = st.study_id
       WHERE c.status_id IN (1, 2)
+      ${orgFilter}
       ORDER BY c.date_created DESC, c.name
     `;
 
-    const result = await pool.query(query);
-    logger.info('Forms retrieved', { count: result.rows.length });
+    const result = await pool.query(query, params);
+    logger.info('Forms retrieved', { count: result.rows.length, userId });
     return result.rows;
   } catch (error: any) {
     logger.error('Get all forms error', { error: error.message });
@@ -1110,9 +1146,10 @@ export const getAllForms = async (): Promise<any[]> => {
 
 /**
  * Get CRF by ID
+ * Org-scoped: if caller belongs to an org, form owner or study owner must be in the same org
  */
-export const getFormById = async (crfId: number): Promise<any> => {
-  logger.info('Getting form by ID', { crfId });
+export const getFormById = async (crfId: number, callerUserId?: number): Promise<any> => {
+  logger.info('Getting form by ID', { crfId, callerUserId });
 
   try {
     const query = `
@@ -1131,6 +1168,33 @@ export const getFormById = async (crfId: number): Promise<any> => {
     
     if (result.rows.length === 0) {
       return null;
+    }
+
+    // Org-scoping check
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+      if (callerOrgIds.length > 0) {
+        const form = result.rows[0];
+        const ownerIds = [form.owner_id];
+        // Also check study owner if the form is linked to a study
+        if (form.source_study_id) {
+          const studyOwner = await pool.query(`SELECT owner_id FROM study WHERE study_id = $1`, [form.source_study_id]);
+          if (studyOwner.rows.length > 0) ownerIds.push(studyOwner.rows[0].owner_id);
+        }
+        const ownerInOrg = await pool.query(
+          `SELECT 1 FROM acc_organization_member WHERE user_id = ANY($1::int[]) AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+          [ownerIds, callerOrgIds]
+        );
+        if (ownerInOrg.rows.length === 0) {
+          logger.warn('getFormById org-scoping denied', { crfId, callerUserId, callerOrgIds });
+          return null;
+        }
+      }
     }
 
     return result.rows[0];
@@ -2457,8 +2521,8 @@ export const restoreForm = async (
  * Get all archived forms (admin only)
  * 21 CFR Part 11 compliant - provides visibility to archived records
  */
-export const getArchivedForms = async (studyId?: number): Promise<any[]> => {
-  logger.info('Getting archived forms', { studyId });
+export const getArchivedForms = async (studyId?: number, userId?: number): Promise<any[]> => {
+  logger.info('Getting archived forms', { studyId, userId });
 
   try {
     // Check if category column exists in crf table
@@ -2467,6 +2531,34 @@ export const getArchivedForms = async (studyId?: number): Promise<any[]> => {
       WHERE table_name = 'crf' AND column_name = 'category'
     `);
     const hasCategoryColumn = columnCheck.rows.length > 0;
+
+    // Build org-scoping filter
+    let orgFilter = '';
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (userId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [userId]
+      );
+      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+      if (userOrgIds.length > 0) {
+        params.push(userOrgIds);
+        orgFilter = `AND (
+          c.owner_id IN (
+            SELECT m.user_id FROM acc_organization_member m
+            WHERE m.organization_id = ANY($${paramIndex++}::int[]) AND m.status = 'active'
+          )
+        )`;
+      }
+    }
+
+    if (studyId) {
+      params.push(studyId);
+      orgFilter += ` AND c.source_study_id = $${paramIndex++}`;
+    }
 
     let query = `
       SELECT 
@@ -2491,18 +2583,12 @@ export const getArchivedForms = async (studyId?: number): Promise<any[]> => {
       LEFT JOIN study st ON c.source_study_id = st.study_id
       LEFT JOIN user_account u ON c.update_id = u.user_id
       WHERE c.status_id IN (5, 6)
+      ${orgFilter}
+      ORDER BY c.date_updated DESC, c.name
     `;
 
-    const params: any[] = [];
-    if (studyId) {
-      params.push(studyId);
-      query += ` AND c.source_study_id = $1`;
-    }
-
-    query += ` ORDER BY c.date_updated DESC, c.name`;
-
     const result = await pool.query(query, params);
-    logger.info('Archived forms retrieved', { count: result.rows.length });
+    logger.info('Archived forms retrieved', { count: result.rows.length, userId });
     return result.rows;
   } catch (error: any) {
     logger.error('Get archived forms error', { error: error.message });

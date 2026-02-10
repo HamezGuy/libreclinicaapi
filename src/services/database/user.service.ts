@@ -23,9 +23,10 @@ export const getUsers = async (
     enabled?: boolean;
     page?: number;
     limit?: number;
-  }
+  },
+  callerUserId?: number
 ): Promise<PaginatedResponse<User>> => {
-  logger.info('Getting users', filters);
+  logger.info('Getting users', { ...filters, callerUserId });
 
   try {
     const { studyId, role, enabled, page = 1, limit = 20 } = filters;
@@ -34,6 +35,24 @@ export const getUsers = async (
     const conditions: string[] = ['1=1'];
     const params: any[] = [];
     let paramIndex = 1;
+
+    // Org-scoping: if caller belongs to an org, only show users from same org(s)
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+      if (userOrgIds.length > 0) {
+        conditions.push(`u.user_id IN (
+          SELECT m.user_id FROM acc_organization_member m
+          WHERE m.organization_id = ANY($${paramIndex++}::int[])
+            AND m.status = 'active'
+        )`);
+        params.push(userOrgIds);
+      }
+    }
 
     if (studyId) {
       conditions.push(`sur.study_id = $${paramIndex++}`);
@@ -76,6 +95,13 @@ export const getUsers = async (
         u.status_id,
         u.date_created,
         u.date_lastvisit,
+        u.date_updated,
+        u.enabled,
+        u.account_non_locked,
+        u.lock_counter,
+        u.run_webservices,
+        u.enable_api_key,
+        u.user_type_id,
         ut.user_type
       FROM user_account u
       LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
@@ -107,11 +133,32 @@ export const getUsers = async (
 
 /**
  * Get user by ID
+ * Org-scoped: if caller belongs to an org, target user must be in the same org(s)
  */
-export const getUserById = async (userId: number): Promise<User | null> => {
-  logger.info('Getting user by ID', { userId });
+export const getUserById = async (userId: number, callerUserId?: number): Promise<User | null> => {
+  logger.info('Getting user by ID', { userId, callerUserId });
 
   try {
+    // Org-scoping: verify caller and target share an org
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+      if (callerOrgIds.length > 0) {
+        const targetOrgCheck = await pool.query(
+          `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+          [userId, callerOrgIds]
+        );
+        if (targetOrgCheck.rows.length === 0) {
+          logger.warn('getUserById org-scoping denied', { userId, callerUserId, callerOrgIds });
+          return null;
+        }
+      }
+    }
+
     const query = `
       SELECT 
         u.*,
@@ -286,6 +333,24 @@ export const createUser = async (
       logger.info('User assigned to study', { userId, studyId, role: lcRoleName });
     }
 
+    // Add user to creator's organization(s)
+    try {
+      const creatorOrgs = await client.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [creatorId]
+      );
+      for (const orgRow of creatorOrgs.rows) {
+        await client.query(`
+          INSERT INTO acc_organization_member (organization_id, user_id, role, status, date_joined)
+          VALUES ($1, $2, $3, 'active', NOW())
+          ON CONFLICT (organization_id, user_id) DO NOTHING
+        `, [orgRow.organization_id, userId, data.role || 'data_entry']);
+        logger.info('User added to organization', { userId, organizationId: orgRow.organization_id });
+      }
+    } catch (orgError: any) {
+      logger.warn('Could not add user to creator org', { error: orgError.message });
+    }
+
     // Log audit event
     await client.query(`
       INSERT INTO audit_log_event (
@@ -360,6 +425,23 @@ export const updateUser = async (
   updaterId: number
 ): Promise<{ success: boolean; message?: string }> => {
   logger.info('Updating user', { userId, updaterId });
+
+  // Org-scoping: verify updater and target share an org
+  const orgCheck = await pool.query(
+    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+    [updaterId]
+  );
+  const updaterOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  if (updaterOrgIds.length > 0) {
+    const targetCheck = await pool.query(
+      `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+      [userId, updaterOrgIds]
+    );
+    if (targetCheck.rows.length === 0) {
+      logger.warn('updateUser org-scoping denied', { userId, updaterId, updaterOrgIds });
+      return { success: false, message: 'User not found in your organization' };
+    }
+  }
 
   const client = await pool.connect();
 
@@ -487,6 +569,23 @@ export const deleteUser = async (
   deleterId: number
 ): Promise<{ success: boolean; message?: string }> => {
   logger.info('Deleting user', { userId, deleterId });
+
+  // Org-scoping: verify deleter and target share an org
+  const orgCheck = await pool.query(
+    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+    [deleterId]
+  );
+  const deleterOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  if (deleterOrgIds.length > 0) {
+    const targetCheck = await pool.query(
+      `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+      [userId, deleterOrgIds]
+    );
+    if (targetCheck.rows.length === 0) {
+      logger.warn('deleteUser org-scoping denied', { userId, deleterId, deleterOrgIds });
+      return { success: false, message: 'User not found in your organization' };
+    }
+  }
 
   const client = await pool.connect();
 

@@ -128,7 +128,8 @@ export const recordAuditEvent = async (
  * Uses database for fast queries
  */
 export const getAuditLogs = async (
-  params: AuditQueryParams
+  params: AuditQueryParams,
+  callerUserId?: number
 ): Promise<ApiResponse<any>> => {
   logger.info('Fetching audit logs (hybrid)', params);
 
@@ -140,7 +141,8 @@ export const getAuditLogs = async (
     startDate: params.startDate,
     endDate: params.endDate,
     limit: params.limit || 50,
-    offset: params.offset || ((params.page || 1) - 1) * (params.limit || 50)
+    offset: params.offset || ((params.page || 1) - 1) * (params.limit || 50),
+    callerUserId
   });
 
   return result;
@@ -188,7 +190,7 @@ export const getSubjectAuditTrail = async (
   }
 
   // Fallback to database
-  const dbResult = await auditDb.getSubjectAuditTrail(subjectId);
+  const dbResult = await auditDb.getSubjectAuditTrail(subjectId, userId);
   return dbResult;
 };
 
@@ -231,7 +233,7 @@ export const getFormAuditTrail = async (
   }
 
   // Fallback to database
-  const dbResult = await auditDb.getFormAuditTrail(eventCrfId);
+  const dbResult = await auditDb.getFormAuditTrail(eventCrfId, userId);
   return dbResult;
 };
 
@@ -347,13 +349,14 @@ export const exportAuditLogs = async (
 export const getComplianceReport = async (
   studyId: number,
   startDate: string,
-  endDate: string
+  endDate: string,
+  callerUserId?: number
 ): Promise<ApiResponse<any>> => {
   return auditDb.getComplianceReport({
     studyId,
     startDate,
     endDate
-  });
+  }, callerUserId);
 };
 
 /**
