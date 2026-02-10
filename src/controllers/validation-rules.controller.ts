@@ -17,8 +17,9 @@ import { ApiResponse } from '../types';
 export const getRulesForCrf = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { crfId } = req.params;
+    const caller = (req as any).user;
 
-    const rules = await validationRulesService.getRulesForCrf(parseInt(crfId));
+    const rules = await validationRulesService.getRulesForCrf(parseInt(crfId), caller?.userId);
 
     const response: ApiResponse = {
       success: true,
@@ -38,8 +39,9 @@ export const getRulesForCrf = async (req: Request, res: Response, next: NextFunc
 export const getRulesForStudy = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { studyId } = req.params;
+    const caller = (req as any).user;
 
-    const rules = await validationRulesService.getRulesForStudy(parseInt(studyId));
+    const rules = await validationRulesService.getRulesForStudy(parseInt(studyId), caller?.userId);
 
     const response: ApiResponse = {
       success: true,
@@ -59,8 +61,9 @@ export const getRulesForStudy = async (req: Request, res: Response, next: NextFu
 export const getRule = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { ruleId } = req.params;
+    const caller = (req as any).user;
 
-    const rule = await validationRulesService.getRuleById(parseInt(ruleId));
+    const rule = await validationRulesService.getRuleById(parseInt(ruleId), caller?.userId);
 
     if (!rule) {
       res.status(404).json({ success: false, message: 'Rule not found' });
@@ -338,8 +341,9 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
 export const getRulesForEventCrf = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { eventCrfId } = req.params;
+    const caller = (req as any).user;
 
-    const rules = await validationRulesService.getRulesForEventCrf(parseInt(eventCrfId));
+    const rules = await validationRulesService.getRulesForEventCrf(parseInt(eventCrfId), caller?.userId);
 
     const response: ApiResponse = {
       success: true,

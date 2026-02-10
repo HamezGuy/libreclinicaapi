@@ -11,6 +11,25 @@ import { logger } from '../../config/logger';
 import { ApiResponse, PaginatedResponse } from '../../types';
 
 /**
+ * Helper: get org member user IDs for the caller.
+ * Returns null if the caller has no org membership (root admin sees all).
+ */
+const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
+  const orgCheck = await pool.query(
+    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+    [callerUserId]
+  );
+  const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  if (callerOrgIds.length === 0) return null; // No org = super-admin, see all
+
+  const memberCheck = await pool.query(
+    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
+    [callerOrgIds]
+  );
+  return memberCheck.rows.map((r: any) => r.user_id);
+};
+
+/**
  * Get queries with filters
  */
 export const getQueries = async (
@@ -20,9 +39,10 @@ export const getQueries = async (
     status?: string;
     page?: number;
     limit?: number;
-  }
+  },
+  callerUserId?: number
 ): Promise<PaginatedResponse<any>> => {
-  logger.info('Getting queries', filters);
+  logger.info('Getting queries', { ...filters, callerUserId });
 
   try {
     const { studyId, subjectId, status, page = 1, limit = 20 } = filters;
@@ -31,6 +51,15 @@ export const getQueries = async (
     const conditions: string[] = ['dn.parent_dn_id IS NULL']; // Only parent queries
     const params: any[] = [];
     let paramIndex = 1;
+
+    // Org-scoping: only show queries owned by users in the same org
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        conditions.push(`dn.owner_id = ANY($${paramIndex++}::int[])`);
+        params.push(orgUserIds);
+      }
+    }
     
     if (studyId) {
       conditions.push(`dn.study_id = $${paramIndex++}`);
@@ -117,8 +146,8 @@ export const getQueries = async (
 /**
  * Get query by ID with responses
  */
-export const getQueryById = async (queryId: number): Promise<any> => {
-  logger.info('Getting query by ID', { queryId });
+export const getQueryById = async (queryId: number, callerUserId?: number): Promise<any> => {
+  logger.info('Getting query by ID', { queryId, callerUserId });
 
   try {
     // Get parent query with subject info through entity relationships
@@ -150,6 +179,14 @@ export const getQueryById = async (queryId: number): Promise<any> => {
     }
 
     const parent = parentResult.rows[0];
+
+    // Org-scoping: verify caller can see this query
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds && !orgUserIds.includes(parent.owner_id)) {
+        return null;
+      }
+    }
 
     // Get responses
     const responsesQuery = `
@@ -713,8 +750,8 @@ export const closeQueryWithSignatureVerified = async (
 /**
  * Get query audit trail
  */
-export const getQueryAuditTrail = async (queryId: number): Promise<any[]> => {
-  logger.info('Getting query audit trail', { queryId });
+export const getQueryAuditTrail = async (queryId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting query audit trail', { queryId, callerUserId });
 
   try {
     const query = `
@@ -737,6 +774,15 @@ export const getQueryAuditTrail = async (queryId: number): Promise<any[]> => {
     `;
 
     const result = await pool.query(query, [queryId]);
+
+    // Org-scoping: verify caller can see this query's audit trail
+    if (callerUserId && result.rows.length > 0) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        return result.rows.filter((r: any) => orgUserIds.includes(r.user_id || 0));
+      }
+    }
+
     return result.rows;
   } catch (error: any) {
     logger.error('Get query audit trail error', { error: error.message });
@@ -747,10 +793,21 @@ export const getQueryAuditTrail = async (queryId: number): Promise<any[]> => {
 /**
  * Get query statistics for a study
  */
-export const getQueryStats = async (studyId: number): Promise<any> => {
-  logger.info('Getting query statistics', { studyId });
+export const getQueryStats = async (studyId: number, callerUserId?: number): Promise<any> => {
+  logger.info('Getting query statistics', { studyId, callerUserId });
 
   try {
+    let orgFilter = '';
+    const params: any[] = [studyId];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND dn.owner_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         dnst.name as status,
@@ -758,12 +815,12 @@ export const getQueryStats = async (studyId: number): Promise<any> => {
       FROM discrepancy_note dn
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
       WHERE dn.study_id = $1
-        AND dn.parent_dn_id IS NULL
+        AND dn.parent_dn_id IS NULL${orgFilter}
       GROUP BY dnst.name
       ORDER BY count DESC
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, params);
 
     return result.rows;
   } catch (error: any) {
@@ -822,10 +879,21 @@ export const getResolutionStatuses = async (): Promise<any[]> => {
 /**
  * Get queries for a specific form (event_crf)
  */
-export const getFormQueries = async (eventCrfId: number): Promise<any[]> => {
-  logger.info('Getting form queries', { eventCrfId });
+export const getFormQueries = async (eventCrfId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting form queries', { eventCrfId, callerUserId });
 
   try {
+    let orgFilter = '';
+    const params: any[] = [eventCrfId];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND dn.owner_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         dn.discrepancy_note_id,
@@ -844,11 +912,11 @@ export const getFormQueries = async (eventCrfId: number): Promise<any[]> => {
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
       INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
       WHERE decm.event_crf_id = $1
-        AND dn.parent_dn_id IS NULL
+        AND dn.parent_dn_id IS NULL${orgFilter}
       ORDER BY dn.date_created DESC
     `;
 
-    const result = await pool.query(query, [eventCrfId]);
+    const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get form queries error', { error: error.message });
@@ -916,10 +984,21 @@ export const reassignQuery = async (
 /**
  * Get query counts by status
  */
-export const getQueryCountByStatus = async (studyId: number): Promise<any[]> => {
-  logger.info('Getting query count by status', { studyId });
+export const getQueryCountByStatus = async (studyId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting query count by status', { studyId, callerUserId });
 
   try {
+    let orgFilter = '';
+    const params: any[] = [studyId];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND dn.owner_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         rs.resolution_status_id as status_id,
@@ -927,12 +1006,12 @@ export const getQueryCountByStatus = async (studyId: number): Promise<any[]> => 
         COUNT(dn.discrepancy_note_id) as count
       FROM resolution_status rs
       LEFT JOIN discrepancy_note dn ON rs.resolution_status_id = dn.resolution_status_id 
-        AND dn.study_id = $1 AND dn.parent_dn_id IS NULL
+        AND dn.study_id = $1 AND dn.parent_dn_id IS NULL${orgFilter}
       GROUP BY rs.resolution_status_id, rs.name
       ORDER BY rs.resolution_status_id
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get query count by status error', { error: error.message });
@@ -943,10 +1022,21 @@ export const getQueryCountByStatus = async (studyId: number): Promise<any[]> => 
 /**
  * Get query counts by type
  */
-export const getQueryCountByType = async (studyId: number): Promise<any[]> => {
-  logger.info('Getting query count by type', { studyId });
+export const getQueryCountByType = async (studyId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting query count by type', { studyId, callerUserId });
 
   try {
+    let orgFilter = '';
+    const params: any[] = [studyId];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND dn.owner_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         dnt.discrepancy_note_type_id as type_id,
@@ -954,12 +1044,12 @@ export const getQueryCountByType = async (studyId: number): Promise<any[]> => {
         COUNT(dn.discrepancy_note_id) as count
       FROM discrepancy_note_type dnt
       LEFT JOIN discrepancy_note dn ON dnt.discrepancy_note_type_id = dn.discrepancy_note_type_id 
-        AND dn.study_id = $1 AND dn.parent_dn_id IS NULL
+        AND dn.study_id = $1 AND dn.parent_dn_id IS NULL${orgFilter}
       GROUP BY dnt.discrepancy_note_type_id, dnt.name
       ORDER BY dnt.discrepancy_note_type_id
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get query count by type error', { error: error.message });
@@ -970,8 +1060,8 @@ export const getQueryCountByType = async (studyId: number): Promise<any[]> => {
 /**
  * Get query thread (conversation history)
  */
-export const getQueryThread = async (queryId: number): Promise<any[]> => {
-  logger.info('Getting query thread', { queryId });
+export const getQueryThread = async (queryId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting query thread', { queryId, callerUserId });
 
   try {
     const query = `
@@ -1011,6 +1101,21 @@ export const getQueryThread = async (queryId: number): Promise<any[]> => {
     `;
 
     const result = await pool.query(query, [queryId]);
+
+    // Org-scoping: verify caller can see this query thread
+    if (callerUserId && result.rows.length > 0) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        const parentOwner = result.rows[0];
+        // Check if any user in the thread is in the caller's org
+        const hasAccess = result.rows.some((r: any) => {
+          const creatorId = r.owner_id || r.created_by_id;
+          return orgUserIds.includes(creatorId);
+        });
+        if (!hasAccess) return [];
+      }
+    }
+
     return result.rows;
   } catch (error: any) {
     logger.error('Get query thread error', { error: error.message });
@@ -1021,7 +1126,7 @@ export const getQueryThread = async (queryId: number): Promise<any[]> => {
 /**
  * Get overdue queries
  */
-export const getOverdueQueries = async (studyId: number, daysThreshold: number = 7): Promise<any[]> => {
+export const getOverdueQueries = async (studyId: number, daysThreshold: number = 7, callerUserId?: number): Promise<any[]> => {
   logger.info('Getting overdue queries', { studyId, daysThreshold });
 
   try {
@@ -1044,11 +1149,17 @@ export const getOverdueQueries = async (studyId: number, daysThreshold: number =
       WHERE dn.study_id = $1
         AND dn.parent_dn_id IS NULL
         AND dnst.name IN ('New', 'Updated', 'Resolution Proposed')
-        AND dn.date_created < NOW() - INTERVAL '${daysThreshold} days'
+        AND dn.date_created < NOW() - INTERVAL '${daysThreshold} days'${callerUserId ? ` AND dn.owner_id = ANY($2::int[])` : ''}
       ORDER BY dn.date_created ASC
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const params: any[] = [studyId];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) params.push(orgUserIds);
+    }
+
+    const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get overdue queries error', { error: error.message });
@@ -1106,8 +1217,8 @@ export const getMyAssignedQueries = async (userId: number, studyId?: number): Pr
  * This retrieves queries linked to a specific data point via dn_item_data_map.
  * Used for displaying field-level query indicators in the UI.
  */
-export const getFieldQueries = async (itemDataId: number): Promise<any[]> => {
-  logger.info('Getting field queries', { itemDataId });
+export const getFieldQueries = async (itemDataId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting field queries', { itemDataId, callerUserId });
 
   try {
     const query = `
@@ -1129,11 +1240,17 @@ export const getFieldQueries = async (itemDataId: number): Promise<any[]> => {
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
       INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
       WHERE dim.item_data_id = $1
-        AND dn.parent_dn_id IS NULL
+        AND dn.parent_dn_id IS NULL${callerUserId ? ` AND dn.owner_id = ANY($2::int[])` : ''}
       ORDER BY dn.date_created DESC
     `;
 
-    const result = await pool.query(query, [itemDataId]);
+    const params: any[] = [itemDataId];
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) params.push(orgUserIds);
+    }
+
+    const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get field queries error', { error: error.message });
@@ -1147,7 +1264,7 @@ export const getFieldQueries = async (itemDataId: number): Promise<any[]> => {
  * This retrieves queries linked to a specific field within a form instance.
  * Used when itemDataId is not known but eventCrfId and fieldName are available.
  */
-export const getQueriesByField = async (eventCrfId: number, fieldName: string): Promise<any[]> => {
+export const getQueriesByField = async (eventCrfId: number, fieldName: string, callerUserId?: number): Promise<any[]> => {
   logger.info('Getting queries by field', { eventCrfId, fieldName });
 
   try {
@@ -1170,7 +1287,7 @@ export const getQueriesByField = async (eventCrfId: number, fieldName: string): 
     }
 
     const itemDataId = itemDataResult.rows[0].item_data_id;
-    return await getFieldQueries(itemDataId);
+    return await getFieldQueries(itemDataId, callerUserId);
   } catch (error: any) {
     logger.error('Get queries by field error', { error: error.message });
     return [];
@@ -1182,10 +1299,21 @@ export const getQueriesByField = async (eventCrfId: number, fieldName: string): 
  * 
  * Returns a map of fieldName -> openQueryCount for efficient UI rendering.
  */
-export const getFormFieldQueryCounts = async (eventCrfId: number): Promise<Record<string, number>> => {
-  logger.info('Getting form field query counts', { eventCrfId });
+export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?: number): Promise<Record<string, number>> => {
+  logger.info('Getting form field query counts', { eventCrfId, callerUserId });
 
   try {
+    let orgFilter = '';
+    const params: any[] = [eventCrfId];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND dn.owner_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         i.name as field_name,
@@ -1198,11 +1326,11 @@ export const getFormFieldQueryCounts = async (eventCrfId: number): Promise<Recor
       WHERE id.event_crf_id = $1
         AND id.deleted = false
         AND dn.parent_dn_id IS NULL
-        AND rs.name NOT IN ('Closed', 'Not Applicable')
+        AND rs.name NOT IN ('Closed', 'Not Applicable')${orgFilter}
       GROUP BY i.name
     `;
 
-    const result = await pool.query(query, [eventCrfId]);
+    const result = await pool.query(query, params);
     
     const counts: Record<string, number> = {};
     for (const row of result.rows) {

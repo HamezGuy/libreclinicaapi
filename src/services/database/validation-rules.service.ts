@@ -16,6 +16,25 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 
+/**
+ * Helper: get org member user IDs for the caller.
+ * Returns null if the caller has no org membership (root admin sees all).
+ */
+const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
+  const orgCheck = await pool.query(
+    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+    [callerUserId]
+  );
+  const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  if (callerOrgIds.length === 0) return null;
+
+  const memberCheck = await pool.query(
+    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
+    [callerOrgIds]
+  );
+  return memberCheck.rows.map((r: any) => r.user_id);
+};
+
 export interface ValidationRule {
   id: number;
   crfId: number;
@@ -166,8 +185,8 @@ export const initializeValidationRulesTable = async (): Promise<boolean> => {
 /**
  * Get all validation rules for a CRF
  */
-export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> => {
-  logger.info('Getting validation rules for CRF', { crfId });
+export const getRulesForCrf = async (crfId: number, callerUserId?: number): Promise<ValidationRule[]> => {
+  logger.info('Getting validation rules for CRF', { crfId, callerUserId });
 
   // Ensure table exists before querying
   await initializeValidationRulesTable();
@@ -205,7 +224,16 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
 
     let customRules: ValidationRule[] = [];
     try {
-      const customResult = await pool.query(customRulesQuery, [crfId]);
+      let customResult = await pool.query(customRulesQuery, [crfId]);
+      
+      // Org-scoping: filter custom rules by owner
+      if (callerUserId) {
+        const orgUserIds = await getOrgMemberUserIds(callerUserId);
+        if (orgUserIds) {
+          customResult = { ...customResult, rows: customResult.rows.filter((r: any) => orgUserIds.includes(r.created_by)) };
+        }
+      }
+      
       customRules = customResult.rows.map(mapDbRowToRule);
     } catch (e: any) {
       // Table might not exist yet
@@ -349,8 +377,8 @@ export const getRulesForCrf = async (crfId: number): Promise<ValidationRule[]> =
  * 
  * Uses UNION to combine sources and GROUP BY to deduplicate
  */
-export const getRulesForStudy = async (studyId: number): Promise<{ crfId: number; crfName: string; rules: ValidationRule[] }[]> => {
-  logger.info('Getting validation rules for study', { studyId });
+export const getRulesForStudy = async (studyId: number, callerUserId?: number): Promise<{ crfId: number; crfName: string; rules: ValidationRule[] }[]> => {
+  logger.info('Getting validation rules for study', { studyId, callerUserId });
 
   try {
     // Combined query using UNION to get unique CRFs from multiple sources
@@ -409,7 +437,7 @@ export const getRulesForStudy = async (studyId: number): Promise<{ crfId: number
     // Convert to array and fetch rules for each unique CRF
     const results = [];
     for (const crf of crfMap.values()) {
-      const rules = await getRulesForCrf(crf.crfId);
+      const rules = await getRulesForCrf(crf.crfId, callerUserId);
       results.push({
         crfId: crf.crfId,
         crfName: crf.crfName,
@@ -431,7 +459,7 @@ export const getRulesForStudy = async (studyId: number): Promise<{ crfId: number
 /**
  * Get a single validation rule by ID
  */
-export const getRuleById = async (ruleId: number): Promise<ValidationRule | null> => {
+export const getRuleById = async (ruleId: number, callerUserId?: number): Promise<ValidationRule | null> => {
   // Ensure table exists
   await initializeValidationRulesTable();
   
@@ -467,6 +495,14 @@ export const getRuleById = async (ruleId: number): Promise<ValidationRule | null
     
     if (result.rows.length === 0) {
       return null;
+    }
+
+    // Org-scoping: verify caller can see this rule
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds && !orgUserIds.includes(result.rows[0].created_by)) {
+        return null;
+      }
     }
     
     return mapDbRowToRule(result.rows[0]);
@@ -1513,8 +1549,8 @@ function mapDbRowToRule(row: any): ValidationRule {
  * 
  * This ensures validation rules apply consistently to ALL form copies.
  */
-export const getRulesForEventCrf = async (eventCrfId: number): Promise<ValidationRule[]> => {
-  logger.info('Getting validation rules for event_crf', { eventCrfId });
+export const getRulesForEventCrf = async (eventCrfId: number, callerUserId?: number): Promise<ValidationRule[]> => {
+  logger.info('Getting validation rules for event_crf', { eventCrfId, callerUserId });
 
   try {
     // Get the CRF ID from the event_crf
@@ -1533,7 +1569,7 @@ export const getRulesForEventCrf = async (eventCrfId: number): Promise<Validatio
     const crfId = eventCrfResult.rows[0].crf_id;
     
     // Get rules for this CRF
-    return await getRulesForCrf(crfId);
+    return await getRulesForCrf(crfId, callerUserId);
   } catch (error: any) {
     logger.error('Get rules for event_crf error', { error: error.message, eventCrfId });
     throw error;

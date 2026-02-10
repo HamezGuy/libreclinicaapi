@@ -8,6 +8,7 @@ import * as queryService from '../services/database/query.service';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, subjectId, status, page, limit } = req.query;
+  const caller = (req as any).user;
 
   const result = await queryService.getQueries({
     studyId: studyId ? parseInt(studyId as string) : undefined,
@@ -15,15 +16,16 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     status: status as string,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 20
-  });
+  }, caller?.userId);
 
   res.json(result);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getQueryById(parseInt(id));
+  const result = await queryService.getQueryById(parseInt(id), caller?.userId);
 
   if (!result) {
     res.status(404).json({ success: false, message: 'Query not found' });
@@ -184,21 +186,23 @@ export const closeWithSignature = asyncHandler(async (req: Request, res: Respons
  */
 export const getAuditTrail = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getQueryAuditTrail(parseInt(id));
+  const result = await queryService.getQueryAuditTrail(parseInt(id), caller?.userId);
 
   res.json({ success: true, data: result });
 });
 
 export const stats = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
+  const caller = (req as any).user;
 
   if (!studyId) {
     res.status(400).json({ success: false, message: 'studyId is required' });
     return;
   }
 
-  const result = await queryService.getQueryStats(parseInt(studyId as string));
+  const result = await queryService.getQueryStats(parseInt(studyId as string), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -224,8 +228,9 @@ export const getResolutionStatuses = asyncHandler(async (req: Request, res: Resp
  */
 export const getFormQueries = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getFormQueries(parseInt(eventCrfId));
+  const result = await queryService.getFormQueries(parseInt(eventCrfId), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -267,13 +272,14 @@ export const reassign = asyncHandler(async (req: Request, res: Response) => {
  */
 export const countByStatus = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
+  const caller = (req as any).user;
 
   if (!studyId) {
     res.status(400).json({ success: false, message: 'studyId is required' });
     return;
   }
 
-  const result = await queryService.getQueryCountByStatus(parseInt(studyId as string));
+  const result = await queryService.getQueryCountByStatus(parseInt(studyId as string), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -283,13 +289,14 @@ export const countByStatus = asyncHandler(async (req: Request, res: Response) =>
  */
 export const countByType = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
+  const caller = (req as any).user;
 
   if (!studyId) {
     res.status(400).json({ success: false, message: 'studyId is required' });
     return;
   }
 
-  const result = await queryService.getQueryCountByType(parseInt(studyId as string));
+  const result = await queryService.getQueryCountByType(parseInt(studyId as string), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -299,8 +306,9 @@ export const countByType = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getThread = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getQueryThread(parseInt(id));
+  const result = await queryService.getQueryThread(parseInt(id), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -310,6 +318,7 @@ export const getThread = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getOverdue = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, days } = req.query;
+  const caller = (req as any).user;
 
   if (!studyId) {
     res.status(400).json({ success: false, message: 'studyId is required' });
@@ -318,7 +327,8 @@ export const getOverdue = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await queryService.getOverdueQueries(
     parseInt(studyId as string),
-    parseInt(days as string) || 7
+    parseInt(days as string) || 7,
+    caller?.userId
   );
 
   res.json({ success: true, data: result });
@@ -344,8 +354,9 @@ export const getMyAssigned = asyncHandler(async (req: Request, res: Response) =>
  */
 export const getFieldQueries = asyncHandler(async (req: Request, res: Response) => {
   const { itemDataId } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getFieldQueries(parseInt(itemDataId));
+  const result = await queryService.getFieldQueries(parseInt(itemDataId), caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -355,8 +366,9 @@ export const getFieldQueries = asyncHandler(async (req: Request, res: Response) 
  */
 export const getQueriesByField = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId, fieldName } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getQueriesByField(parseInt(eventCrfId), fieldName);
+  const result = await queryService.getQueriesByField(parseInt(eventCrfId), fieldName, caller?.userId);
 
   res.json({ success: true, data: result });
 });
@@ -367,8 +379,9 @@ export const getQueriesByField = asyncHandler(async (req: Request, res: Response
  */
 export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const caller = (req as any).user;
 
-  const result = await queryService.getFormFieldQueryCounts(parseInt(eventCrfId));
+  const result = await queryService.getFormFieldQueryCounts(parseInt(eventCrfId), caller?.userId);
 
   res.json({ success: true, data: result });
 });
