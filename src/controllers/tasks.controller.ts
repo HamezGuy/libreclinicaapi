@@ -23,6 +23,7 @@ export const getTasks = asyncHandler(async (req: Request, res: Response) => {
   const filters: tasksService.TaskFilters = {
     userId: user?.userId,
     username: user?.username,
+    callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
     types: types ? (types as string).split(',') as tasksService.TaskType[] : undefined,
     status: status as tasksService.TaskStatus | undefined,
@@ -42,11 +43,13 @@ export const getTasks = asyncHandler(async (req: Request, res: Response) => {
  * GET /api/tasks/user/:username
  */
 export const getUserTasks = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
   const { username } = req.params;
   const { studyId, types, status, priority, limit } = req.query;
   
   const filters: tasksService.TaskFilters = {
     username,
+    callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
     types: types ? (types as string).split(',') as tasksService.TaskType[] : undefined,
     status: status as tasksService.TaskStatus | undefined,
@@ -70,6 +73,7 @@ export const getTaskSummary = asyncHandler(async (req: Request, res: Response) =
   const filters: tasksService.TaskFilters = {
     userId: user?.userId,
     username: user?.username,
+    callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
     includeQueries: includeQueries !== 'false' // Default to true
   };
@@ -84,11 +88,13 @@ export const getTaskSummary = asyncHandler(async (req: Request, res: Response) =
  * GET /api/tasks/user/:username/summary
  */
 export const getUserTaskSummary = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
   const { username } = req.params;
   const { studyId } = req.query;
   
   const filters: tasksService.TaskFilters = {
     username,
+    callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined
   };
   
@@ -136,6 +142,7 @@ export const getTasksByType = asyncHandler(async (req: Request, res: Response) =
   const filters: tasksService.TaskFilters = {
     userId: user?.userId,
     username: user?.username,
+    callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
     types: [type as tasksService.TaskType],
     limit: limit ? parseInt(limit as string) : 50
@@ -157,6 +164,7 @@ export const getOverdueTasks = asyncHandler(async (req: Request, res: Response) 
   const filters: tasksService.TaskFilters = {
     userId: user?.userId,
     username: user?.username,
+    callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
     status: 'overdue',
     limit: limit ? parseInt(limit as string) : 50

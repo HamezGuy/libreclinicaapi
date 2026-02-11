@@ -1916,8 +1916,10 @@ export const createForm = async (
             const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
             
             for (const condition of field.showWhen) {
-              // Find the control item's item_form_metadata_id by field name
-              const controlIfmResult = await client.query(`
+              // Find the control item's item_form_metadata_id
+              // condition.fieldId may be the label (stored as item.name) OR the auto-generated snake_case name
+              // Try exact match first, then try matching against all field labels/names
+              let controlIfmResult = await client.query(`
                 SELECT ifm.item_form_metadata_id, i.name
                 FROM item_form_metadata ifm
                 INNER JOIN item i ON ifm.item_id = i.item_id
@@ -1925,8 +1927,27 @@ export const createForm = async (
                 LIMIT 1
               `, [crfVersionId, condition.fieldId]);
               
+              // If no match, the fieldId might be a snake_case name - look up by matching against field labels
+              if (controlIfmResult.rows.length === 0) {
+                // Find the label from the fields array that matches this fieldId as a name
+                const matchingField = data.fields?.find(f => 
+                  (f.name === condition.fieldId) || 
+                  (f.label && f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') === condition.fieldId)
+                );
+                if (matchingField) {
+                  controlIfmResult = await client.query(`
+                    SELECT ifm.item_form_metadata_id, i.name
+                    FROM item_form_metadata ifm
+                    INNER JOIN item i ON ifm.item_id = i.item_id
+                    WHERE ifm.crf_version_id = $1 AND i.name = $2
+                    LIMIT 1
+                  `, [crfVersionId, matchingField.label || matchingField.name]);
+                }
+              }
+              
               const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
-              const controlItemName = condition.fieldId || '';
+              // Store the label (what item.name contains) for consistent round-tripping
+              const controlItemName = controlIfmResult.rows[0]?.name || condition.fieldId || '';
               
               // Store operator metadata in message field as JSON so non-equals operators survive round-trip
               // SCD natively only supports equality, so we encode the operator in the message
@@ -1956,6 +1977,8 @@ export const createForm = async (
               logger.debug('Created SCD skip logic', {
                 targetField: field.label,
                 controlField: condition.fieldId,
+                controlItemName,
+                controlIfmId,
                 triggerValue: condition.value
               });
             }
@@ -2382,7 +2405,9 @@ export const updateForm = async (
             const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
             
             for (const condition of field.showWhen) {
-              const controlIfmResult = await client.query(`
+              // Find the control item's item_form_metadata_id
+              // condition.fieldId may be the label (stored as item.name) OR the auto-generated snake_case name
+              let controlIfmResult = await client.query(`
                 SELECT ifm.item_form_metadata_id, i.name
                 FROM item_form_metadata ifm
                 INNER JOIN item i ON ifm.item_id = i.item_id
@@ -2390,8 +2415,26 @@ export const updateForm = async (
                 LIMIT 1
               `, [crfVersionId, condition.fieldId]);
               
+              // If no match, the fieldId might be a snake_case name - look up by matching against field labels
+              if (controlIfmResult.rows.length === 0) {
+                const matchingField = data.fields?.find(f => 
+                  (f.name === condition.fieldId) || 
+                  (f.label && f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') === condition.fieldId)
+                );
+                if (matchingField) {
+                  controlIfmResult = await client.query(`
+                    SELECT ifm.item_form_metadata_id, i.name
+                    FROM item_form_metadata ifm
+                    INNER JOIN item i ON ifm.item_id = i.item_id
+                    WHERE ifm.crf_version_id = $1 AND i.name = $2
+                    LIMIT 1
+                  `, [crfVersionId, matchingField.label || matchingField.name]);
+                }
+              }
+              
               const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
-              const controlItemName = condition.fieldId || '';
+              // Store the label (what item.name contains) for consistent round-tripping
+              const controlItemName = controlIfmResult.rows[0]?.name || condition.fieldId || '';
               
               // Store operator in message as JSON for non-equals operators
               const scdMessage = JSON.stringify({

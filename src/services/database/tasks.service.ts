@@ -29,6 +29,24 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 
+/**
+ * Helper: get org member user IDs for the caller.
+ * Returns null if the caller has no org membership (root admin sees all).
+ */
+const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
+  const orgCheck = await pool.query(
+    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+    [callerUserId]
+  );
+  if (orgCheck.rows.length === 0) return null; // No org = root admin, sees all
+  const orgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  const members = await pool.query(
+    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
+    [orgIds]
+  );
+  return members.rows.map((r: any) => r.user_id);
+};
+
 // Task type enumeration matching LibreClinica data sources
 export type TaskType = 
   | 'query'              // From discrepancy_note
@@ -103,6 +121,7 @@ export interface TaskSummary {
 export interface TaskFilters {
   userId?: number;
   username?: string;
+  callerUserId?: number;  // For org-scoping
   studyId?: number;
   types?: TaskType[];
   status?: TaskStatus;
@@ -171,39 +190,50 @@ export async function getUserTasks(filters: TaskFilters): Promise<{ success: boo
       userStudyIds = await getUserStudyIds(userId);
     }
     
+    // Org-scoping: resolve the set of user IDs in the caller's organization
+    // If caller has no org (root admin), orgUserIds will be null => no org filter applied
+    let orgUserIds: number[] | null = null;
+    const callerUserId = filters.callerUserId || userId;
+    if (callerUserId) {
+      orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        logger.info('Org-scoping tasks', { callerUserId, orgMemberCount: orgUserIds.length });
+      }
+    }
+    
     // 1. QUERIES - From discrepancy_note (assigned_user_id or owner_id matches user)
     if (types.includes('query') && includeQueries) {
-      const queries = await getQueryTasks(userId, filters.studyId, limit);
+      const queries = await getQueryTasks(userId, filters.studyId, limit, orgUserIds);
       tasks.push(...queries);
     }
     
     // 2. SCHEDULED VISITS - From study_event (owner_id matches user)
     if (types.includes('scheduled_visit')) {
-      const scheduledVisits = await getScheduledVisitTasks(userId, filters.studyId, userStudyIds, limit);
+      const scheduledVisits = await getScheduledVisitTasks(userId, filters.studyId, userStudyIds, limit, orgUserIds);
       tasks.push(...scheduledVisits);
     }
     
     // 3. DATA ENTRY - Events with data entry started (owner_id matches)
     if (types.includes('data_entry')) {
-      const dataEntryTasks = await getDataEntryTasks(userId, filters.studyId, userStudyIds, limit);
+      const dataEntryTasks = await getDataEntryTasks(userId, filters.studyId, userStudyIds, limit, orgUserIds);
       tasks.push(...dataEntryTasks);
     }
     
     // 4. FORM COMPLETION - Incomplete event_crf records (owner_id matches)
     if (types.includes('form_completion')) {
-      const formTasks = await getFormCompletionTasks(userId, filters.studyId, userStudyIds, limit);
+      const formTasks = await getFormCompletionTasks(userId, filters.studyId, userStudyIds, limit, orgUserIds);
       tasks.push(...formTasks);
     }
     
     // 5. SDV REQUIRED - event_crf with sdv_status = false (for CRAs with access)
     if (types.includes('sdv_required')) {
-      const sdvTasks = await getSDVTasks(userId, filters.studyId, userStudyIds, limit);
+      const sdvTasks = await getSDVTasks(userId, filters.studyId, userStudyIds, limit, orgUserIds);
       tasks.push(...sdvTasks);
     }
     
     // 6. SIGNATURE REQUIRED - Completed forms needing e-signature (owner_id matches)
     if (types.includes('signature_required')) {
-      const signatureTasks = await getSignatureTasks(userId, filters.studyId, userStudyIds, limit);
+      const signatureTasks = await getSignatureTasks(userId, filters.studyId, userStudyIds, limit, orgUserIds);
       tasks.push(...signatureTasks);
     }
     
@@ -284,7 +314,7 @@ export async function getTaskSummary(filters: TaskFilters): Promise<{ success: b
 // ============ QUERY TASKS (discrepancy_note) ============
 // Queries where user is assigned_user_id OR owner_id
 
-async function getQueryTasks(userId: number | undefined, studyId: number | undefined, limit: number): Promise<Task[]> {
+async function getQueryTasks(userId: number | undefined, studyId: number | undefined, limit: number, orgUserIds: number[] | null = null): Promise<Task[]> {
   let query = `
     SELECT 
       dn.discrepancy_note_id,
@@ -333,6 +363,13 @@ async function getQueryTasks(userId: number | undefined, studyId: number | undef
   if (studyId) {
     query += ` AND dn.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  }
+  
+  // Org-scoping: only show queries owned by users in the same org
+  if (orgUserIds) {
+    query += ` AND dn.owner_id = ANY($${paramIdx}::int[])`;
+    params.push(orgUserIds);
     paramIdx++;
   }
   
@@ -410,7 +447,8 @@ async function getScheduledVisitTasks(
   userId: number | undefined, 
   studyId: number | undefined, 
   userStudyIds: number[],
-  limit: number
+  limit: number,
+  orgUserIds: number[] | null = null
 ): Promise<Task[]> {
   let query = `
     SELECT 
@@ -462,6 +500,13 @@ async function getScheduledVisitTasks(
   if (studyId) {
     query += ` AND s.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  }
+  
+  // Org-scoping: only show visits owned by users in the same org
+  if (orgUserIds) {
+    query += ` AND se.owner_id = ANY($${paramIdx}::int[])`;
+    params.push(orgUserIds);
     paramIdx++;
   }
   
@@ -534,7 +579,8 @@ async function getDataEntryTasks(
   userId: number | undefined, 
   studyId: number | undefined, 
   userStudyIds: number[],
-  limit: number
+  limit: number,
+  orgUserIds: number[] | null = null
 ): Promise<Task[]> {
   let query = `
     SELECT 
@@ -582,6 +628,13 @@ async function getDataEntryTasks(
   if (studyId) {
     query += ` AND s.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  }
+  
+  // Org-scoping: only show data entry tasks owned by users in the same org
+  if (orgUserIds) {
+    query += ` AND se.owner_id = ANY($${paramIdx}::int[])`;
+    params.push(orgUserIds);
     paramIdx++;
   }
   
@@ -640,7 +693,8 @@ async function getFormCompletionTasks(
   userId: number | undefined, 
   studyId: number | undefined, 
   userStudyIds: number[],
-  limit: number
+  limit: number,
+  orgUserIds: number[] | null = null
 ): Promise<Task[]> {
   let query = `
     SELECT 
@@ -695,6 +749,13 @@ async function getFormCompletionTasks(
   if (studyId) {
     query += ` AND s.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  }
+  
+  // Org-scoping: only show form completion tasks owned by users in the same org
+  if (orgUserIds) {
+    query += ` AND ec.owner_id = ANY($${paramIdx}::int[])`;
+    params.push(orgUserIds);
     paramIdx++;
   }
   
@@ -761,7 +822,8 @@ async function getSDVTasks(
   userId: number | undefined, 
   studyId: number | undefined, 
   userStudyIds: number[],
-  limit: number
+  limit: number,
+  orgUserIds: number[] | null = null
 ): Promise<Task[]> {
   let query = `
     SELECT 
@@ -804,6 +866,13 @@ async function getSDVTasks(
   } else if (studyId) {
     query += ` AND s.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  }
+  
+  // Org-scoping: only show SDV tasks for forms owned by users in the same org
+  if (orgUserIds) {
+    query += ` AND ec.owner_id = ANY($${paramIdx}::int[])`;
+    params.push(orgUserIds);
     paramIdx++;
   }
   
@@ -866,7 +935,8 @@ async function getSignatureTasks(
   userId: number | undefined, 
   studyId: number | undefined, 
   userStudyIds: number[],
-  limit: number
+  limit: number,
+  orgUserIds: number[] | null = null
 ): Promise<Task[]> {
   let query = `
     SELECT 
@@ -914,6 +984,13 @@ async function getSignatureTasks(
   if (studyId) {
     query += ` AND s.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  }
+  
+  // Org-scoping: only show signature tasks for forms owned by users in the same org
+  if (orgUserIds) {
+    query += ` AND ec.owner_id = ANY($${paramIdx}::int[])`;
+    params.push(orgUserIds);
     paramIdx++;
   }
   
