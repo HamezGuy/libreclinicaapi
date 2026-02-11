@@ -404,31 +404,14 @@ export const studySchemas = {
         'string.pattern.base': 'Study identifier can only contain letters, numbers, hyphens, and underscores',
         'any.required': 'Protocol number is required'
       }),
-    principalInvestigator: Joi.string().required().max(255)
-      .messages({
-        'any.required': 'Principal Investigator is required for clinical trials'
-      }),
-    sponsor: Joi.string().required().max(255)
-      .messages({
-        'any.required': 'Sponsor is required for clinical trials'
-      }),
-    phase: Joi.string().required().valid('I', 'II', 'III', 'IV', 'N/A', 'i', 'ii', 'iii', 'iv', 'phase_i', 'phase_ii', 'phase_iii', 'phase_iv')
-      .messages({
-        'any.required': 'Study phase is required',
-        'any.only': 'Phase must be I, II, III, IV, or N/A'
-      }),
-    expectedTotalEnrollment: Joi.number().integer().min(1).required()
-      .messages({
-        'any.required': 'Expected enrollment is required',
-        'number.min': 'Expected enrollment must be at least 1'
-      }),
+    principalInvestigator: Joi.string().optional().max(255).allow(''),
+    sponsor: Joi.string().optional().max(255).allow(''),
+    phase: Joi.string().optional().valid('I', 'II', 'III', 'IV', 'N/A', 'i', 'ii', 'iii', 'iv', 'phase_i', 'phase_ii', 'phase_iii', 'phase_iv', '').allow(''),
+    expectedTotalEnrollment: Joi.number().integer().min(0).optional().allow(null),
     datePlannedStart: Joi.alternatives().try(
       Joi.date().iso(),
-      Joi.string().min(1)
-    ).required()
-      .messages({
-        'any.required': 'Planned start date is required'
-      }),
+      Joi.string().allow('')
+    ).optional(),
 
     // Optional identification fields
     description: Joi.string().optional().max(100000).allow(''),

@@ -796,20 +796,20 @@ export const createStudy = async (
       data.secondaryIdentifier || null,                               // $3  secondary_identifier
       data.name,                                                       // $4  name
       data.officialTitle || null,                                     // $5  official_title
-      data.summary || '',                                              // $6  summary
+      data.summary || null,                                             // $6  summary
       data.protocolDescription || null,                               // $7  protocol_description
       data.protocolDateVerification || null,                          // $8  protocol_date_verification
       
       // Timeline
       data.datePlannedStart || null,                                  // $9  date_planned_start
       data.datePlannedEnd || null,                                    // $10 date_planned_end
-      data.expectedTotalEnrollment || 0,                              // $11 expected_total_enrollment
+      data.expectedTotalEnrollment || null,                           // $11 expected_total_enrollment
       userId,                                                          // $12 owner_id
       
       // Classification
       data.protocolType || 'interventional',                          // $13 protocol_type
       data.phase || null,                                              // $14 phase
-      data.sponsor || '',                                              // $15 sponsor
+      data.sponsor || null,                                            // $15 sponsor
       data.collaborators || null,                                     // $16 collaborators
       data.principalInvestigator || null,                             // $17 principal_investigator
       
