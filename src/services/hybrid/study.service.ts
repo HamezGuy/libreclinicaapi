@@ -904,13 +904,29 @@ export const createStudy = async (
       const userParams = (data as any).studyParameters || {};
       
       // Define default parameters with user overrides
+      // Accept both individual keys (legacy) and combined/DB-matching keys (new frontend)
+      
+      // Resolve subjectIdPrefixSuffix: accept combined key OR individual prefix/suffix keys
+      const resolvedPrefixSuffix = userParams.subjectIdPrefixSuffix 
+        || (userParams.subjectIdPrefix || userParams.subjectIdSuffix 
+            ? `${userParams.subjectIdPrefix || ''}|${userParams.subjectIdSuffix || ''}` 
+            : '');
+      
+      // Resolve personIdShownOnCRF: accept DB key (uppercase CRF) OR legacy key (lowercase)
+      const resolvedPersonIdOnCrf = userParams.personIdShownOnCRF || userParams.personIdShownOnCrf || 'false';
+      
+      // Resolve eventLocationRequired: accept string values ('required'/'not_used') OR boolean
+      const resolvedEventLocation = 
+        userParams.eventLocationRequired === 'required' ? 'required' :
+        userParams.eventLocationRequired === 'not_used' ? 'not_used' :
+        userParams.eventLocationRequired === true ? 'required' : 'not_used';
+      
       const defaultParams = [
         { handle: 'collectDob', value: userParams.collectDob || '1' },
         { handle: 'genderRequired', value: userParams.genderRequired || 'true' },
         { handle: 'subjectPersonIdRequired', value: userParams.subjectPersonIdRequired || 'optional' },
         { handle: 'subjectIdGeneration', value: userParams.subjectIdGeneration || 'manual' },
-        { handle: 'subjectIdPrefixSuffix', value: userParams.subjectIdPrefix || userParams.subjectIdSuffix ? 
-            `${userParams.subjectIdPrefix || ''}|${userParams.subjectIdSuffix || ''}` : '' },
+        { handle: 'subjectIdPrefixSuffix', value: resolvedPrefixSuffix },
         { handle: 'studySubjectIdLabel', value: userParams.studySubjectIdLabel || 'Subject ID' },
         { handle: 'secondaryIdLabel', value: userParams.secondaryIdLabel || 'Secondary ID' },
         { handle: 'discrepancyManagement', value: userParams.discrepancyManagement !== undefined ? 
@@ -921,11 +937,11 @@ export const createStudy = async (
         { handle: 'interviewDateRequired', value: 'required' },
         { handle: 'interviewDateDefault', value: 'eventDate' },
         { handle: 'interviewDateEditable', value: 'true' },
-        { handle: 'personIdShownOnCRF', value: userParams.personIdShownOnCrf || 'false' },
+        { handle: 'personIdShownOnCRF', value: resolvedPersonIdOnCrf },
         { handle: 'secondaryLabelViewable', value: userParams.secondaryLabelViewable !== undefined ?
             String(userParams.secondaryLabelViewable) : 'false' },
         { handle: 'adminForcedReasonForChange', value: 'true' },
-        { handle: 'eventLocationRequired', value: userParams.eventLocationRequired ? 'required' : 'not_used' },
+        { handle: 'eventLocationRequired', value: resolvedEventLocation },
         { handle: 'dateOfEnrollmentForStudyRequired', value: userParams.dateOfEnrollmentForStudyRequired || 'true' },
         { handle: 'allowAdministrativeEditing', value: userParams.allowAdministrativeEditing !== undefined ?
             String(userParams.allowAdministrativeEditing) : 'true' },
