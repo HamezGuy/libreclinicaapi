@@ -588,11 +588,25 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
     const scdByItemId = new Map<number, any[]>();
     for (const scd of scdResult.rows) {
       const conditions = scdByItemId.get(scd.target_item_id) || [];
+      
+      // Parse operator from message field (stored as JSON by our API)
+      let operator = 'equals';
+      let message = scd.message || '';
+      try {
+        const parsed = JSON.parse(scd.message);
+        if (parsed && parsed.operator) {
+          operator = parsed.operator;
+          message = parsed.message || '';
+        }
+      } catch {
+        // Not JSON - legacy plain text message, default to equals
+      }
+      
       conditions.push({
         fieldId: scd.control_field_name || scd.control_item_name,
-        operator: 'equals',  // SCD uses simple equality check
+        operator,
         value: scd.option_value,
-        message: scd.message
+        message
       });
       scdByItemId.set(scd.target_item_id, conditions);
     }
@@ -680,9 +694,14 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         validationRules.push({ type: 'required', message: 'This field is required' });
       }
       if (item.validation_pattern) {
+        // Detect Excel formula rules stored with =FORMULA: prefix
+        const isFormula = item.validation_pattern.startsWith('=FORMULA:');
+        const patternValue = isFormula 
+          ? item.validation_pattern.substring(9) // Strip =FORMULA: prefix
+          : item.validation_pattern;
         validationRules.push({ 
-          type: 'pattern', 
-          value: item.validation_pattern,
+          type: isFormula ? 'formula' : 'pattern', 
+          value: patternValue,
           message: item.validation_message || 'Invalid format'
         });
       }
@@ -777,13 +796,24 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         calculationFormula: extendedProps.calculationFormula,
         dependsOn: extendedProps.dependsOn,
         
-        // Conditional Logic - merge from scd_item_metadata (LibreClinica skip logic) and extended props
-        showWhen: scdByItemId.get(item.item_id) || extendedProps.showWhen || [],
+        // Conditional Logic / Branching
+        // Use extendedProps as primary source (preserves all operators), fall back to SCD (equals-only)
+        showWhen: (extendedProps.showWhen && extendedProps.showWhen.length > 0) 
+          ? extendedProps.showWhen 
+          : (scdByItemId.get(item.item_id) || []),
+        hideWhen: extendedProps.hideWhen || [],
         requiredWhen: extendedProps.requiredWhen,
         conditionalLogic: extendedProps.conditionalLogic,
         visibilityConditions: extendedProps.visibilityConditions,
         // Flag to indicate if using LibreClinica native SCD
         hasNativeScd: scdByItemId.has(item.item_id),
+        
+        // Form Linking / Branch to Another Form
+        linkedFormId: extendedProps.linkedFormId,
+        linkedFormName: extendedProps.linkedFormName,
+        linkedFormTriggerValue: extendedProps.linkedFormTriggerValue,
+        linkedFormRequired: extendedProps.linkedFormRequired,
+        formLinks: extendedProps.formLinks,
         
         // Custom
         customAttributes: extendedProps.customAttributes,
@@ -1320,11 +1350,19 @@ interface FormField {
   calculationFormula?: string;
   dependsOn?: string[];
   
-  // Conditional Logic
+  // Conditional Logic / Branching
   showWhen?: ConditionalRule[];
+  hideWhen?: ConditionalRule[];
   requiredWhen?: ConditionalRule[];
   conditionalLogic?: any[];
   visibilityConditions?: any[];
+  
+  // Form Linking / Branch to Another Form
+  linkedFormId?: number | string;
+  linkedFormName?: string;
+  linkedFormTriggerValue?: any;
+  linkedFormRequired?: boolean;
+  formLinks?: any[];
   
   // Custom attributes
   customAttributes?: Record<string, any>;
@@ -1382,11 +1420,19 @@ const serializeExtendedProperties = (field: FormField): string => {
     calculationFormula: field.calculationFormula,
     dependsOn: field.dependsOn,
     
-    // Conditional Logic
+    // Conditional Logic / Branching
     showWhen: field.showWhen,
+    hideWhen: field.hideWhen,
     requiredWhen: field.requiredWhen,
     conditionalLogic: field.conditionalLogic,
     visibilityConditions: field.visibilityConditions,
+    
+    // Form Linking / Branch to Another Form
+    linkedFormId: field.linkedFormId,
+    linkedFormName: field.linkedFormName,
+    linkedFormTriggerValue: field.linkedFormTriggerValue,
+    linkedFormRequired: field.linkedFormRequired,
+    formLinks: field.formLinks,
     
     // Clinical
     unit: field.unit,
@@ -1882,6 +1928,13 @@ export const createForm = async (
               const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
               const controlItemName = condition.fieldId || '';
               
+              // Store operator metadata in message field as JSON so non-equals operators survive round-trip
+              // SCD natively only supports equality, so we encode the operator in the message
+              const scdMessage = JSON.stringify({
+                operator: condition.operator || 'equals',
+                message: (condition as any).message || ''
+              });
+              
               // Insert into scd_item_metadata (LibreClinica skip logic table)
               await client.query(`
                 INSERT INTO scd_item_metadata (
@@ -1897,7 +1950,7 @@ export const createForm = async (
                 controlIfmId,
                 controlItemName,
                 condition.value || '',
-                (condition as any).message || ''
+                scdMessage
               ]);
               
               logger.debug('Created SCD skip logic', {
@@ -2298,6 +2351,73 @@ export const updateForm = async (
           UPDATE item_form_metadata SET show_item = false
           WHERE item_id = $1 AND crf_version_id = $2
         `, [item.item_id, crfVersionId]);
+      }
+
+      // ========================================
+      // SCD (Skip Logic) - Delete old and recreate
+      // ========================================
+      // Delete all existing SCD records for this CRF version
+      await client.query(`
+        DELETE FROM scd_item_metadata 
+        WHERE scd_item_form_metadata_id IN (
+          SELECT item_form_metadata_id FROM item_form_metadata WHERE crf_version_id = $1
+        )
+      `, [crfVersionId]);
+      
+      // Recreate SCD records from updated showWhen conditions
+      for (let i = 0; i < data.fields.length; i++) {
+        const field = data.fields[i];
+        
+        if (field.showWhen && Array.isArray(field.showWhen) && field.showWhen.length > 0) {
+          // Get the target item_form_metadata_id for this field
+          const targetIfmResult = await client.query(`
+            SELECT ifm.item_form_metadata_id
+            FROM item_form_metadata ifm
+            INNER JOIN item i ON ifm.item_id = i.item_id
+            WHERE ifm.crf_version_id = $1 AND i.name = $2
+            LIMIT 1
+          `, [crfVersionId, field.label || field.name]);
+          
+          if (targetIfmResult.rows.length > 0) {
+            const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
+            
+            for (const condition of field.showWhen) {
+              const controlIfmResult = await client.query(`
+                SELECT ifm.item_form_metadata_id, i.name
+                FROM item_form_metadata ifm
+                INNER JOIN item i ON ifm.item_id = i.item_id
+                WHERE ifm.crf_version_id = $1 AND i.name = $2
+                LIMIT 1
+              `, [crfVersionId, condition.fieldId]);
+              
+              const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
+              const controlItemName = condition.fieldId || '';
+              
+              // Store operator in message as JSON for non-equals operators
+              const scdMessage = JSON.stringify({
+                operator: condition.operator || 'equals',
+                message: (condition as any).message || ''
+              });
+              
+              await client.query(`
+                INSERT INTO scd_item_metadata (
+                  scd_item_form_metadata_id, 
+                  control_item_form_metadata_id, 
+                  control_item_name, 
+                  option_value, 
+                  message, 
+                  version
+                ) VALUES ($1, $2, $3, $4, $5, 1)
+              `, [
+                targetIfmId,
+                controlIfmId,
+                controlItemName,
+                condition.value || '',
+                scdMessage
+              ]);
+            }
+          }
+        }
       }
 
       logger.info('Form fields updated', { crfId, fieldCount: data.fields.length });
