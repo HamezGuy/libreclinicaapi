@@ -803,7 +803,7 @@ export const createStudy = async (
       // Timeline
       data.datePlannedStart || null,                                  // $9  date_planned_start
       data.datePlannedEnd || null,                                    // $10 date_planned_end
-      data.expectedTotalEnrollment || null,                           // $11 expected_total_enrollment
+      data.expectedTotalEnrollment ?? null,                            // $11 expected_total_enrollment (use ?? to preserve 0)
       userId,                                                          // $12 owner_id
       
       // Classification
@@ -829,7 +829,7 @@ export const createStudy = async (
       data.medlineIdentifier || null,                                 // $28 medline_identifier
       data.url || null,                                                // $29 url
       data.urlDescription || null,                                    // $30 url_description
-      data.resultsReference || null,                                  // $31 results_reference
+      data.resultsReference ?? null,                                   // $31 results_reference (use ?? to preserve false)
       
       // Eligibility
       data.conditions || null,                                        // $32 conditions
@@ -838,7 +838,7 @@ export const createStudy = async (
       data.gender || null,                                             // $35 gender
       data.ageMin || null,                                             // $36 age_min
       data.ageMax || null,                                             // $37 age_max
-      data.healthyVolunteerAccepted || null,                          // $38 healthy_volunteer_accepted
+      data.healthyVolunteerAccepted ?? null,                           // $38 healthy_volunteer_accepted (use ?? to preserve false)
       
       // Study Design
       data.purpose || null,                                            // $39 purpose
