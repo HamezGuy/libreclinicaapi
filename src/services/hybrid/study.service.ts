@@ -1252,6 +1252,13 @@ export const updateStudy = async (
   try {
     await client.query('BEGIN');
 
+    // Check study exists before updating
+    const existsResult = await client.query('SELECT study_id FROM study WHERE study_id = $1', [studyId]);
+    if (existsResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Study not found' };
+    }
+
     const updates: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
