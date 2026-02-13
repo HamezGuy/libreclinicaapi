@@ -508,6 +508,21 @@ export const updateUser = async (
       params.push(data.passwdChallengeAnswer);
     }
 
+    if ((data as any).timeZone !== undefined) {
+      updates.push(`time_zone = $${paramIndex++}`);
+      params.push((data as any).timeZone);
+    }
+
+    if ((data as any).runWebservices !== undefined) {
+      updates.push(`run_webservices = $${paramIndex++}`);
+      params.push((data as any).runWebservices);
+    }
+
+    if ((data as any).enableApiKey !== undefined) {
+      updates.push(`enable_api_key = $${paramIndex++}`);
+      params.push((data as any).enableApiKey);
+    }
+
     if (updates.length === 0) {
       return {
         success: false,
@@ -528,6 +543,63 @@ export const updateUser = async (
     `;
 
     await client.query(updateQuery, params);
+
+    // Handle role change: update study_user_role for the user's active study
+    if ((data as any).role) {
+      const newRole = (data as any).role;
+      const roleNameMap: Record<string, string> = {
+        'admin': 'admin',
+        'coordinator': 'coordinator',
+        'investigator': 'Investigator',
+        'monitor': 'monitor',
+        'data_entry': 'ra',
+        'ra': 'ra',
+        'viewer': 'ra'
+      };
+      const lcRoleName = roleNameMap[newRole.toLowerCase()] || newRole;
+
+      // Get the user's username
+      const userNameResult = await client.query(
+        `SELECT user_name, active_study FROM user_account WHERE user_id = $1`,
+        [userId]
+      );
+      if (userNameResult.rows.length > 0) {
+        const userName = userNameResult.rows[0].user_name;
+        const activeStudy = userNameResult.rows[0].active_study || 1;
+
+        // Update existing role or insert new one for the active study
+        const existingRole = await client.query(
+          `SELECT role_id FROM study_user_role WHERE user_name = $1 AND study_id = $2 AND status_id = 1`,
+          [userName, activeStudy]
+        );
+        if (existingRole.rows.length > 0) {
+          await client.query(
+            `UPDATE study_user_role SET role_name = $1, date_updated = NOW(), update_id = $2
+             WHERE user_name = $3 AND study_id = $4 AND status_id = 1`,
+            [lcRoleName, updaterId, userName, activeStudy]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, date_created, user_name)
+             VALUES ($1, $2, 1, $3, NOW(), $4)`,
+            [lcRoleName, activeStudy, updaterId, userName]
+          );
+        }
+
+        // Also update user_type_id based on role
+        const roleToUserType: Record<string, number> = {
+          'admin': 1, 'coordinator': 2, 'investigator': 2,
+          'monitor': 2, 'data_entry': 2, 'ra': 2, 'viewer': 2
+        };
+        const newUserTypeId = roleToUserType[newRole.toLowerCase()] || 2;
+        await client.query(
+          `UPDATE user_account SET user_type_id = $1 WHERE user_id = $2`,
+          [newUserTypeId, userId]
+        );
+
+        logger.info('User role updated', { userId, userName, newRole: lcRoleName, studyId: activeStudy });
+      }
+    }
 
     // Log audit event
     await client.query(`

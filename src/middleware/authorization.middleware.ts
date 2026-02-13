@@ -12,6 +12,40 @@ import { AuthRequest } from './auth.middleware';
  * - user_type_id 2: tech-admin (has technical privileges)
  * - user_type_id 3: user (standard user)
  */
+/**
+ * Role alias map: maps the canonical role names used in requireRole() calls
+ * to ALL equivalent LibreClinica role_name values (case-insensitive matching).
+ *
+ * LibreClinica role_name values from study_user_role table:
+ *   admin, coordinator, director, Investigator, ra, monitor, ra2
+ *   site_Study_Coordinator, site_Study_Director, site_investigator,
+ *   site_Data_Entry_Person, site_monitor, site_Data_Entry_Person2
+ */
+const ROLE_ALIASES: Record<string, string[]> = {
+  admin:        ['admin', 'system_administrator'],
+  coordinator:  ['coordinator', 'study_coordinator', 'site_study_coordinator', 'director', 'study_director', 'site_study_director'],
+  investigator: ['investigator', 'site_investigator'],
+  data_entry:   ['ra', 'ra2', 'data_entry', 'data_entry_person', 'site_data_entry_person', 'site_data_entry_person2'],
+  monitor:      ['monitor', 'site_monitor'],
+};
+
+/**
+ * Check if a user role matches any of the allowed roles (case-insensitive, with aliases).
+ */
+function roleMatches(userRole: string, allowedRole: string): boolean {
+  const lcUserRole = userRole.toLowerCase();
+  const lcAllowed = allowedRole.toLowerCase();
+
+  // Direct match (case-insensitive)
+  if (lcUserRole === lcAllowed) return true;
+
+  // Check aliases: does the user's role fall within the allowed role's alias group?
+  const aliases = ROLE_ALIASES[lcAllowed];
+  if (aliases && aliases.includes(lcUserRole)) return true;
+
+  return false;
+}
+
 export const requireRole = (...allowedRoles: string[]) => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const authReq = req as AuthRequest;
@@ -38,7 +72,7 @@ export const requireRole = (...allowedRoles: string[]) => {
       const adminResult = await db.query(adminCheckQuery, [authReq.user.userId]);
       const userTypeFromDb = adminResult.rows[0]?.user_type?.toLowerCase() || '';
       
-      // Get user roles from study_user_role
+      // Get user roles from study_user_role (ALL roles across all studies)
       const roleResult = await db.query(`
         SELECT DISTINCT role_name
         FROM study_user_role
@@ -55,10 +89,13 @@ export const requireRole = (...allowedRoles: string[]) => {
         authReq.user?.userType?.toLowerCase()?.includes('admin');
       
       // Check if user has at least one of the allowed roles
+      // Uses case-insensitive matching with role aliases
       const hasPermission = 
         isSystemAdmin ||
-        userRoles.includes('admin') ||
-        allowedRoles.some(role => userRoles.includes(role));
+        userRoles.some(r => r.toLowerCase() === 'admin') ||
+        allowedRoles.some(allowed => 
+          userRoles.some(userRole => roleMatches(userRole, allowed))
+        );
       
       if (!hasPermission) {
         logger.warn('Insufficient permissions', {

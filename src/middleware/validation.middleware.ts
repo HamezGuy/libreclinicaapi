@@ -693,8 +693,9 @@ export const userSchemas = {
     firstName: Joi.string().required().max(50),
     lastName: Joi.string().required().max(50),
     email: Joi.string().email().required().max(120),
-    institutionalAffiliation: Joi.string().optional().max(255),
-    phone: Joi.string().optional().max(40),
+    institutionalAffiliation: Joi.string().optional().max(255).allow('', null),
+    phone: Joi.string().optional().max(40).allow('', null),
+    timeZone: Joi.string().optional().max(255).allow('', null),
     password: Joi.string().required()
       .min(8)
       .pattern(/.*[@$!%*?&#^()_+=\-].*/)
@@ -702,18 +703,26 @@ export const userSchemas = {
         'string.min': 'Password must be at least 8 characters',
         'string.pattern.base': 'Password must contain at least one special character'
       }),
-    role: Joi.string().required().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry')
+    role: Joi.string().required().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry', 'ra', 'ra2', 'director', 'viewer'),
+    runWebservices: Joi.boolean().optional(),
+    enableApiKey: Joi.boolean().optional()
   }),
 
   update: Joi.object({
     userId: Joi.number().integer().positive().optional(),
-    firstName: Joi.string().optional().max(50),
-    lastName: Joi.string().optional().max(50),
-    email: Joi.string().email().optional().max(120),
-    institutionalAffiliation: Joi.string().optional().max(255),
-    phone: Joi.string().optional().max(40),
-    role: Joi.string().optional().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry'),
-    enabled: Joi.boolean().optional()
+    firstName: Joi.string().optional().max(50).allow(''),
+    lastName: Joi.string().optional().max(50).allow(''),
+    email: Joi.string().email().optional().max(120).allow(''),
+    institutionalAffiliation: Joi.string().optional().max(255).allow(''),
+    phone: Joi.string().optional().max(40).allow(''),
+    role: Joi.string().optional().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry', 'ra', 'ra2', 'director', 'viewer').allow(''),
+    enabled: Joi.boolean().optional(),
+    timeZone: Joi.string().optional().max(255).allow('', null),
+    runWebservices: Joi.boolean().optional(),
+    enableApiKey: Joi.boolean().optional(),
+    accountNonLocked: Joi.boolean().optional(),
+    activeStudyId: Joi.number().integer().positive().optional().allow(null),
+    userTypeId: Joi.number().integer().optional()
   }),
 
   list: Joi.object({

@@ -83,6 +83,8 @@ import organizationRoutes from './routes/organization.routes';
 import siteRoutes from './routes/site.routes';
 // Form Layout (column configuration - uses item_form_metadata native table)
 import formLayoutRoutes from './routes/form-layout.routes';
+// Per-user custom permission overrides (à la carte permissions)
+import permissionRoutes from './routes/permission.routes';
 
 // ============================================================================
 // FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
@@ -300,6 +302,8 @@ app.use('/api/organizations', organizationRoutes);
 app.use('/api/sites', siteRoutes);
 // Form Layout (column configuration from item_form_metadata)
 app.use('/api/form-layout', formLayoutRoutes);
+// Per-user custom permission overrides (à la carte permissions)
+app.use('/api/permissions', permissionRoutes);
 
 // ============================================================================
 // CONDITIONAL ROUTES - Require custom acc_* tables

@@ -32,6 +32,10 @@ RUN npm ci --omit=dev
 # Copy compiled JS from builder stage
 COPY --from=builder /app/dist ./dist
 
+# IMPORTANT: Port must match nginx proxy_pass (http://api:3000) and healthcheck.
+# This ENV ensures the port is ALWAYS 3000 inside Docker regardless of .env files.
+# Local dev can override via .env (PORT=3001 etc.) since Dockerfile ENV is only for Docker.
+ENV PORT=3000
 EXPOSE 3000
 
 # Health check

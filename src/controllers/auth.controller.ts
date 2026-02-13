@@ -38,6 +38,9 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const jwtPayload = await authService.buildJwtPayload(result.data);
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
 
+  // Fetch per-user custom permission overrides (à la carte)
+  const customPermissions = await authService.fetchCustomPermissions(result.data.user_id);
+
   res.json({
     success: true,
     accessToken: tokens.accessToken,
@@ -51,7 +54,8 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       email: result.data.email,
       role: jwtPayload.role,
       studyIds: jwtPayload.studyIds,
-      organizationIds: jwtPayload.organizationIds || []
+      organizationIds: jwtPayload.organizationIds || [],
+      customPermissions
     },
     organizations: (jwtPayload.organizationDetails || []).map(o => ({
       organizationId: String(o.organizationId),
@@ -81,6 +85,9 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
   const jwtPayload = await authService.buildJwtPayload(result.data);
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
 
+  // Fetch per-user custom permission overrides (à la carte)
+  const customPermissions = await authService.fetchCustomPermissions(result.data.user_id);
+
   res.json({
     success: true,
     accessToken: tokens.accessToken,
@@ -94,7 +101,8 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
       email: result.data.email,
       role: jwtPayload.role,
       studyIds: jwtPayload.studyIds,
-      organizationIds: jwtPayload.organizationIds || []
+      organizationIds: jwtPayload.organizationIds || [],
+      customPermissions
     },
     organizations: (jwtPayload.organizationDetails || []).map(o => ({
       organizationId: String(o.organizationId),

@@ -29,6 +29,7 @@ import {
 import { JwtPayload } from '../../utils/jwt.util';
 import { User, ApiResponse, LoginResponse } from '../../types';
 import { getRoleByName, getHighestRole, LibreClinicaRole, ROLES } from '../../constants/roles';
+import { getUserCustomPermissions } from './permission.service';
 
 const googleClient = new OAuth2Client(config.google.clientId);
 
@@ -733,6 +734,19 @@ async function createGoogleUser(data: {
   return result.rows[0];
 }
 
+/**
+ * Fetch per-user custom permission overrides for inclusion in login response.
+ * These are NOT included in the JWT (to keep it small) but are sent alongside it.
+ */
+export const fetchCustomPermissions = async (userId: number): Promise<Record<string, boolean>> => {
+  try {
+    return await getUserCustomPermissions(userId);
+  } catch (error: any) {
+    logger.warn('Could not fetch custom permissions for login response', { error: error.message, userId });
+    return {};
+  }
+};
+
 export default {
   authenticateUser,
   authenticateWithGoogle,
@@ -742,6 +756,7 @@ export default {
   getUserRoleDetails,
   userHasPermission,
   isUserAdmin,
-  logUserLogout
+  logUserLogout,
+  fetchCustomPermissions
 };
 
