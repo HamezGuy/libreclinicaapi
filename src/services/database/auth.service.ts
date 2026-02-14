@@ -406,7 +406,10 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
 
   // Check if user is system admin (user_type_id = 1 = ADMIN, 0 = TECH_ADMIN)
   // This is stored in user_account table
-  let primaryRole = 'user';
+  // NOTE: Default must be 'ra' (not 'user') because 'user' is not a valid LibreClinica role name.
+  // The frontend getRoleByName('user') returns INVALID, causing permission failures.
+  // 'ra' (Data Entry Person) is the safest minimum-privilege default.
+  let primaryRole = 'ra';
   const userTypeId = (user as any).user_type_id;
   
   if (userTypeId === 1 || userTypeId === 0) {
@@ -417,7 +420,7 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
     // Determine primary role using LibreClinica role hierarchy
     // Lower ID = higher privilege (admin=1 is highest)
     const highestRole = getHighestRole(roleNames);
-    primaryRole = highestRole.name !== 'invalid' ? highestRole.name : 'user';
+    primaryRole = highestRole.name !== 'invalid' ? highestRole.name : 'ra';
   }
 
   // Get user type from database if not already present
@@ -451,8 +454,8 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
     userName: user.user_name, // Use userName for consistency with auth middleware
     username: user.user_name, // Keep for backwards compatibility
     email: user.email,
-    role: primaryRole,
-    userType: userType, // Include user type for authorization checks
+    role: primaryRole,        // User's global role (highest across all studies)
+    userType: userType,       // Include user type for authorization checks
     studyIds,
     organizationIds,
     organizationDetails

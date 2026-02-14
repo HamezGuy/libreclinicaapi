@@ -1,285 +1,216 @@
 /**
- * LibreClinica Role Constants
+ * AccuraTrials EDC — Role Constants
  * 
- * These role definitions match the LibreClinica Role.java constants exactly.
- * Roles are stored in study_user_role.role_name as strings.
+ * Industry-standard EDC roles aligned with:
+ *   - ICH E6(R3) GCP responsibilities
+ *   - 21 CFR Part 11 §11.10(d) access controls
+ *   - Medidata Rave, Veeva Vault CDMS, REDCap, OpenClinica role patterns
  * 
- * Source: org.akaza.openclinica.bean.core.Role
+ * 6 roles (simplified from legacy 8):
+ *   1. admin         — System Administrator
+ *   2. data_manager  — Data Manager (data quality, lock, export, validation rules)
+ *   3. investigator  — Investigator / PI (e-sign authority, enter/view data)
+ *   4. coordinator   — Clinical Research Coordinator (primary data entry, manage subjects)
+ *   5. monitor       — Monitor / CRA (SDV, queries, read-only data access)
+ *   6. viewer        — Sponsor / Read-Only
+ * 
+ * Legacy LibreClinica role names (director, ra, ra2) are mapped to these 6 via aliases
+ * in getRoleByName() so existing study_user_role data remains valid.
  */
 
-/**
- * Role interface matching LibreClinica structure
- */
 export interface LibreClinicaRole {
   id: number;
   name: string;
   description: string;
+  displayName: string;
+  /** Can enter/edit eCRF data */
   canSubmitData: boolean;
+  /** Can export/extract study data */
   canExtractData: boolean;
+  /** Can manage study configuration, sites, CRF design */
   canManageStudy: boolean;
+  /** Can perform SDV and monitoring activities */
   canMonitor: boolean;
+  /** Can apply electronic signatures on eCRFs (21 CFR Part 11) */
+  canSign: boolean;
+  /** Can lock/freeze data */
+  canLockData: boolean;
+  /** Can manage users */
+  canManageUsers: boolean;
 }
 
-/**
- * LibreClinica role definitions
- * These match the Role.java constants exactly
- */
+// ============================================================================
+// Role Definitions — 6 industry-standard EDC roles
+// ============================================================================
+
 export const ROLES = {
   INVALID: {
-    id: 0,
-    name: 'invalid',
-    description: 'Invalid Role',
-    canSubmitData: false,
-    canExtractData: false,
-    canManageStudy: false,
-    canMonitor: false
+    id: 0, name: 'invalid', description: 'Invalid Role', displayName: 'Invalid',
+    canSubmitData: false, canExtractData: false, canManageStudy: false,
+    canMonitor: false, canSign: false, canLockData: false, canManageUsers: false
   } as LibreClinicaRole,
 
   ADMIN: {
-    id: 1,
-    name: 'admin',
-    description: 'System_Administrator',
-    canSubmitData: true,
-    canExtractData: true,
-    canManageStudy: true,
-    canMonitor: true
+    id: 1, name: 'admin', description: 'System_Administrator', displayName: 'System Administrator',
+    canSubmitData: true, canExtractData: true, canManageStudy: true,
+    canMonitor: true, canSign: true, canLockData: true, canManageUsers: true
   } as LibreClinicaRole,
 
-  COORDINATOR: {
-    id: 2,
-    name: 'coordinator',
-    description: 'Study_Coordinator',
-    canSubmitData: true,
-    canExtractData: true,
-    canManageStudy: true,
-    canMonitor: false
-  } as LibreClinicaRole,
-
-  STUDYDIRECTOR: {
-    id: 3,
-    name: 'director',
-    description: 'Study_Director',
-    canSubmitData: true,
-    canExtractData: true,
-    canManageStudy: true,
-    canMonitor: false
+  DATA_MANAGER: {
+    id: 2, name: 'data_manager', description: 'Data_Manager', displayName: 'Data Manager',
+    canSubmitData: true, canExtractData: true, canManageStudy: true,
+    canMonitor: false, canSign: false, canLockData: true, canManageUsers: false
   } as LibreClinicaRole,
 
   INVESTIGATOR: {
-    id: 4,
-    name: 'Investigator',
-    description: 'Investigator',
-    canSubmitData: true,
-    canExtractData: true,
-    canManageStudy: false,
-    canMonitor: false
+    id: 3, name: 'investigator', description: 'Investigator', displayName: 'Investigator',
+    canSubmitData: true, canExtractData: true, canManageStudy: false,
+    canMonitor: false, canSign: true, canLockData: false, canManageUsers: false
   } as LibreClinicaRole,
 
-  RESEARCHASSISTANT: {
-    id: 5,
-    name: 'ra',
-    description: 'Data_Entry_Person',
-    canSubmitData: true,
-    canExtractData: false,
-    canManageStudy: false,
-    canMonitor: false
+  COORDINATOR: {
+    id: 4, name: 'coordinator', description: 'Clinical_Research_Coordinator', displayName: 'Clinical Research Coordinator',
+    canSubmitData: true, canExtractData: false, canManageStudy: false,
+    canMonitor: false, canSign: false, canLockData: false, canManageUsers: false
   } as LibreClinicaRole,
 
   MONITOR: {
-    id: 6,
-    name: 'monitor',
-    description: 'Monitor',
-    canSubmitData: false,
-    canExtractData: false,
-    canManageStudy: false,
-    canMonitor: true
+    id: 5, name: 'monitor', description: 'Monitor', displayName: 'Monitor / CRA',
+    canSubmitData: false, canExtractData: false, canManageStudy: false,
+    canMonitor: true, canSign: false, canLockData: false, canManageUsers: false
   } as LibreClinicaRole,
 
-  RESEARCHASSISTANT2: {
-    id: 7,
-    name: 'ra2',
-    description: 'site_Data_Entry_Person2',
-    canSubmitData: true,
-    canExtractData: false,
-    canManageStudy: false,
-    canMonitor: false
-  } as LibreClinicaRole
+  VIEWER: {
+    id: 6, name: 'viewer', description: 'Sponsor_ReadOnly', displayName: 'Read-Only / Sponsor',
+    canSubmitData: false, canExtractData: false, canManageStudy: false,
+    canMonitor: false, canSign: false, canLockData: false, canManageUsers: false
+  } as LibreClinicaRole,
 };
 
-/**
- * Site-level role name mappings (used for sites/child studies)
- * Maps role ID to site-specific role name
- */
-export const SITE_ROLE_MAP: Record<number, string> = {
-  2: 'site_Study_Coordinator',
-  3: 'site_Study_Director',
-  4: 'site_investigator',
-  5: 'site_Data_Entry_Person',
-  6: 'site_monitor',
-  7: 'site_Data_Entry_Person2'
-};
+// ============================================================================
+// Canonical role list (what the UI shows in dropdowns)
+// ============================================================================
 
-/**
- * Study-level role name mappings (used for parent studies)
- * Maps role ID to study-specific role name
- */
-export const STUDY_ROLE_MAP: Record<number, string> = {
-  2: 'Study_Coordinator',
-  3: 'Study_Director',
-  4: 'Investigator',
-  5: 'Data_Entry_Person',
-  6: 'Monitor'
-};
-
-/**
- * All roles as array (excluding INVALID)
- */
 export const ALL_ROLES: LibreClinicaRole[] = [
   ROLES.ADMIN,
-  ROLES.COORDINATOR,
-  ROLES.STUDYDIRECTOR,
+  ROLES.DATA_MANAGER,
   ROLES.INVESTIGATOR,
-  ROLES.RESEARCHASSISTANT,
+  ROLES.COORDINATOR,
   ROLES.MONITOR,
-  ROLES.RESEARCHASSISTANT2
+  ROLES.VIEWER,
 ];
 
-/**
- * Get role by ID
- */
-export const getRoleById = (id: number): LibreClinicaRole => {
-  const role = ALL_ROLES.find(r => r.id === id);
-  return role || ROLES.INVALID;
-};
+// ============================================================================
+// Legacy/alias mappings — backwards compatibility with LibreClinica DB
+// study_user_role.role_name may contain any of these strings from older data.
+// ============================================================================
 
 /**
- * Get role by name (matches role_name column in study_user_role)
- * Handles both study and site role names
+ * Get role by name.
+ * Handles current role names, legacy LibreClinica names, and site-level aliases.
  */
 export const getRoleByName = (name: string): LibreClinicaRole => {
-  // Normalize the name (lowercase for comparison)
-  const normalizedName = name.toLowerCase().trim();
+  const n = name.toLowerCase().trim();
 
-  // Direct match on role name
+  // Direct match on current role names
   for (const role of ALL_ROLES) {
-    if (role.name.toLowerCase() === normalizedName) {
-      return role;
-    }
+    if (role.name === n) return role;
   }
 
-  // Match on description
-  for (const role of ALL_ROLES) {
-    if (role.description.toLowerCase() === normalizedName) {
-      return role;
-    }
-  }
+  // Legacy and alias mappings (LibreClinica DB backwards compatibility)
+  const ALIAS_MAP: Record<string, LibreClinicaRole> = {
+    // Admin aliases
+    'system_administrator': ROLES.ADMIN,
 
-  // Match site role names
-  const siteRoleMappings: Record<string, LibreClinicaRole> = {
-    'site_study_coordinator': ROLES.COORDINATOR,
-    'site_study_director': ROLES.STUDYDIRECTOR,
+    // Data Manager aliases (legacy names that meant study management)
+    // NOTE: bare 'coordinator' is NOT here — direct match returns ROLES.COORDINATOR (CRC)
+    'study_coordinator': ROLES.DATA_MANAGER,
+    'site_study_coordinator': ROLES.DATA_MANAGER,
+    'director': ROLES.DATA_MANAGER,
+    'study_director': ROLES.DATA_MANAGER,
+    'site_study_director': ROLES.DATA_MANAGER,
+
+    // Investigator aliases
     'site_investigator': ROLES.INVESTIGATOR,
-    'site_data_entry_person': ROLES.RESEARCHASSISTANT,
+
+    // Coordinator (CRC) aliases (was ra/data_entry in legacy)
+    'ra': ROLES.COORDINATOR,
+    'ra2': ROLES.COORDINATOR,
+    'data_entry': ROLES.COORDINATOR,
+    'data_entry_person': ROLES.COORDINATOR,
+    'site_data_entry_person': ROLES.COORDINATOR,
+    'site_data_entry_person2': ROLES.COORDINATOR,
+    'user': ROLES.COORDINATOR,
+    'crc': ROLES.COORDINATOR,
+
+    // Monitor aliases
     'site_monitor': ROLES.MONITOR,
-    'site_data_entry_person2': ROLES.RESEARCHASSISTANT2
+
+    // Viewer aliases
+    'sponsor': ROLES.VIEWER,
+    'read_only': ROLES.VIEWER,
   };
 
-  if (siteRoleMappings[normalizedName]) {
-    return siteRoleMappings[normalizedName];
-  }
+  if (ALIAS_MAP[n]) return ALIAS_MAP[n];
 
-  // Match study role names
-  const studyRoleMappings: Record<string, LibreClinicaRole> = {
-    'study_coordinator': ROLES.COORDINATOR,
-    'study_director': ROLES.STUDYDIRECTOR,
-    'investigator': ROLES.INVESTIGATOR,
-    'data_entry_person': ROLES.RESEARCHASSISTANT,
-    'monitor': ROLES.MONITOR,
-    'system_administrator': ROLES.ADMIN
-  };
-
-  if (studyRoleMappings[normalizedName]) {
-    return studyRoleMappings[normalizedName];
+  // Description match
+  for (const role of ALL_ROLES) {
+    if (role.description.toLowerCase() === n) return role;
   }
 
   return ROLES.INVALID;
 };
 
 /**
- * Get the highest privilege role from a list of role names
- * Lower ID = higher privilege (admin=1 is highest)
+ * Get role by ID
+ */
+export const getRoleById = (id: number): LibreClinicaRole => {
+  return ALL_ROLES.find(r => r.id === id) || ROLES.INVALID;
+};
+
+/**
+ * Get the highest privilege role from a list of role names.
+ * Lower ID = higher privilege.
  */
 export const getHighestRole = (roleNames: string[]): LibreClinicaRole => {
-  let highestRole: LibreClinicaRole = ROLES.INVALID;
-
+  let highest: LibreClinicaRole = ROLES.INVALID;
   for (const name of roleNames) {
     const role = getRoleByName(name);
-    if (role.id !== 0 && (highestRole.id === 0 || role.id < highestRole.id)) {
-      highestRole = role;
+    if (role.id !== 0 && (highest.id === 0 || role.id < highest.id)) {
+      highest = role;
     }
   }
-
-  return highestRole;
+  return highest;
 };
 
-/**
- * Check if a role has a specific permission
- */
+// Convenience permission checks
 export const roleHasPermission = (
   roleName: string,
-  permission: 'submitData' | 'extractData' | 'manageStudy' | 'monitor'
+  permission: 'submitData' | 'extractData' | 'manageStudy' | 'monitor' | 'sign' | 'lockData' | 'manageUsers'
 ): boolean => {
   const role = getRoleByName(roleName);
-  
-  switch (permission) {
-    case 'submitData':
-      return role.canSubmitData;
-    case 'extractData':
-      return role.canExtractData;
-    case 'manageStudy':
-      return role.canManageStudy;
-    case 'monitor':
-      return role.canMonitor;
-    default:
-      return false;
-  }
+  const map: Record<string, boolean> = {
+    submitData: role.canSubmitData,
+    extractData: role.canExtractData,
+    manageStudy: role.canManageStudy,
+    monitor: role.canMonitor,
+    sign: role.canSign,
+    lockData: role.canLockData,
+    manageUsers: role.canManageUsers,
+  };
+  return map[permission] ?? false;
 };
 
-/**
- * Check if user is admin
- */
-export const isAdmin = (roleName: string): boolean => {
-  const role = getRoleByName(roleName);
-  return role.id === ROLES.ADMIN.id;
-};
+export const isAdmin = (roleName: string): boolean => getRoleByName(roleName).id === ROLES.ADMIN.id;
+export const canManageStudy = (roleName: string): boolean => getRoleByName(roleName).canManageStudy;
+export const canSubmitData = (roleName: string): boolean => getRoleByName(roleName).canSubmitData;
 
-/**
- * Check if user can manage studies (Coordinator, Director, or Admin)
- */
-export const canManageStudy = (roleName: string): boolean => {
-  const role = getRoleByName(roleName);
-  return role.canManageStudy;
-};
-
-/**
- * Check if user can submit data (most roles except monitor and invalid)
- */
-export const canSubmitData = (roleName: string): boolean => {
-  const role = getRoleByName(roleName);
-  return role.canSubmitData;
-};
+// Legacy exports for backward compatibility (site/study maps not needed with new aliases)
+export const SITE_ROLE_MAP: Record<number, string> = {};
+export const STUDY_ROLE_MAP: Record<number, string> = {};
 
 export default {
-  ROLES,
-  ALL_ROLES,
-  SITE_ROLE_MAP,
-  STUDY_ROLE_MAP,
-  getRoleById,
-  getRoleByName,
-  getHighestRole,
-  roleHasPermission,
-  isAdmin,
-  canManageStudy,
-  canSubmitData
+  ROLES, ALL_ROLES, getRoleById, getRoleByName, getHighestRole,
+  roleHasPermission, isAdmin, canManageStudy, canSubmitData,
+  SITE_ROLE_MAP, STUDY_ROLE_MAP,
 };
-

@@ -12,6 +12,7 @@ import { logger } from '../../config/logger';
 import { hashPasswordMD5, validatePassword } from '../../utils/password.util';
 import { User, PaginatedResponse } from '../../types';
 import { getRoleByName, ALL_ROLES, STUDY_ROLE_MAP, SITE_ROLE_MAP } from '../../constants/roles';
+import { applyRoleDefaults } from './feature-access.service';
 
 /**
  * Get users with filters
@@ -271,11 +272,14 @@ export const createUser = async (
     let userTypeId = data.userTypeId || 2;
     if (data.role) {
       const roleToUserType: Record<string, number> = {
-        'admin': 1,       // tech-admin
-        'coordinator': 2, // user
+        'admin': 1,          // system admin
+        'data_manager': 2,   // user
         'investigator': 2,
+        'coordinator': 2,
         'monitor': 2,
-        'data_entry': 2
+        'viewer': 2,
+        // Legacy
+        'data_entry': 2, 'ra': 2, 'ra2': 2, 'director': 2,
       };
       userTypeId = roleToUserType[data.role.toLowerCase()] || 2;
     }
@@ -313,13 +317,20 @@ export const createUser = async (
     if (data.role) {
       const studyId = data.studyId || 1; // Default to study 1
       
-      // Map frontend role names to LibreClinica role names
+      // Map frontend role names to DB role names.
+      // The 6 canonical roles are stored directly. Legacy names are also accepted.
       const roleNameMap: Record<string, string> = {
         'admin': 'admin',
+        'data_manager': 'data_manager',
+        'investigator': 'investigator',
         'coordinator': 'coordinator',
-        'investigator': 'Investigator',
         'monitor': 'monitor',
-        'data_entry': 'ra'
+        'viewer': 'viewer',
+        // Legacy aliases
+        'data_entry': 'coordinator',
+        'ra': 'coordinator',
+        'ra2': 'coordinator',
+        'director': 'data_manager',
       };
       
       const lcRoleName = roleNameMap[data.role.toLowerCase()] || data.role;
@@ -331,6 +342,14 @@ export const createUser = async (
       `, [lcRoleName, studyId, creatorId, data.username]);
 
       logger.info('User assigned to study', { userId, studyId, role: lcRoleName });
+
+      // Apply feature access defaults for the assigned role
+      try {
+        await applyRoleDefaults(userId, lcRoleName, creatorId);
+        logger.info('Feature access defaults applied for new user', { userId, role: lcRoleName });
+      } catch (featureError: any) {
+        logger.warn('Could not apply feature defaults (non-fatal)', { error: featureError.message });
+      }
     }
 
     // Add user to creator's organization(s)
@@ -547,14 +566,19 @@ export const updateUser = async (
     // Handle role change: update study_user_role for the user's active study
     if ((data as any).role) {
       const newRole = (data as any).role;
+      // Map frontend role names to DB role names (6 canonical + legacy aliases)
       const roleNameMap: Record<string, string> = {
         'admin': 'admin',
+        'data_manager': 'data_manager',
+        'investigator': 'investigator',
         'coordinator': 'coordinator',
-        'investigator': 'Investigator',
         'monitor': 'monitor',
-        'data_entry': 'ra',
-        'ra': 'ra',
-        'viewer': 'ra'
+        'viewer': 'viewer',
+        // Legacy aliases
+        'data_entry': 'coordinator',
+        'ra': 'coordinator',
+        'ra2': 'coordinator',
+        'director': 'data_manager',
       };
       const lcRoleName = roleNameMap[newRole.toLowerCase()] || newRole;
 
@@ -569,7 +593,7 @@ export const updateUser = async (
 
         // Update existing role or insert new one for the active study
         const existingRole = await client.query(
-          `SELECT role_id FROM study_user_role WHERE user_name = $1 AND study_id = $2 AND status_id = 1`,
+          `SELECT role_name FROM study_user_role WHERE user_name = $1 AND study_id = $2 AND status_id = 1`,
           [userName, activeStudy]
         );
         if (existingRole.rows.length > 0) {
@@ -588,8 +612,9 @@ export const updateUser = async (
 
         // Also update user_type_id based on role
         const roleToUserType: Record<string, number> = {
-          'admin': 1, 'coordinator': 2, 'investigator': 2,
-          'monitor': 2, 'data_entry': 2, 'ra': 2, 'viewer': 2
+          'admin': 1, 'data_manager': 2, 'investigator': 2,
+          'coordinator': 2, 'monitor': 2, 'viewer': 2,
+          'data_entry': 2, 'ra': 2, 'ra2': 2, 'director': 2,
         };
         const newUserTypeId = roleToUserType[newRole.toLowerCase()] || 2;
         await client.query(
@@ -598,6 +623,15 @@ export const updateUser = async (
         );
 
         logger.info('User role updated', { userId, userName, newRole: lcRoleName, studyId: activeStudy });
+
+        // Apply feature access defaults for the new role
+        try {
+          await applyRoleDefaults(userId, lcRoleName, updaterId);
+          logger.info('Feature access defaults applied for new role', { userId, role: lcRoleName });
+        } catch (featureError: any) {
+          // Non-fatal: feature access table may not exist yet on first deploy
+          logger.warn('Could not apply feature defaults (non-fatal)', { error: featureError.message });
+        }
       }
     }
 

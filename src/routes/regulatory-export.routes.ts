@@ -15,7 +15,7 @@ const router = Router();
 router.use(authMiddleware);
 
 // GET /api/regulatory-export/formats - List available export formats
-router.get('/formats', requireRole('admin', 'coordinator'), async (req: Request, res: Response) => {
+router.get('/formats', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   res.json({
     success: true,
     data: [
@@ -27,12 +27,12 @@ router.get('/formats', requireRole('admin', 'coordinator'), async (req: Request,
 });
 
 // POST /api/regulatory-export/generate - Generate a regulatory export package
-router.post('/generate', requireRole('admin', 'coordinator'), async (req: Request, res: Response) => {
+router.post('/generate', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   res.status(501).json({ success: false, message: 'Regulatory export generation not yet implemented' });
 });
 
 // GET /api/regulatory-export/history - List past exports
-router.get('/history', requireRole('admin', 'coordinator'), async (req: Request, res: Response) => {
+router.get('/history', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   res.json({ success: true, data: [] });
 });
 

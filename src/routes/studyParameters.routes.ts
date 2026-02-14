@@ -82,7 +82,7 @@ router.get('/:studyId/raw', async (req: Request, res: Response) => {
  * PUT /api/study-parameters/:studyId
  * Update study parameters (admin/coordinator only)
  */
-router.put('/:studyId', requireRole('admin', 'coordinator'), async (req: Request, res: Response) => {
+router.put('/:studyId', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   try {
     const studyId = parseInt(req.params.studyId);
     const user = (req as any).user;

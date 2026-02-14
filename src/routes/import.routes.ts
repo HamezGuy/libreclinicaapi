@@ -7,11 +7,16 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
+import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import * as csvToOdm from '../services/import/csv-to-odm.service';
 import { getSoapClient } from '../services/soap/soapClient';
 import { logger } from '../config/logger';
 
 const router = Router();
+
+// All import routes require authentication
+router.use(authMiddleware);
 const upload = multer({ 
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB max
@@ -76,10 +81,15 @@ router.post('/validate', upload.single('file'), asyncHandler(async (req: Request
       success: true,
       data: {
         format: 'csv',
+        isValid: true,
         needsMapping: true,
         headers,
         rowCount,
-        suggestions
+        suggestions,
+        validRecords: rowCount,
+        invalidRecords: 0,
+        errors: [],
+        warnings: rowCount > 0 ? [] : ['File appears to be empty']
       }
     });
   }

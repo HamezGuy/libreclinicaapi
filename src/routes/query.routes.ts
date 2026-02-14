@@ -49,7 +49,7 @@ router.get('/:id/audit-trail', controller.getAuditTrail);
 
 // Create and update operations (signature required per §11.50)
 router.post('/', 
-  requireRole('admin', 'coordinator', 'data_entry', 'investigator', 'monitor'), 
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator', 'monitor'), 
   validate({ body: querySchemas.create }), 
   requireSignatureFor(SignatureMeanings.QUERY_CREATE),
   controller.create
@@ -60,22 +60,54 @@ router.post('/:id/respond',
   controller.respond
 );
 router.put('/:id/status', 
-  requireRole('monitor', 'coordinator', 'admin'), 
+  requireRole('monitor', 'data_manager', 'admin'), 
   validate({ params: commonSchemas.idParam, body: querySchemas.updateStatus }), 
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.updateStatus
 );
 router.put('/:id/reassign', 
-  requireRole('coordinator', 'admin'), 
+  requireRole('data_manager', 'admin'), 
   requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.reassign
 );
 
 // Close with electronic signature (21 CFR Part 11 compliant)
 router.post('/:id/close-with-signature', 
-  requireRole('monitor', 'coordinator', 'admin', 'investigator'), 
+  requireRole('monitor', 'data_manager', 'admin', 'investigator'), 
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.closeWithSignature
+);
+
+// Reopen a closed query
+router.put('/:id/reopen',
+  requireRole('monitor', 'data_manager', 'admin'),
+  requireSignatureFor('I authorize reopening this query'),
+  controller.reopenQuery
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// BULK OPERATIONS
+// ═══════════════════════════════════════════════════════════════════
+
+// Bulk update status (e.g., mass close)
+router.post('/bulk/status',
+  requireRole('monitor', 'data_manager', 'admin'),
+  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
+  controller.bulkUpdateStatus
+);
+
+// Bulk close queries
+router.post('/bulk/close',
+  requireRole('monitor', 'data_manager', 'admin'),
+  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
+  controller.bulkClose
+);
+
+// Bulk reassign queries
+router.post('/bulk/reassign',
+  requireRole('data_manager', 'admin'),
+  requireSignatureFor(SignatureMeanings.AUTHORIZE),
+  controller.bulkReassign
 );
 
 export default router;

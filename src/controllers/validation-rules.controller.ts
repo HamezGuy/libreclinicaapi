@@ -428,18 +428,25 @@ export const validateFieldChange = async (req: Request, res: Response, next: Nex
       return;
     }
 
+    // Safely parse numeric params - they may already be numbers from JSON body
+    const safeParseInt = (val: any): number | undefined => {
+      if (val === undefined || val === null) return undefined;
+      const n = typeof val === 'number' ? val : parseInt(val);
+      return isNaN(n) ? undefined : n;
+    };
+
     const result = await validationRulesService.validateFieldChange(
-      parseInt(crfId),
+      safeParseInt(crfId)!,
       fieldPath,
       value,
       allFormData,
       {
         createQueries,
-        studyId: studyId ? parseInt(studyId) : undefined,
-        subjectId: subjectId ? parseInt(subjectId) : undefined,
-        eventCrfId: eventCrfId ? parseInt(eventCrfId) : undefined,
-        itemDataId: itemDataId ? parseInt(itemDataId) : undefined,
-        itemId: itemId ? parseInt(itemId) : undefined,
+        studyId: safeParseInt(studyId),
+        subjectId: safeParseInt(subjectId),
+        eventCrfId: safeParseInt(eventCrfId),
+        itemDataId: safeParseInt(itemDataId),
+        itemId: safeParseInt(itemId),
         userId: user?.userId,
         operationType: operationType as 'create' | 'update' | 'delete'
       }

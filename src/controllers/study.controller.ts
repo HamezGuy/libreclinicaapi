@@ -159,6 +159,7 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
         s.summary,
         s.principal_investigator,
         s.facility_name,
+        s.facility_address,
         s.facility_city,
         s.facility_state,
         s.facility_country,
@@ -186,10 +187,17 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
       status: mapSiteStatus(site.status_id),
       address: {
         facility: site.facility_name || '',
+        street: site.facility_address || '',
         city: site.facility_city || '',
         state: site.facility_state || '',
         country: site.facility_country || ''
       },
+      // Also provide flat field names for frontend compatibility
+      facilityName: site.facility_name || '',
+      facilityAddress: site.facility_address || '',
+      facilityCity: site.facility_city || '',
+      facilityState: site.facility_state || '',
+      facilityCountry: site.facility_country || '',
       contact: {
         email: site.facility_contact_email || '',
         phone: site.facility_contact_phone || ''

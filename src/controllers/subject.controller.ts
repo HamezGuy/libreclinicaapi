@@ -367,6 +367,8 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
         se.date_start,
         se.date_end,
         se.location,
+        se.scheduled_date,
+        COALESCE(se.is_unscheduled, false) as is_unscheduled,
         sest.name as status,
         se.date_created,
         (
@@ -384,26 +386,44 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN subject_event_status sest ON se.subject_event_status_id = sest.subject_event_status_id
       WHERE se.study_subject_id = $1
-      ORDER BY sed.ordinal, se.sample_ordinal
+      ORDER BY 
+        COALESCE(se.scheduled_date, se.date_start, se.date_created) ASC,
+        sed.ordinal ASC,
+        se.sample_ordinal ASC
     `;
 
     const result = await pool.query(query, [parseInt(id)]);
 
     const events = result.rows.map(event => ({
       id: event.study_event_id.toString(),
+      study_event_id: event.study_event_id,
       eventDefinitionId: event.study_event_definition_id.toString(),
+      study_event_definition_id: event.study_event_definition_id,
       name: event.event_name,
       description: event.event_description || '',
       type: event.event_type || 'scheduled',
+      event_type: event.event_type || 'scheduled',
       order: event.event_order,
+      ordinal: event.event_order,
       occurrence: event.sample_ordinal,
       startDate: event.date_start,
+      date_start: event.date_start,
       endDate: event.date_end,
+      date_end: event.date_end,
+      scheduledDate: event.scheduled_date,
+      scheduled_date: event.scheduled_date,
+      isUnscheduled: event.is_unscheduled,
+      is_unscheduled: event.is_unscheduled,
       location: event.location || '',
       status: event.status,
+      status_name: event.status,
       dateCreated: event.date_created,
       totalForms: parseInt(event.total_forms) || 0,
+      total_forms: parseInt(event.total_forms) || 0,
       completedForms: parseInt(event.completed_forms) || 0,
+      completed_forms: parseInt(event.completed_forms) || 0,
+      crf_count: parseInt(event.total_forms) || 0,
+      completed_crf_count: parseInt(event.completed_forms) || 0,
       completionPercentage: event.total_forms > 0 
         ? Math.round((event.completed_forms / event.total_forms) * 100) 
         : 0

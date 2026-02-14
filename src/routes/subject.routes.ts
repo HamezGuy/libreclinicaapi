@@ -94,20 +94,20 @@ router.get('/:id/forms', validate({ params: commonSchemas.idParam }), controller
 
 // Create/Update operations - require coordinator or investigator role + signature
 router.post('/', 
-  requireRole('coordinator', 'investigator'), 
+  requireRole('data_manager', 'coordinator', 'investigator'), 
   soapRateLimiter, 
   validate({ body: subjectSchemas.create }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_ENROLL),
   controller.create
 );
 router.put('/:id', 
-  requireRole('coordinator', 'investigator'), 
+  requireRole('data_manager', 'coordinator', 'investigator'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_UPDATE),
   controller.update
 );
 router.put('/:id/status', 
-  requireRole('coordinator', 'investigator'), 
+  requireRole('data_manager', 'coordinator', 'investigator'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_WITHDRAW),
   controller.updateStatus
@@ -115,7 +115,7 @@ router.put('/:id/status',
 
 // Delete operation - require admin role (soft delete) + signature
 router.delete('/:id', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_DELETE),
   controller.remove

@@ -3492,6 +3492,7 @@ CREATE TABLE public.study (
     principal_investigator character varying(255),
     facility_name character varying(255),
     facility_city character varying(255),
+    facility_address character varying(1000),
     facility_state character varying(20),
     facility_zip character varying(64),
     facility_country character varying(64),
@@ -3555,7 +3556,9 @@ CREATE TABLE public.study_event (
     update_id integer,
     subject_event_status_id integer,
     start_time_flag boolean,
-    end_time_flag boolean
+    end_time_flag boolean,
+    scheduled_date timestamp with time zone,
+    is_unscheduled boolean DEFAULT false
 );
 
 

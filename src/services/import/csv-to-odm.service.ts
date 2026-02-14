@@ -53,7 +53,9 @@ export interface ValidationResult {
  * Parse CSV content to structured data
  */
 export const parseCSV = (csvContent: string): CSVParseResult => {
-  const lines = csvContent.split('\n').filter(l => l.trim());
+  // Normalize line endings: handle Windows (\r\n), old Mac (\r), and Unix (\n)
+  const normalizedContent = csvContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = normalizedContent.split('\n').filter(l => l.trim());
   
   if (lines.length === 0) {
     return { headers: [], rows: [], rowCount: 0 };

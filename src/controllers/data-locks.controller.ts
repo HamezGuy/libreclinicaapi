@@ -8,6 +8,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as dataLocksService from '../services/database/data-locks.service';
+import { pool } from '../config/database';
 
 // ═══════════════════════════════════════════════════════════════════
 // LIST & QUERY ENDPOINTS
@@ -226,10 +227,147 @@ export const unlockEvent = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  // Reuse the individual form unlock for each form in the event
-  // For now, we'll use the subject unlock as a basis
-  // TODO: Add specific event unlock to service
-  res.status(501).json({ success: false, message: 'Event unlock not yet implemented' });
+  // Unlock all forms in this event
+  try {
+    const eventCrfResult = await pool.query(
+      `SELECT event_crf_id FROM event_crf WHERE study_event_id = $1 AND status_id = 6`,
+      [parseInt(studyEventId)]
+    );
+
+    let unlocked = 0;
+    for (const row of eventCrfResult.rows) {
+      const result = await dataLocksService.unlockRecord(row.event_crf_id, user.userId);
+      if (result.success) unlocked++;
+    }
+
+    // Audit
+    await pool.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+      VALUES (NOW(), 'study_event', $1, $2, 'Event Data Unlocked', $3,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+    `, [user.userId, parseInt(studyEventId), reason]);
+
+    res.json({ success: true, message: `Unlocked ${unlocked} forms for event`, data: { unlocked } });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// FREEZE / UNFREEZE
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Freeze a single CRF record
+ * POST /api/data-locks/freeze/:eventCrfId
+ */
+export const freeze = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const eventCrfId = parseInt(req.params.eventCrfId);
+
+  const result = await dataLocksService.freezeRecord(eventCrfId, user.userId);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result);
+});
+
+/**
+ * Unfreeze a single CRF record
+ * DELETE /api/data-locks/freeze/:eventCrfId
+ */
+export const unfreeze = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const eventCrfId = parseInt(req.params.eventCrfId);
+  const { reason } = req.body;
+
+  if (!reason) {
+    res.status(400).json({ success: false, message: 'Reason is required for unfreezing' });
+    return;
+  }
+
+  const result = await dataLocksService.unfreezeRecord(eventCrfId, user.userId, reason);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result);
+});
+
+/**
+ * Batch freeze multiple CRF records
+ * POST /api/data-locks/batch/freeze
+ */
+export const batchFreeze = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventCrfIds } = req.body;
+
+  if (!eventCrfIds?.length) {
+    res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
+    return;
+  }
+
+  const result = await dataLocksService.batchFreezeRecords(eventCrfIds, user.userId);
+  res.json({ success: result.success, data: result });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// BATCH OPERATIONS
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Batch lock multiple CRF records
+ * POST /api/data-locks/batch/lock
+ * Body: { eventCrfIds: number[] }
+ */
+export const batchLock = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventCrfIds } = req.body;
+
+  if (!eventCrfIds?.length) {
+    res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
+    return;
+  }
+
+  const result = await dataLocksService.batchLockRecords(eventCrfIds, user.userId);
+  res.json({ success: result.success, data: result });
+});
+
+/**
+ * Batch unlock multiple CRF records
+ * POST /api/data-locks/batch/unlock
+ * Body: { eventCrfIds: number[] }
+ */
+export const batchUnlock = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventCrfIds } = req.body;
+
+  if (!eventCrfIds?.length) {
+    res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
+    return;
+  }
+
+  const result = await dataLocksService.batchUnlockRecords(eventCrfIds, user.userId);
+  res.json({ success: result.success, data: result });
+});
+
+/**
+ * Batch SDV multiple CRF records
+ * POST /api/data-locks/batch/sdv
+ * Body: { eventCrfIds: number[] }
+ */
+export const batchSDV = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventCrfIds } = req.body;
+
+  if (!eventCrfIds?.length) {
+    res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
+    return;
+  }
+
+  const result = await dataLocksService.batchSDV(eventCrfIds, user.userId);
+  res.json({ success: result.success, data: result });
 });
 
 export default { 
@@ -241,5 +379,11 @@ export default {
   lockSubject,
   unlockSubject,
   lockEvent,
-  unlockEvent
+  unlockEvent,
+  freeze,
+  unfreeze,
+  batchFreeze,
+  batchLock,
+  batchUnlock,
+  batchSDV
 };

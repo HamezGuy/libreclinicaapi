@@ -115,7 +115,7 @@ router.get('/:crfVersionId/render', asyncHandler(async (req: Request, res: Respo
  * POST /api/form-layout
  * Save form layout configuration (admin only)
  */
-router.post('/', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { crfVersionId, items } = req.body;
   const user = (req as any).user;
 
@@ -147,7 +147,7 @@ router.post('/', requireRole('admin', 'coordinator'), asyncHandler(async (req: R
  * PUT /api/form-layout/field/:itemFormMetadataId
  * Update a single field's layout
  */
-router.put('/field/:itemFormMetadataId', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.put('/field/:itemFormMetadataId', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { itemFormMetadataId } = req.params;
   const { columnNumber, ordinal } = req.body;
 

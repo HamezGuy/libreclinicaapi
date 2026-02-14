@@ -386,6 +386,79 @@ export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Re
   res.json({ success: true, data: result });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// REOPEN + BULK OPERATIONS
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Reopen a closed query
+ * PUT /api/queries/:id/reopen
+ */
+export const reopenQuery = asyncHandler(async (req: Request, res: Response) => {
+  const queryId = parseInt(req.params.id);
+  const caller = (req as any).user;
+  const { reason } = req.body;
+
+  const result = await queryService.reopenQuery(queryId, caller.userId, reason || 'Reopened');
+
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result);
+});
+
+/**
+ * Bulk update status for multiple queries
+ * POST /api/queries/bulk/status
+ */
+export const bulkUpdateStatus = asyncHandler(async (req: Request, res: Response) => {
+  const caller = (req as any).user;
+  const { queryIds, statusId, reason } = req.body;
+
+  if (!queryIds?.length || !statusId) {
+    res.status(400).json({ success: false, message: 'queryIds array and statusId are required' });
+    return;
+  }
+
+  const result = await queryService.bulkUpdateStatus(queryIds, statusId, caller.userId, reason);
+  res.json({ success: result.success, data: result });
+});
+
+/**
+ * Bulk close queries
+ * POST /api/queries/bulk/close
+ */
+export const bulkClose = asyncHandler(async (req: Request, res: Response) => {
+  const caller = (req as any).user;
+  const { queryIds, reason } = req.body;
+
+  if (!queryIds?.length) {
+    res.status(400).json({ success: false, message: 'queryIds array is required' });
+    return;
+  }
+
+  const result = await queryService.bulkCloseQueries(queryIds, caller.userId, reason || 'Bulk closed');
+  res.json({ success: result.success, data: result });
+});
+
+/**
+ * Bulk reassign queries
+ * POST /api/queries/bulk/reassign
+ */
+export const bulkReassign = asyncHandler(async (req: Request, res: Response) => {
+  const caller = (req as any).user;
+  const { queryIds, assignToUserId, reason } = req.body;
+
+  if (!queryIds?.length || !assignToUserId) {
+    res.status(400).json({ success: false, message: 'queryIds array and assignToUserId are required' });
+    return;
+  }
+
+  const result = await queryService.bulkReassignQueries(queryIds, assignToUserId, caller.userId, reason);
+  res.json({ success: result.success, data: result });
+});
+
 export default { 
   list, 
   get, 
@@ -406,6 +479,10 @@ export default {
   countByType, 
   getThread, 
   getOverdue, 
-  getMyAssigned 
+  getMyAssigned,
+  reopenQuery,
+  bulkUpdateStatus,
+  bulkClose,
+  bulkReassign
 };
 

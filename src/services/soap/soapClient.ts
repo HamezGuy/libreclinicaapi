@@ -149,7 +149,14 @@ export class SoapClient {
           }
         }
       } else {
-        xml += `<${prefix}:${key}>${this.escapeXml(String(value))}</${prefix}:${key}>`;
+        const strValue = String(value);
+        // If the value looks like raw XML (starts with <?xml or <ODM), wrap in CDATA
+        // to prevent double-escaping. This is critical for ODM XML import payloads.
+        if (strValue.trimStart().startsWith('<?xml') || strValue.trimStart().startsWith('<ODM') || strValue.trimStart().startsWith('<odm')) {
+          xml += `<${prefix}:${key}><![CDATA[${strValue}]]></${prefix}:${key}>`;
+        } else {
+          xml += `<${prefix}:${key}>${this.escapeXml(strValue)}</${prefix}:${key}>`;
+        }
       }
     }
     return xml;

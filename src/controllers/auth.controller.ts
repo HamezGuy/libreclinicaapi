@@ -475,12 +475,40 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
 
   const dbUser = result.rows[0];
   
-  // Get user type name
+  // Get user type name (column is 'user_type', not 'name')
   const typeResult = await pool.query(
-    'SELECT name FROM user_type WHERE user_type_id = $1',
+    'SELECT user_type FROM user_type WHERE user_type_id = $1',
     [dbUser.user_type_id]
   );
-  const userTypeName = typeResult.rows.length > 0 ? typeResult.rows[0].name : 'unknown';
+  const userTypeName = typeResult.rows.length > 0 ? typeResult.rows[0].user_type : 'unknown';
+
+  // Determine primary role using the SAME logic as buildJwtPayload (auth.service.ts)
+  // Priority: 1) user_type_id check (sys admin), 2) study_user_role, 3) fallback
+  let primaryRole: string;
+  const userTypeId = dbUser.user_type_id;
+
+  if (userTypeId === 1 || userTypeId === 0) {
+    // System admin or tech admin — always 'admin' regardless of study_user_role
+    primaryRole = 'admin';
+  } else {
+    // Get role(s) from study_user_role and pick the highest privilege
+    const roleResult = await pool.query(`
+      SELECT DISTINCT sur.role_name
+      FROM study_user_role sur
+      INNER JOIN user_account ua ON sur.user_name = ua.user_name
+      WHERE ua.user_id = $1 AND sur.status_id = 1
+    `, [user.userId]);
+
+    if (roleResult.rows.length > 0) {
+      // Use the role constants to pick the highest privilege role
+      const { getHighestRole } = await import('../constants/roles');
+      const roleNames = roleResult.rows.map((r: any) => r.role_name);
+      const highest = getHighestRole(roleNames);
+      primaryRole = highest.name !== 'invalid' ? highest.name : 'coordinator';
+    } else {
+      primaryRole = 'coordinator'; // Default for users with no study assignment
+    }
+  }
 
   res.json({
     success: true,
@@ -492,7 +520,9 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
       email: dbUser.email,
       phone: dbUser.phone || '',
       institutionalAffiliation: dbUser.institutional_affiliation || '',
-      role: userTypeName,
+      role: primaryRole,
+      userType: userTypeName,
+      userTypeId: userTypeId,
       timeZone: dbUser.time_zone || 'America/New_York',
       isActive: dbUser.status_id === 1,
       createdAt: dbUser.date_created,

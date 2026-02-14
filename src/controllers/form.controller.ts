@@ -14,14 +14,15 @@ export const saveData = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await formService.saveFormData(req.body, user.userId, user.username);
 
-  // Track form save action
+  // Track form save action - use the actual eventCrfId from the result
+  // (for new saves, req.body.eventCrfId won't exist yet; the service creates it)
   if (result.success) {
     await trackUserAction({
       userId: user.userId,
       username: user.username,
       action: 'FORM_UPDATED',
       entityType: 'event_crf',
-      entityId: req.body.eventCrfId || req.body.crfId,
+      entityId: (result as any).eventCrfId || req.body.eventCrfId || req.body.crfId,
       details: 'Form data saved'
     });
   }

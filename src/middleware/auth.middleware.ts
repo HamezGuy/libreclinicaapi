@@ -9,7 +9,7 @@ export interface AuthRequest extends Request {
     userName: string;
     email: string;
     userType: string;
-    role: string;
+    role: string;      // User's global role (highest across all studies)
     studyIds?: number[];
     organizationIds?: number[];
   };

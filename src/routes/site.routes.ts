@@ -33,7 +33,7 @@ router.get('/study/:studyId', asyncHandler(async (req: Request, res: Response) =
       ps.name as parent_study_name,
       s.status_id,
       s.principal_investigator,
-      s.facility_name, s.facility_city, s.facility_state,
+      s.facility_name, s.facility_address, s.facility_city, s.facility_state,
       s.facility_zip, s.facility_country, s.facility_recruitment_status,
       s.facility_contact_name as contact_name, s.facility_contact_degree as contact_degree,
       s.facility_contact_email as contact_email, s.facility_contact_phone as contact_phone,
@@ -65,6 +65,7 @@ router.get('/study/:studyId', asyncHandler(async (req: Request, res: Response) =
     status: row.status_id === 1 ? 'active' : row.status_id === 6 ? 'locked' : row.status_id === 9 ? 'frozen' : 'inactive',
     principalInvestigator: row.principal_investigator,
     facilityName: row.facility_name,
+    facilityAddress: row.facility_address,
     facilityCity: row.facility_city,
     facilityState: row.facility_state,
     facilityZip: row.facility_zip,
@@ -115,6 +116,7 @@ router.get('/:siteId', asyncHandler(async (req: Request, res: Response) => {
       statusId: row.status_id,
       principalInvestigator: row.principal_investigator,
       facilityName: row.facility_name,
+      facilityAddress: row.facility_address,
       facilityCity: row.facility_city,
       facilityState: row.facility_state,
       facilityZip: row.facility_zip,
@@ -131,9 +133,9 @@ router.get('/:siteId', asyncHandler(async (req: Request, res: Response) => {
  * POST /api/sites
  * Create a new site (child study)
  */
-router.post('/', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { parentStudyId, siteName, siteNumber, principalInvestigator, facilityName, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description } = req.body;
+  const { parentStudyId, siteName, siteNumber, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description } = req.body;
 
   if (!parentStudyId || !siteName) {
     res.status(400).json({ success: false, message: 'parentStudyId and siteName are required' });
@@ -144,12 +146,12 @@ router.post('/', requireRole('admin', 'coordinator'), asyncHandler(async (req: R
 
   const result = await pool.query(`
     INSERT INTO study (parent_study_id, unique_identifier, secondary_identifier, name, summary, principal_investigator,
-      facility_name, facility_city, facility_state, facility_zip, facility_country,
+      facility_name, facility_address, facility_city, facility_state, facility_zip, facility_country,
       expected_total_enrollment, type_id, status_id, owner_id, date_created)
-    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, type_id, 1, $13, NOW()
+    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, type_id, 1, $14, NOW()
     FROM study WHERE study_id = $1
     RETURNING study_id
-  `, [parentStudyId, uniqueId, siteNumber, siteName, description, principalInvestigator, facilityName, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, user.userId]);
+  `, [parentStudyId, uniqueId, siteNumber, siteName, description, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, user.userId]);
 
   if (result.rows.length === 0) {
     res.status(400).json({ success: false, message: 'Parent study not found' });
@@ -163,20 +165,21 @@ router.post('/', requireRole('admin', 'coordinator'), asyncHandler(async (req: R
  * PUT /api/sites/:siteId
  * Update a site
  */
-router.put('/:siteId', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.put('/:siteId', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { siteId } = req.params;
   const user = (req as any).user;
-  const { siteName, siteNumber, principalInvestigator, facilityName, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description } = req.body;
+  const { siteName, siteNumber, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description } = req.body;
 
   await pool.query(`
     UPDATE study SET name = COALESCE($1, name), secondary_identifier = COALESCE($2, secondary_identifier),
       principal_investigator = COALESCE($3, principal_investigator), facility_name = COALESCE($4, facility_name),
-      facility_city = COALESCE($5, facility_city), facility_state = COALESCE($6, facility_state),
-      facility_zip = COALESCE($7, facility_zip), facility_country = COALESCE($8, facility_country),
-      expected_total_enrollment = COALESCE($9, expected_total_enrollment), summary = COALESCE($10, summary),
-      update_id = $11, date_updated = NOW()
-    WHERE study_id = $12 AND parent_study_id IS NOT NULL
-  `, [siteName, siteNumber, principalInvestigator, facilityName, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description, user.userId, siteId]);
+      facility_address = COALESCE($5, facility_address),
+      facility_city = COALESCE($6, facility_city), facility_state = COALESCE($7, facility_state),
+      facility_zip = COALESCE($8, facility_zip), facility_country = COALESCE($9, facility_country),
+      expected_total_enrollment = COALESCE($10, expected_total_enrollment), summary = COALESCE($11, summary),
+      update_id = $12, date_updated = NOW()
+    WHERE study_id = $13 AND parent_study_id IS NOT NULL
+  `, [siteName, siteNumber, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description, user.userId, siteId]);
 
   res.json({ success: true, message: 'Site updated' });
 }));
@@ -240,7 +243,7 @@ router.get('/:siteId/patients', asyncHandler(async (req: Request, res: Response)
  * POST /api/sites/transfer
  * Transfer a patient between sites
  */
-router.post('/transfer', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/transfer', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { studySubjectId, fromSiteId, toSiteId, reason } = req.body;
 
@@ -306,7 +309,7 @@ router.get('/:siteId/staff', asyncHandler(async (req: Request, res: Response) =>
  * POST /api/sites/:siteId/staff
  * Assign staff to a site
  */
-router.post('/:siteId/staff', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/:siteId/staff', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { siteId } = req.params;
   const user = (req as any).user;
   const { username, userId, role } = req.body;
@@ -342,7 +345,7 @@ router.post('/:siteId/staff', requireRole('admin', 'coordinator'), asyncHandler(
  * DELETE /api/sites/:siteId/staff/:username
  * Remove staff from a site
  */
-router.delete('/:siteId/staff/:username', requireRole('admin', 'coordinator'), asyncHandler(async (req: Request, res: Response) => {
+router.delete('/:siteId/staff/:username', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { siteId, username } = req.params;
   const user = (req as any).user;
 

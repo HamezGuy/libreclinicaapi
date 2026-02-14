@@ -9,6 +9,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { ApiResponse, PaginatedResponse } from '../../types';
+import * as notificationService from './notification.service';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -79,12 +80,14 @@ export const getQueries = async (
 
     const whereClause = conditions.join(' AND ');
 
-    // Count
+    // Count - must include the same JOINs as the data query when subjectId filter is used
     const countQuery = `
       SELECT COUNT(*) as total
       FROM discrepancy_note dn
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
+      ${subjectId ? 'LEFT JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id' : ''}
+      ${subjectId ? 'LEFT JOIN study_subject ss ON dssm.study_subject_id = ss.study_subject_id' : ''}
       WHERE ${whereClause}
     `;
 
@@ -269,7 +272,93 @@ export const createQuery = async (
       };
     }
 
-    // Insert discrepancy note (main record) - include assigned_user_id if provided
+    // Resolve query assignment:
+    // 1. Use explicitly provided assignedUserId
+    // 2. Look up form workflow config (query_route_to_user) when entity is eventCrf or itemData
+    // 3. Fall back to null (unassigned)
+    let resolvedAssignedUserId = data.assignedUserId || null;
+    
+    if (!resolvedAssignedUserId && (data.entityType === 'eventCrf' || data.entityType === 'itemData')) {
+      try {
+        // Try to find workflow-assigned user from form workflow config
+        let lookupEntityId = data.entityId;
+        let crfIdForLookup: number | null = null;
+        
+        if (data.entityType === 'eventCrf') {
+          // entityId IS the event_crf_id - look up the crf_id
+          const ecResult = await client.query(`
+            SELECT cv.crf_id FROM event_crf ec
+            INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+            WHERE ec.event_crf_id = $1
+          `, [lookupEntityId]);
+          if (ecResult.rows.length > 0) crfIdForLookup = ecResult.rows[0].crf_id;
+        } else if (data.entityType === 'itemData') {
+          // entityId IS item_data_id - look up crf_id via event_crf
+          const idResult = await client.query(`
+            SELECT cv.crf_id FROM item_data id
+            INNER JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+            INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+            WHERE id.item_data_id = $1
+          `, [lookupEntityId]);
+          if (idResult.rows.length > 0) crfIdForLookup = idResult.rows[0].crf_id;
+        }
+        
+        if (crfIdForLookup) {
+          const configResult = await client.query(`
+            SELECT query_route_to_user, query_route_to_users FROM acc_form_workflow_config
+            WHERE crf_id = $1
+              AND (study_id = $2 OR study_id IS NULL)
+            ORDER BY study_id DESC NULLS LAST
+            LIMIT 1
+          `, [crfIdForLookup, data.studyId || null]);
+          
+          if (configResult.rows.length > 0) {
+            // Priority 1: Use new multi-user JSON array field
+            let routeUsernames: string[] = [];
+            try {
+              const rawUsers = configResult.rows[0].query_route_to_users;
+              if (rawUsers) {
+                routeUsernames = JSON.parse(rawUsers);
+              }
+            } catch { /* ignore parse errors */ }
+
+            // Priority 2: Fall back to legacy single-user field
+            if (routeUsernames.length === 0) {
+              const legacyUser = configResult.rows[0].query_route_to_user;
+              if (legacyUser && legacyUser.trim()) {
+                routeUsernames = [legacyUser.trim()];
+              }
+            }
+
+            if (routeUsernames.length > 0) {
+              // Resolve the first user as the primary assignee
+              const userResult = await client.query(`
+                SELECT user_id, user_name FROM user_account
+                WHERE user_name = ANY($1) AND enabled = true
+              `, [routeUsernames]);
+
+              if (userResult.rows.length > 0) {
+                resolvedAssignedUserId = userResult.rows[0].user_id;
+                // Store additional assignees for child note creation after insert
+                (data as any)._additionalAssigneeIds = userResult.rows
+                  .slice(1)
+                  .map((r: any) => r.user_id);
+                logger.info('Query auto-assigned via workflow config', { 
+                  crfId: crfIdForLookup, 
+                  usernames: routeUsernames,
+                  primaryUserId: resolvedAssignedUserId,
+                  additionalCount: (data as any)._additionalAssigneeIds?.length || 0
+                });
+              }
+            }
+          }
+        }
+      } catch (e: any) {
+        logger.warn('Could not resolve workflow assignee for query:', e.message);
+      }
+    }
+
+    // Insert discrepancy note (main record) with resolved assignment
     const insertNoteQuery = `
       INSERT INTO discrepancy_note (
         description, detailed_notes, discrepancy_note_type_id,
@@ -288,34 +377,75 @@ export const createQuery = async (
       data.studyId,
       data.entityType,
       userId,
-      data.assignedUserId || null  // Set assigned user if provided
+      resolvedAssignedUserId  // Workflow-resolved or explicitly provided
     ]);
 
     const queryId = noteResult.rows[0].discrepancy_note_id;
 
-    // Insert into appropriate mapping table
-    // Note: For studySubject entity type, the mapping table already uses study_subject_id
-    // so we don't need to add it again
-    const needsStudySubjectColumn = studySubjectId && 
-      data.entityType !== 'studySubject' && 
-      mapping.idColumn !== 'study_subject_id';
-    
+    // Insert into the primary mapping table for the entity type
+    // LibreClinica mapping tables (dn_item_data_map, dn_event_crf_map, etc.) 
+    // do NOT have a study_subject_id column - use dn_study_subject_map separately
     const insertMapQuery = `
       INSERT INTO ${mapping.table} (
         discrepancy_note_id, ${mapping.idColumn}
-        ${needsStudySubjectColumn ? ', study_subject_id' : ''}
-      ) VALUES (
-        $1, $2
-        ${needsStudySubjectColumn ? ', $3' : ''}
-      )
+      ) VALUES ($1, $2)
     `;
+    await client.query(insertMapQuery, [queryId, data.entityId]);
 
-    const mapParams = [queryId, data.entityId];
-    if (needsStudySubjectColumn) {
-      mapParams.push(studySubjectId);
+    // Also create a dn_study_subject_map entry if we have a subjectId
+    // and the primary mapping table is NOT already dn_study_subject_map
+    if (studySubjectId && mapping.table !== 'dn_study_subject_map') {
+      try {
+        await client.query(`
+          INSERT INTO dn_study_subject_map (discrepancy_note_id, study_subject_id, column_name)
+          VALUES ($1, $2, 'value')
+        `, [queryId, studySubjectId]);
+      } catch (e: any) {
+        // Non-critical: don't fail query creation if subject linkage fails
+        logger.warn('Could not link query to study subject', { queryId, studySubjectId, error: e.message });
+      }
     }
 
-    await client.query(insertMapQuery, mapParams);
+    // Create child discrepancy notes for additional assignees (multi-user routing)
+    const additionalAssigneeIds: number[] = (data as any)._additionalAssigneeIds || [];
+    for (const additionalUserId of additionalAssigneeIds) {
+      try {
+        const childResult = await client.query(`
+          INSERT INTO discrepancy_note (
+            description, detailed_notes, discrepancy_note_type_id,
+            resolution_status_id, study_id, entity_type,
+            owner_id, assigned_user_id, parent_dn_id, date_created
+          ) VALUES (
+            $1, $2, $3, 1, $4, $5, $6, $7, $8, NOW()
+          )
+          RETURNING discrepancy_note_id
+        `, [
+          data.description,
+          data.detailedNotes || '',
+          typeId,
+          data.studyId,
+          data.entityType,
+          userId,
+          additionalUserId,
+          queryId  // Link to parent query
+        ]);
+        
+        // Map child note to the same entity
+        const childNoteId = childResult.rows[0].discrepancy_note_id;
+        await client.query(`
+          INSERT INTO ${mapping.table} (discrepancy_note_id, ${mapping.idColumn})
+          VALUES ($1, $2)
+        `, [childNoteId, data.entityId]);
+
+        logger.info('Created child query for additional assignee', { 
+          parentQueryId: queryId, childNoteId, additionalUserId 
+        });
+      } catch (childError: any) {
+        logger.warn('Failed to create child query for additional assignee', { 
+          parentQueryId: queryId, additionalUserId, error: childError.message 
+        });
+      }
+    }
 
     // Log audit event
     await client.query(`
@@ -331,6 +461,22 @@ export const createQuery = async (
     await client.query('COMMIT');
 
     logger.info('Query created successfully', { queryId });
+
+    // Fire-and-forget: create in-app notifications for all assigned users
+    try {
+      if (resolvedAssignedUserId) {
+        await notificationService.notifyQueryAssigned(
+          resolvedAssignedUserId, data.description || 'New query', queryId, data.studyId
+        );
+      }
+      for (const addlId of additionalAssigneeIds) {
+        await notificationService.notifyQueryAssigned(
+          addlId, data.description || 'New query', queryId, data.studyId
+        );
+      }
+    } catch (notifErr: any) {
+      logger.warn('Failed to send query assignment notifications', { error: notifErr.message });
+    }
 
     return {
       success: true,
@@ -443,6 +589,32 @@ export const addQueryResponse = async (
     await client.query('COMMIT');
 
     logger.info('Query response added successfully', { responseId, parentQueryId });
+
+    // Notify the query owner that a response was added
+    try {
+      const ownerUserId = parent.owner_id;
+      if (ownerUserId && ownerUserId !== userId) {
+        // Look up responder name
+        const responderResult = await pool.query(
+          `SELECT first_name, last_name FROM user_account WHERE user_id = $1`, [userId]
+        );
+        const responderName = responderResult.rows[0]
+          ? `${responderResult.rows[0].first_name} ${responderResult.rows[0].last_name}`.trim()
+          : 'A user';
+        await notificationService.notifyQueryResponse(
+          ownerUserId, data.description || 'Response added', parentQueryId, responderName
+        );
+      }
+      // Also notify assigned user if different
+      const assignedUserId = parent.assigned_user_id;
+      if (assignedUserId && assignedUserId !== userId && assignedUserId !== ownerUserId) {
+        await notificationService.notifyQueryResponse(
+          assignedUserId, data.description || 'Response added', parentQueryId, 'A user'
+        );
+      }
+    } catch (notifErr: any) {
+      logger.warn('Failed to send query response notification', { error: notifErr.message });
+    }
 
     return {
       success: true,
@@ -762,6 +934,7 @@ export const getQueryAuditTrail = async (queryId: number, callerUserId?: number)
         ale.old_value,
         ale.new_value,
         ale.reason_for_change,
+        ale.user_id,
         u.user_name,
         u.first_name || ' ' || u.last_name as user_full_name,
         alet.name as event_type
@@ -779,7 +952,7 @@ export const getQueryAuditTrail = async (queryId: number, callerUserId?: number)
     if (callerUserId && result.rows.length > 0) {
       const orgUserIds = await getOrgMemberUserIds(callerUserId);
       if (orgUserIds) {
-        return result.rows.filter((r: any) => orgUserIds.includes(r.user_id || 0));
+        return result.rows.filter((r: any) => orgUserIds.includes(r.user_id));
       }
     }
 
@@ -1149,17 +1322,23 @@ export const getOverdueQueries = async (studyId: number, daysThreshold: number =
       WHERE dn.study_id = $1
         AND dn.parent_dn_id IS NULL
         AND dnst.name IN ('New', 'Updated', 'Resolution Proposed')
-        AND dn.date_created < NOW() - INTERVAL '${daysThreshold} days'${callerUserId ? ` AND dn.owner_id = ANY($2::int[])` : ''}
+        AND dn.date_created < NOW() - INTERVAL '1 day' * $2
       ORDER BY dn.date_created ASC
     `;
 
-    const params: any[] = [studyId];
+    const params: any[] = [studyId, Math.max(0, Math.floor(daysThreshold))];
+    
+    // Org-scoping: only return queries owned by users in the caller's org
+    let orgFilteredQuery = query;
     if (callerUserId) {
       const orgUserIds = await getOrgMemberUserIds(callerUserId);
-      if (orgUserIds) params.push(orgUserIds);
+      if (orgUserIds) {
+        orgFilteredQuery = query.replace('ORDER BY', `AND dn.owner_id = ANY($3::int[]) ORDER BY`);
+        params.push(orgUserIds);
+      }
     }
 
-    const result = await pool.query(query, params);
+    const result = await pool.query(orgFilteredQuery, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get overdue queries error', { error: error.message });
@@ -1344,6 +1523,106 @@ export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?:
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════
+// QUERY REOPEN
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Reopen a closed query.  Sets status back to New (1) and logs an audit event.
+ */
+export const reopenQuery = async (
+  queryId: number,
+  userId: number,
+  reason: string
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Reopening query', { queryId, userId, reason });
+  return updateQueryStatus(queryId, 1, userId, { reason: reason || 'Query reopened' });
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// BULK OPERATIONS
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Bulk update status for multiple queries.
+ */
+export const bulkUpdateStatus = async (
+  queryIds: number[],
+  statusId: number,
+  userId: number,
+  reason?: string
+): Promise<{ success: boolean; updated: number; failed: number; errors: string[] }> => {
+  logger.info('Bulk updating query statuses', { count: queryIds.length, statusId, userId });
+  let updated = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const qid of queryIds) {
+    const result = await updateQueryStatus(qid, statusId, userId, { reason });
+    if (result.success) {
+      updated++;
+    } else {
+      failed++;
+      errors.push(`Query ${qid}: ${result.message}`);
+    }
+  }
+
+  return { success: failed === 0, updated, failed, errors };
+};
+
+/**
+ * Bulk close queries with a shared reason.
+ */
+export const bulkCloseQueries = async (
+  queryIds: number[],
+  userId: number,
+  reason: string
+): Promise<{ success: boolean; closed: number; failed: number; errors: string[] }> => {
+  logger.info('Bulk closing queries', { count: queryIds.length, userId });
+  let closed = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const qid of queryIds) {
+    const result = await updateQueryStatus(qid, 4, userId, { reason, signature: false });
+    if (result.success) {
+      closed++;
+    } else {
+      failed++;
+      errors.push(`Query ${qid}: ${result.message}`);
+    }
+  }
+
+  return { success: failed === 0, closed, failed, errors };
+};
+
+/**
+ * Bulk reassign queries to a new user.
+ */
+export const bulkReassignQueries = async (
+  queryIds: number[],
+  newAssignedUserId: number,
+  userId: number,
+  reason?: string
+): Promise<{ success: boolean; reassigned: number; failed: number; errors: string[] }> => {
+  logger.info('Bulk reassigning queries', { count: queryIds.length, newAssignedUserId, userId });
+  let reassigned = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const qid of queryIds) {
+    const result = await reassignQuery(qid, newAssignedUserId, userId);
+    if (result.success) {
+      reassigned++;
+    } else {
+      failed++;
+      errors.push(`Query ${qid}: ${result.message}`);
+    }
+  }
+
+  return { success: failed === 0, reassigned, failed, errors };
+};
+
 export default {
   getQueries,
   getQueryById,
@@ -1365,5 +1644,9 @@ export default {
   getQueryCountByType,
   getQueryThread,
   getOverdueQueries,
-  getMyAssignedQueries
+  getMyAssignedQueries,
+  reopenQuery,
+  bulkUpdateStatus,
+  bulkCloseQueries,
+  bulkReassignQueries
 };

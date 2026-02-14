@@ -49,7 +49,7 @@ router.get('/access-requests', requireRole('admin'), controller.listAccessReques
 router.patch('/access-requests/:requestId', requireRole('admin'), controller.reviewAccessRequest);
 
 // Invitations (create - requires auth) - MUST be before /:id
-router.post('/invitations', requireRole('admin', 'coordinator', 'investigator'), controller.createInvitation);
+router.post('/invitations', requireRole('admin', 'data_manager', 'investigator'), controller.createInvitation);
 
 // Organization CRUD
 router.get('/', requireRole('admin'), controller.list);
@@ -67,8 +67,8 @@ router.patch('/:id/members/:userId/role', requireRole('admin', 'investigator'), 
 router.delete('/:id/members/:userId', requireRole('admin'), controller.removeMember);
 
 // Codes
-router.post('/:id/codes', requireRole('admin', 'coordinator'), controller.generateCode);
+router.post('/:id/codes', requireRole('admin', 'data_manager'), controller.generateCode);
 router.get('/:id/codes', controller.listCodes);
-router.patch('/:id/codes/:codeId', requireRole('admin', 'coordinator'), controller.deactivateCode);
+router.patch('/:id/codes/:codeId', requireRole('admin', 'data_manager'), controller.deactivateCode);
 
 export default router;

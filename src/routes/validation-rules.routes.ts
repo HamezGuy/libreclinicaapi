@@ -58,21 +58,21 @@ router.get('/:ruleId', controller.getRule);
 
 // Create a new rule (admin/coordinator only + signature)
 router.post('/', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor('I authorize creation of this validation rule'),
   controller.createRule
 );
 
 // Update a rule (signature required)
 router.put('/:ruleId', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor('I authorize modification of this validation rule'),
   controller.updateRule
 );
 
 // Toggle rule active state (signature required)
 router.patch('/:ruleId/toggle', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor('I authorize toggling this validation rule'),
   controller.toggleRule
 );
@@ -89,6 +89,16 @@ router.post('/validate/:crfId', controller.validateData);
 
 // Test a rule (no signature - read-only operation)
 router.post('/test', controller.testRule);
+
+// Serve the shared format type definitions so the frontend can stay in sync
+router.get('/format-types', (_req, res) => {
+  try {
+    const formatTypes = require('../../config/format-types.json');
+    res.json({ success: true, data: formatTypes });
+  } catch {
+    res.status(500).json({ success: false, message: 'Failed to load format types' });
+  }
+});
 
 export default router;
 

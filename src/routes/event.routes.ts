@@ -36,13 +36,13 @@ router.get('/instance/:studyEventId/crfs', controller.getPatientEventCRFs);
 
 // Create/Update/Delete - require coordinator or admin role + signature
 router.post('/', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   validate({ body: eventSchemas.create }), 
   requireSignatureFor(SignatureMeanings.EVENT_CREATE),
   controller.create
 );
 router.put('/:id', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam, body: eventSchemas.update }), 
   requireSignatureFor(SignatureMeanings.EVENT_UPDATE),
   controller.update
@@ -56,7 +56,7 @@ router.delete('/:id',
 
 // Schedule event - require data entry or coordinator role + signature
 router.post('/schedule', 
-  requireRole('coordinator', 'data_entry', 'investigator'), 
+  requireRole('data_manager', 'coordinator', 'investigator'), 
   soapRateLimiter, 
   validate({ body: eventSchemas.schedule }), 
   requireSignatureFor(SignatureMeanings.EVENT_SCHEDULE),
@@ -72,35 +72,35 @@ router.get('/study/:studyId/event/:eventId/available-crfs', controller.getAvaila
 
 // Assign CRF to event (signature required)
 router.post('/:eventId/crfs', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
   controller.assignCrf
 );
 
 // Update CRF assignment settings (signature required)
 router.put('/crf-assignment/:crfAssignmentId', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.updateEventCrf
 );
 
 // Remove CRF from event (signature required)
 router.delete('/crf-assignment/:crfAssignmentId', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_DELETE),
   controller.removeCrf
 );
 
 // Reorder CRFs within an event (signature required)
 router.put('/:eventId/crfs/reorder', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.reorderCrfs
 );
 
 // Bulk assign CRFs to event (signature required)
 router.post('/:eventId/crfs/bulk', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
   controller.bulkAssignCrfs
 );

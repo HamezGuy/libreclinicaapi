@@ -57,7 +57,7 @@ export const importData = async (
     const soapClient = getSoapClient();
     const response = await soapClient.executeRequest<any>({
       serviceName: 'data',
-      methodName: 'importODM',
+      methodName: 'import',
       parameters: {
         odm: odmXml
       },

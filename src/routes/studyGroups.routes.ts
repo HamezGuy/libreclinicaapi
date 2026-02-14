@@ -58,7 +58,7 @@ router.get('/study/:studyId', async (req: Request, res: Response) => {
  * POST /api/study-groups/class
  * Create a new study group class (admin/coordinator only)
  */
-router.post('/class', requireRole('admin', 'coordinator'), async (req: Request, res: Response) => {
+router.post('/class', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { studyId, name, groupClassTypeId, subjectAssignment } = req.body;
@@ -93,7 +93,7 @@ router.post('/class', requireRole('admin', 'coordinator'), async (req: Request, 
  * POST /api/study-groups/group
  * Create a new group within a class (admin/coordinator only)
  */
-router.post('/group', requireRole('admin', 'coordinator'), async (req: Request, res: Response) => {
+router.post('/group', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   try {
     const { studyGroupClassId, name, description } = req.body;
     

@@ -1,0 +1,21 @@
+{
+  "email":            { "pattern": "^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$", "label": "Email address", "example": "user@example.com" },
+  "phone_us":         { "pattern": "^\\(?\\d{3}\\)?[\\-. ]?\\d{3}[\\-. ]?\\d{4}$", "label": "US phone number", "example": "123-456-7890" },
+  "phone_intl":       { "pattern": "^\\+?\\d{1,4}[\\-. ]?\\(?\\d+\\)?[\\-. \\d]{5,}$", "label": "International phone", "example": "+1 234-567-8901" },
+  "letters_only":     { "pattern": "^[a-zA-Z\\s]+$", "label": "Letters only", "example": "John Doe" },
+  "numbers_only":     { "pattern": "^\\d+$", "label": "Whole numbers only", "example": "42" },
+  "alphanumeric":     { "pattern": "^[a-zA-Z0-9\\s]+$", "label": "Letters and numbers", "example": "ABC123" },
+  "no_special_chars": { "pattern": "^[a-zA-Z0-9\\s.,_\\-]+$", "label": "No special characters", "example": "Study note 1" },
+  "date_mmddyyyy":    { "pattern": "^(0[1-9]|1[0-2])/(0[1-9]|[12]\\d|3[01])/\\d{4}$", "label": "Date (MM/DD/YYYY)", "example": "01/15/2025" },
+  "date_ddmmyyyy":    { "pattern": "^(0[1-9]|[12]\\d|3[01])/(0[1-9]|1[0-2])/\\d{4}$", "label": "Date (DD/MM/YYYY)", "example": "15/01/2025" },
+  "date_iso":         { "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$", "label": "Date (YYYY-MM-DD)", "example": "2025-01-15" },
+  "time_24h":         { "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$", "label": "Time (24h)", "example": "14:30" },
+  "time_12h":         { "pattern": "^(0?[1-9]|1[0-2]):[0-5]\\d\\s?(AM|PM|am|pm)$", "label": "Time (12h)", "example": "2:30 PM" },
+  "positive_number":  { "pattern": "^\\d*\\.?\\d+$", "label": "Positive numbers only", "example": "12.5" },
+  "integer_only":     { "pattern": "^-?\\d+$", "label": "Whole numbers (incl. negatives)", "example": "-5" },
+  "decimal_2dp":      { "pattern": "^-?\\d+\\.\\d{2}$", "label": "Number with 2 decimal places", "example": "12.34" },
+  "subject_id":       { "pattern": "^[A-Z]{2,5}-\\d{3,5}$", "label": "Subject ID (SITE-001)", "example": "NYC-001" },
+  "initials":         { "pattern": "^[A-Z]{2,3}$", "label": "Patient initials (2-3 caps)", "example": "JD" },
+  "zipcode_us":       { "pattern": "^\\d{5}(-\\d{4})?$", "label": "US ZIP code", "example": "10001" },
+  "custom_regex":     { "pattern": "", "label": "Custom pattern (advanced)", "example": "" }
+}

@@ -237,6 +237,23 @@ export const subjectSchemas = {
 
 /**
  * Form/CRF Schemas
+ * 
+ * ARCHITECTURE NOTE — validation is layered:
+ * 
+ * Layer 1 (this middleware): validates REQUEST STRUCTURE only — ensures the
+ *   required identifiers (studyId, subjectId, event/form IDs) are present and
+ *   have correct types.  The actual form field data inside `data`/`formData`
+ *   is intentionally left as a free-form object here.
+ * 
+ * Layer 2 (validation-rules.service.ts): validates FIELD VALUES.  After the
+ *   middleware passes the request through, the form service invokes the
+ *   validation rules engine which checks each user-entered value against
+ *   configured rules (required, range, format, consistency, formula).
+ *   - Hard-edit rules (severity: 'error') block the save.
+ *   - Soft-edit rules (severity: 'warning') create queries (discrepancy notes).
+ * 
+ * This separation ensures that field-level business rules are managed via the
+ * validation-rules configuration screen, not hard-coded in Joi schemas.
  */
 export const formSchemas = {
   saveData: Joi.object({
@@ -250,6 +267,8 @@ export const formSchemas = {
     eventId: Joi.number().integer().positive().optional(),
     studyEventDefinitionId: Joi.number().integer().positive().optional(),
     studyEventId: Joi.number().integer().positive().optional(),
+    // eventCrfId: passed through explicitly so the service layer can use it
+    // for itemId-based field matching during validation rule evaluation.
     eventCrfId: Joi.number().integer().positive().optional(),
 
     // Form ID - accept both frontend and backend naming conventions
@@ -257,7 +276,8 @@ export const formSchemas = {
     crfId: Joi.number().integer().positive().optional(),
     crfVersionId: Joi.number().integer().positive().optional(),
 
-    // Form data - accept both frontend and backend naming conventions
+    // Form data — free-form objects; field-level validation is handled by
+    // validation-rules.service.ts (Layer 2), not here.
     data: Joi.object().optional(),
     formData: Joi.object().optional(),
 
@@ -338,6 +358,7 @@ const siteSchema = Joi.object({
   uniqueIdentifier: Joi.string().required().max(255),
   principalInvestigator: Joi.string().optional().max(255).allow(''),
   facilityName: Joi.string().optional().max(255).allow(''),
+  facilityAddress: Joi.string().optional().max(1000).allow(''),
   facilityCity: Joi.string().optional().max(255).allow(''),
   facilityState: Joi.string().optional().max(20).allow(''),
   facilityZip: Joi.string().optional().max(64).allow(''),
@@ -429,6 +450,7 @@ export const studySchemas = {
 
     // Facility fields
     facilityName: Joi.string().optional().max(255).allow(''),
+    facilityAddress: Joi.string().optional().max(1000).allow(''),
     facilityCity: Joi.string().optional().max(255).allow(''),
     facilityState: Joi.string().optional().max(20).allow(''),
     facilityZip: Joi.string().optional().max(64).allow(''),
@@ -523,6 +545,7 @@ export const studySchemas = {
 
     // Facility fields
     facilityName: Joi.string().optional().max(255).allow(''),
+    facilityAddress: Joi.string().optional().max(1000).allow(''),
     facilityCity: Joi.string().optional().max(255).allow(''),
     facilityState: Joi.string().optional().max(20).allow(''),
     facilityZip: Joi.string().optional().max(64).allow(''),
@@ -703,7 +726,12 @@ export const userSchemas = {
         'string.min': 'Password must be at least 8 characters',
         'string.pattern.base': 'Password must contain at least one special character'
       }),
-    role: Joi.string().required().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry', 'ra', 'ra2', 'director', 'viewer'),
+    role: Joi.string().required().valid(
+      // Current 6 canonical roles
+      'admin', 'data_manager', 'investigator', 'coordinator', 'monitor', 'viewer',
+      // Legacy role names (backwards compatibility)
+      'data_entry', 'ra', 'ra2', 'director'
+    ),
     runWebservices: Joi.boolean().optional(),
     enableApiKey: Joi.boolean().optional()
   }),
@@ -715,7 +743,12 @@ export const userSchemas = {
     email: Joi.string().email().optional().max(120).allow(''),
     institutionalAffiliation: Joi.string().optional().max(255).allow(''),
     phone: Joi.string().optional().max(40).allow(''),
-    role: Joi.string().optional().valid('admin', 'coordinator', 'investigator', 'monitor', 'data_entry', 'ra', 'ra2', 'director', 'viewer').allow(''),
+    role: Joi.string().optional().valid(
+      // Current 6 canonical roles
+      'admin', 'data_manager', 'investigator', 'coordinator', 'monitor', 'viewer',
+      // Legacy role names (backwards compatibility)
+      'data_entry', 'ra', 'ra2', 'director'
+    ).allow(''),
     enabled: Joi.boolean().optional(),
     timeZone: Joi.string().optional().max(255).allow('', null),
     runWebservices: Joi.boolean().optional(),
@@ -767,7 +800,9 @@ export const eventSchemas = {
     studyEventDefinitionId: Joi.number().integer().positive().required(),
     startDate: Joi.date().iso().optional(),
     endDate: Joi.date().iso().optional(),
-    location: Joi.string().optional().max(255)
+    location: Joi.string().optional().max(255),
+    scheduledDate: Joi.date().iso().optional(),
+    isUnscheduled: Joi.boolean().optional()
   }),
 
   create: Joi.object({

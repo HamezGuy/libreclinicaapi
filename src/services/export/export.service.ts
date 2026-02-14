@@ -27,7 +27,7 @@ import { config } from '../../config/environment';
 import { pool } from '../../config/database';
 
 // Types matching LibreClinica's ExportFormatBean
-export type ExportFormat = 'csv' | 'odm' | 'spss' | 'txt';
+export type ExportFormat = 'csv' | 'odm' | 'spss' | 'txt' | 'xlsx';
 
 // Types matching LibreClinica's DatasetBean fields
 export interface DatasetConfig {
@@ -38,6 +38,7 @@ export interface DatasetConfig {
   dateEnd?: string;
   eventOIDs?: string[];
   crfOIDs?: string[];
+  subjectOIDs?: string[];
   // Display options from DatasetBean
   showEventLocation?: boolean;
   showEventStart?: boolean;
@@ -45,8 +46,11 @@ export interface DatasetConfig {
   showSubjectDob?: boolean;
   showSubjectGender?: boolean;
   showSubjectStatus?: boolean;
+  showSubjectEnrollmentDate?: boolean;
   showCRFstatus?: boolean;
   showCRFversion?: boolean;
+  showItemOIDs?: boolean;
+  showAuditInfo?: boolean;
 }
 
 export interface ExportResult {
@@ -203,29 +207,132 @@ export const buildCsvExport = async (
 ): Promise<string> => {
   logger.info('Building CSV export', { studyOID: datasetConfig.studyOID });
 
-  const subjects = await getSubjectsForExport(datasetConfig.studyOID, username);
+  // Get study ID from OID
+  const studyResult = await pool.query(
+    'SELECT study_id FROM study WHERE oc_oid = $1 OR unique_identifier = $1 LIMIT 1',
+    [datasetConfig.studyOID]
+  );
+  
+  if (studyResult.rows.length === 0) {
+    logger.warn('Study not found for CSV export', { studyOID: datasetConfig.studyOID });
+    return 'No study found';
+  }
+  const studyId = studyResult.rows[0].study_id;
 
-  // Build header row
-  const headers = ['SubjectID', 'StudySubjectID', 'Status'];
-  if (datasetConfig.showSubjectGender) headers.push('Sex');
-  if (datasetConfig.showSubjectDob) headers.push('DateOfBirth');
-  if (datasetConfig.showSubjectStatus) headers.push('Status');
+  // Build dynamic WHERE clauses based on filters
+  const params: any[] = [studyId];
+  const whereClauses: string[] = ['ss.study_id = $1', 'ss.status_id = 1'];
+  
+  // Filter by specific subjects
+  if (datasetConfig.subjectOIDs && datasetConfig.subjectOIDs.length > 0) {
+    params.push(datasetConfig.subjectOIDs);
+    whereClauses.push(`(ss.oc_oid = ANY($${params.length}) OR ss.label = ANY($${params.length}))`);
+  }
+  
+  // Filter by specific events
+  if (datasetConfig.eventOIDs && datasetConfig.eventOIDs.length > 0) {
+    params.push(datasetConfig.eventOIDs);
+    whereClauses.push(`(sed.oc_oid = ANY($${params.length}) OR sed.name = ANY($${params.length}) OR sed.oc_oid IS NULL)`);
+  }
+  
+  // Filter by specific CRFs/forms
+  if (datasetConfig.crfOIDs && datasetConfig.crfOIDs.length > 0) {
+    params.push(datasetConfig.crfOIDs);
+    whereClauses.push(`(c.oc_oid = ANY($${params.length}) OR c.name = ANY($${params.length}) OR c.oc_oid IS NULL)`);
+  }
+  
+  // Filter by date range
+  if (datasetConfig.dateStart) {
+    params.push(datasetConfig.dateStart);
+    whereClauses.push(`(se.date_start >= $${params.length} OR se.date_start IS NULL)`);
+  }
+  if (datasetConfig.dateEnd) {
+    params.push(datasetConfig.dateEnd);
+    whereClauses.push(`(se.date_start <= $${params.length} OR se.date_start IS NULL)`);
+  }
+
+  // Get all subject data including form data (item_data)
+  const query = `
+    SELECT 
+      ss.label as subject_id,
+      ss.secondary_label,
+      ss.enrollment_date,
+      sub.gender,
+      sub.date_of_birth,
+      sed.name as event_name,
+      sed.oc_oid as event_oid,
+      sed.ordinal as event_ordinal,
+      c.name as form_name,
+      c.oc_oid as form_oid,
+      i.name as item_name,
+      i.oc_oid as item_oid,
+      id.value as item_value,
+      se.date_start as visit_date,
+      COALESCE(se.is_unscheduled, false) as is_unscheduled,
+      sest.name as event_status,
+      cs.name as form_status
+    FROM study_subject ss
+    INNER JOIN subject sub ON ss.subject_id = sub.subject_id
+    LEFT JOIN study_event se ON se.study_subject_id = ss.study_subject_id
+    LEFT JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    LEFT JOIN subject_event_status sest ON se.subject_event_status_id = sest.subject_event_status_id
+    LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+    LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+    LEFT JOIN crf c ON cv.crf_id = c.crf_id
+    LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+    LEFT JOIN item_data id ON id.event_crf_id = ec.event_crf_id AND (id.deleted IS NULL OR id.deleted = false)
+    LEFT JOIN item i ON id.item_id = i.item_id
+    WHERE ${whereClauses.join(' AND ')}
+    ORDER BY ss.label, sed.ordinal, se.sample_ordinal, c.name, i.name
+  `;
+
+  const result = await pool.query(query, params);
+
+  if (result.rows.length === 0) {
+    // Fallback: just subject demographics
+    const subjects = await getSubjectsForExport(datasetConfig.studyOID, username);
+    const headers = ['SubjectID', 'StudySubjectID'];
+    if (datasetConfig.showSubjectGender) headers.push('Sex');
+    if (datasetConfig.showSubjectDob) headers.push('DateOfBirth');
+    if (datasetConfig.showSubjectStatus) headers.push('Status');
+
+    const rows: string[] = [headers.join(',')];
+    for (const subject of subjects) {
+      const row: string[] = [
+        csvEscape(subject.subjectOID || subject.uniqueIdentifier || ''),
+        csvEscape(subject.studySubjectID || subject.label || '')
+      ];
+      if (datasetConfig.showSubjectGender) row.push(csvEscape(subject.sex || ''));
+      if (datasetConfig.showSubjectDob) row.push(csvEscape(subject.dateOfBirth || ''));
+      if (datasetConfig.showSubjectStatus) row.push(csvEscape(subject.status || ''));
+      rows.push(row.join(','));
+    }
+    return rows.join('\n');
+  }
+
+  // Build comprehensive CSV with form data
+  const headers = ['SubjectID', 'EventName', 'EventDate', 'Unscheduled', 'FormName', 'FormStatus', 'ItemName', 'ItemValue'];
+  if (datasetConfig.showSubjectGender) headers.splice(1, 0, 'Sex');
+  if (datasetConfig.showSubjectDob) headers.splice(1, 0, 'DateOfBirth');
 
   const rows: string[] = [headers.join(',')];
 
-  // Build data rows
-  for (const subject of subjects) {
-    const row: string[] = [
-      csvEscape(subject.subjectOID || subject.uniqueIdentifier || ''),
-      csvEscape(subject.studySubjectID || subject.label || ''),
-      csvEscape(subject.status || '')
+  for (const row of result.rows) {
+    const csvRow: string[] = [
+      csvEscape(row.subject_id || '')
     ];
-    
-    if (datasetConfig.showSubjectGender) row.push(csvEscape(subject.sex || ''));
-    if (datasetConfig.showSubjectDob) row.push(csvEscape(subject.dateOfBirth || ''));
-    if (datasetConfig.showSubjectStatus) row.push(csvEscape(subject.status || ''));
-    
-    rows.push(row.join(','));
+    if (datasetConfig.showSubjectDob) csvRow.push(csvEscape(row.date_of_birth || ''));
+    if (datasetConfig.showSubjectGender) csvRow.push(csvEscape(row.gender || ''));
+    csvRow.push(
+      csvEscape(row.event_name || ''),
+      csvEscape(row.visit_date ? new Date(row.visit_date).toISOString().split('T')[0] : ''),
+      csvEscape(row.is_unscheduled ? 'Yes' : 'No'),
+      csvEscape(row.form_name || ''),
+      csvEscape(row.form_status || ''),
+      csvEscape(row.item_name || ''),
+      csvEscape(row.item_value || '')
+    );
+    rows.push(csvRow.join(','));
   }
 
   return rows.join('\n');
@@ -252,7 +359,8 @@ export const executeExport = async (
 
     switch (format) {
       case 'odm':
-        content = await buildOdmExport(datasetConfig, username);
+        // Use the full ODM export that includes clinical data, not just demographics
+        content = await buildFullOdmExport(datasetConfig, username);
         mimeType = 'application/xml';
         extension = 'xml';
         break;
@@ -260,6 +368,13 @@ export const executeExport = async (
         content = await buildCsvExport(datasetConfig, username);
         mimeType = 'text/csv';
         extension = 'csv';
+        break;
+      case 'xlsx':
+        // XLSX is exported as CSV with Excel-compatible encoding
+        // (true XLSX binary would require a library like exceljs)
+        content = '\uFEFF' + await buildCsvExport(datasetConfig, username); // BOM for Excel
+        mimeType = 'text/csv';
+        extension = 'csv'; // Deliver as CSV that Excel can open
         break;
       case 'txt':
         content = await buildCsvExport(datasetConfig, username);

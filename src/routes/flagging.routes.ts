@@ -38,7 +38,7 @@ router.get('/crfs/:eventCrfId', async (req: Request, res: Response) => {
 });
 
 // POST /api/flagging/crfs/:eventCrfId - Flag a CRF
-router.post('/crfs/:eventCrfId', requireRole('monitor', 'coordinator', 'admin'), async (req: Request, res: Response) => {
+router.post('/crfs/:eventCrfId', requireRole('monitor', 'data_manager', 'admin'), async (req: Request, res: Response) => {
   try {
     const eventCrfId = parseInt(req.params.eventCrfId);
     const { flagType, comment } = req.body;
@@ -80,7 +80,7 @@ router.get('/items/:itemDataId', async (req: Request, res: Response) => {
 });
 
 // POST /api/flagging/items/:itemDataId - Flag an item
-router.post('/items/:itemDataId', requireRole('monitor', 'coordinator', 'admin'), async (req: Request, res: Response) => {
+router.post('/items/:itemDataId', requireRole('monitor', 'data_manager', 'admin'), async (req: Request, res: Response) => {
   try {
     const itemDataId = parseInt(req.params.itemDataId);
     const { flagType, comment } = req.body;

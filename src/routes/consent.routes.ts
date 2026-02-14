@@ -353,6 +353,31 @@ router.get('/studies/:studyId/consents', authMiddleware, async (req: Request, re
 });
 
 // ============================================================================
+// Expired Consents
+// ============================================================================
+
+/**
+ * GET /api/consent/studies/:studyId/expired-consents
+ * Get expired consents for a study (consent_expiry_date < now)
+ */
+router.get('/studies/:studyId/expired-consents', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const studyId = parseInt(req.params.studyId);
+    // Query the dashboard for recent consents and filter for expired ones
+    const dashboard = await getConsentDashboard(studyId);
+    const now = new Date();
+    const expired = (dashboard.recentConsents || []).filter((c: any) => {
+      if (!c.consentExpiryDate) return false;
+      return new Date(c.consentExpiryDate) < now && c.consentStatus !== 'withdrawn';
+    });
+    res.json({ success: true, data: expired });
+  } catch (error: any) {
+    logger.error('Error getting expired consents', { error: error.message, studyId: req.params.studyId });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ============================================================================
 // Dashboard
 // ============================================================================
 

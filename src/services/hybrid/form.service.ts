@@ -67,28 +67,36 @@ export const saveFormData = async (
     };
   }
 
-  // Apply validation rules BEFORE saving
-  // Create queries (discrepancy notes) for validation failures
+  // ===== PRE-SAVE VALIDATION (dry run - no query creation) =====
+  // Validate BEFORE saving but do NOT create queries yet.
+  // Queries are created AFTER successful save to avoid orphaned queries.
+  // Hard edit errors (severity: 'error') block the save.
+  // Soft edit warnings (severity: 'warning') allow save, queries created post-save.
+  let validationWarnings: any[] = [];
   if (crfId && formData) {
     try {
-      // First pass: validate without creating queries to check for hard errors
+      // Pass eventCrfId if available (for editing existing forms) to enable
+      // item_id-based field matching. Without this, rules that only match by
+      // item_id would be silently skipped in pre-save but caught in post-save.
+      const existingEventCrfId = (request as any).eventCrfId;
+      
       const validationResult = await validationRulesService.validateFormData(
         crfId,
         formData,
         {
-          createQueries: true,  // Create queries for validation failures
+          createQueries: false,  // DO NOT create queries before save
           studyId: request.studyId,
           subjectId: request.subjectId,
-          userId: userId
+          userId: userId,
+          eventCrfId: existingEventCrfId || undefined
         }
       );
 
-      // If there are hard edit errors, block the save
+      // If there are hard edit errors, block the save (no queries created)
       if (!validationResult.valid && validationResult.errors.length > 0) {
-        logger.warn('Form data validation failed - queries created', { 
+        logger.warn('Form data validation failed - save blocked', { 
           crfId, 
-          errors: validationResult.errors,
-          queriesCreated: validationResult.queriesCreated
+          errorCount: validationResult.errors.length
         });
         
         return {
@@ -96,20 +104,33 @@ export const saveFormData = async (
           message: 'Validation failed',
           errors: validationResult.errors,
           warnings: validationResult.warnings,
-          queriesCreated: validationResult.queriesCreated
+          queriesCreated: 0
         } as any;
       }
 
-      // Log warnings but continue with save
-      if (validationResult.warnings.length > 0) {
-        logger.info('Form data validation warnings', { 
+      // Store warnings for post-save query creation
+      validationWarnings = validationResult.warnings || [];
+      if (validationWarnings.length > 0) {
+        logger.info('Form data has validation warnings, will create queries after save', { 
           crfId, 
-          warnings: validationResult.warnings 
+          warningCount: validationWarnings.length 
         });
       }
     } catch (validationError: any) {
-      // Don't block save if validation service fails
-      logger.warn('Validation check failed, proceeding with save', { 
+      // Configurable fail-safe: if VALIDATION_FAIL_SAFE=true (default: false),
+      // block the save when the validation service itself crashes.  This prevents
+      // potentially invalid data from being persisted when validation is unavailable.
+      const failSafe = process.env.VALIDATION_FAIL_SAFE === 'true';
+      if (failSafe) {
+        logger.error('Pre-save validation service crashed — blocking save (VALIDATION_FAIL_SAFE=true)', {
+          error: validationError.message
+        });
+        return {
+          success: false,
+          message: 'Validation service is temporarily unavailable. Please try again shortly.'
+        };
+      }
+      logger.warn('Pre-save validation check failed, proceeding with save (VALIDATION_FAIL_SAFE=false)', { 
         error: validationError.message 
       });
     }
@@ -212,20 +233,34 @@ const saveFormDataDirect = async (
     if (eventCrfResult.rows.length > 0) {
       eventCrfId = eventCrfResult.rows[0].event_crf_id;
       
-      // CHECK IF RECORD IS LOCKED - status_id = 6 means locked
-      // This is critical for 21 CFR Part 11 compliance (§11.10(d))
+      // CHECK IF RECORD IS LOCKED OR FROZEN
+      // Locked (status_id = 6) = permanent, only admin can unlock
+      // Frozen = intermediate protection, DM/admin can unfreeze
+      // 21 CFR Part 11 compliance (§11.10(d))
       const lockCheckResult = await client.query(`
-        SELECT status_id FROM event_crf WHERE event_crf_id = $1
+        SELECT status_id, COALESCE(frozen, false) as frozen FROM event_crf WHERE event_crf_id = $1
       `, [eventCrfId]);
       
-      if (lockCheckResult.rows.length > 0 && lockCheckResult.rows[0].status_id === 6) {
-        await client.query('ROLLBACK');
-        logger.warn('Attempted to edit locked record', { eventCrfId, userId });
-        return {
-          success: false,
-          message: 'Cannot edit data - this record is locked. Request an unlock through the Data Lock Management system.',
-          errors: ['RECORD_LOCKED']
-        };
+      if (lockCheckResult.rows.length > 0) {
+        const ecRow = lockCheckResult.rows[0];
+        if (ecRow.status_id === 6) {
+          await client.query('ROLLBACK');
+          logger.warn('Attempted to edit locked record', { eventCrfId, userId });
+          return {
+            success: false,
+            message: 'Cannot edit data - this record is locked. Request an unlock through the Data Lock Management system.',
+            errors: ['RECORD_LOCKED']
+          };
+        }
+        if (ecRow.frozen) {
+          await client.query('ROLLBACK');
+          logger.warn('Attempted to edit frozen record', { eventCrfId, userId });
+          return {
+            success: false,
+            message: 'Cannot edit data - this record is frozen. Request an unfreeze from a Data Manager before editing.',
+            errors: ['RECORD_FROZEN']
+          };
+        }
       }
     } else {
       // Create the event_crf
@@ -262,8 +297,6 @@ const saveFormDataDirect = async (
     const formData = request.formData || {};
 
     for (const [fieldName, value] of Object.entries(formData)) {
-      if (value === null || value === undefined || value === '') continue;
-
       // Find the item_id for this field
       const itemId = itemMap.get(fieldName.toLowerCase());
       if (!itemId) {
@@ -271,12 +304,43 @@ const saveFormDataDirect = async (
         continue;
       }
 
-      // Check if item_data already exists
+      // Check if item_data already exists (exclude soft-deleted records)
       const existingResult = await client.query(`
         SELECT item_data_id, value FROM item_data
-        WHERE event_crf_id = $1 AND item_id = $2
+        WHERE event_crf_id = $1 AND item_id = $2 AND deleted = false
         LIMIT 1
       `, [eventCrfId, itemId]);
+
+      // Handle field clearing: when value is null/undefined/empty, 
+      // clear existing data instead of skipping
+      const isEmpty = value === null || value === undefined || value === '';
+      
+      if (isEmpty) {
+        // Only need to clear if there's existing data
+        if (existingResult.rows.length > 0) {
+          const oldValue = existingResult.rows[0].value;
+          if (oldValue !== '' && oldValue !== null) {
+            // Clear the value (set to empty string, per LibreClinica convention)
+            await client.query(`
+              UPDATE item_data
+              SET value = '', date_updated = NOW(), update_id = $1
+              WHERE item_data_id = $2
+            `, [userId, existingResult.rows[0].item_data_id]);
+
+            // Log value clearing to audit trail
+            await client.query(`
+              INSERT INTO audit_log_event (
+                audit_date, audit_table, user_id, entity_id,
+                old_value, new_value, audit_log_event_type_id,
+                event_crf_id, reason_for_change
+              ) VALUES (NOW(), 'item_data', $1, $2, $3, '', 1, $4, 'Value cleared')
+            `, [userId, existingResult.rows[0].item_data_id, oldValue, eventCrfId]);
+            
+            savedCount++;
+          }
+        }
+        continue; // Skip to next field
+      }
 
       let stringValue = String(value);
       
@@ -341,10 +405,10 @@ const saveFormDataDirect = async (
       totalFields: Object.keys(formData).length
     });
 
-    // 7. AUTO-TRIGGER WORKFLOW: Create SDV task for completed form (Real EDC workflow)
-    // This automatically creates a workflow task when form data is saved
+    // 7. AUTO-TRIGGER WORKFLOW — deduplicated
+    // Only create a 'form_submitted' event ONCE per eventCrfId.
+    // Subsequent saves log 'form_edited' instead (one per save session).
     try {
-      // Get form details for workflow creation
       const formDetailsResult = await pool.query(`
         SELECT 
           c.name as form_name,
@@ -360,27 +424,80 @@ const saveFormDataDirect = async (
         const formName = formDetailsResult.rows[0].form_name;
         const subjectId = formDetailsResult.rows[0].subject_id;
         
-        // Trigger SDV workflow automatically
-        await workflowService.triggerFormSubmittedWorkflow(
-          eventCrfId!,
-          request.studyId,
-          subjectId,
-          formName,
-          userId
-        );
+        // Check if a 'form_submitted' event already exists for this CRF instance
+        const existingEvent = await pool.query(`
+          SELECT audit_id FROM audit_log_event
+          WHERE audit_table = 'form_workflow'
+            AND entity_id = $1
+            AND entity_name = 'form_submitted'
+          LIMIT 1
+        `, [eventCrfId]);
         
-        logger.info('Auto-triggered SDV workflow for form submission', { eventCrfId, formName });
+        if (existingEvent.rows.length === 0) {
+          // First save — log form_submitted
+          await workflowService.triggerFormSubmittedWorkflow(
+            eventCrfId!,
+            request.studyId,
+            subjectId,
+            formName,
+            userId
+          );
+          logger.info('Auto-triggered form_submitted workflow', { eventCrfId, formName });
+        } else {
+          // Subsequent save — log form_edited (lighter weight, no duplicate)
+          await pool.query(`
+            INSERT INTO audit_log_event (
+              audit_log_event_type_id, audit_date, audit_table,
+              entity_id, entity_name, user_id, new_value
+            ) VALUES (1, NOW(), 'form_workflow', $1, 'form_edited', $2, $3)
+          `, [eventCrfId, userId, JSON.stringify({ eventCrfId, studyId: request.studyId, subjectId, formName })]);
+          logger.info('Logged form_edited event (duplicate form_submitted suppressed)', { eventCrfId });
+        }
       }
     } catch (workflowError: any) {
-      // Don't fail the form save if workflow creation fails
       logger.warn('Failed to auto-create workflow for form submission', { error: workflowError.message });
+    }
+
+    // ===== POST-SAVE VALIDATION: Create queries for validation warnings =====
+    // Now that data is saved successfully, create queries (discrepancy notes) for
+    // validation failures. Hard edit errors were caught in pre-save and blocked.
+    // Only run post-save if there were warnings OR if we have an eventCrfId
+    // (enables more accurate field matching via itemDataMap).
+    let queriesCreated = 0;
+    if (request.crfId && request.formData && eventCrfId) {
+      try {
+        const postSaveValidation = await validationRulesService.validateFormData(
+          request.crfId,
+          request.formData,
+          {
+            createQueries: true,  // NOW create queries for any validation failures
+            studyId: request.studyId,
+            subjectId: request.subjectId,
+            eventCrfId: eventCrfId,
+            userId: userId
+          }
+        );
+        queriesCreated = postSaveValidation.queriesCreated || 0;
+        if (queriesCreated > 0) {
+          logger.info('Post-save validation created queries', { 
+            eventCrfId, crfId: request.crfId, queriesCreated 
+          });
+        }
+      } catch (postValidationError: any) {
+        // Don't fail the save response if post-save validation fails
+        logger.warn('Post-save validation query creation failed', { 
+          error: postValidationError.message 
+        });
+      }
     }
 
     return {
       success: true,
+      eventCrfId,  // Top-level for frontend SaveFormDataResponse compatibility
       data: { eventCrfId, savedCount },
-      message: `Form data saved successfully (${savedCount} fields)`
-    };
+      message: `Form data saved successfully (${savedCount} fields)`,
+      queriesCreated
+    } as any;
   } catch (error: any) {
     await client.query('ROLLBACK');
     logger.error('Direct database save failed', { error: error.message });
@@ -820,6 +937,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         
         // Table field properties
         tableColumns: extendedProps.tableColumns,
+        tableRows: extendedProps.tableRows,
         tableSettings: extendedProps.tableSettings
       };
     });
@@ -1384,6 +1502,7 @@ interface FormField {
   
   // Table field properties
   tableColumns?: any[];
+  tableRows?: any[];
   tableSettings?: Record<string, any>;
 }
 
@@ -1452,6 +1571,7 @@ const serializeExtendedProperties = (field: FormField): string => {
     
     // Table field properties
     tableColumns: field.tableColumns,
+    tableRows: field.tableRows,
     tableSettings: field.tableSettings
   };
   

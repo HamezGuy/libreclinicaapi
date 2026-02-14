@@ -22,7 +22,7 @@ export interface JwtPayload {
   username: string;
   userName?: string; // Alias for username (for auth middleware compatibility)
   email: string;
-  role: string;
+  role: string;      // User's global role (highest across all study assignments)
   userType?: string; // User type from user_type table (admin, user, sysadmin, etc.)
   studyIds?: number[];
   organizationIds?: number[]; // Organization IDs the user belongs to

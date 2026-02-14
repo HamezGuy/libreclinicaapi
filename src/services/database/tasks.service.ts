@@ -149,12 +149,15 @@ async function getUserId(username: string): Promise<number | null> {
 
 /**
  * Get studies the user has access to
+ * Note: study_user_role links via user_name, not user_id or owner_id
+ * (owner_id is the user who created the role assignment, not the assignee)
  */
 async function getUserStudyIds(userId: number): Promise<number[]> {
   try {
     const result = await pool.query(`
-      SELECT DISTINCT study_id FROM study_user_role 
-      WHERE owner_id = $1 AND status_id = 1
+      SELECT DISTINCT sur.study_id FROM study_user_role sur
+      INNER JOIN user_account ua ON sur.user_name = ua.user_name
+      WHERE ua.user_id = $1 AND sur.status_id = 1
     `, [userId]);
     return result.rows.map((r: any) => r.study_id);
   } catch (error) {

@@ -4,12 +4,21 @@
  * 
  * Lock Status IDs in LibreClinica:
  * 1 = available (unlocked, can be edited)
- * 2 = unavailable
+ * 2 = unavailable (data complete)
  * 3 = private
  * 4 = pending
  * 5 = removed
- * 6 = locked (data locked)
+ * 6 = locked (data locked — permanent)
  * 7 = auto-removed
+ * 
+ * FREEZE:
+ * Freeze is a two-stage protection step BEFORE lock.  A frozen form cannot be
+ * edited by CRCs, but can be unfrozen by a DM/admin.  Lock is permanent (only
+ * admin can unlock).  We use a separate `frozen` boolean on event_crf (added
+ * via migration) rather than a new status_id, because the status table is
+ * shared with LibreClinica core.
+ * 
+ * Lifecycle:  Available → Frozen → Locked
  * 
  * Data Locking Process (21 CFR Part 11 Compliant):
  * 1. All queries must be closed
@@ -495,12 +504,98 @@ export const getLockedRecords = async (filters: {
   }
 };
 
+/**
+ * Lock a single CRF record.
+ * 
+ * WORKFLOW ENFORCEMENT: Before locking, checks the acc_form_workflow_config
+ * to ensure all required workflow steps have been completed:
+ * - SDV must be done if requiresSDV=true
+ * - PI signature must be applied if requiresSignature=true
+ * - DDE must be completed if requiresDDE=true  
+ * - All open queries must be resolved
+ */
 export const lockRecord = async (eventCrfId: number, userId: number) => {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
+    // 1. Load the event_crf and its workflow config
+    const ecResult = await client.query(`
+      SELECT 
+        ec.event_crf_id, ec.status_id, ec.completion_status_id,
+        COALESCE(ec.sdv_status, false) as sdv_verified,
+        cv.crf_id
+      FROM event_crf ec
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      WHERE ec.event_crf_id = $1
+    `, [eventCrfId]);
+
+    if (ecResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'CRF instance not found' };
+    }
+
+    const ec = ecResult.rows[0];
+    if (ec.status_id === 6) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Record is already locked' };
+    }
+
+    // 2. Load workflow requirements
+    let requiresSDV = false;
+    let requiresSignature = false;
+    let requiresDDE = false;
+    try {
+      const cfgResult = await client.query(`
+        SELECT requires_sdv, requires_signature, requires_dde
+        FROM acc_form_workflow_config
+        WHERE crf_id = $1
+        ORDER BY study_id DESC NULLS LAST
+        LIMIT 1
+      `, [ec.crf_id]);
+      if (cfgResult.rows.length > 0) {
+        requiresSDV = cfgResult.rows[0].requires_sdv;
+        requiresSignature = cfgResult.rows[0].requires_signature;
+        requiresDDE = cfgResult.rows[0].requires_dde;
+      }
+    } catch { /* table may not exist */ }
+
+    // 3. Enforce requirements
+    const blockingReasons: string[] = [];
+
+    // Must be at least data_entry_complete (completion_status_id >= 4 or status_id = 2)
+    if (ec.completion_status_id < 4 && ec.status_id !== 2) {
+      blockingReasons.push('Form must be marked as complete before locking');
+    }
+
+    if (requiresSDV && !ec.sdv_verified) {
+      blockingReasons.push('Source Data Verification (SDV) is required but not yet completed');
+    }
+
+    if (requiresSignature && ec.completion_status_id < 5) {
+      blockingReasons.push('PI electronic signature is required but not yet applied');
+    }
+
+    // Check open queries on this CRF
+    const queryResult = await client.query(`
+      SELECT COUNT(*) as cnt FROM discrepancy_note dn
+      INNER JOIN dn_event_crf_map dem ON dn.discrepancy_note_id = dem.discrepancy_note_id
+      WHERE dem.event_crf_id = $1
+        AND dn.resolution_status_id IN (1, 2, 3)
+        AND dn.parent_dn_id IS NULL
+    `, [eventCrfId]);
+    const openQueries = parseInt(queryResult.rows[0]?.cnt || '0');
+    if (openQueries > 0) {
+      blockingReasons.push(`${openQueries} open ${openQueries === 1 ? 'query' : 'queries'} must be resolved before locking`);
+    }
+
+    if (blockingReasons.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: blockingReasons.join('. '), blockingReasons };
+    }
+
+    // 4. Lock the record
     const updateQuery = `
       UPDATE event_crf
       SET status_id = 6, update_id = $2, date_updated = CURRENT_TIMESTAMP
@@ -515,7 +610,7 @@ export const lockRecord = async (eventCrfId: number, userId: number) => {
       return { success: false, message: 'Record not found or already locked' };
     }
 
-    // Audit log - audit_log_event requires audit_log_event_type_id (FK to audit_log_event_type)
+    // 5. Audit log
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
       VALUES (CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'Data Locked',
@@ -531,6 +626,265 @@ export const lockRecord = async (eventCrfId: number, userId: number) => {
   } finally {
     client.release();
   }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// BATCH LOCK / UNLOCK
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Batch lock multiple CRF records.  Validates each before locking.
+ * Returns summary of how many succeeded / failed.
+ */
+export const batchLockRecords = async (
+  eventCrfIds: number[],
+  userId: number
+): Promise<{ success: boolean; locked: number; failed: number; errors: string[] }> => {
+  logger.info('Batch locking records', { count: eventCrfIds.length, userId });
+  let locked = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const ecId of eventCrfIds) {
+    try {
+      const result = await lockRecord(ecId, userId);
+      if (result.success) {
+        locked++;
+      } else {
+        failed++;
+        errors.push(`CRF ${ecId}: ${result.message}`);
+      }
+    } catch (e: any) {
+      failed++;
+      errors.push(`CRF ${ecId}: ${e.message}`);
+    }
+  }
+
+  return { success: failed === 0, locked, failed, errors };
+};
+
+/**
+ * Batch unlock multiple CRF records.
+ */
+export const batchUnlockRecords = async (
+  eventCrfIds: number[],
+  userId: number
+): Promise<{ success: boolean; unlocked: number; failed: number; errors: string[] }> => {
+  logger.info('Batch unlocking records', { count: eventCrfIds.length, userId });
+  let unlocked = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const ecId of eventCrfIds) {
+    try {
+      const result = await unlockRecord(ecId, userId);
+      if (result.success) {
+        unlocked++;
+      } else {
+        failed++;
+        errors.push(`CRF ${ecId}: ${result.message}`);
+      }
+    } catch (e: any) {
+      failed++;
+      errors.push(`CRF ${ecId}: ${e.message}`);
+    }
+  }
+
+  return { success: failed === 0, unlocked, failed, errors };
+};
+
+/**
+ * Batch SDV: mark multiple CRF records as source-data-verified.
+ */
+export const batchSDV = async (
+  eventCrfIds: number[],
+  userId: number
+): Promise<{ success: boolean; verified: number; failed: number; errors: string[] }> => {
+  logger.info('Batch SDV', { count: eventCrfIds.length, userId });
+  let verified = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const ecId of eventCrfIds) {
+    try {
+      await pool.query(`
+        UPDATE event_crf SET sdv_status = true, sdv_update_id = $1, date_updated = NOW()
+        WHERE event_crf_id = $2 AND (sdv_status IS NULL OR sdv_status = false)
+      `, [userId, ecId]);
+
+      await pool.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
+        VALUES (NOW(), 'event_crf', $1, $2, 'SDV Verified (batch)',
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      `, [userId, ecId]);
+
+      verified++;
+    } catch (e: any) {
+      failed++;
+      errors.push(`CRF ${ecId}: ${e.message}`);
+    }
+  }
+
+  return { success: failed === 0, verified, failed, errors };
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// FREEZE / UNFREEZE  (two-stage protection before lock)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Ensure the `frozen` column exists on event_crf (adds it if missing).
+ */
+const ensureFrozenColumn = async (): Promise<void> => {
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'event_crf' AND column_name = 'frozen'
+      ) THEN
+        ALTER TABLE event_crf ADD COLUMN frozen BOOLEAN NOT NULL DEFAULT false;
+      END IF;
+    END $$
+  `);
+};
+
+/**
+ * Freeze a single CRF record.
+ * Frozen forms cannot be edited by CRCs but can be unfrozen by DM/admin.
+ * Validates that the form is complete and all queries are resolved.
+ */
+export const freezeRecord = async (
+  eventCrfId: number,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  await ensureFrozenColumn();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Check current state
+    const ecResult = await client.query(
+      `SELECT status_id, completion_status_id, frozen FROM event_crf WHERE event_crf_id = $1`,
+      [eventCrfId]
+    );
+    if (ecResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'CRF instance not found' };
+    }
+    const ec = ecResult.rows[0];
+    if (ec.status_id === 6) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is already locked — cannot freeze a locked form' };
+    }
+    if (ec.frozen) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is already frozen' };
+    }
+
+    // Must be at least data complete
+    if (ec.completion_status_id < 4 && ec.status_id !== 2) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form must be marked as complete before freezing' };
+    }
+
+    // Check open queries
+    const qResult = await client.query(`
+      SELECT COUNT(*) as cnt FROM discrepancy_note dn
+      INNER JOIN dn_event_crf_map dem ON dn.discrepancy_note_id = dem.discrepancy_note_id
+      WHERE dem.event_crf_id = $1 AND dn.resolution_status_id IN (1, 2, 3) AND dn.parent_dn_id IS NULL
+    `, [eventCrfId]);
+    const openQueries = parseInt(qResult.rows[0]?.cnt || '0');
+    if (openQueries > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: `${openQueries} open queries must be resolved before freezing` };
+    }
+
+    // Freeze
+    await client.query(
+      `UPDATE event_crf SET frozen = true, date_updated = NOW(), update_id = $1 WHERE event_crf_id = $2`,
+      [userId, eventCrfId]
+    );
+
+    // Audit
+    await client.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
+      VALUES (NOW(), 'event_crf', $1, $2, 'Data Frozen',
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+    `, [userId, eventCrfId]);
+
+    await client.query('COMMIT');
+    logger.info('Form frozen', { eventCrfId, userId });
+    return { success: true, message: 'Form frozen successfully' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Freeze error', { eventCrfId, error: error.message });
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Unfreeze a frozen CRF record (DM/admin only).
+ */
+export const unfreezeRecord = async (
+  eventCrfId: number,
+  userId: number,
+  reason: string
+): Promise<{ success: boolean; message?: string }> => {
+  await ensureFrozenColumn();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `UPDATE event_crf SET frozen = false, date_updated = NOW(), update_id = $1
+       WHERE event_crf_id = $2 AND frozen = true RETURNING event_crf_id`,
+      [userId, eventCrfId]
+    );
+
+    if ((result.rowCount || 0) === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is not frozen or not found' };
+    }
+
+    await client.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+      VALUES (NOW(), 'event_crf', $1, $2, 'Data Unfrozen', $3,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+    `, [userId, eventCrfId, reason]);
+
+    await client.query('COMMIT');
+    logger.info('Form unfrozen', { eventCrfId, userId, reason });
+    return { success: true, message: 'Form unfrozen successfully' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Batch freeze multiple CRF records.
+ */
+export const batchFreezeRecords = async (
+  eventCrfIds: number[],
+  userId: number
+): Promise<{ success: boolean; frozen: number; failed: number; errors: string[] }> => {
+  await ensureFrozenColumn();
+  let frozen = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const ecId of eventCrfIds) {
+    const result = await freezeRecord(ecId, userId);
+    if (result.success) { frozen++; } else { failed++; errors.push(`CRF ${ecId}: ${result.message}`); }
+  }
+
+  return { success: failed === 0, frozen, failed, errors };
 };
 
 export const unlockRecord = async (eventCrfId: number, userId: number) => {

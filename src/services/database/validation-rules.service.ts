@@ -52,6 +52,7 @@ export interface ValidationRule {
   minValue?: number;
   maxValue?: number;
   pattern?: string;
+  formatType?: string;
   operator?: string;
   compareFieldPath?: string;
   customExpression?: string;
@@ -75,10 +76,26 @@ export interface CreateValidationRuleRequest {
   minValue?: number;
   maxValue?: number;
   pattern?: string;
+  formatType?: string;
   operator?: string;
   compareFieldPath?: string;
   customExpression?: string;
 }
+
+/**
+ * FORMAT_TYPE_REGISTRY
+ * 
+ * Single source of truth: loaded from config/format-types.json so both the
+ * backend and the Angular frontend use identical patterns.  The frontend
+ * FORMAT_TYPE_MAP should be regenerated from the same JSON file.
+ * 
+ * Maps user-friendly format type keys to their underlying regex patterns.
+ * This is the core of the no-code validation builder: non-technical users
+ * pick from a dropdown (e.g., "Letters only") and the system stores only the
+ * semantic key (e.g., "letters_only"). The regex is resolved at validation time.
+ */
+import formatTypesJson from '../../config/format-types.json';
+export const FORMAT_TYPE_REGISTRY: Record<string, { pattern: string; label: string; example: string }> = formatTypesJson;
 
 // Track if table has been initialized
 let tableInitialized = false;
@@ -155,6 +172,7 @@ export const initializeValidationRulesTable = async (): Promise<boolean> => {
       min_value NUMERIC,
       max_value NUMERIC,
       pattern TEXT,
+      format_type VARCHAR(50),
       operator VARCHAR(20),
       compare_field_path VARCHAR(255),
       custom_expression TEXT,
@@ -174,6 +192,10 @@ export const initializeValidationRulesTable = async (): Promise<boolean> => {
   try {
     await pool.query(createTableQuery);
     await pool.query(createIndexQuery);
+    // Add format_type column if it doesn't exist (migration for existing databases)
+    try {
+      await pool.query(`ALTER TABLE validation_rules ADD COLUMN IF NOT EXISTS format_type VARCHAR(50)`);
+    } catch (e) { /* column may already exist */ }
     tableInitialized = true;
     logger.info('Validation rules table initialized successfully');
     return true;
@@ -340,7 +362,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         severity: row.action_type === 'DISCREPANCY_NRS' ? 'warning' : 'error' as ValidationRule['severity'],
         errorMessage: row.action_message || 'Validation failed',
         warningMessage: row.action_type === 'DISCREPANCY_NRS' ? row.action_message : undefined,
-        active: row.enabled || true,
+        active: row.enabled !== false,
         customExpression: row.expression,
         dateCreated: new Date(),
         createdBy: row.owner_id || 1, // Required field
@@ -556,9 +578,9 @@ export const createRule = async (
       INSERT INTO validation_rules (
         crf_id, crf_version_id, item_id, name, description, rule_type,
         field_path, severity, error_message, warning_message, active,
-        min_value, max_value, pattern, operator, compare_field_path,
+        min_value, max_value, pattern, format_type, operator, compare_field_path,
         custom_expression, date_created, owner_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP, $17)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15, $16, $17, CURRENT_TIMESTAMP, $18)
       RETURNING validation_rule_id
     `;
 
@@ -579,6 +601,7 @@ export const createRule = async (
       rule.minValue || null,
       rule.maxValue || null,
       rule.pattern || null,
+      rule.formatType || null,
       rule.operator || null,
       rule.compareFieldPath || null,
       rule.customExpression || null,
@@ -639,12 +662,13 @@ export const updateRule = async (
         min_value = $8,
         max_value = $9,
         pattern = $10,
-        operator = $11,
-        compare_field_path = $12,
-        custom_expression = $13,
+        format_type = $11,
+        operator = $12,
+        compare_field_path = $13,
+        custom_expression = $14,
         date_updated = CURRENT_TIMESTAMP,
-        update_id = $14
-      WHERE validation_rule_id = $15
+        update_id = $15
+      WHERE validation_rule_id = $16
     `;
 
     await client.query(updateQuery, [
@@ -658,6 +682,7 @@ export const updateRule = async (
       updates.minValue ?? null,
       updates.maxValue ?? null,
       updates.pattern ?? null,
+      updates.formatType ?? null,
       updates.operator ?? null,
       updates.compareFieldPath ?? null,
       updates.customExpression ?? null,
@@ -750,7 +775,7 @@ export const validateFormData = async (
 ): Promise<{
   valid: boolean;
   errors: { fieldPath: string; message: string; severity: string; queryId?: number; itemDataId?: number }[];
-  warnings: { fieldPath: string; message: string }[];
+  warnings: { fieldPath: string; message: string; queryId?: number }[];
   queriesCreated?: number;
 }> => {
   logger.info('Validating form data', { 
@@ -762,7 +787,7 @@ export const validateFormData = async (
   // Get rules for this CRF (works for both templates and copies)
   const rules = await getRulesForCrf(crfId);
   const errors: { fieldPath: string; message: string; severity: string; queryId?: number; itemDataId?: number }[] = [];
-  const warnings: { fieldPath: string; message: string }[] = [];
+  const warnings: { fieldPath: string; message: string; queryId?: number }[] = [];
   let queriesCreated = 0;
 
   // If eventCrfId is provided, build itemDataMap from database for accurate query linking
@@ -780,6 +805,69 @@ export const validateFormData = async (
 
     // Match field value using multiple strategies
     const value = getFieldValue(formData, rule, itemDataMap);
+    
+    // If the field is not found in form data (value === undefined), determine
+    // whether this is a genuine naming mismatch (skip) or a required field
+    // that the user actually left empty (fail).
+    if (value === undefined) {
+      // For 'required' rules with an itemId, check whether the field SHOULD
+      // be in this form by looking it up in the itemDataMap.  If the item
+      // exists in the map the field is part of this CRF version — treat the
+      // missing value as empty so the required rule fires correctly.
+      if (rule.ruleType === 'required' && rule.itemId) {
+        const mappedItemDataId = itemDataMap[`item_${rule.itemId}`];
+        if (mappedItemDataId) {
+          // Field belongs to this CRF but wasn't submitted — treat as empty
+          const requiredResult = applyRule(rule, '', formData);
+          if (!requiredResult.valid) {
+            const itemDataId = mappedItemDataId;
+            const error: { fieldPath: string; message: string; severity: string; queryId?: number; itemDataId?: number } = {
+              fieldPath: rule.fieldPath,
+              message: rule.errorMessage,
+              severity: rule.severity || 'error',
+              itemDataId
+            };
+
+            if (options?.createQueries && options.studyId && options.userId) {
+              try {
+                const queryId = await createValidationQuery({
+                  studyId: options.studyId,
+                  subjectId: options.subjectId,
+                  eventCrfId: options.eventCrfId,
+                  crfId: crfId,
+                  itemDataId: itemDataId,
+                  itemId: rule.itemId,
+                  fieldPath: rule.fieldPath,
+                  ruleName: rule.name,
+                  errorMessage: rule.errorMessage,
+                  value: '',
+                  userId: options.userId,
+                  severity: rule.severity || 'error'
+                });
+                if (queryId) {
+                  error.queryId = queryId;
+                  queriesCreated++;
+                }
+              } catch (e: any) {
+                logger.error('Failed to create validation query for missing required field:', e.message);
+              }
+            }
+            errors.push(error);
+          }
+          continue;
+        }
+      }
+
+      // Field is not part of this form submission — skip validation
+      logger.debug('Field not found in form data, skipping validation', {
+        ruleFieldPath: rule.fieldPath,
+        ruleName: rule.name,
+        ruleType: rule.ruleType,
+        formDataKeys: Object.keys(formData).slice(0, 10)
+      });
+      continue;
+    }
+    
     const validationResult = applyRule(rule, value, formData);
 
     if (!validationResult.valid) {
@@ -794,20 +882,22 @@ export const validateFormData = async (
           itemDataId
         };
 
-        // Create query for validation failure if requested
+        // Create query for hard-edit validation failure if requested
         if (options?.createQueries && options.studyId && options.userId) {
           try {
             const queryId = await createValidationQuery({
               studyId: options.studyId,
               subjectId: options.subjectId,
               eventCrfId: options.eventCrfId,
+              crfId: crfId,
               itemDataId: itemDataId,
               itemId: rule.itemId,
               fieldPath: rule.fieldPath,
               ruleName: rule.name,
               errorMessage: rule.errorMessage,
               value: value,
-              userId: options.userId
+              userId: options.userId,
+              severity: 'error'
             });
             if (queryId) {
               error.queryId = queryId;
@@ -820,10 +910,38 @@ export const validateFormData = async (
 
         errors.push(error);
       } else {
-        warnings.push({
+        // Warning (soft edit) - still create a query for workflow tracking
+        const warning: { fieldPath: string; message: string; queryId?: number } = {
           fieldPath: rule.fieldPath,
           message: rule.warningMessage || rule.errorMessage
-        });
+        };
+
+        if (options?.createQueries && options.studyId && options.userId) {
+          try {
+            const queryId = await createValidationQuery({
+              studyId: options.studyId,
+              subjectId: options.subjectId,
+              eventCrfId: options.eventCrfId,
+              crfId: crfId,
+              itemDataId: itemDataId,
+              itemId: rule.itemId,
+              fieldPath: rule.fieldPath,
+              ruleName: rule.name,
+              errorMessage: rule.warningMessage || rule.errorMessage,
+              value: value,
+              userId: options.userId,
+              severity: 'warning'
+            });
+            if (queryId) {
+              warning.queryId = queryId;
+              queriesCreated++;
+            }
+          } catch (e: any) {
+            logger.error('Failed to create warning validation query:', e.message);
+          }
+        }
+
+        warnings.push(warning);
       }
     }
   }
@@ -885,6 +1003,9 @@ function getFieldValue(
   rule: ValidationRule,
   itemDataMap: Record<string, number>
 ): any {
+  // Guard against null/undefined fieldPath
+  if (!rule.fieldPath) return undefined;
+  
   // 1. Direct fieldPath match (exact)
   let value = getNestedValue(formData, rule.fieldPath);
   if (value !== undefined) return value;
@@ -1021,7 +1142,7 @@ export const validateFieldChange = async (
 ): Promise<{
   valid: boolean;
   errors: { fieldPath: string; message: string; severity: string; queryId?: number }[];
-  warnings: { fieldPath: string; message: string }[];
+  warnings: { fieldPath: string; message: string; queryId?: number }[];
   queryCreated?: boolean;
   queriesCreated?: number;
 }> => {
@@ -1034,7 +1155,7 @@ export const validateFieldChange = async (
 
   const rules = await getRulesForCrf(crfId);
   const errors: { fieldPath: string; message: string; severity: string; queryId?: number }[] = [];
-  const warnings: { fieldPath: string; message: string }[] = [];
+  const warnings: { fieldPath: string; message: string; queryId?: number }[] = [];
   let queriesCreated = 0;
 
   // Build itemDataMap if we have eventCrfId for better field matching
@@ -1064,6 +1185,14 @@ export const validateFieldChange = async (
     const validationResult = applyRule(rule, value, allFormData);
 
     if (!validationResult.valid) {
+      // Get itemDataId for this field if not provided
+      let itemDataId = options?.itemDataId;
+      if (!itemDataId && itemDataMap[fieldPath]) {
+        itemDataId = itemDataMap[fieldPath];
+      } else if (!itemDataId && itemDataMap[fieldPath.toLowerCase()]) {
+        itemDataId = itemDataMap[fieldPath.toLowerCase()];
+      }
+
       if (rule.severity === 'error') {
         const error: { fieldPath: string; message: string; severity: string; queryId?: number } = {
           fieldPath: rule.fieldPath,
@@ -1071,28 +1200,22 @@ export const validateFieldChange = async (
           severity: 'error'
         };
 
-        // Create query for validation failure if requested
+        // Create query for hard-edit validation failure if requested
         if (options?.createQueries && options.studyId && options.userId) {
           try {
-            // Get itemDataId for this field if not provided
-            let itemDataId = options.itemDataId;
-            if (!itemDataId && itemDataMap[fieldPath]) {
-              itemDataId = itemDataMap[fieldPath];
-            } else if (!itemDataId && itemDataMap[fieldPath.toLowerCase()]) {
-              itemDataId = itemDataMap[fieldPath.toLowerCase()];
-            }
-            
             const queryId = await createValidationQuery({
               studyId: options.studyId,
               subjectId: options.subjectId,
               eventCrfId: options.eventCrfId,
+              crfId: crfId,
               itemDataId: itemDataId,
-              itemId: rule.itemId || options.itemId,
+              itemId: rule.itemId || options?.itemId,
               fieldPath: rule.fieldPath,
               ruleName: rule.name,
               errorMessage: rule.errorMessage,
               value: value,
-              userId: options.userId
+              userId: options.userId,
+              severity: 'error'
             });
             if (queryId) {
               error.queryId = queryId;
@@ -1105,10 +1228,38 @@ export const validateFieldChange = async (
 
         errors.push(error);
       } else {
-        warnings.push({
+        // Warning (soft edit) - create query for workflow tracking
+        const warning: { fieldPath: string; message: string; queryId?: number } = {
           fieldPath: rule.fieldPath,
           message: rule.warningMessage || rule.errorMessage
-        });
+        };
+
+        if (options?.createQueries && options.studyId && options.userId) {
+          try {
+            const queryId = await createValidationQuery({
+              studyId: options.studyId,
+              subjectId: options.subjectId,
+              eventCrfId: options.eventCrfId,
+              crfId: crfId,
+              itemDataId: itemDataId,
+              itemId: rule.itemId || options?.itemId,
+              fieldPath: rule.fieldPath,
+              ruleName: rule.name,
+              errorMessage: rule.warningMessage || rule.errorMessage,
+              value: value,
+              userId: options.userId,
+              severity: 'warning'
+            });
+            if (queryId) {
+              warning.queryId = queryId;
+              queriesCreated++;
+            }
+          } catch (e: any) {
+            logger.error('Failed to create warning validation query:', e.message);
+          }
+        }
+
+        warnings.push(warning);
       }
     }
   }
@@ -1138,8 +1289,14 @@ function matchesField(
   itemId?: number,
   itemDataMap?: Record<string, number>
 ): boolean {
+  // Guard against null/undefined fieldPath on rule
+  if (!rule.fieldPath && !rule.itemId) return false;
+  
   // 1. Match by itemId (most reliable for LibreClinica fields)
   if (rule.itemId && itemId && rule.itemId === itemId) return true;
+  
+  // If rule has no fieldPath, can't do path matching
+  if (!rule.fieldPath) return false;
   
   // 2. Match by exact fieldPath
   if (rule.fieldPath === fieldPath) return true;
@@ -1193,6 +1350,7 @@ async function createValidationQuery(params: {
   studyId: number;
   subjectId?: number;
   eventCrfId?: number;
+  crfId?: number;
   itemDataId?: number;
   itemId?: number;
   fieldPath: string;
@@ -1201,6 +1359,7 @@ async function createValidationQuery(params: {
   value: any;
   userId: number;
   assignedUserId?: number;
+  severity?: 'error' | 'warning';
 }): Promise<number | null> {
   const client = await pool.connect();
   
@@ -1219,6 +1378,7 @@ async function createValidationQuery(params: {
     }
     
     // Check for existing open query on this field to prevent duplicates
+    // Check both type 1 (Failed Validation) and type 2 (Annotation/warning)
     if (itemDataId) {
       const existingQuery = await client.query(`
         SELECT dn.discrepancy_note_id 
@@ -1226,7 +1386,7 @@ async function createValidationQuery(params: {
         INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
         INNER JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         WHERE dim.item_data_id = $1
-          AND dn.discrepancy_note_type_id = 1  -- Failed Validation Check
+          AND dn.discrepancy_note_type_id IN (1, 2)  -- Failed Validation Check OR Annotation
           AND rs.name NOT IN ('Closed', 'Not Applicable')
           AND dn.parent_dn_id IS NULL
         LIMIT 1
@@ -1244,17 +1404,36 @@ async function createValidationQuery(params: {
       }
     }
     
-    // Get assigned user - find a coordinator or CRA for this study
+    // ===== WORKFLOW-BASED QUERY ASSIGNMENT =====
+    // Priority:
+    // 1. Explicitly provided assignedUserId (from caller)
+    // 2. Form workflow config (acc_form_workflow_config.query_route_to_user)
+    // 3. Default assignee (coordinator/data manager for the study)
     let assignedUserId = params.assignedUserId;
+    
     if (!assignedUserId) {
+      // Look up form workflow config to find the designated query recipient
+      assignedUserId = await findWorkflowAssignee(client, params.crfId, params.eventCrfId, params.studyId);
+    }
+    
+    if (!assignedUserId) {
+      // Fallback to default study role-based assignment
       assignedUserId = await findDefaultAssignee(client, params.studyId, params.subjectId);
     }
     
-    const description = `Validation Error: ${params.ruleName}`;
-    const detailedNotes = `Field: ${params.fieldPath}\nValue: ${JSON.stringify(params.value)}\nError: ${params.errorMessage}`;
+    const isWarning = params.severity === 'warning';
+    const description = isWarning 
+      ? `Validation Warning: ${params.ruleName}` 
+      : `Validation Error: ${params.ruleName}`;
+    const detailedNotes = `Field: ${params.fieldPath}\nValue: ${JSON.stringify(params.value)}\n${isWarning ? 'Warning' : 'Error'}: ${params.errorMessage}\nSeverity: ${params.severity || 'error'}`;
 
-    // Discrepancy note type 1 = "Failed Validation Check" in LibreClinica
-    // Resolution status 1 = "New"
+    // LibreClinica discrepancy_note_type_id:
+    //   1 = "Failed Validation Check" (hard edit / error)
+    //   2 = "Annotation" (soft edit / warning query)
+    //   3 = "Query" (manual query)
+    // Use type 1 for errors (Failed Validation), type 2 for warnings (Annotation/soft edit)
+    const noteTypeId = isWarning ? 2 : 1;
+    // Resolution status: 1 = "New"
     const result = await client.query(`
       INSERT INTO discrepancy_note (
         description,
@@ -1266,9 +1445,9 @@ async function createValidationQuery(params: {
         assigned_user_id,
         date_created,
         entity_type
-      ) VALUES ($1, $2, 1, 1, $3, $4, $5, CURRENT_TIMESTAMP, 'itemData')
+      ) VALUES ($1, $2, $3, 1, $4, $5, $6, CURRENT_TIMESTAMP, 'itemData')
       RETURNING discrepancy_note_id
-    `, [description, detailedNotes, params.studyId, params.userId, assignedUserId]);
+    `, [description, detailedNotes, noteTypeId, params.studyId, params.userId, assignedUserId]);
 
     const queryId = result.rows[0]?.discrepancy_note_id;
     
@@ -1277,11 +1456,13 @@ async function createValidationQuery(params: {
     }
 
     // Link to item_data if available (most precise)
+    // column_name should be 'value' (the column in item_data being referenced)
+    // per LibreClinica schema convention
     if (itemDataId) {
       await client.query(`
         INSERT INTO dn_item_data_map (discrepancy_note_id, item_data_id, column_name)
         VALUES ($1, $2, $3)
-      `, [queryId, itemDataId, params.fieldPath]);
+      `, [queryId, itemDataId, 'value']);
       
       logger.info('Linked validation query to item_data', { 
         queryId, 
@@ -1339,6 +1520,103 @@ async function createValidationQuery(params: {
 }
 
 /**
+ * Find the workflow-assigned user for queries on a specific form.
+ * 
+ * Checks acc_form_workflow_config.query_route_to_user for the CRF.
+ * This is configured in the Workflow Management UI and routes ALL queries
+ * for a given form to a specific user.
+ * 
+ * When a form has a query_route_to_user configured, ALL validation queries
+ * (both errors and warnings) are assigned to that user. They will see these
+ * queries in their "My Assigned Queries" dashboard and task list.
+ * 
+ * @param client - DB client (within transaction)
+ * @param crfId - The CRF/form template ID (may be undefined)
+ * @param eventCrfId - The form instance ID (used to look up crfId if not provided)
+ * @param studyId - The study ID for study-specific workflow config
+ * @returns The user_id to assign queries to, or null if no workflow config exists
+ */
+async function findWorkflowAssignee(
+  client: any,
+  crfId?: number,
+  eventCrfId?: number,
+  studyId?: number
+): Promise<number | null> {
+  try {
+    // If we don't have crfId but have eventCrfId, look it up
+    let resolvedCrfId = crfId;
+    if (!resolvedCrfId && eventCrfId) {
+      const ecResult = await client.query(`
+        SELECT cv.crf_id FROM event_crf ec
+        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        WHERE ec.event_crf_id = $1
+      `, [eventCrfId]);
+      if (ecResult.rows.length > 0) {
+        resolvedCrfId = ecResult.rows[0].crf_id;
+      }
+    }
+    
+    if (!resolvedCrfId) return null;
+    
+    // Check if the acc_form_workflow_config table exists before querying
+    // This prevents errors when the migration hasn't run yet
+    const tableCheck = await client.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'acc_form_workflow_config'
+      ) as exists
+    `);
+    if (!tableCheck.rows[0].exists) {
+      logger.debug('acc_form_workflow_config table does not exist yet, skipping workflow assignment');
+      return null;
+    }
+    
+    // Look up workflow config for this CRF
+    // Check study-specific config first, then fall back to global (study_id IS NULL)
+    const configResult = await client.query(`
+      SELECT query_route_to_user
+      FROM acc_form_workflow_config
+      WHERE crf_id = $1 
+        AND (study_id = $2 OR study_id IS NULL)
+        AND query_route_to_user IS NOT NULL
+        AND query_route_to_user != ''
+      ORDER BY study_id DESC NULLS LAST
+      LIMIT 1
+    `, [resolvedCrfId, studyId || null]);
+    
+    if (configResult.rows.length === 0) return null;
+    
+    const routeToUsername = configResult.rows[0].query_route_to_user;
+    if (!routeToUsername) return null;
+    
+    // Resolve username to user_id
+    // The workflow config stores username (user_name), not user_id
+    const userResult = await client.query(`
+      SELECT user_id FROM user_account
+      WHERE user_name = $1 AND enabled = true
+      LIMIT 1
+    `, [routeToUsername]);
+    
+    if (userResult.rows.length > 0) {
+      logger.info('Workflow-assigned query to user', { 
+        crfId: resolvedCrfId, 
+        username: routeToUsername,
+        userId: userResult.rows[0].user_id 
+      });
+      return userResult.rows[0].user_id;
+    }
+    
+    logger.warn('Workflow query_route_to_user not found as active user', { 
+      username: routeToUsername, crfId: resolvedCrfId 
+    });
+    return null;
+  } catch (e: any) {
+    logger.warn('Could not find workflow assignee:', e.message);
+    return null;
+  }
+}
+
+/**
  * Find a default user to assign validation queries to
  * 
  * Priority:
@@ -1354,10 +1632,11 @@ async function findDefaultAssignee(
 ): Promise<number | null> {
   try {
     // Try to find a coordinator or data manager for this study
+    // Note: study_user_role uses user_name (not user_id) as the link to user_account
     const result = await client.query(`
       SELECT DISTINCT ua.user_id
       FROM user_account ua
-      INNER JOIN study_user_role sur ON ua.user_id = sur.user_id
+      INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
       WHERE sur.study_id = $1
         AND sur.status_id = 1
         AND sur.role_name IN ('Study Coordinator', 'Clinical Research Coordinator', 'Data Manager', 'coordinator')
@@ -1379,7 +1658,7 @@ async function findDefaultAssignee(
     const fallbackResult = await client.query(`
       SELECT ua.user_id
       FROM user_account ua
-      INNER JOIN study_user_role sur ON ua.user_id = sur.user_id
+      INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
       WHERE sur.study_id = $1 AND sur.status_id = 1 AND ua.enabled = true
       LIMIT 1
     `, [studyId]);
@@ -1456,11 +1735,49 @@ function applyRule(
     return { valid: true };
   }
 
+  // Detect multi-value fields (checkbox/multi-select stored as comma-separated strings)
+  // These need special handling: range and format rules designed for single values
+  // should not be applied to comma-separated multi-value strings.
+  const isMultiValue = typeof value === 'string' && value.includes(',') &&
+    !/^\d[\d,.]*$/.test(value) && // Not a decimal number with commas (e.g., "1,234.56")
+    !/^\d{4}-\d{2}-\d{2}/.test(value); // Not a date string
+
+  // Handle array values (in case value comes as actual array)
+  if (Array.isArray(value)) {
+    if (rule.ruleType === 'required') {
+      return { valid: value.length > 0 };
+    }
+    // Range and format rules don't apply to array/multi-select values
+    if (rule.ruleType === 'range' || rule.ruleType === 'format') {
+      return { valid: true };
+    }
+  }
+
   switch (rule.ruleType) {
     case 'required':
+      if (Array.isArray(value)) return { valid: value.length > 0 };
       return { valid: value !== null && value !== undefined && value !== '' };
 
     case 'range':
+      // Skip range validation for multi-value (checkbox/multi-select) fields
+      // Comma-separated option values like "opt1,opt2" would produce NaN and falsely fail
+      if (isMultiValue) return { valid: true };
+      
+      // Check for date range validation
+      if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+        const dateValue = new Date(value);
+        if (isNaN(dateValue.getTime())) return { valid: false };
+        if (rule.minValue !== undefined) {
+          const minDate = new Date(rule.minValue);
+          if (!isNaN(minDate.getTime()) && dateValue < minDate) return { valid: false };
+        }
+        if (rule.maxValue !== undefined) {
+          const maxDate = new Date(rule.maxValue);
+          if (!isNaN(maxDate.getTime()) && dateValue > maxDate) return { valid: false };
+        }
+        return { valid: true };
+      }
+      
       const numValue = Number(value);
       if (isNaN(numValue)) return { valid: false };
       if (rule.minValue !== undefined && numValue < rule.minValue) return { valid: false };
@@ -1468,16 +1785,25 @@ function applyRule(
       return { valid: true };
 
     case 'format':
-      if (!rule.pattern) return { valid: true };
+      // Resolve the pattern: formatType registry takes priority over raw pattern.
+      // This is the core of the no-code builder: the DB stores a semantic key like
+      // "email" and we look up the regex here at validation time.
+      let resolvedPattern = rule.pattern;
+      if (rule.formatType && rule.formatType !== 'custom_regex' && FORMAT_TYPE_REGISTRY[rule.formatType]) {
+        resolvedPattern = FORMAT_TYPE_REGISTRY[rule.formatType].pattern;
+      }
+      if (!resolvedPattern) return { valid: true };
+      // Skip format/regex validation for multi-value (checkbox/multi-select) fields
+      if (isMultiValue) return { valid: true };
       // Check if this is actually an Excel formula stored as format type
-      if (rule.pattern.startsWith('=FORMULA:') || rule.pattern.startsWith('=')) {
-        const formula = rule.pattern.startsWith('=FORMULA:') 
-          ? rule.pattern.substring(9) 
-          : rule.pattern;
+      if (resolvedPattern.startsWith('=FORMULA:') || resolvedPattern.startsWith('=')) {
+        const formula = resolvedPattern.startsWith('=FORMULA:') 
+          ? resolvedPattern.substring(9) 
+          : resolvedPattern;
         return evaluateExcelFormula(formula, value, allData);
       }
       try {
-        const regex = new RegExp(rule.pattern);
+        const regex = new RegExp(resolvedPattern);
         return { valid: regex.test(String(value)) };
       } catch {
         return { valid: true }; // Invalid regex = no validation
@@ -1671,9 +1997,10 @@ function mapDbRowToRule(row: any): ValidationRule {
     errorMessage: row.error_message,
     warningMessage: row.warning_message,
     active: row.active !== false,
-    minValue: row.min_value ? Number(row.min_value) : undefined,
-    maxValue: row.max_value ? Number(row.max_value) : undefined,
+    minValue: row.min_value != null ? Number(row.min_value) : undefined,
+    maxValue: row.max_value != null ? Number(row.max_value) : undefined,
     pattern: row.pattern,
+    formatType: row.format_type || undefined,
     operator: row.operator,
     compareFieldPath: row.compare_field_path,
     customExpression: row.custom_expression,
@@ -1739,7 +2066,7 @@ export const validateEventCrf = async (
 ): Promise<{
   valid: boolean;
   errors: { fieldPath: string; message: string; severity: string; queryId?: number; itemDataId?: number }[];
-  warnings: { fieldPath: string; message: string }[];
+  warnings: { fieldPath: string; message: string; queryId?: number }[];
   queriesCreated?: number;
 }> => {
   logger.info('Validating event_crf', { eventCrfId });

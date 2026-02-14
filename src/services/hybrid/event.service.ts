@@ -88,21 +88,29 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
       SELECT 
         se.study_event_id,
         se.study_event_definition_id,
+        se.study_subject_id,
         sed.name as event_name,
         sed.ordinal,
+        sed.type as event_type,
         se.subject_event_status_id,
+        se.subject_event_status_id as status_id,
         ses.name as status_name,
         se.date_start,
         se.date_end,
         se.sample_ordinal,
         se.location,
+        se.scheduled_date,
+        COALESCE(se.is_unscheduled, false) as is_unscheduled,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id) as crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id = 2) as completed_crf_count
       FROM study_event se
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN subject_event_status ses ON se.subject_event_status_id = ses.subject_event_status_id
       WHERE se.study_subject_id = $1
-      ORDER BY sed.ordinal, se.sample_ordinal
+      ORDER BY 
+        COALESCE(se.scheduled_date, se.date_start, se.date_created) ASC,
+        sed.ordinal ASC,
+        se.sample_ordinal ASC
     `;
 
     const result = await pool.query(query, [studySubjectId]);
@@ -212,6 +220,8 @@ export const scheduleSubjectEvent = async (
     startDate?: string;
     endDate?: string;
     location?: string;
+    scheduledDate?: string;
+    isUnscheduled?: boolean;
   },
   userId: number,
   username: string
@@ -290,15 +300,19 @@ export const scheduleSubjectEvent = async (
           study_subject_id, study_event_definition_id, location,
           sample_ordinal, date_start, date_end, owner_id, status_id,
           date_created, subject_event_status_id, start_time_flag,
-          end_time_flag
+          end_time_flag, scheduled_date, is_unscheduled
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, 1, NOW(), 1, false, false
+          $1, $2, $3, $4, $5, $6, $7, 1, NOW(), $8, false, false, $9, $10
         )
         RETURNING study_event_id
       `;
 
       const startDate = data.startDate ? new Date(data.startDate) : new Date();
       const endDate = data.endDate ? new Date(data.endDate) : null;
+      const scheduledDate = data.scheduledDate ? new Date(data.scheduledDate) : (data.isUnscheduled ? startDate : null);
+      const isUnscheduled = data.isUnscheduled || false;
+      // Unscheduled visits start as 'not_scheduled' (2) until data entry begins
+      const subjectEventStatusId = isUnscheduled ? 2 : 1;
 
       const insertResult = await client.query(insertQuery, [
         data.studySubjectId,
@@ -307,7 +321,10 @@ export const scheduleSubjectEvent = async (
         sampleOrdinal,
         startDate,
         endDate,
-        userId
+        userId,
+        subjectEventStatusId,
+        scheduledDate,
+        isUnscheduled
       ]);
 
       const studyEventId = insertResult.rows[0].study_event_id;
@@ -403,9 +420,13 @@ export const scheduleSubjectEvent = async (
         success: true,
         data: {
           studyEventId,
+          study_event_id: studyEventId,
           studySubjectId: data.studySubjectId,
           studyEventDefinitionId: data.studyEventDefinitionId,
           startDate: startDate.toISOString(),
+          date_start: startDate.toISOString(),
+          scheduled_date: scheduledDate ? scheduledDate.toISOString() : null,
+          is_unscheduled: isUnscheduled,
           location: data.location
         },
         message: 'Event scheduled successfully'

@@ -331,6 +331,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         s.collaborators,
         s.principal_investigator,
         s.facility_name,
+        s.facility_address,
         s.facility_city,
         s.facility_state,
         s.facility_zip,
@@ -501,6 +502,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         s.principal_investigator,
         s.expected_total_enrollment,
         s.facility_name,
+        s.facility_address,
         s.facility_city,
         s.facility_state,
         s.facility_country,
@@ -520,6 +522,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
       principalInvestigator: site.principal_investigator,
       expectedTotalEnrollment: site.expected_total_enrollment,
       facilityName: site.facility_name,
+      facilityAddress: site.facility_address,
       facilityCity: site.facility_city,
       facilityState: site.facility_state,
       facilityCountry: site.facility_country,
@@ -698,6 +701,7 @@ export const createStudy = async (
     
     // Facility
     facilityName?: string;
+    facilityAddress?: string;
     facilityCity?: string;
     facilityState?: string;
     facilityZip?: string;
@@ -770,7 +774,7 @@ export const createStudy = async (
         expected_total_enrollment, status_id, owner_id, date_created,
         protocol_type, phase, sponsor, collaborators,
         principal_investigator,
-        facility_name, facility_city, facility_state, facility_zip, facility_country,
+        facility_name, facility_address, facility_city, facility_state, facility_zip, facility_country,
         facility_recruitment_status, facility_contact_name, facility_contact_degree,
         facility_contact_phone, facility_contact_email,
         medline_identifier, url, url_description, results_reference,
@@ -780,11 +784,11 @@ export const createStudy = async (
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(),
         $13, $14, $15, $16, $17,
-        $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-        $28, $29, $30, $31,
-        $32, $33, $34, $35, $36, $37, $38,
-        $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
-        $49
+        $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
+        $29, $30, $31, $32,
+        $33, $34, $35, $36, $37, $38, $39,
+        $40, $41, $42, $43, $44, $45, $46, $47, $48, $49,
+        $50
       )
       RETURNING study_id
     `;
@@ -815,45 +819,46 @@ export const createStudy = async (
       
       // Facility
       data.facilityName || null,                                      // $18 facility_name
-      data.facilityCity || null,                                      // $19 facility_city
-      data.facilityState || null,                                     // $20 facility_state
-      data.facilityZip || null,                                       // $21 facility_zip
-      data.facilityCountry || null,                                   // $22 facility_country
-      data.facilityRecruitmentStatus || null,                         // $23 facility_recruitment_status
-      data.facilityContactName || null,                               // $24 facility_contact_name
-      data.facilityContactDegree || null,                             // $25 facility_contact_degree
-      data.facilityContactPhone || null,                              // $26 facility_contact_phone
-      data.facilityContactEmail || null,                              // $27 facility_contact_email
+      data.facilityAddress || null,                                     // $19 facility_address
+      data.facilityCity || null,                                      // $20 facility_city
+      data.facilityState || null,                                     // $21 facility_state
+      data.facilityZip || null,                                       // $22 facility_zip
+      data.facilityCountry || null,                                   // $23 facility_country
+      data.facilityRecruitmentStatus || null,                         // $24 facility_recruitment_status
+      data.facilityContactName || null,                               // $25 facility_contact_name
+      data.facilityContactDegree || null,                             // $26 facility_contact_degree
+      data.facilityContactPhone || null,                              // $27 facility_contact_phone
+      data.facilityContactEmail || null,                              // $28 facility_contact_email
       
       // Protocol
-      data.medlineIdentifier || null,                                 // $28 medline_identifier
-      data.url || null,                                                // $29 url
-      data.urlDescription || null,                                    // $30 url_description
-      data.resultsReference ?? null,                                   // $31 results_reference (use ?? to preserve false)
+      data.medlineIdentifier || null,                                 // $29 medline_identifier
+      data.url || null,                                                // $30 url
+      data.urlDescription || null,                                    // $31 url_description
+      data.resultsReference ?? null,                                   // $32 results_reference (use ?? to preserve false)
       
       // Eligibility
-      data.conditions || null,                                        // $32 conditions
-      data.keywords || null,                                          // $33 keywords
-      data.eligibility || null,                                       // $34 eligibility
-      data.gender || null,                                             // $35 gender
-      data.ageMin || null,                                             // $36 age_min
-      data.ageMax || null,                                             // $37 age_max
-      data.healthyVolunteerAccepted ?? null,                           // $38 healthy_volunteer_accepted (use ?? to preserve false)
+      data.conditions || null,                                        // $33 conditions
+      data.keywords || null,                                          // $34 keywords
+      data.eligibility || null,                                       // $35 eligibility
+      data.gender || null,                                             // $36 gender
+      data.ageMin || null,                                             // $37 age_min
+      data.ageMax || null,                                             // $38 age_max
+      data.healthyVolunteerAccepted ?? null,                           // $39 healthy_volunteer_accepted (use ?? to preserve false)
       
       // Study Design
-      data.purpose || null,                                            // $39 purpose
-      data.allocation || null,                                        // $40 allocation
-      data.masking || null,                                           // $41 masking
-      data.control || null,                                            // $42 control
-      data.assignment || null,                                        // $43 assignment
-      data.endpoint || null,                                          // $44 endpoint
-      data.interventions || null,                                     // $45 interventions
-      data.duration || null,                                          // $46 duration
-      data.selection || null,                                         // $47 selection
-      data.timing || null,                                            // $48 timing
+      data.purpose || null,                                            // $40 purpose
+      data.allocation || null,                                        // $41 allocation
+      data.masking || null,                                           // $42 masking
+      data.control || null,                                            // $43 control
+      data.assignment || null,                                        // $44 assignment
+      data.endpoint || null,                                          // $45 endpoint
+      data.interventions || null,                                     // $46 interventions
+      data.duration || null,                                          // $47 duration
+      data.selection || null,                                         // $48 selection
+      data.timing || null,                                            // $49 timing
       
       // OID
-      ocOid                                                           // $49 oc_oid
+      ocOid                                                           // $50 oc_oid
     ]);
 
     const studyId = insertResult.rows[0].study_id;
@@ -1134,10 +1139,10 @@ export const createStudy = async (
             INSERT INTO study (
               parent_study_id, unique_identifier, name, summary,
               principal_investigator, expected_total_enrollment,
-              facility_name, facility_city, facility_state, facility_country,
+              facility_name, facility_address, facility_city, facility_state, facility_country,
               facility_recruitment_status,
               status_id, owner_id, date_created, oc_oid
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, NOW(), $14)
           `, [
             studyId,                                      // parent_study_id
             site.uniqueIdentifier,                        // unique_identifier
@@ -1146,6 +1151,7 @@ export const createStudy = async (
             site.principalInvestigator || null,           // principal_investigator
             site.expectedTotalEnrollment || 0,            // expected_total_enrollment
             site.facilityName || null,                    // facility_name
+            site.facilityAddress || null,                 // facility_address
             site.facilityCity || null,                    // facility_city
             site.facilityState || null,                   // facility_state
             site.facilityCountry || null,                 // facility_country
@@ -1214,6 +1220,7 @@ export const updateStudy = async (
     
     // Facility
     facilityName?: string;
+    facilityAddress?: string;
     facilityCity?: string;
     facilityState?: string;
     facilityZip?: string;
@@ -1295,6 +1302,7 @@ export const updateStudy = async (
       datePlannedStart: 'date_planned_start',
       datePlannedEnd: 'date_planned_end',
       facilityName: 'facility_name',
+      facilityAddress: 'facility_address',
       facilityCity: 'facility_city',
       facilityState: 'facility_state',
       facilityZip: 'facility_zip',
@@ -1598,15 +1606,16 @@ export const updateStudy = async (
             await client.query(`
               UPDATE study
               SET name = $1, principal_investigator = $2, expected_total_enrollment = $3,
-                  facility_name = $4, facility_city = $5, facility_state = $6,
-                  facility_country = $7, facility_recruitment_status = $8,
-                  date_updated = NOW(), update_id = $9
-              WHERE study_id = $10 AND parent_study_id = $11
+                  facility_name = $4, facility_address = $5, facility_city = $6, facility_state = $7,
+                  facility_country = $8, facility_recruitment_status = $9,
+                  date_updated = NOW(), update_id = $10
+              WHERE study_id = $11 AND parent_study_id = $12
             `, [
               site.name,
               site.principalInvestigator || null,
               site.expectedTotalEnrollment || 0,
               site.facilityName || null,
+              site.facilityAddress || null,
               site.facilityCity || null,
               site.facilityState || null,
               site.facilityCountry || null,
@@ -1623,10 +1632,10 @@ export const updateStudy = async (
               INSERT INTO study (
                 parent_study_id, unique_identifier, name, summary,
                 principal_investigator, expected_total_enrollment,
-                facility_name, facility_city, facility_state, facility_country,
+                facility_name, facility_address, facility_city, facility_state, facility_country,
                 facility_recruitment_status,
                 status_id, owner_id, date_created, oc_oid
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, NOW(), $14)
             `, [
               studyId,
               site.uniqueIdentifier,
@@ -1635,6 +1644,7 @@ export const updateStudy = async (
               site.principalInvestigator || null,
               site.expectedTotalEnrollment || 0,
               site.facilityName || null,
+              site.facilityAddress || null,
               site.facilityCity || null,
               site.facilityState || null,
               site.facilityCountry || null,

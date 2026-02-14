@@ -13,20 +13,44 @@ import { AuthRequest } from './auth.middleware';
  * - user_type_id 3: user (standard user)
  */
 /**
- * Role alias map: maps the canonical role names used in requireRole() calls
+ * Role alias map: maps the 6 canonical role names used in requireRole() calls
  * to ALL equivalent LibreClinica role_name values (case-insensitive matching).
- *
- * LibreClinica role_name values from study_user_role table:
- *   admin, coordinator, director, Investigator, ra, monitor, ra2
- *   site_Study_Coordinator, site_Study_Director, site_investigator,
- *   site_Data_Entry_Person, site_monitor, site_Data_Entry_Person2
+ * 
+ * Canonical roles: admin, data_manager, investigator, coordinator, monitor, viewer
+ * 
+ * Legacy LibreClinica role names (director, ra, ra2) are included as aliases
+ * so existing study_user_role data still grants correct access.
  */
+/**
+ * Role alias mapping for requireRole() calls.
+ * 
+ * 6 canonical roles (sorted by descending privilege):
+ *   'admin'        → admin, system_administrator
+ *   'data_manager' → data_manager, director, study_coordinator (study management level)
+ *   'investigator' → investigator, site_investigator (PI / e-sign authority)
+ *   'coordinator'  → coordinator, crc, ra, ra2, data_entry_person (CRC / data entry level)
+ *   'monitor'      → monitor, site_monitor (SDV / read-only monitoring)
+ *   'viewer'       → viewer, sponsor, read_only
+ *
+ * IMPORTANT: In the new system, 'coordinator' in the DB = CRC (data entry).
+ * Legacy LibreClinica data with 'study_coordinator' or 'director' still maps
+ * to data_manager-level access via aliases.
+ */
+// Study management level: data_manager role + legacy aliases that meant study coordination
+// NOTE: bare 'coordinator' is NOT here — in the new system 'coordinator' = CRC (data entry)
+const STUDY_MGMT_ROLES = ['data_manager', 'study_coordinator', 'site_study_coordinator', 'director', 'study_director', 'site_study_director'];
+
+// Data entry / CRC level: coordinator role + legacy aliases for data entry personnel
+const DATA_ENTRY_ROLES = ['coordinator', 'ra', 'ra2', 'data_entry', 'data_entry_person', 'crc', 'site_data_entry_person', 'site_data_entry_person2', 'user'];
+
 const ROLE_ALIASES: Record<string, string[]> = {
-  admin:        ['admin', 'system_administrator'],
-  coordinator:  ['coordinator', 'study_coordinator', 'site_study_coordinator', 'director', 'study_director', 'site_study_director'],
-  investigator: ['investigator', 'site_investigator'],
-  data_entry:   ['ra', 'ra2', 'data_entry', 'data_entry_person', 'site_data_entry_person', 'site_data_entry_person2'],
-  monitor:      ['monitor', 'site_monitor'],
+  admin:         ['admin', 'system_administrator'],
+  data_manager:  STUDY_MGMT_ROLES,   // Study management: data_manager + legacy study-coordinator aliases
+  coordinator:   DATA_ENTRY_ROLES,    // CRC / data entry: coordinator (new canonical) + legacy ra/data_entry aliases
+  data_entry:    DATA_ENTRY_ROLES,    // Alias for coordinator (backwards compatibility with old route calls)
+  investigator:  ['investigator', 'site_investigator'],
+  monitor:       ['monitor', 'site_monitor'],
+  viewer:        ['viewer', 'sponsor', 'read_only'],
 };
 
 /**
@@ -214,4 +238,3 @@ export const requireStudyAccess = (studyIdParam: string = 'studyId') => {
     }
   };
 };
-

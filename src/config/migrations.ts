@@ -34,6 +34,10 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'wound_scanner', fn: createWoundTables },
     { name: 'wound_full_schema', fn: createWoundFullSchemaTables },
     { name: 'randomization_engine', fn: createRandomizationEngineTables },
+    { name: 'user_feature_access', fn: createUserFeatureAccessTables },
+    { name: 'form_workflow_config', fn: createFormWorkflowConfigTable },
+    { name: 'workflow_tasks', fn: createWorkflowTasksTable },
+    { name: 'notifications', fn: createNotificationsTable },
   ];
 
   let successCount = 0;
@@ -816,4 +820,219 @@ async function createRandomizationEngineTables(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_rand_list_subject ON acc_randomization_list(used_by_subject_id)`);
 
   logger.info('Randomization engine tables verified');
+}
+
+// ============================================================================
+// User Feature Access (acc_user_feature_access)
+// Controls which application features each user can access.
+// Features: training, econsent, epro, rtsm, woundScanner, aiAssistant,
+//           randomization, dataLock, userManagement, reporting
+// ============================================================================
+async function createUserFeatureAccessTables(pool: any): Promise<void> {
+  // Master feature registry - defines all available features in the system
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_feature (
+      feature_id SERIAL PRIMARY KEY,
+      feature_key VARCHAR(50) NOT NULL UNIQUE,
+      display_name VARCHAR(100) NOT NULL,
+      description TEXT,
+      category VARCHAR(50) DEFAULT 'general',
+      is_active BOOLEAN DEFAULT true,
+      requires_role_level INTEGER DEFAULT 0,
+      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Per-user feature access - which features each user can access
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_user_feature_access (
+      access_id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      feature_key VARCHAR(50) NOT NULL,
+      is_enabled BOOLEAN DEFAULT true,
+      granted_by INTEGER,
+      granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      revoked_by INTEGER,
+      revoked_at TIMESTAMP,
+      notes TEXT,
+      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, feature_key)
+    )
+  `);
+
+  // Default feature access by role - what features each role gets by default
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_role_default_features (
+      id SERIAL PRIMARY KEY,
+      role_name VARCHAR(50) NOT NULL,
+      feature_key VARCHAR(50) NOT NULL,
+      is_enabled BOOLEAN DEFAULT true,
+      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(role_name, feature_key)
+    )
+  `);
+
+  // Indexes
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_feature_user ON acc_user_feature_access(user_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_feature_key ON acc_user_feature_access(feature_key)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_feature_enabled ON acc_user_feature_access(user_id, is_enabled)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_role_default_features_role ON acc_role_default_features(role_name)`);
+
+  // Seed the feature registry with all application features
+  const features = [
+    { key: 'dashboard', name: 'Dashboard', desc: 'Main dashboard with study overview', category: 'core', roleLevel: 0 },
+    { key: 'training', name: 'Training Module', desc: 'GCP training and certification management', category: 'compliance', roleLevel: 0 },
+    { key: 'econsent', name: 'eConsent', desc: 'Electronic informed consent management', category: 'clinical', roleLevel: 0 },
+    { key: 'epro', name: 'ePRO/Patient Portal', desc: 'Patient-reported outcomes and portal access', category: 'clinical', roleLevel: 30 },
+    { key: 'rtsm', name: 'RTSM/IRT', desc: 'Randomization and trial supply management', category: 'clinical', roleLevel: 60 },
+    { key: 'randomization', name: 'Randomization', desc: 'Subject randomization and unblinding', category: 'clinical', roleLevel: 40 },
+    { key: 'woundScanner', name: 'Wound Scanner', desc: 'iOS wound measurement and imaging', category: 'clinical', roleLevel: 0 },
+    { key: 'aiAssistant', name: 'AI Assistant', desc: 'AI-powered protocol and data assistant', category: 'tools', roleLevel: 0 },
+    { key: 'dataLock', name: 'Data Lock Management', desc: 'Database lock and freeze controls', category: 'data', roleLevel: 60 },
+    { key: 'userManagement', name: 'User Management', desc: 'Create, edit, and manage user accounts', category: 'admin', roleLevel: 70 },
+    { key: 'reporting', name: 'Reports & Exports', desc: 'Study data exports and compliance reports', category: 'data', roleLevel: 30 },
+    { key: 'siteManagement', name: 'Site Management', desc: 'Manage clinical trial sites', category: 'admin', roleLevel: 60 },
+    { key: 'studyManagement', name: 'Study Management', desc: 'Create and configure studies', category: 'admin', roleLevel: 70 },
+    { key: 'emailNotifications', name: 'Email Notifications', desc: 'Email notification management', category: 'tools', roleLevel: 60 },
+  ];
+
+  for (const f of features) {
+    await pool.query(`
+      INSERT INTO acc_feature (feature_key, display_name, description, category, requires_role_level)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (feature_key) DO UPDATE SET
+        display_name = $2, description = $3, category = $4, requires_role_level = $5, date_updated = NOW()
+    `, [f.key, f.name, f.desc, f.category, f.roleLevel]);
+  }
+
+  // Seed default role-feature mappings (6 industry-standard EDC roles)
+  const roleDefaults: Record<string, string[]> = {
+    'admin':        ['dashboard', 'training', 'econsent', 'epro', 'rtsm', 'randomization', 'woundScanner', 'aiAssistant', 'dataLock', 'userManagement', 'reporting', 'siteManagement', 'studyManagement', 'emailNotifications'],
+    'data_manager': ['dashboard', 'training', 'econsent', 'epro', 'rtsm', 'randomization', 'woundScanner', 'aiAssistant', 'dataLock', 'reporting', 'siteManagement', 'studyManagement'],
+    'investigator': ['dashboard', 'training', 'econsent', 'epro', 'randomization', 'woundScanner', 'aiAssistant', 'reporting'],
+    'coordinator':  ['dashboard', 'training', 'econsent', 'woundScanner', 'aiAssistant'],
+    'monitor':      ['dashboard', 'training', 'econsent', 'reporting', 'aiAssistant'],
+    'viewer':       ['dashboard', 'training', 'reporting'],
+  };
+
+  for (const [roleName, featureKeys] of Object.entries(roleDefaults)) {
+    for (const featureKey of featureKeys) {
+      await pool.query(`
+        INSERT INTO acc_role_default_features (role_name, feature_key, is_enabled)
+        VALUES ($1, $2, true)
+        ON CONFLICT (role_name, feature_key) DO NOTHING
+      `, [roleName, featureKey]);
+    }
+  }
+
+  logger.info('User feature access tables verified and seeded');
+}
+
+/**
+ * Form Workflow Configuration
+ * 
+ * Per-CRF lifecycle settings: SDV, PI signature, DDE, query routing.
+ * These configure which steps a form must pass through before lock.
+ */
+async function createFormWorkflowConfigTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_form_workflow_config (
+      config_id       SERIAL PRIMARY KEY,
+      crf_id          INTEGER NOT NULL,
+      study_id        INTEGER,
+      requires_sdv        BOOLEAN NOT NULL DEFAULT false,
+      requires_signature  BOOLEAN NOT NULL DEFAULT false,
+      requires_dde        BOOLEAN NOT NULL DEFAULT false,
+      query_route_to_user  VARCHAR(255),
+      query_route_to_users TEXT DEFAULT '[]',
+      updated_by      INTEGER,
+      date_updated    TIMESTAMP DEFAULT NOW(),
+      UNIQUE(crf_id, study_id)
+    )
+  `);
+
+  // Migration: add query_route_to_users column if it doesn't exist (for existing installs)
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'acc_form_workflow_config' AND column_name = 'query_route_to_users'
+      ) THEN
+        ALTER TABLE acc_form_workflow_config ADD COLUMN query_route_to_users TEXT DEFAULT '[]';
+      END IF;
+    END $$
+  `);
+
+  logger.info('Form workflow config table verified');
+}
+
+/**
+ * Workflow Tasks Table
+ * 
+ * Dedicated table for workflow task management, replacing the pattern of
+ * storing tasks in audit_log_event.  Supports multi-user assignment via
+ * INTEGER[] column and proper status tracking with timestamps.
+ */
+async function createWorkflowTasksTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_workflow_tasks (
+      task_id           SERIAL PRIMARY KEY,
+      task_type         VARCHAR(50) NOT NULL,
+      title             VARCHAR(255) NOT NULL,
+      description       TEXT,
+      status            VARCHAR(30) NOT NULL DEFAULT 'pending',
+      priority          VARCHAR(20) NOT NULL DEFAULT 'medium',
+      entity_type       VARCHAR(50),
+      entity_id         INTEGER,
+      event_crf_id      INTEGER,
+      study_id          INTEGER,
+      assigned_to_user_ids INTEGER[] DEFAULT '{}',
+      created_by        INTEGER NOT NULL,
+      completed_by      INTEGER,
+      date_created      TIMESTAMP NOT NULL DEFAULT NOW(),
+      date_updated      TIMESTAMP NOT NULL DEFAULT NOW(),
+      date_completed    TIMESTAMP,
+      due_date          TIMESTAMP,
+      metadata          JSONB DEFAULT '{}'
+    )
+  `);
+
+  // Indexes for common lookups
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_wf_tasks_status ON acc_workflow_tasks(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_wf_tasks_study ON acc_workflow_tasks(study_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_wf_tasks_event_crf ON acc_workflow_tasks(event_crf_id)`);
+
+  logger.info('Workflow tasks table verified');
+}
+
+/**
+ * In-App Notifications Table
+ * 
+ * Stores per-user notifications for query assignments, form review requests,
+ * workflow transitions, and other EDC events.
+ */
+async function createNotificationsTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_notifications (
+      notification_id   SERIAL PRIMARY KEY,
+      user_id           INTEGER NOT NULL,
+      notification_type VARCHAR(50) NOT NULL,
+      title             VARCHAR(255) NOT NULL,
+      message           TEXT NOT NULL,
+      is_read           BOOLEAN NOT NULL DEFAULT false,
+      entity_type       VARCHAR(50),
+      entity_id         INTEGER,
+      study_id          INTEGER,
+      link_url          VARCHAR(500),
+      date_created      TIMESTAMP NOT NULL DEFAULT NOW(),
+      date_read         TIMESTAMP
+    )
+  `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_notif_user_unread ON acc_notifications(user_id, is_read) WHERE is_read = false`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_notif_user_date ON acc_notifications(user_id, date_created DESC)`);
+
+  logger.info('Notifications table verified');
 }

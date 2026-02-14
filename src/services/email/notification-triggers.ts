@@ -99,14 +99,30 @@ async function getSiteName(siteId: number): Promise<string> {
 
 /**
  * Get users assigned to a study with a specific role
+ * Note: study_user_role uses role_name (string) and user_name (string),
+ * not role_id or user_id. We join to user_account to get user_id.
  */
 async function getStudyUsersByRole(studyId: number, roleId: number): Promise<number[]> {
   try {
+    // Map roleId to role_name(s) using LibreClinica role constants
+    const roleNameMap: Record<number, string[]> = {
+      1: ['admin', 'System_Administrator'],
+      2: ['coordinator', 'Study_Coordinator', 'site_Study_Coordinator'],
+      3: ['director', 'Study_Director', 'site_Study_Director'],
+      4: ['Investigator', 'site_investigator'],
+      5: ['ra', 'Data_Entry_Person', 'site_Data_Entry_Person'],
+      6: ['monitor', 'Monitor', 'site_monitor'],
+      7: ['ra2', 'site_Data_Entry_Person2']
+    };
+    const roleNames = roleNameMap[roleId] || [];
+    if (roleNames.length === 0) return [];
+
     const result = await pool.query(`
-      SELECT DISTINCT sur.user_id
+      SELECT DISTINCT ua.user_id
       FROM study_user_role sur
-      WHERE sur.study_id = $1 AND sur.role_id = $2 AND sur.status_id = 1
-    `, [studyId, roleId]);
+      INNER JOIN user_account ua ON sur.user_name = ua.user_name
+      WHERE sur.study_id = $1 AND sur.role_name = ANY($2) AND sur.status_id = 1
+    `, [studyId, roleNames]);
     
     return result.rows.map(r => r.user_id);
   } catch (error) {
@@ -116,12 +132,14 @@ async function getStudyUsersByRole(studyId: number, roleId: number): Promise<num
 
 /**
  * Get users assigned to a site
+ * Note: study_user_role uses user_name, not user_id. Join to user_account.
  */
 async function getSiteUsers(siteId: number): Promise<number[]> {
   try {
     const result = await pool.query(`
-      SELECT DISTINCT sur.user_id
+      SELECT DISTINCT ua.user_id
       FROM study_user_role sur
+      INNER JOIN user_account ua ON sur.user_name = ua.user_name
       WHERE sur.study_id = $1 AND sur.status_id = 1
     `, [siteId]);
     
@@ -616,10 +634,11 @@ export async function triggerStudyLockChange(
   logger.info('Triggering study lock change notification', { studyId, isLocked });
 
   try {
-    // Notify all study users
+    // Notify all study users (join to user_account since study_user_role uses user_name, not user_id)
     const result = await pool.query(`
-      SELECT DISTINCT user_id FROM study_user_role
-      WHERE study_id = $1 AND status_id = 1
+      SELECT DISTINCT ua.user_id FROM study_user_role sur
+      INNER JOIN user_account ua ON sur.user_name = ua.user_name
+      WHERE sur.study_id = $1 AND sur.status_id = 1
     `, [studyId]);
 
     const userIds = result.rows.map(r => r.user_id);

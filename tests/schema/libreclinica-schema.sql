@@ -254,6 +254,7 @@ CREATE TABLE study (
     results_reference VARCHAR(255),
     facility_name VARCHAR(255),
     facility_city VARCHAR(255),
+    facility_address VARCHAR(1000),
     facility_state VARCHAR(20),
     facility_zip VARCHAR(64),
     facility_country VARCHAR(64),
@@ -393,7 +394,9 @@ CREATE TABLE study_event (
     subject_event_status_id INTEGER REFERENCES subject_event_status(subject_event_status_id),
     start_time_flag BOOLEAN DEFAULT false,
     end_time_flag BOOLEAN DEFAULT false,
-    reference_visit_id INTEGER
+    reference_visit_id INTEGER,
+    scheduled_date TIMESTAMP WITH TIME ZONE,
+    is_unscheduled BOOLEAN DEFAULT false
 );
 
 -- ============================================================================

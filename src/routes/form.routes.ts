@@ -8,10 +8,11 @@
  * - All changes are logged to audit trail (§11.10(e))
  */
 
-import express from 'express';
+import express, { Request, Response } from 'express';
 import * as controller from '../controllers/form.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { pool } from '../config/database';
 import { validate, formSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
 import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
@@ -46,12 +47,12 @@ router.get('/:id/versions', validate({ params: commonSchemas.idParam }), control
 
 // Form templates (CRFs) - write operations (signature required per §11.50)
 router.post('/', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_CREATE),
   controller.create
 );
 router.put('/:id', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.update
@@ -82,7 +83,7 @@ router.post('/:id/restore',
 // Template Forking/Versioning - write operations (signature required per §11.50)
 // Create new version of existing CRF
 router.post('/:id/versions', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_CREATE),
   controller.createVersion
@@ -90,7 +91,7 @@ router.post('/:id/versions',
 
 // Fork (copy) entire CRF to new independent form
 router.post('/:id/fork', 
-  requireRole('admin', 'coordinator'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_CREATE),
   controller.fork
@@ -98,7 +99,7 @@ router.post('/:id/fork',
 
 // Form data operations (signature required for data entry per §11.50)
 router.post('/save', 
-  requireRole('data_entry', 'investigator', 'coordinator'), 
+  requireRole('data_manager', 'coordinator', 'investigator'), 
   soapRateLimiter, 
   validate({ body: formSchemas.saveData }), 
   requireSignatureFor(SignatureMeanings.FORM_DATA_SAVE),
@@ -113,15 +114,167 @@ router.get('/status/:eventCrfId', controller.getStatus);
 // 2. Optionally creates queries for validation failures
 // 3. Updates the field data if validation passes (or if validateOnly=false)
 router.patch('/field/:eventCrfId', 
-  requireRole('data_entry', 'investigator', 'coordinator'),
+  requireRole('data_manager', 'coordinator', 'investigator'),
   controller.updateField
 );
 
 // Validate only (no data update) - for real-time validation feedback
 router.post('/validate-field/:eventCrfId',
-  requireRole('data_entry', 'investigator', 'coordinator'),
+  requireRole('data_manager', 'coordinator', 'investigator'),
   controller.validateField
 );
 
-export default router;
+// ============================================================================
+// Form Workflow Configuration (CRF lifecycle settings)
+// ============================================================================
 
+// Helper: parse queryRouteToUsers from DB row (JSON TEXT column)
+function parseRouteUsers(row: any): string[] {
+  try {
+    const raw = row.query_route_to_users;
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore parse errors */ }
+  // Fall back to legacy single-user field
+  return row.query_route_to_user ? [row.query_route_to_user] : [];
+}
+
+// GET /api/forms/workflow-config/:crfId - Get workflow config for a form
+router.get('/workflow-config/:crfId', async (req: Request, res: Response) => {
+  try {
+    const crfId = parseInt(req.params.crfId);
+    const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : null;
+
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_form_workflow_config') as exists
+    `);
+    if (!tableCheck.rows[0].exists) {
+      res.json({
+        success: true,
+        data: { requiresSDV: false, requiresSignature: false, requiresDDE: false, queryRouteToUser: '', queryRouteToUsers: [] }
+      });
+      return;
+    }
+
+    const result = await pool.query(`
+      SELECT requires_sdv, requires_signature, requires_dde, query_route_to_user, query_route_to_users
+      FROM acc_form_workflow_config
+      WHERE crf_id = $1 AND (study_id = $2 OR study_id IS NULL)
+      ORDER BY study_id DESC NULLS LAST
+      LIMIT 1
+    `, [crfId, studyId]);
+
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      const users = parseRouteUsers(row);
+      res.json({
+        success: true,
+        data: {
+          requiresSDV: row.requires_sdv,
+          requiresSignature: row.requires_signature,
+          requiresDDE: row.requires_dde,
+          queryRouteToUser: row.query_route_to_user || '',
+          queryRouteToUsers: users
+        }
+      });
+    } else {
+      res.json({
+        success: true,
+        data: { requiresSDV: false, requiresSignature: false, requiresDDE: false, queryRouteToUser: '', queryRouteToUsers: [] }
+      });
+    }
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/forms/workflow-config - Get workflow config for ALL forms (bulk)
+router.get('/workflow-config', async (req: Request, res: Response) => {
+  try {
+    const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : null;
+
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_form_workflow_config') as exists
+    `);
+    if (!tableCheck.rows[0].exists) {
+      res.json({ success: true, data: {} });
+      return;
+    }
+
+    const result = await pool.query(`
+      SELECT crf_id, requires_sdv, requires_signature, requires_dde, query_route_to_user, query_route_to_users
+      FROM acc_form_workflow_config
+      WHERE study_id = $1 OR study_id IS NULL
+      ORDER BY crf_id
+    `, [studyId]);
+
+    const configMap: Record<string, any> = {};
+    for (const row of result.rows) {
+      const users = parseRouteUsers(row);
+      configMap[String(row.crf_id)] = {
+        requiresSDV: row.requires_sdv,
+        requiresSignature: row.requires_signature,
+        requiresDDE: row.requires_dde,
+        queryRouteToUser: row.query_route_to_user || '',
+        queryRouteToUsers: users
+      };
+    }
+
+    res.json({ success: true, data: configMap });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /api/forms/workflow-config/:crfId - Save workflow config for a form
+router.put('/workflow-config/:crfId',
+  requireRole('admin', 'data_manager'),
+  async (req: Request, res: Response) => {
+    try {
+      const crfId = parseInt(req.params.crfId);
+      const { requiresSDV, requiresSignature, requiresDDE, queryRouteToUser, queryRouteToUsers, studyId } = req.body;
+      const userId = (req as any).user?.userId;
+
+      // Ensure the table exists (auto-create if migration hasn't run)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS acc_form_workflow_config (
+          config_id       SERIAL PRIMARY KEY,
+          crf_id          INTEGER NOT NULL,
+          study_id        INTEGER,
+          requires_sdv        BOOLEAN NOT NULL DEFAULT false,
+          requires_signature  BOOLEAN NOT NULL DEFAULT false,
+          requires_dde        BOOLEAN NOT NULL DEFAULT false,
+          query_route_to_user VARCHAR(255),
+          query_route_to_users TEXT DEFAULT '[]',
+          updated_by      INTEGER,
+          date_updated    TIMESTAMP DEFAULT NOW(),
+          UNIQUE(crf_id, study_id)
+        )
+      `);
+
+      // Serialize multi-user list as JSON; keep legacy single-user field in sync
+      const usersJson = JSON.stringify(queryRouteToUsers || []);
+      const legacyUser = (queryRouteToUsers?.length ? queryRouteToUsers[0] : queryRouteToUser) || null;
+
+      await pool.query(`
+        INSERT INTO acc_form_workflow_config
+          (crf_id, study_id, requires_sdv, requires_signature, requires_dde, query_route_to_user, query_route_to_users, updated_by, date_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        ON CONFLICT (crf_id, study_id)
+        DO UPDATE SET
+          requires_sdv = EXCLUDED.requires_sdv,
+          requires_signature = EXCLUDED.requires_signature,
+          requires_dde = EXCLUDED.requires_dde,
+          query_route_to_user = EXCLUDED.query_route_to_user,
+          query_route_to_users = EXCLUDED.query_route_to_users,
+          updated_by = EXCLUDED.updated_by,
+          date_updated = NOW()
+      `, [crfId, studyId || null, requiresSDV || false, requiresSignature || false, requiresDDE || false, legacyUser, usersJson, userId]);
+
+      res.json({ success: true, message: 'Workflow configuration saved' });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+);
+
+export default router;
