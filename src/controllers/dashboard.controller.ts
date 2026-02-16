@@ -201,9 +201,13 @@ export const getSitePerformance = asyncHandler(async (req: Request, res: Respons
  * Get form completion rates
  */
 export const getFormCompletionRates = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
   const { studyId } = req.query;
 
-  const result = await dashboardService.getFormCompletionRates(parseInt(studyId as string));
+  const result = await dashboardService.getFormCompletionRates(
+    parseInt(studyId as string),
+    user?.userId
+  );
 
   res.json({ success: true, data: result });
 });

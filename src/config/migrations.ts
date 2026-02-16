@@ -38,6 +38,8 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'form_workflow_config', fn: createFormWorkflowConfigTable },
     { name: 'workflow_tasks', fn: createWorkflowTasksTable },
     { name: 'notifications', fn: createNotificationsTable },
+    { name: 'visit_windows', fn: createVisitWindowColumns },
+    { name: 'task_status_tracking', fn: createTaskStatusTrackingTable },
   ];
 
   let successCount = 0;
@@ -1035,4 +1037,46 @@ async function createNotificationsTable(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_notif_user_date ON acc_notifications(user_id, date_created DESC)`);
 
   logger.info('Notifications table verified');
+}
+
+// ============================================================================
+// Visit Windows (schedule_day, min_day, max_day on study_event_definition)
+// ============================================================================
+async function createVisitWindowColumns(pool: any): Promise<void> {
+  // Add visit window columns to study_event_definition
+  // schedule_day: target day relative to Day 0 (e.g., Day 7, Day 14, Day 28)
+  // min_day: minimum acceptable day (schedule_day - tolerance)
+  // max_day: maximum acceptable day (schedule_day + tolerance)
+  await pool.query(`ALTER TABLE study_event_definition ADD COLUMN IF NOT EXISTS schedule_day INTEGER`);
+  await pool.query(`ALTER TABLE study_event_definition ADD COLUMN IF NOT EXISTS min_day INTEGER`);
+  await pool.query(`ALTER TABLE study_event_definition ADD COLUMN IF NOT EXISTS max_day INTEGER`);
+  await pool.query(`ALTER TABLE study_event_definition ADD COLUMN IF NOT EXISTS reference_event_id INTEGER`);
+
+  logger.info('Visit window columns verified on study_event_definition');
+}
+
+// ============================================================================
+// Task Status Tracking (acc_task_status)
+// Tracks manual task completions and dismissals (uncompletable)
+// ============================================================================
+async function createTaskStatusTrackingTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_task_status (
+      task_status_id    SERIAL PRIMARY KEY,
+      task_id           VARCHAR(100) NOT NULL UNIQUE,
+      status            VARCHAR(30) NOT NULL DEFAULT 'completed',
+      completed_by      INTEGER,
+      completed_at      TIMESTAMP DEFAULT NOW(),
+      reason            TEXT,
+      organization_id   INTEGER,
+      date_created      TIMESTAMP NOT NULL DEFAULT NOW(),
+      date_updated      TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_acc_task_status_task_id ON acc_task_status(task_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_acc_task_status_status ON acc_task_status(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_acc_task_status_org ON acc_task_status(organization_id)`);
+
+  logger.info('Task status tracking table verified');
 }

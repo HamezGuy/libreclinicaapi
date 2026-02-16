@@ -675,42 +675,81 @@ export const getSitePerformance = async (studyId: number): Promise<any[]> => {
  * 
  * Also excludes soft-deleted records (status_id IN 5, 7).
  */
-export const getFormCompletionRates = async (studyId: number): Promise<any[]> => {
-  logger.info('Getting form completion rates', { studyId });
+export const getFormCompletionRates = async (studyId: number, callerUserId?: number): Promise<any[]> => {
+  logger.info('Getting form completion rates', { studyId, callerUserId });
 
   try {
+    // Resolve org-scoping: only include forms owned by users in the caller's org
+    let orgFilter = '';
+    const params: any[] = [studyId];
+    let paramIdx = 2;
+
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      if (orgCheck.rows.length > 0) {
+        const orgIds = orgCheck.rows.map((r: any) => r.organization_id);
+        const memberResult = await pool.query(
+          `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
+          [orgIds]
+        );
+        const orgUserIds = memberResult.rows.map((r: any) => r.user_id);
+        if (orgUserIds.length > 0) {
+          orgFilter = ` AND c.owner_id = ANY($${paramIdx}::int[])`;
+          params.push(orgUserIds);
+          paramIdx++;
+        }
+      }
+    }
+
+    // Query: start from CRFs assigned to the study's events (event_definition_crf),
+    // then LEFT JOIN to actual event_crf instances to get completion counts.
+    // This ensures we see ALL assigned forms, even those with 0 entries.
+    // Completion is determined by date_completed IS NOT NULL (most reliable indicator).
     const query = `
       SELECT 
         c.crf_id,
         c.name as form_name,
-        COUNT(ec.event_crf_id) as total_instances,
-        COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END) as completed,
-        COUNT(CASE WHEN cs.name NOT IN ('complete', 'signed') OR cs.name IS NULL THEN 1 END) as incomplete
-      FROM event_crf ec
-      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-      INNER JOIN crf c ON cv.crf_id = c.crf_id
-      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
-      WHERE ss.study_id = $1
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.status_id NOT IN (5, 7)) as total_instances,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.date_completed IS NOT NULL AND ec.status_id NOT IN (5, 7)) as completed,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.date_completed IS NULL AND ec.status_id NOT IN (5, 7)) as incomplete
+      FROM event_definition_crf edc
+      INNER JOIN crf c ON edc.crf_id = c.crf_id
+      LEFT JOIN study_event se ON se.study_event_definition_id = edc.study_event_definition_id
+        AND se.status_id NOT IN (5, 7)
+      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
         AND ss.status_id NOT IN (5, 7)
-        AND ec.status_id NOT IN (5, 7)
+        AND ss.study_id = $1
+      LEFT JOIN crf_version cv ON cv.crf_id = c.crf_id
+      LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+        AND ec.crf_version_id = cv.crf_version_id
+        AND ec.study_subject_id = ss.study_subject_id
+      INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
+      WHERE sed.study_id = $1
+        AND sed.status_id NOT IN (5, 7)
+        AND edc.status_id NOT IN (5, 7)
         AND c.status_id NOT IN (5, 7)
+        ${orgFilter}
       GROUP BY c.crf_id, c.name
       ORDER BY c.name
     `;
 
-    const result = await pool.query(query, [studyId]);
-    return result.rows.map(row => ({
-      formId: row.crf_id,
-      formName: row.form_name,
-      totalInstances: parseInt(row.total_instances) || 0,
-      completed: parseInt(row.completed) || 0,
-      incomplete: parseInt(row.incomplete) || 0,
-      completionRate: row.total_instances > 0 
-        ? Math.round((parseInt(row.completed) / parseInt(row.total_instances)) * 100) 
-        : 0
-    }));
+    const result = await pool.query(query, params);
+    return result.rows.map(row => {
+      const total = parseInt(row.total_instances) || 0;
+      const completed = parseInt(row.completed) || 0;
+      const incomplete = parseInt(row.incomplete) || 0;
+      return {
+        formId: row.crf_id,
+        formName: row.form_name,
+        totalInstances: total,
+        completed,
+        incomplete,
+        completionRate: total > 0 ? Math.round((completed / total) * 100) : 0
+      };
+    });
   } catch (error: any) {
     logger.error('Form completion rates error', { error: error.message });
     return [];

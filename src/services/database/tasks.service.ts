@@ -47,6 +47,66 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
   return members.rows.map((r: any) => r.user_id);
 };
 
+/**
+ * Helper: get organization info for a user
+ */
+const getUserOrganizations = async (userId: number): Promise<{ id: number; name: string }[]> => {
+  try {
+    const result = await pool.query(`
+      SELECT o.organization_id as id, o.name
+      FROM acc_organization o
+      JOIN acc_organization_member m ON o.organization_id = m.organization_id
+      WHERE m.user_id = $1 AND m.status = 'active' AND o.status = 'active'
+    `, [userId]);
+    return result.rows;
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Helper: get dismissed/completed task IDs from acc_task_status
+ */
+const getDismissedTaskIds = async (organizationId?: number): Promise<Set<string>> => {
+  try {
+    let query = `SELECT task_id FROM acc_task_status WHERE status IN ('dismissed', 'completed')`;
+    const params: any[] = [];
+    if (organizationId) {
+      query += ` AND (organization_id = $1 OR organization_id IS NULL)`;
+      params.push(organizationId);
+    }
+    const result = await pool.query(query, params);
+    return new Set(result.rows.map((r: any) => r.task_id));
+  } catch {
+    return new Set();
+  }
+};
+
+/**
+ * Helper: get visit window data for a study event definition
+ * Used for proper timeframe calculation based on schedule_day, min_day, max_day
+ */
+const getVisitWindowForEvent = async (studyEventDefinitionId: number): Promise<{
+  scheduleDay: number | null;
+  minDay: number | null;
+  maxDay: number | null;
+} | null> => {
+  try {
+    const result = await pool.query(
+      `SELECT schedule_day, min_day, max_day FROM study_event_definition WHERE study_event_definition_id = $1`,
+      [studyEventDefinitionId]
+    );
+    if (result.rows.length === 0) return null;
+    return {
+      scheduleDay: result.rows[0].schedule_day,
+      minDay: result.rows[0].min_day,
+      maxDay: result.rows[0].max_day
+    };
+  } catch {
+    return null;
+  }
+};
+
 // Task type enumeration matching LibreClinica data sources
 export type TaskType = 
   | 'query'              // From discrepancy_note
@@ -196,13 +256,19 @@ export async function getUserTasks(filters: TaskFilters): Promise<{ success: boo
     // Org-scoping: resolve the set of user IDs in the caller's organization
     // If caller has no org (root admin), orgUserIds will be null => no org filter applied
     let orgUserIds: number[] | null = null;
+    let userOrgs: { id: number; name: string }[] = [];
     const callerUserId = filters.callerUserId || userId;
     if (callerUserId) {
       orgUserIds = await getOrgMemberUserIds(callerUserId);
+      userOrgs = await getUserOrganizations(callerUserId);
       if (orgUserIds) {
         logger.info('Org-scoping tasks', { callerUserId, orgMemberCount: orgUserIds.length });
       }
     }
+    
+    // Get dismissed/completed task IDs to filter them out
+    const primaryOrgId = userOrgs.length > 0 ? userOrgs[0].id : undefined;
+    const dismissedTaskIds = await getDismissedTaskIds(primaryOrgId);
     
     // 1. QUERIES - From discrepancy_note (assigned_user_id or owner_id matches user)
     if (types.includes('query') && includeQueries) {
@@ -240,8 +306,24 @@ export async function getUserTasks(filters: TaskFilters): Promise<{ success: boo
       tasks.push(...signatureTasks);
     }
     
+    // Filter out dismissed/completed tasks
+    let filteredTasks = tasks.filter(t => !dismissedTaskIds.has(t.id));
+    
+    // Add organization info to each task
+    if (userOrgs.length > 0) {
+      const orgName = userOrgs[0].name;
+      const orgId = userOrgs[0].id;
+      filteredTasks = filteredTasks.map(t => ({
+        ...t,
+        metadata: {
+          ...t.metadata,
+          organizationId: orgId,
+          organizationName: orgName
+        }
+      }));
+    }
+    
     // Filter by status if specified
-    let filteredTasks = tasks;
     if (filters.status) {
       filteredTasks = filteredTasks.filter(t => t.status === filters.status);
     }
@@ -456,6 +538,7 @@ async function getScheduledVisitTasks(
   let query = `
     SELECT 
       se.study_event_id,
+      se.study_event_definition_id,
       se.date_start,
       se.date_end,
       se.location,
@@ -467,8 +550,12 @@ async function getScheduledVisitTasks(
       sed.name as event_name,
       sed.description as event_description,
       sed.ordinal as event_ordinal,
+      sed.schedule_day,
+      sed.min_day,
+      sed.max_day,
       ss.study_subject_id,
       ss.label as subject_label,
+      ss.enrollment_date,
       s.study_id,
       s.name as study_name,
       ua.user_id as owner_user_id,
@@ -520,8 +607,25 @@ async function getScheduledVisitTasks(
     const result = await pool.query(query, params);
     
     return result.rows.map((row: any) => {
-      const dueDate = row.date_start ? new Date(row.date_start) : null;
       const now = new Date();
+      
+      // Calculate due date from visit window if available, otherwise use date_start
+      let dueDate: Date | null = null;
+      let windowInfo = '';
+      
+      if (row.max_day !== null && row.max_day !== undefined && row.enrollment_date) {
+        // Use visit window: due date = enrollment_date + max_day
+        const enrollDate = new Date(row.enrollment_date);
+        dueDate = new Date(enrollDate.getTime() + row.max_day * 24 * 60 * 60 * 1000);
+        
+        if (row.schedule_day !== null) {
+          const windowMinus = row.schedule_day - (row.min_day || row.schedule_day);
+          const windowPlus = (row.max_day || row.schedule_day) - row.schedule_day;
+          windowInfo = `Day ${row.schedule_day} (${windowMinus > 0 ? '-' + windowMinus : '0'}/+${windowPlus})`;
+        }
+      } else if (row.date_start) {
+        dueDate = new Date(row.date_start);
+      }
       
       let status: TaskStatus = 'pending';
       let taskType: TaskType = 'scheduled_visit';
@@ -541,7 +645,7 @@ async function getScheduledVisitTasks(
         id: `visit-${row.study_event_id}`,
         type: taskType,
         title: `${row.event_name}`,
-        description: `Subject: ${row.subject_label}${row.location ? ` | Location: ${row.location}` : ''}`,
+        description: `Subject: ${row.subject_label}${row.location ? ` | Location: ${row.location}` : ''}${windowInfo ? ` | ${windowInfo}` : ''}`,
         status,
         priority,
         dueDate,
@@ -565,7 +669,11 @@ async function getScheduledVisitTasks(
           sampleOrdinal: row.sample_ordinal,
           eventStatus: row.event_status,
           eventOrdinal: row.event_ordinal,
-          eventDescription: row.event_description
+          eventDescription: row.event_description,
+          scheduleDay: row.schedule_day,
+          minDay: row.min_day,
+          maxDay: row.max_day,
+          visitWindow: windowInfo || undefined
         }
       };
     });
@@ -594,8 +702,12 @@ async function getDataEntryTasks(
       ses.name as event_status,
       sed.name as event_name,
       sed.ordinal as event_ordinal,
+      sed.schedule_day,
+      sed.min_day,
+      sed.max_day,
       ss.study_subject_id,
       ss.label as subject_label,
+      ss.enrollment_date,
       s.study_id,
       s.name as study_name,
       ua.user_id as owner_user_id,
@@ -652,14 +764,36 @@ async function getDataEntryTasks(
       const incompleteForms = parseInt(row.incomplete_forms) || 0;
       const now = new Date();
       
+      // Calculate due date from visit window if available
+      let dueDate: Date | null = null;
+      let windowInfo = '';
+      
+      if (row.max_day !== null && row.max_day !== undefined && row.enrollment_date) {
+        const enrollDate = new Date(row.enrollment_date);
+        dueDate = new Date(enrollDate.getTime() + row.max_day * 24 * 60 * 60 * 1000);
+        
+        if (row.schedule_day !== null) {
+          const wMinus = row.schedule_day - (row.min_day || row.schedule_day);
+          const wPlus = (row.max_day || row.schedule_day) - row.schedule_day;
+          windowInfo = `Day ${row.schedule_day} (-${wMinus}/+${wPlus})`;
+        }
+      } else if (row.date_start) {
+        dueDate = new Date(row.date_start);
+      }
+      
+      let priority: TaskPriority = 'high';
+      if (dueDate && dueDate < now) {
+        priority = 'critical';
+      }
+      
       return {
         id: `dataentry-${row.study_event_id}`,
         type: 'data_entry' as TaskType,
         title: `Data Entry: ${row.event_name}`,
-        description: `Subject: ${row.subject_label} | ${incompleteForms}/${totalForms} forms incomplete`,
-        status: 'in_progress' as TaskStatus,
-        priority: 'high' as TaskPriority,
-        dueDate: row.date_start ? new Date(row.date_start) : null,
+        description: `Subject: ${row.subject_label} | ${incompleteForms}/${totalForms} forms incomplete${windowInfo ? ' | ' + windowInfo : ''}`,
+        status: (dueDate && dueDate < now) ? 'overdue' as TaskStatus : 'in_progress' as TaskStatus,
+        priority,
+        dueDate,
         createdAt: new Date(row.date_created),
         studyId: row.study_id,
         studyName: row.study_name,
@@ -680,7 +814,11 @@ async function getDataEntryTasks(
           incompleteForms,
           completedForms: totalForms - incompleteForms,
           eventStatus: row.event_status,
-          eventOrdinal: row.event_ordinal
+          eventOrdinal: row.event_ordinal,
+          scheduleDay: row.schedule_day,
+          minDay: row.min_day,
+          maxDay: row.max_day,
+          visitWindow: windowInfo || undefined
         }
       };
     });
@@ -702,6 +840,7 @@ async function getFormCompletionTasks(
   let query = `
     SELECT 
       ec.event_crf_id,
+      ec.study_event_id,
       ec.date_created,
       ec.date_interviewed,
       ec.interviewer_name,
@@ -792,9 +931,9 @@ async function getFormCompletionTasks(
         studyName: row.study_name,
         subjectId: row.study_subject_id,
         subjectLabel: row.subject_label,
-        eventId: null,
+        eventId: row.study_event_id,
         eventName: row.event_name,
-        formId: row.event_crf_id,
+        formId: row.crf_id,
         formName: row.crf_name,
         assignedToUserId: row.owner_user_id || null,
         assignedToUsername: row.owner_username || null,
@@ -803,6 +942,7 @@ async function getFormCompletionTasks(
         sourceTable: 'event_crf',
         sourceId: row.event_crf_id,
         metadata: {
+          eventCrfId: row.event_crf_id,
           crfId: row.crf_id,
           crfVersion: row.crf_version,
           crfStatus: row.crf_status,
@@ -831,6 +971,7 @@ async function getSDVTasks(
   let query = `
     SELECT 
       ec.event_crf_id,
+      ec.study_event_id,
       ec.date_created,
       ec.date_completed,
       ec.owner_id,
@@ -909,17 +1050,18 @@ async function getSDVTasks(
         studyName: row.study_name,
         subjectId: row.study_subject_id,
         subjectLabel: row.subject_label,
-        eventId: null,
+        eventId: row.study_event_id,
         eventName: row.event_name,
-        formId: row.event_crf_id,
+        formId: row.crf_id,
         formName: row.crf_name,
-        assignedToUserId: null,  // SDV not assigned to specific user
+        assignedToUserId: null,
         assignedToUsername: null,
         ownerId: row.owner_user_id || null,
         ownerUsername: row.owner_username || null,
         sourceTable: 'event_crf',
         sourceId: row.event_crf_id,
         metadata: {
+          eventCrfId: row.event_crf_id,
           crfId: row.crf_id,
           dateCompleted: row.date_completed
         }
@@ -944,6 +1086,7 @@ async function getSignatureTasks(
   let query = `
     SELECT 
       ec.event_crf_id,
+      ec.study_event_id,
       ec.date_created,
       ec.date_completed,
       ec.electronic_signature_status,
@@ -1027,9 +1170,9 @@ async function getSignatureTasks(
         studyName: row.study_name,
         subjectId: row.study_subject_id,
         subjectLabel: row.subject_label,
-        eventId: null,
+        eventId: row.study_event_id,
         eventName: row.event_name,
-        formId: row.event_crf_id,
+        formId: row.crf_id,
         formName: row.crf_name,
         assignedToUserId: row.owner_user_id || null,
         assignedToUsername: row.owner_username || null,
@@ -1038,6 +1181,7 @@ async function getSignatureTasks(
         sourceTable: 'event_crf',
         sourceId: row.event_crf_id,
         metadata: {
+          eventCrfId: row.event_crf_id,
           crfId: row.crf_id,
           eventStatus: row.event_status,
           eventStatusId: row.subject_event_status_id,
@@ -1089,4 +1233,92 @@ function getTableForType(type: string): string {
     'signature': 'event_crf'
   };
   return tableMap[type] || '';
+}
+
+/**
+ * Complete a task (mark as done)
+ */
+export async function completeTask(
+  taskId: string, 
+  userId: number, 
+  reason?: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    // Get user's org ID
+    const orgResult = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active' LIMIT 1`,
+      [userId]
+    );
+    const orgId = orgResult.rows[0]?.organization_id || null;
+    
+    await pool.query(`
+      INSERT INTO acc_task_status (task_id, status, completed_by, completed_at, reason, organization_id)
+      VALUES ($1, 'completed', $2, NOW(), $3, $4)
+      ON CONFLICT (task_id) DO UPDATE SET 
+        status = 'completed', completed_by = $2, completed_at = NOW(), 
+        reason = $3, date_updated = NOW()
+    `, [taskId, userId, reason || 'Task completed', orgId]);
+    
+    logger.info('Task completed', { taskId, userId });
+    return { success: true, message: 'Task marked as completed' };
+  } catch (error: any) {
+    logger.error('Error completing task', { taskId, error: error.message });
+    return { success: false, message: `Failed to complete task: ${error.message}` };
+  }
+}
+
+/**
+ * Dismiss a task as uncompletable (won't show up anymore)
+ */
+export async function dismissTask(
+  taskId: string, 
+  userId: number, 
+  reason: string
+): Promise<{ success: boolean; message: string }> {
+  if (!reason || reason.trim().length === 0) {
+    return { success: false, message: 'A reason is required when dismissing a task' };
+  }
+  
+  try {
+    const orgResult = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active' LIMIT 1`,
+      [userId]
+    );
+    const orgId = orgResult.rows[0]?.organization_id || null;
+    
+    await pool.query(`
+      INSERT INTO acc_task_status (task_id, status, completed_by, completed_at, reason, organization_id)
+      VALUES ($1, 'dismissed', $2, NOW(), $3, $4)
+      ON CONFLICT (task_id) DO UPDATE SET 
+        status = 'dismissed', completed_by = $2, completed_at = NOW(), 
+        reason = $3, date_updated = NOW()
+    `, [taskId, userId, reason, orgId]);
+    
+    logger.info('Task dismissed as uncompletable', { taskId, userId, reason });
+    return { success: true, message: 'Task dismissed as uncompletable' };
+  } catch (error: any) {
+    logger.error('Error dismissing task', { taskId, error: error.message });
+    return { success: false, message: `Failed to dismiss task: ${error.message}` };
+  }
+}
+
+/**
+ * Reopen a previously completed or dismissed task
+ */
+export async function reopenTask(
+  taskId: string, 
+  userId: number
+): Promise<{ success: boolean; message: string }> {
+  try {
+    await pool.query(
+      `DELETE FROM acc_task_status WHERE task_id = $1`,
+      [taskId]
+    );
+    
+    logger.info('Task reopened', { taskId, userId });
+    return { success: true, message: 'Task reopened' };
+  } catch (error: any) {
+    logger.error('Error reopening task', { taskId, error: error.message });
+    return { success: false, message: `Failed to reopen task: ${error.message}` };
+  }
 }

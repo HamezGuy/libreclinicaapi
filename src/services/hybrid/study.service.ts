@@ -393,7 +393,11 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         sed.ordinal,
         sed.repeating,
         sed.oc_oid,
-        sed.status_id
+        sed.status_id,
+        sed.schedule_day,
+        sed.min_day,
+        sed.max_day,
+        sed.reference_event_id
       FROM study_event_definition sed
       WHERE sed.study_id = $1 AND sed.status_id = 1
       ORDER BY sed.ordinal
@@ -428,6 +432,10 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         ordinal: event.ordinal,
         repeating: event.repeating,
         oid: event.oc_oid,
+        scheduleDay: event.schedule_day,
+        minDay: event.min_day,
+        maxDay: event.max_day,
+        referenceEventId: event.reference_event_id,
         crfAssignments: crfResult.rows.map((crf: any) => ({
           crfId: crf.crf_id,
           crfName: crf.crf_name,
@@ -981,12 +989,13 @@ export const createStudy = async (
         // Generate OC OID for event
         const eventOid = `SE_${studyId}_${eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)}`;
         
-        // Insert study_event_definition
+        // Insert study_event_definition (with visit window fields)
         const eventResult = await client.query(`
           INSERT INTO study_event_definition (
             study_id, name, description, ordinal, type, repeating, category,
+            schedule_day, min_day, max_day, reference_event_id,
             status_id, owner_id, date_created, oc_oid
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13)
           RETURNING study_event_definition_id
         `, [
           studyId,
@@ -996,6 +1005,10 @@ export const createStudy = async (
           eventDef.type || 'scheduled',
           eventDef.repeating || false,
           eventDef.category || 'Study Event',
+          eventDef.scheduleDay ?? null,
+          eventDef.minDay ?? null,
+          eventDef.maxDay ?? null,
+          eventDef.referenceEventId ?? null,
           userId,
           eventOid
         ]);
@@ -1374,12 +1387,14 @@ export const updateStudy = async (
           await client.query('SAVEPOINT update_event');
           
           if (eventDef.studyEventDefinitionId) {
-            // Update existing event
+            // Update existing event (including visit window fields)
             await client.query(`
               UPDATE study_event_definition
               SET name = $1, description = $2, category = $3, type = $4, 
-                  ordinal = $5, repeating = $6, date_updated = NOW(), update_id = $7
-              WHERE study_event_definition_id = $8
+                  ordinal = $5, repeating = $6, 
+                  schedule_day = $7, min_day = $8, max_day = $9, reference_event_id = $10,
+                  date_updated = NOW(), update_id = $11
+              WHERE study_event_definition_id = $12
             `, [
               eventDef.name,
               eventDef.description || '',
@@ -1387,6 +1402,10 @@ export const updateStudy = async (
               eventDef.type || 'scheduled',
               eventDef.ordinal || 1,
               eventDef.repeating || false,
+              eventDef.scheduleDay ?? null,
+              eventDef.minDay ?? null,
+              eventDef.maxDay ?? null,
+              eventDef.referenceEventId ?? null,
               userId,
               eventDef.studyEventDefinitionId
             ]);
@@ -1421,14 +1440,15 @@ export const updateStudy = async (
               }
             }
           } else {
-            // Create new event
+            // Create new event (with visit window fields)
             const eventOid = `SE_${studyId}_${eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)}`;
             
             const eventResult = await client.query(`
               INSERT INTO study_event_definition (
                 study_id, name, description, ordinal, type, repeating, category,
+                schedule_day, min_day, max_day, reference_event_id,
                 status_id, owner_id, date_created, oc_oid
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13)
               RETURNING study_event_definition_id
             `, [
               studyId,
@@ -1438,6 +1458,10 @@ export const updateStudy = async (
               eventDef.type || 'scheduled',
               eventDef.repeating || false,
               eventDef.category || 'Study Event',
+              eventDef.scheduleDay ?? null,
+              eventDef.minDay ?? null,
+              eventDef.maxDay ?? null,
+              eventDef.referenceEventId ?? null,
               userId,
               eventOid
             ]);

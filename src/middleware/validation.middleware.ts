@@ -809,10 +809,16 @@ export const eventSchemas = {
     studyId: Joi.number().integer().positive().required(),
     name: Joi.string().required().min(3).max(255),
     description: Joi.string().optional().max(1000),
-    ordinal: Joi.number().integer().min(1).optional(), // Auto-calculated if not provided
+    ordinal: Joi.number().integer().min(1).optional(),
     type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
     repeating: Joi.boolean().optional(),
-    category: Joi.string().optional().max(100)
+    category: Joi.string().optional().max(100),
+    scheduleDay: Joi.number().integer().min(0).optional().allow(null),
+    minDay: Joi.number().integer().min(0).optional().allow(null),
+    maxDay: Joi.number().integer().min(0).optional().allow(null),
+    referenceEventId: Joi.number().integer().positive().optional().allow(null),
+    password: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
   }),
 
   update: Joi.object({
@@ -821,7 +827,11 @@ export const eventSchemas = {
     ordinal: Joi.number().integer().min(1).optional(),
     type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
     repeating: Joi.boolean().optional(),
-    category: Joi.string().optional().max(100)
+    category: Joi.string().optional().max(100),
+    scheduleDay: Joi.number().integer().min(0).optional().allow(null),
+    minDay: Joi.number().integer().min(0).optional().allow(null),
+    maxDay: Joi.number().integer().min(0).optional().allow(null),
+    referenceEventId: Joi.number().integer().positive().optional().allow(null)
   }),
 
   list: Joi.object({

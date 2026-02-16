@@ -232,16 +232,22 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
         sed.repeating,
         sed.category,
         sed.ordinal,
+        sed.schedule_day,
+        sed.min_day,
+        sed.max_day,
+        sed.reference_event_id,
         st.name as status_name,
         sed.status_id,
         (
           SELECT COUNT(DISTINCT edc.crf_id)
           FROM event_definition_crf edc
           WHERE edc.study_event_definition_id = sed.study_event_definition_id
+            AND edc.status_id NOT IN (5, 7)
         ) as form_count
       FROM study_event_definition sed
       INNER JOIN status st ON sed.status_id = st.status_id
       WHERE sed.study_id = $1
+        AND sed.status_id NOT IN (5, 7)
       ORDER BY sed.ordinal
     `;
 
@@ -257,7 +263,11 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
       category: event.category || '',
       order: event.ordinal,
       status: event.status_name,
-      formCount: parseInt(event.form_count) || 0
+      formCount: parseInt(event.form_count) || 0,
+      scheduleDay: event.schedule_day,
+      minDay: event.min_day,
+      maxDay: event.max_day,
+      referenceEventId: event.reference_event_id
     }));
 
     res.json({ success: true, data: events });

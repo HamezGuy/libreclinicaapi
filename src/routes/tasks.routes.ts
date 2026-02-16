@@ -37,6 +37,15 @@ router.get('/user/:username', tasksController.getUserTasks);
 // Get task summary for specific user
 router.get('/user/:username/summary', tasksController.getUserTaskSummary);
 
+// Complete a task
+router.patch('/:taskId/complete', tasksController.completeTask);
+
+// Dismiss a task as uncompletable
+router.patch('/:taskId/dismiss', tasksController.dismissTask);
+
+// Reopen a task
+router.patch('/:taskId/reopen', tasksController.reopenTask);
+
 // Get single task by ID
 router.get('/:taskId', tasksController.getTask);
 

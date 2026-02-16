@@ -179,6 +179,67 @@ export const getOverdueTasks = asyncHandler(async (req: Request, res: Response) 
   res.json(result);
 });
 
+/**
+ * Complete a task
+ * PATCH /api/tasks/:taskId/complete
+ */
+export const completeTask = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { taskId } = req.params;
+  const { reason } = req.body;
+  
+  const result = await tasksService.completeTask(taskId, user?.userId, reason);
+  
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  
+  res.json(result);
+});
+
+/**
+ * Dismiss a task as uncompletable
+ * PATCH /api/tasks/:taskId/dismiss
+ */
+export const dismissTask = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { taskId } = req.params;
+  const { reason } = req.body;
+  
+  if (!reason || reason.trim().length === 0) {
+    res.status(400).json({ success: false, message: 'A reason is required when dismissing a task' });
+    return;
+  }
+  
+  const result = await tasksService.dismissTask(taskId, user?.userId, reason);
+  
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  
+  res.json(result);
+});
+
+/**
+ * Reopen a task
+ * PATCH /api/tasks/:taskId/reopen
+ */
+export const reopenTask = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { taskId } = req.params;
+  
+  const result = await tasksService.reopenTask(taskId, user?.userId);
+  
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  
+  res.json(result);
+});
+
 export default {
   getTasks,
   getUserTasks,
@@ -186,6 +247,9 @@ export default {
   getUserTaskSummary,
   getTask,
   getTasksByType,
-  getOverdueTasks
+  getOverdueTasks,
+  completeTask,
+  dismissTask,
+  reopenTask
 };
 

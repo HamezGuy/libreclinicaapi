@@ -28,13 +28,17 @@ export const getStudyEvents = async (studyId: number): Promise<any[]> => {
         sed.type,
         sed.repeating,
         sed.category,
+        sed.schedule_day,
+        sed.min_day,
+        sed.max_day,
+        sed.reference_event_id,
         s.name as status_name,
         sed.oc_oid,
-        (SELECT COUNT(*) FROM study_event se WHERE se.study_event_definition_id = sed.study_event_definition_id) as usage_count,
-        (SELECT COUNT(*) FROM event_definition_crf edc WHERE edc.study_event_definition_id = sed.study_event_definition_id) as crf_count
+        (SELECT COUNT(*) FROM study_event se WHERE se.study_event_definition_id = sed.study_event_definition_id AND se.status_id NOT IN (5, 7)) as usage_count,
+        (SELECT COUNT(*) FROM event_definition_crf edc WHERE edc.study_event_definition_id = sed.study_event_definition_id AND edc.status_id NOT IN (5, 7)) as crf_count
       FROM study_event_definition sed
       INNER JOIN status s ON sed.status_id = s.status_id
-      WHERE sed.study_id = $1
+      WHERE sed.study_id = $1 AND sed.status_id NOT IN (5, 7)
       ORDER BY sed.ordinal
     `;
 
@@ -460,6 +464,10 @@ export const createStudyEvent = async (
     type?: string;
     repeating?: boolean;
     category?: string;
+    scheduleDay?: number;
+    minDay?: number;
+    maxDay?: number;
+    referenceEventId?: number;
   },
   userId: number
 ): Promise<{ success: boolean; eventDefinitionId?: number; message?: string }> => {
@@ -484,13 +492,14 @@ export const createStudyEvent = async (
     // Generate OC OID
     const ocOid = `SE_${data.studyId}_${data.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
-    // Insert study event definition
+    // Insert study event definition with visit window fields
     const insertQuery = `
       INSERT INTO study_event_definition (
         study_id, name, description, ordinal, type, repeating, category,
+        schedule_day, min_day, max_day, reference_event_id,
         status_id, owner_id, date_created, oc_oid
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(), $13
       )
       RETURNING study_event_definition_id
     `;
@@ -503,6 +512,10 @@ export const createStudyEvent = async (
       data.type || 'scheduled',
       data.repeating || false,
       data.category || 'Study Event',
+      data.scheduleDay ?? null,
+      data.minDay ?? null,
+      data.maxDay ?? null,
+      data.referenceEventId ?? null,
       userId,
       ocOid
     ]);
@@ -554,6 +567,10 @@ export const updateStudyEvent = async (
     type?: string;
     repeating?: boolean;
     category?: string;
+    scheduleDay?: number | null;
+    minDay?: number | null;
+    maxDay?: number | null;
+    referenceEventId?: number | null;
   },
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
@@ -596,6 +613,26 @@ export const updateStudyEvent = async (
     if (data.category !== undefined) {
       updates.push(`category = $${paramIndex++}`);
       params.push(data.category);
+    }
+
+    if (data.scheduleDay !== undefined) {
+      updates.push(`schedule_day = $${paramIndex++}`);
+      params.push(data.scheduleDay);
+    }
+
+    if (data.minDay !== undefined) {
+      updates.push(`min_day = $${paramIndex++}`);
+      params.push(data.minDay);
+    }
+
+    if (data.maxDay !== undefined) {
+      updates.push(`max_day = $${paramIndex++}`);
+      params.push(data.maxDay);
+    }
+
+    if (data.referenceEventId !== undefined) {
+      updates.push(`reference_event_id = $${paramIndex++}`);
+      params.push(data.referenceEventId);
     }
 
     if (updates.length === 0) {
@@ -733,8 +770,12 @@ export const getAvailableCrfsForEvent = async (
   logger.info('Getting available CRFs for event', { studyId, eventDefinitionId, callerUserId });
 
   try {
-    // Build org-scoping filter
-    let orgFilter = '';
+    // Build visibility filter: show CRFs the user should have access to
+    // A CRF is visible if ANY of:
+    //   a) source_study_id matches the current study
+    //   b) source_study_id is NULL (shared/unlinked CRF)
+    //   c) CRF is owned by someone in the user's organization
+    let visibilityFilter = `(c.source_study_id = $1 OR c.source_study_id IS NULL)`;
     const params: any[] = [studyId, eventDefinitionId];
     let paramIndex = 3;
 
@@ -747,13 +788,23 @@ export const getAvailableCrfsForEvent = async (
 
       if (userOrgIds.length > 0) {
         params.push(userOrgIds);
-        orgFilter = `AND c.owner_id IN (
-          SELECT m.user_id FROM acc_organization_member m
-          WHERE m.organization_id = ANY($${paramIndex++}::int[]) AND m.status = 'active'
+        // Add org ownership as a THIRD option in the OR chain
+        visibilityFilter = `(
+          c.source_study_id = $1 
+          OR c.source_study_id IS NULL 
+          OR c.owner_id IN (
+            SELECT m.user_id FROM acc_organization_member m
+            WHERE m.organization_id = ANY($${paramIndex++}::int[]) AND m.status = 'active'
+          )
         )`;
       }
     }
 
+    // Find CRFs that can be assigned to this event:
+    // 1. CRF is active (not deleted)
+    // 2. CRF is visible to the user (study match, or shared, or org member owns it)
+    // 3. CRF is not already assigned to this event
+    // 4. CRF has at least one active version
     const query = `
       SELECT 
         c.crf_id,
@@ -761,28 +812,33 @@ export const getAvailableCrfsForEvent = async (
         c.description,
         c.status_id,
         s.name as status_name,
+        c.source_study_id,
         cv.crf_version_id as latest_version_id,
         cv.name as latest_version_name,
-        (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id) as version_count
+        (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id AND status_id NOT IN (5, 7)) as version_count
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN (
         SELECT DISTINCT ON (crf_id) crf_id, crf_version_id, name
         FROM crf_version
+        WHERE status_id NOT IN (5, 7)
         ORDER BY crf_id, crf_version_id DESC
       ) cv ON c.crf_id = cv.crf_id
       WHERE c.status_id IN (1, 2)
-        AND c.source_study_id = $1
+        AND ${visibilityFilter}
         AND c.crf_id NOT IN (
           SELECT crf_id FROM event_definition_crf 
-          WHERE study_event_definition_id = $2 AND status_id = 1
+          WHERE study_event_definition_id = $2 AND status_id NOT IN (5, 7)
         )
-        ${orgFilter}
+        AND EXISTS (SELECT 1 FROM crf_version v WHERE v.crf_id = c.crf_id AND v.status_id NOT IN (5, 7))
       ORDER BY c.name
     `;
 
     const result = await pool.query(query, params);
-    logger.info('Available CRFs for event', { studyId, eventDefinitionId, count: result.rows.length });
+    logger.info('Available CRFs for event', { 
+      studyId, eventDefinitionId, count: result.rows.length,
+      crfNames: result.rows.map((r: any) => r.name)
+    });
     return result.rows;
   } catch (error: any) {
     logger.error('Get available CRFs error', { error: error.message });
