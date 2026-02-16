@@ -286,32 +286,15 @@ async function logToDatabase(data: {
  * Creates table if it doesn't exist (for initial setup)
  */
 async function ensureAuditTableExists(): Promise<void> {
-  const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS audit_user_api_log (
-      id SERIAL PRIMARY KEY,
-      audit_id VARCHAR(36) NOT NULL UNIQUE,
-      user_id INTEGER,
-      username VARCHAR(255) NOT NULL,
-      user_role VARCHAR(50),
-      http_method VARCHAR(10) NOT NULL,
-      endpoint_path VARCHAR(500) NOT NULL,
-      query_params TEXT,
-      request_body TEXT,
-      response_status INTEGER,
-      ip_address VARCHAR(45),
-      user_agent TEXT,
-      duration_ms INTEGER,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      FOREIGN KEY (user_id) REFERENCES user_account(user_id) ON DELETE SET NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_audit_user_api_log_user_id ON audit_user_api_log(user_id);
-    CREATE INDEX IF NOT EXISTS idx_audit_user_api_log_created_at ON audit_user_api_log(created_at);
-    CREATE INDEX IF NOT EXISTS idx_audit_user_api_log_endpoint ON audit_user_api_log(endpoint_path);
-  `;
-
+  // Table is created by startup migrations (config/migrations.ts).
+  // Just verify it exists.
   try {
-    await pool.query(createTableQuery);
+    const result = await pool.query(`
+      SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'audit_user_api_log') as exists
+    `);
+    if (!result.rows[0].exists) {
+      logger.warn('audit_user_api_log table not found — startup migrations may not have run');
+    }
   } catch (error: any) {
     // Table might already exist, ignore error
     logger.debug('Audit table creation skipped', { error: error.message });

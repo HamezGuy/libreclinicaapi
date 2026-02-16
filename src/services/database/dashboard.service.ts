@@ -503,46 +503,6 @@ export const getUserActivityStats = async (
 };
 
 /**
- * Get overall study progress
- * Combines multiple metrics
- */
-export const getStudyProgress = async (studyId: number): Promise<any> => {
-  logger.info('Getting study progress', { studyId });
-
-  try {
-    const [enrollment, completion, queries] = await Promise.all([
-      getEnrollmentStats(studyId),
-      getCompletionStats(studyId),
-      getQueryStatistics(studyId, 'month')
-    ]);
-
-    // Calculate overall progress percentage
-    const enrollmentProgress = enrollment.targetEnrollment 
-      ? (enrollment.totalSubjects / enrollment.targetEnrollment) * 100
-      : null;
-
-    const overallProgress = completion.completionPercentage;
-
-    return {
-      studyId,
-      overallProgress: Math.round(overallProgress),
-      enrollmentProgress: enrollmentProgress ? Math.round(enrollmentProgress) : null,
-      enrollment,
-      completion,
-      queries,
-      lastUpdated: new Date()
-    };
-  } catch (error: any) {
-    logger.error('Study progress error', {
-      error: error.message,
-      studyId
-    });
-
-    throw error;
-  }
-};
-
-/**
  * Get enrollment trend over time
  */
 export const getEnrollmentTrend = async (
@@ -1270,7 +1230,6 @@ export default {
   getCompletionStats,
   getQueryStatistics,
   getUserActivityStats,
-  getStudyProgress,
   getEnrollmentTrend,
   getCompletionTrend,
   getSitePerformance,

@@ -40,6 +40,11 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'notifications', fn: createNotificationsTable },
     { name: 'visit_windows', fn: createVisitWindowColumns },
     { name: 'task_status_tracking', fn: createTaskStatusTrackingTable },
+    { name: 'validation_rules', fn: createValidationRulesTable },
+    { name: 'user_custom_permissions', fn: createUserCustomPermissionsTable },
+    { name: 'user_account_extended', fn: createUserAccountExtendedTable },
+    { name: 'file_uploads', fn: createFileUploadsTable },
+    { name: 'audit_user_api_log', fn: createAuditUserApiLogTable },
   ];
 
   let successCount = 0;
@@ -947,12 +952,39 @@ async function createFormWorkflowConfigTable(pool: any): Promise<void> {
       requires_sdv        BOOLEAN NOT NULL DEFAULT false,
       requires_signature  BOOLEAN NOT NULL DEFAULT false,
       requires_dde        BOOLEAN NOT NULL DEFAULT false,
-      query_route_to_user  VARCHAR(255),
       query_route_to_users TEXT DEFAULT '[]',
       updated_by      INTEGER,
-      date_updated    TIMESTAMP DEFAULT NOW(),
-      UNIQUE(crf_id, study_id)
+      date_updated    TIMESTAMP DEFAULT NOW()
     )
+  `);
+
+  // Drop the old plain UNIQUE constraint if it exists
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'acc_form_workflow_config_crf_id_study_id_key'
+          AND conrelid = 'acc_form_workflow_config'::regclass
+      ) THEN
+        ALTER TABLE acc_form_workflow_config
+          DROP CONSTRAINT acc_form_workflow_config_crf_id_study_id_key;
+      END IF;
+    END $$
+  `);
+
+  // Clean up duplicate rows (keep only the latest per crf_id + COALESCE(study_id,0))
+  await pool.query(`
+    DELETE FROM acc_form_workflow_config a
+    USING acc_form_workflow_config b
+    WHERE a.crf_id = b.crf_id
+      AND COALESCE(a.study_id, 0) = COALESCE(b.study_id, 0)
+      AND a.config_id < b.config_id
+  `);
+
+  // Functional unique index: COALESCE(study_id, 0) maps NULL → 0
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_form_workflow_config_crf_study
+    ON acc_form_workflow_config (crf_id, COALESCE(study_id, 0))
   `);
 
   // Migration: add query_route_to_users column if it doesn't exist (for existing installs)
@@ -963,6 +995,24 @@ async function createFormWorkflowConfigTable(pool: any): Promise<void> {
         WHERE table_name = 'acc_form_workflow_config' AND column_name = 'query_route_to_users'
       ) THEN
         ALTER TABLE acc_form_workflow_config ADD COLUMN query_route_to_users TEXT DEFAULT '[]';
+      END IF;
+    END $$
+  `);
+
+  // Migrate legacy single-user data into JSON array, then drop the old column
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'acc_form_workflow_config' AND column_name = 'query_route_to_user'
+      ) THEN
+        UPDATE acc_form_workflow_config
+        SET query_route_to_users = '["' || query_route_to_user || '"]'
+        WHERE query_route_to_user IS NOT NULL
+          AND query_route_to_user != ''
+          AND (query_route_to_users IS NULL OR query_route_to_users = '[]');
+
+        ALTER TABLE acc_form_workflow_config DROP COLUMN query_route_to_user;
       END IF;
     END $$
   `);
@@ -1079,4 +1129,127 @@ async function createTaskStatusTrackingTable(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_acc_task_status_org ON acc_task_status(organization_id)`);
 
   logger.info('Task status tracking table verified');
+}
+
+/**
+ * Validation Rules Table
+ */
+async function createValidationRulesTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS validation_rules (
+      validation_rule_id SERIAL PRIMARY KEY,
+      crf_id INTEGER,
+      crf_version_id INTEGER,
+      item_id INTEGER,
+      name VARCHAR(255) NOT NULL,
+      description TEXT,
+      rule_type VARCHAR(50) NOT NULL,
+      field_path VARCHAR(255),
+      severity VARCHAR(20) DEFAULT 'error',
+      error_message TEXT NOT NULL,
+      warning_message TEXT,
+      active BOOLEAN DEFAULT true,
+      min_value NUMERIC,
+      max_value NUMERIC,
+      pattern TEXT,
+      format_type VARCHAR(50),
+      operator VARCHAR(20),
+      compare_field_path VARCHAR(255),
+      custom_expression TEXT,
+      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      date_updated TIMESTAMP,
+      owner_id INTEGER,
+      update_id INTEGER
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_validation_rules_crf ON validation_rules(crf_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_validation_rules_item ON validation_rules(item_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_validation_rules_active ON validation_rules(active)`);
+  logger.info('Validation rules table verified');
+}
+
+/**
+ * User Custom Permissions Table
+ */
+async function createUserCustomPermissionsTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_custom_permissions (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      permission_key VARCHAR(64) NOT NULL,
+      granted BOOLEAN NOT NULL DEFAULT true,
+      granted_by INTEGER,
+      date_created TIMESTAMP DEFAULT NOW(),
+      date_updated TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id, permission_key)
+    )
+  `);
+  logger.info('User custom permissions table verified');
+}
+
+/**
+ * User Account Extended Table (bcrypt password storage)
+ */
+async function createUserAccountExtendedTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_account_extended (
+      user_id INTEGER PRIMARY KEY,
+      bcrypt_passwd VARCHAR(255),
+      passwd_upgraded_at TIMESTAMP DEFAULT NOW(),
+      password_version INTEGER DEFAULT 2
+    )
+  `);
+  logger.info('User account extended table verified');
+}
+
+/**
+ * File Uploads Table
+ */
+async function createFileUploadsTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS file_uploads (
+      file_id VARCHAR(64) PRIMARY KEY,
+      original_name VARCHAR(512) NOT NULL,
+      stored_name VARCHAR(512) NOT NULL,
+      file_path VARCHAR(1024) NOT NULL,
+      mime_type VARCHAR(128) NOT NULL,
+      file_size INTEGER NOT NULL,
+      checksum VARCHAR(64) NOT NULL,
+      crf_version_id INTEGER,
+      item_id INTEGER,
+      crf_version_media_id INTEGER,
+      uploaded_by INTEGER NOT NULL DEFAULT 1,
+      uploaded_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      deleted_at TIMESTAMP,
+      deleted_by INTEGER
+    )
+  `);
+  logger.info('File uploads table verified');
+}
+
+/**
+ * Audit User API Log Table
+ */
+async function createAuditUserApiLogTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_user_api_log (
+      id SERIAL PRIMARY KEY,
+      audit_id VARCHAR(36) NOT NULL UNIQUE,
+      user_id INTEGER,
+      username VARCHAR(255) NOT NULL,
+      user_role VARCHAR(50),
+      http_method VARCHAR(10) NOT NULL,
+      endpoint_path VARCHAR(500) NOT NULL,
+      query_params TEXT,
+      request_body TEXT,
+      response_status INTEGER,
+      ip_address VARCHAR(45),
+      user_agent TEXT,
+      duration_ms INTEGER,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_api_log_user ON audit_user_api_log(user_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_api_log_created ON audit_user_api_log(created_at)`);
+  logger.info('Audit user API log table verified');
 }

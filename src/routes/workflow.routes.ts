@@ -99,6 +99,7 @@ router.get('/crf-lifecycle-summary/:studyId', async (req: Request, res: Response
         ec.status_id,
         ec.completion_status_id,
         COALESCE(ec.sdv_status, false) as sdv_verified,
+        COALESCE(ec.electronic_signature_status, false) as is_signed,
         ec.date_created as form_started,
         ec.date_updated as form_updated,
         cv.crf_id,
@@ -163,7 +164,7 @@ router.get('/crf-lifecycle-summary/:studyId', async (req: Request, res: Response
       let currentPhase = 'not_started';
       if (row.status_id === 6) {
         currentPhase = 'locked';
-      } else if (row.completion_status_id >= 5) {
+      } else if (row.completion_status_id >= 5 || row.is_signed) {
         currentPhase = 'signed';
       } else if (row.sdv_verified) {
         currentPhase = 'sdv_complete';

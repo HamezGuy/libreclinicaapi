@@ -1437,26 +1437,6 @@ export interface FormPermissions {
 }
 
 /**
- * Workflow types
- */
-export type WorkflowType = 
-  | 'form_review'
-  | 'data_query'
-  | 'electronic_signature'
-  | 'study_event';
-
-export type WorkflowStatus =
-  | 'pending'
-  | 'in_progress'
-  | 'completed'
-  | 'cancelled';
-
-export type WorkflowPriority = 
-  | 'high'
-  | 'medium'
-  | 'low';
-
-/**
  * Workflow task for task management
  */
 export interface WorkflowTask {

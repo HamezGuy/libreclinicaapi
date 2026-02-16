@@ -412,12 +412,17 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
           edc.crf_id,
           edc.required_crf as required,
           edc.double_entry as double_data_entry,
-          edc.electronic_signature,
+          COALESCE(awc.requires_signature, edc.electronic_signature, false) as electronic_signature,
+          COALESCE(awc.requires_sdv, false) as requires_sdv,
+          COALESCE(awc.requires_dde, false) as requires_dde,
           edc.hide_crf,
           edc.ordinal,
           c.name as crf_name
         FROM event_definition_crf edc
         INNER JOIN crf c ON edc.crf_id = c.crf_id
+        LEFT JOIN acc_form_workflow_config awc ON (
+          c.crf_id = awc.crf_id AND (awc.study_id IS NULL OR awc.study_id = edc.study_id)
+        )
         WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
         ORDER BY edc.ordinal
       `;

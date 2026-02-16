@@ -167,6 +167,7 @@ export const applyElectronicSignature = async (
         updateQuery = `
           UPDATE event_crf 
           SET electronic_signature_status = true,
+              completion_status_id = GREATEST(COALESCE(completion_status_id, 0), 5),
               date_updated = CURRENT_TIMESTAMP,
               update_id = $2
           WHERE event_crf_id = $1
@@ -336,7 +337,7 @@ export const getSignatureStatus = async (
             ec.electronic_signature_status as is_signed,
             ec.date_updated as last_updated,
             u.user_name as updated_by,
-            edc.electronic_signature as signature_required,
+            COALESCE(awc.requires_signature, false) as signature_required,
             c.name as crf_name,
             sed.name as event_name,
             ss.label as subject_label
@@ -347,9 +348,9 @@ export const getSignatureStatus = async (
           LEFT JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
           LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
           LEFT JOIN user_account u ON ec.update_id = u.user_id
-          LEFT JOIN event_definition_crf edc ON (
-            sed.study_event_definition_id = edc.study_event_definition_id 
-            AND c.crf_id = edc.crf_id
+          LEFT JOIN acc_form_workflow_config awc ON (
+            c.crf_id = awc.crf_id
+            AND (awc.study_id IS NULL OR awc.study_id = ss.study_id)
           )
           WHERE ec.event_crf_id = $1
         `;
@@ -493,6 +494,7 @@ export const getPendingSignatures = async (
 
   try {
     // Get forms that require signature but haven't been signed
+    // Uses acc_form_workflow_config as the source of truth for signature requirements
     const query = `
       SELECT 
         ec.event_crf_id,
@@ -510,14 +512,13 @@ export const getPendingSignatures = async (
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
       INNER JOIN study s ON ss.study_id = s.study_id
-      INNER JOIN event_definition_crf edc ON (
-        sed.study_event_definition_id = edc.study_event_definition_id 
-        AND c.crf_id = edc.crf_id
-        AND (edc.study_id = s.study_id OR edc.study_id = s.parent_study_id)
+      INNER JOIN acc_form_workflow_config awc ON (
+        c.crf_id = awc.crf_id
+        AND (awc.study_id = ss.study_id OR awc.study_id IS NULL)
       )
-      WHERE edc.electronic_signature = true
+      WHERE awc.requires_signature = true
         AND (ec.electronic_signature_status = false OR ec.electronic_signature_status IS NULL)
-        AND ec.status_id IN (4, 6)  -- Unavailable (complete) or Locked
+        AND ec.status_id IN (4, 6)
         ${studyId ? 'AND (s.study_id = $1 OR s.parent_study_id = $1)' : ''}
       ORDER BY ec.date_created DESC
       LIMIT 50
@@ -629,7 +630,7 @@ export const certifyUser = async (
 };
 
 /**
- * Get study e-signature requirements
+ * Get study e-signature requirements from acc_form_workflow_config
  */
 export const getStudySignatureRequirements = async (
   studyId: number
@@ -639,21 +640,18 @@ export const getStudySignatureRequirements = async (
   try {
     const query = `
       SELECT 
-        edc.event_definition_crf_id,
         c.crf_id,
         c.name as crf_name,
-        sed.study_event_definition_id,
-        sed.name as event_name,
-        edc.electronic_signature as requires_signature,
-        edc.required_crf,
-        edc.hide_crf,
-        edc.source_data_verification_code
-      FROM event_definition_crf edc
-      INNER JOIN crf c ON edc.crf_id = c.crf_id
-      INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
-      WHERE (edc.study_id = $1 OR sed.study_id = $1)
-        AND edc.status_id = 1
-      ORDER BY sed.ordinal, c.name
+        COALESCE(awc.requires_signature, false) as requires_signature,
+        COALESCE(awc.requires_sdv, false) as requires_sdv,
+        COALESCE(awc.requires_dde, false) as requires_dde
+      FROM crf c
+      LEFT JOIN acc_form_workflow_config awc ON (
+        c.crf_id = awc.crf_id
+        AND (awc.study_id = $1 OR awc.study_id IS NULL)
+      )
+      WHERE c.status_id = 1
+      ORDER BY c.name
     `;
 
     const result = await pool.query(query, [studyId]);
@@ -661,15 +659,11 @@ export const getStudySignatureRequirements = async (
     return {
       success: true,
       data: result.rows.map(row => ({
-        eventDefinitionCrfId: row.event_definition_crf_id,
         crfId: row.crf_id,
         crfName: row.crf_name,
-        eventId: row.study_event_definition_id,
-        eventName: row.event_name,
         requiresSignature: row.requires_signature === true,
-        required: row.required_crf === true,
-        hidden: row.hide_crf === true,
-        sdvCode: row.source_data_verification_code
+        requiresSDV: row.requires_sdv === true,
+        requiresDDE: row.requires_dde === true
       }))
     };
 

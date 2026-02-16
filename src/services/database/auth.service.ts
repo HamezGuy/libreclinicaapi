@@ -583,23 +583,7 @@ async function updateLastVisit(userId: number): Promise<void> {
  * - Both hashes represent the same password
  */
 async function upgradeToBcrypt(userId: number, bcryptHash: string): Promise<void> {
-  // First, check if the extended table exists, create if not
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS user_account_extended (
-        user_id INTEGER PRIMARY KEY REFERENCES user_account(user_id),
-        bcrypt_passwd VARCHAR(255),
-        passwd_upgraded_at TIMESTAMP DEFAULT NOW(),
-        password_version INTEGER DEFAULT 2,
-        CONSTRAINT fk_user_account FOREIGN KEY (user_id) 
-          REFERENCES user_account(user_id) ON DELETE CASCADE
-      )
-    `);
-  } catch (tableError: any) {
-    // Table might already exist or FK might fail - continue anyway
-    logger.debug('Extended table check', { message: tableError.message });
-  }
-  
+  // Table is created by startup migrations (config/migrations.ts)
   // Upsert the bcrypt hash
   const query = `
     INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)

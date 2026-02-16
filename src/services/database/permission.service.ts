@@ -70,26 +70,11 @@ const VALID_PERMISSION_KEYS = new Set(AVAILABLE_PERMISSIONS.map(p => p.key));
 
 /**
  * Ensure the user_custom_permissions table exists.
- * Called on service init or first use.
+ * Table is created by startup migrations (config/migrations.ts).
  */
 export const ensureTable = async (): Promise<void> => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS user_custom_permissions (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        permission_key VARCHAR(64) NOT NULL,
-        granted BOOLEAN NOT NULL DEFAULT true,
-        granted_by INTEGER,
-        date_created TIMESTAMP DEFAULT NOW(),
-        date_updated TIMESTAMP DEFAULT NOW(),
-        UNIQUE(user_id, permission_key)
-      )
-    `);
-    logger.info('user_custom_permissions table ensured');
-  } catch (error: any) {
-    logger.error('Failed to ensure user_custom_permissions table', { error: error.message });
-  }
+  // No-op: table is created by startup migrations.
+  // Kept for backward compatibility with callers.
 };
 
 /**

@@ -78,26 +78,7 @@ async function verifyAuditTables(): Promise<void> {
     `);
     
     if (!apiLogCheck.rows[0].exists) {
-      logger.info('Creating audit_user_api_log table...');
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS audit_user_api_log (
-          id SERIAL PRIMARY KEY,
-          audit_id VARCHAR(36) NOT NULL UNIQUE,
-          user_id INTEGER,
-          username VARCHAR(255) NOT NULL,
-          user_role VARCHAR(50),
-          http_method VARCHAR(10) NOT NULL,
-          endpoint_path VARCHAR(500) NOT NULL,
-          query_params TEXT,
-          request_body TEXT,
-          response_status INTEGER,
-          ip_address VARCHAR(45),
-          user_agent TEXT,
-          duration_ms INTEGER,
-          created_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-      `);
-      logger.info('audit_user_api_log table created');
+      logger.warn('audit_user_api_log table does not exist — will be created by startup migrations');
     }
     
   } catch (error: any) {

@@ -66,6 +66,13 @@ export const respond = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
+  // Permission check: only assigned user, owner, or elevated roles can respond
+  const editCheck = await queryService.canEditQuery(parseInt(id), user.userId, user.role);
+  if (!editCheck.allowed) {
+    res.status(403).json({ success: false, message: editCheck.message });
+    return;
+  }
+
   const result = await queryService.addQueryResponse(
     parseInt(id), 
     {
@@ -97,6 +104,13 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
   // Validate statusId
   if (statusId === undefined || statusId === null) {
     res.status(400).json({ success: false, message: 'statusId is required' });
+    return;
+  }
+
+  // Permission check: only assigned user, owner, or elevated roles can update status
+  const editCheck = await queryService.canEditQuery(parseInt(id), user.userId, user.role);
+  if (!editCheck.allowed) {
+    res.status(403).json({ success: false, message: editCheck.message });
     return;
   }
 
@@ -142,6 +156,13 @@ export const closeWithSignature = asyncHandler(async (req: Request, res: Respons
 
   if (!reason) {
     res.status(400).json({ success: false, message: 'Reason is required for closing a query' });
+    return;
+  }
+
+  // Permission check: only assigned user, owner, or elevated roles can close
+  const editCheck = await queryService.canEditQuery(parseInt(id), user.userId, user.role);
+  if (!editCheck.allowed) {
+    res.status(403).json({ success: false, message: editCheck.message });
     return;
   }
 
@@ -398,6 +419,13 @@ export const reopenQuery = asyncHandler(async (req: Request, res: Response) => {
   const queryId = parseInt(req.params.id);
   const caller = (req as any).user;
   const { reason } = req.body;
+
+  // Permission check: only assigned user, owner, or elevated roles can reopen
+  const editCheck = await queryService.canEditQuery(queryId, caller.userId, caller.role);
+  if (!editCheck.allowed) {
+    res.status(403).json({ success: false, message: editCheck.message });
+    return;
+  }
 
   const result = await queryService.reopenQuery(queryId, caller.userId, reason || 'Reopened');
 

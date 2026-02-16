@@ -40,57 +40,22 @@ export const initializeFileUploadsTable = async (): Promise<boolean> => {
     return true;
   }
 
-  // First check if table exists
-  const checkQuery = `
-    SELECT EXISTS (
-      SELECT FROM information_schema.tables 
-      WHERE table_name = 'file_uploads'
-    );
-  `;
-
+  // Table is created by startup migrations (config/migrations.ts).
+  // Just check if it exists.
   try {
-    const checkResult = await pool.query(checkQuery);
+    const checkResult = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables WHERE table_name = 'file_uploads'
+      )
+    `);
     if (checkResult.rows[0].exists) {
       tableInitialized = true;
-      logger.info('file_uploads table already exists');
       return true;
     }
-  } catch (e) {
-    // Continue to try creating
-  }
-
-  // Create table
-  const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS file_uploads (
-      file_id VARCHAR(64) PRIMARY KEY,
-      original_name VARCHAR(512) NOT NULL,
-      stored_name VARCHAR(512) NOT NULL,
-      file_path VARCHAR(1024) NOT NULL,
-      mime_type VARCHAR(128) NOT NULL,
-      file_size INTEGER NOT NULL,
-      checksum VARCHAR(64) NOT NULL,
-      crf_version_id INTEGER,
-      item_id INTEGER,
-      crf_version_media_id INTEGER,
-      uploaded_by INTEGER NOT NULL DEFAULT 1,
-      uploaded_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      deleted_at TIMESTAMP,
-      deleted_by INTEGER,
-      UNIQUE(file_id)
-    );
-    
-    CREATE INDEX IF NOT EXISTS idx_file_uploads_crf_version ON file_uploads(crf_version_id);
-    CREATE INDEX IF NOT EXISTS idx_file_uploads_item ON file_uploads(item_id);
-    CREATE INDEX IF NOT EXISTS idx_file_uploads_checksum ON file_uploads(checksum);
-  `;
-
-  try {
-    await pool.query(createTableQuery);
-    tableInitialized = true;
-    logger.info('Created file_uploads table');
-    return true;
+    logger.warn('file_uploads table does not exist yet — run startup migrations');
+    return false;
   } catch (error: any) {
-    logger.error('Failed to create file_uploads table', { error: error.message });
+    logger.error('Failed to check file_uploads table:', error.message);
     return false;
   }
 };

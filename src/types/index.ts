@@ -618,26 +618,6 @@ export interface ServiceStatus {
 
 /**
  * ============================================================================
- * WORKFLOW TYPES
- * ============================================================================
- */
-
-export interface WorkflowStatus {
-  statusId: number;
-  statusName: string;
-  description?: string;
-  allowedTransitions: number[];
-}
-
-export interface WorkflowTransition {
-  fromStatusId: number;
-  toStatusId: number;
-  actionRequired: string;
-  validatorRequired: boolean;
-}
-
-/**
- * ============================================================================
  * REPORT TYPES
  * ============================================================================
  */

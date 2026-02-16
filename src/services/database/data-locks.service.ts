@@ -525,6 +525,7 @@ export const lockRecord = async (eventCrfId: number, userId: number) => {
       SELECT 
         ec.event_crf_id, ec.status_id, ec.completion_status_id,
         COALESCE(ec.sdv_status, false) as sdv_verified,
+        COALESCE(ec.electronic_signature_status, false) as is_signed,
         cv.crf_id
       FROM event_crf ec
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
@@ -573,7 +574,7 @@ export const lockRecord = async (eventCrfId: number, userId: number) => {
       blockingReasons.push('Source Data Verification (SDV) is required but not yet completed');
     }
 
-    if (requiresSignature && ec.completion_status_id < 5) {
+    if (requiresSignature && ec.completion_status_id < 5 && !ec.is_signed) {
       blockingReasons.push('PI electronic signature is required but not yet applied');
     }
 

@@ -31,6 +31,49 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
 };
 
 /**
+ * Check if a caller can edit (respond to, close, update status) a query.
+ * Allowed editors:
+ *   - The assigned user
+ *   - The query owner/creator
+ *   - Users with elevated roles: admin, data_manager, monitor
+ * Returns { allowed: true } or { allowed: false, message }.
+ */
+export const canEditQuery = async (
+  queryId: number,
+  callerUserId: number,
+  callerRole?: string
+): Promise<{ allowed: boolean; message?: string }> => {
+  // Elevated roles can always edit
+  const elevatedRoles = ['admin', 'data_manager', 'monitor'];
+  if (callerRole && elevatedRoles.includes(callerRole.toLowerCase())) {
+    return { allowed: true };
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT owner_id, assigned_user_id FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+    if (result.rows.length === 0) {
+      return { allowed: false, message: 'Query not found' };
+    }
+    const { owner_id, assigned_user_id } = result.rows[0];
+
+    if (callerUserId === owner_id || callerUserId === assigned_user_id) {
+      return { allowed: true };
+    }
+
+    return {
+      allowed: false,
+      message: 'You can only modify queries assigned to you or that you created'
+    };
+  } catch (error: any) {
+    logger.error('Error checking query edit permission', { queryId, callerUserId, error: error.message });
+    return { allowed: false, message: 'Permission check failed' };
+  }
+};
+
+/**
  * Get queries with filters
  */
 export const getQueries = async (
@@ -274,7 +317,7 @@ export const createQuery = async (
 
     // Resolve query assignment:
     // 1. Use explicitly provided assignedUserId
-    // 2. Look up form workflow config (query_route_to_user) when entity is eventCrf or itemData
+    // 2. Look up form workflow config (query_route_to_users) when entity is eventCrf or itemData
     // 3. Fall back to null (unassigned)
     let resolvedAssignedUserId = data.assignedUserId || null;
     
@@ -305,7 +348,7 @@ export const createQuery = async (
         
         if (crfIdForLookup) {
           const configResult = await client.query(`
-            SELECT query_route_to_user, query_route_to_users FROM acc_form_workflow_config
+            SELECT query_route_to_users FROM acc_form_workflow_config
             WHERE crf_id = $1
               AND (study_id = $2 OR study_id IS NULL)
             ORDER BY study_id DESC NULLS LAST
@@ -313,22 +356,14 @@ export const createQuery = async (
           `, [crfIdForLookup, data.studyId || null]);
           
           if (configResult.rows.length > 0) {
-            // Priority 1: Use new multi-user JSON array field
             let routeUsernames: string[] = [];
             try {
               const rawUsers = configResult.rows[0].query_route_to_users;
               if (rawUsers) {
-                routeUsernames = JSON.parse(rawUsers);
+                const parsed = JSON.parse(rawUsers);
+                if (Array.isArray(parsed)) routeUsernames = parsed;
               }
             } catch { /* ignore parse errors */ }
-
-            // Priority 2: Fall back to legacy single-user field
-            if (routeUsernames.length === 0) {
-              const legacyUser = configResult.rows[0].query_route_to_user;
-              if (legacyUser && legacyUser.trim()) {
-                routeUsernames = [legacyUser.trim()];
-              }
-            }
 
             if (routeUsernames.length > 0) {
               // Resolve the first user as the primary assignee

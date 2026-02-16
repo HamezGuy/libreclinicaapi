@@ -137,70 +137,22 @@ export const initializeValidationRulesTable = async (): Promise<boolean> => {
   }
 
   // First check if table exists
-  const checkQuery = `
-    SELECT EXISTS (
-      SELECT FROM information_schema.tables 
-      WHERE table_name = 'validation_rules'
-    );
-  `;
-
+  // Table is created by startup migrations (config/migrations.ts).
+  // Just check if it exists.
   try {
-    const checkResult = await pool.query(checkQuery);
+    const checkResult = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables WHERE table_name = 'validation_rules'
+      )
+    `);
     if (checkResult.rows[0].exists) {
       tableInitialized = true;
       return true;
     }
-  } catch (e) {
-    // Continue to try creating
-  }
-
-  // Create table without foreign key constraints for flexibility
-  const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS validation_rules (
-      validation_rule_id SERIAL PRIMARY KEY,
-      crf_id INTEGER,
-      crf_version_id INTEGER,
-      item_id INTEGER,
-      name VARCHAR(255) NOT NULL,
-      description TEXT,
-      rule_type VARCHAR(50) NOT NULL,
-      field_path VARCHAR(255),
-      severity VARCHAR(20) DEFAULT 'error',
-      error_message TEXT NOT NULL,
-      warning_message TEXT,
-      active BOOLEAN DEFAULT true,
-      min_value NUMERIC,
-      max_value NUMERIC,
-      pattern TEXT,
-      format_type VARCHAR(50),
-      operator VARCHAR(20),
-      compare_field_path VARCHAR(255),
-      custom_expression TEXT,
-      date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      date_updated TIMESTAMP,
-      owner_id INTEGER,
-      update_id INTEGER
-    );
-  `;
-
-  const createIndexQuery = `
-    CREATE INDEX IF NOT EXISTS idx_validation_rules_crf ON validation_rules(crf_id);
-    CREATE INDEX IF NOT EXISTS idx_validation_rules_item ON validation_rules(item_id);
-    CREATE INDEX IF NOT EXISTS idx_validation_rules_active ON validation_rules(active);
-  `;
-
-  try {
-    await pool.query(createTableQuery);
-    await pool.query(createIndexQuery);
-    // Add format_type column if it doesn't exist (migration for existing databases)
-    try {
-      await pool.query(`ALTER TABLE validation_rules ADD COLUMN IF NOT EXISTS format_type VARCHAR(50)`);
-    } catch (e) { /* column may already exist */ }
-    tableInitialized = true;
-    logger.info('Validation rules table initialized successfully');
-    return true;
+    logger.warn('validation_rules table does not exist yet — run startup migrations');
+    return false;
   } catch (error: any) {
-    logger.error('Failed to initialize validation_rules table:', error.message);
+    logger.error('Failed to check validation_rules table:', error.message);
     return false;
   }
 };
@@ -1407,7 +1359,7 @@ async function createValidationQuery(params: {
     // ===== WORKFLOW-BASED QUERY ASSIGNMENT =====
     // Priority:
     // 1. Explicitly provided assignedUserId (from caller)
-    // 2. Form workflow config (acc_form_workflow_config.query_route_to_user)
+    // 2. Form workflow config (acc_form_workflow_config.query_route_to_users)
     // 3. Default assignee (coordinator/data manager for the study)
     let assignedUserId = params.assignedUserId;
     
@@ -1522,13 +1474,13 @@ async function createValidationQuery(params: {
 /**
  * Find the workflow-assigned user for queries on a specific form.
  * 
- * Checks acc_form_workflow_config.query_route_to_user for the CRF.
+ * Checks acc_form_workflow_config.query_route_to_users for the CRF.
  * This is configured in the Workflow Management UI and routes ALL queries
- * for a given form to a specific user.
+ * for a given form to specific user(s).
  * 
- * When a form has a query_route_to_user configured, ALL validation queries
- * (both errors and warnings) are assigned to that user. They will see these
- * queries in their "My Assigned Queries" dashboard and task list.
+ * When a form has query_route_to_users configured, ALL validation queries
+ * (both errors and warnings) are assigned to the first user in the list.
+ * They will see these queries in their "My Assigned Queries" dashboard.
  * 
  * @param client - DB client (within transaction)
  * @param crfId - The CRF/form template ID (may be undefined)
@@ -1559,7 +1511,6 @@ async function findWorkflowAssignee(
     if (!resolvedCrfId) return null;
     
     // Check if the acc_form_workflow_config table exists before querying
-    // This prevents errors when the migration hasn't run yet
     const tableCheck = await client.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables 
@@ -1572,42 +1523,47 @@ async function findWorkflowAssignee(
     }
     
     // Look up workflow config for this CRF
-    // Check study-specific config first, then fall back to global (study_id IS NULL)
     const configResult = await client.query(`
-      SELECT query_route_to_user
+      SELECT query_route_to_users
       FROM acc_form_workflow_config
       WHERE crf_id = $1 
         AND (study_id = $2 OR study_id IS NULL)
-        AND query_route_to_user IS NOT NULL
-        AND query_route_to_user != ''
       ORDER BY study_id DESC NULLS LAST
       LIMIT 1
     `, [resolvedCrfId, studyId || null]);
     
     if (configResult.rows.length === 0) return null;
     
-    const routeToUsername = configResult.rows[0].query_route_to_user;
-    if (!routeToUsername) return null;
-    
-    // Resolve username to user_id
-    // The workflow config stores username (user_name), not user_id
+    let routeUsernames: string[] = [];
+    try {
+      const rawUsers = configResult.rows[0].query_route_to_users;
+      if (rawUsers) {
+        const parsed = JSON.parse(rawUsers);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          routeUsernames = parsed;
+        }
+      }
+    } catch { /* ignore parse errors */ }
+
+    if (routeUsernames.length === 0) return null;
+
+    // Resolve the first username to a user_id
     const userResult = await client.query(`
-      SELECT user_id FROM user_account
-      WHERE user_name = $1 AND enabled = true
-      LIMIT 1
-    `, [routeToUsername]);
+      SELECT user_id, user_name FROM user_account
+      WHERE user_name = ANY($1) AND enabled = true
+    `, [routeUsernames]);
     
     if (userResult.rows.length > 0) {
       logger.info('Workflow-assigned query to user', { 
         crfId: resolvedCrfId, 
-        username: routeToUsername,
+        usernames: routeUsernames,
         userId: userResult.rows[0].user_id 
       });
       return userResult.rows[0].user_id;
     }
     
-    logger.warn('Workflow query_route_to_user not found as active user', { 
-      username: routeToUsername, crfId: resolvedCrfId 
+    logger.warn('Workflow route users not found as active users', { 
+      usernames: routeUsernames, crfId: resolvedCrfId 
     });
     return null;
   } catch (e: any) {
@@ -2136,89 +2092,6 @@ export const validateEventCrf = async (
 };
 
 /**
- * Get rule execution history from rule_action_run table
- * Returns history of when validation rules were executed and what actions were taken
- */
-export const getRuleExecutionHistory = async (
-  studyId: number,
-  options?: { limit?: number; offset?: number; ruleId?: number }
-): Promise<{ success: boolean; data: any[]; total: number }> => {
-  try {
-    const limit = options?.limit || 50;
-    const offset = options?.offset || 0;
-
-    // Check if rule_action_run table exists (it's a LibreClinica Core table)
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_schema = 'public' AND table_name = 'rule_action_run'
-      ) as exists
-    `);
-
-    if (!tableCheck.rows[0].exists) {
-      return { success: true, data: [], total: 0 };
-    }
-
-    let whereClause = 'WHERE rs.study_id = $1';
-    const params: any[] = [studyId];
-    let paramIdx = 2;
-
-    if (options?.ruleId) {
-      whereClause += ` AND r.rule_id = $${paramIdx++}`;
-      params.push(options.ruleId);
-    }
-
-    const countResult = await pool.query(`
-      SELECT COUNT(*) as total
-      FROM rule_action_run rar
-      INNER JOIN rule_action ra ON rar.rule_action_id = ra.rule_action_id
-      INNER JOIN rule_set_rule rsr ON ra.rule_set_rule_id = rsr.rule_set_rule_id
-      INNER JOIN rule_set rs ON rsr.rule_set_id = rs.rule_set_id
-      INNER JOIN rule r ON rsr.rule_id = r.rule_id
-      ${whereClause}
-    `, params);
-
-    params.push(limit, offset);
-    const result = await pool.query(`
-      SELECT 
-        rar.id as run_id,
-        rar.token,
-        rar.run_time,
-        rar.status as run_status,
-        ra.action_type,
-        ra.message,
-        r.name as rule_name,
-        r.description as rule_description,
-        re.value as rule_expression,
-        rsr.rule_set_rule_id,
-        rs.study_id,
-        rs.study_event_definition_id,
-        rs.crf_id,
-        rs.crf_version_id,
-        rs.item_id
-      FROM rule_action_run rar
-      INNER JOIN rule_action ra ON rar.rule_action_id = ra.rule_action_id
-      INNER JOIN rule_set_rule rsr ON ra.rule_set_rule_id = rsr.rule_set_rule_id
-      INNER JOIN rule_set rs ON rsr.rule_set_id = rs.rule_set_id
-      INNER JOIN rule r ON rsr.rule_id = r.rule_id
-      LEFT JOIN rule_expression re ON r.rule_expression_id = re.rule_expression_id
-      ${whereClause}
-      ORDER BY rar.run_time DESC
-      LIMIT $${paramIdx++} OFFSET $${paramIdx}
-    `, params);
-
-    return {
-      success: true,
-      data: result.rows,
-      total: parseInt(countResult.rows[0].total)
-    };
-  } catch (error: any) {
-    logger.warn('getRuleExecutionHistory error', { error: error.message });
-    return { success: true, data: [], total: 0 };
-  }
-};
-
-/**
  * Public wrapper around applyRule for direct rule testing.
  * Used by the testRule controller endpoint to evaluate any rule type
  * (including formula rules) without needing a CRF in the database.
@@ -2244,7 +2117,6 @@ export default {
   validateFormData,
   validateFieldChange,
   validateEventCrf,
-  getRuleExecutionHistory,
   testRuleDirectly
 };
 

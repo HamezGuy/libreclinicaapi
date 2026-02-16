@@ -542,7 +542,7 @@ describe('Query Routing via Workflow Config', () => {
   it('should route queries to configured user when acc_form_workflow_config exists', () => {
     // Tests the priority order:
     // 1. Explicitly provided assignedUserId
-    // 2. Form workflow config (query_route_to_user)
+    // 2. Form workflow config (query_route_to_users)
     // 3. Default assignee (study coordinator/data manager)
     
     // This validates the findWorkflowAssignee → findDefaultAssignee chain

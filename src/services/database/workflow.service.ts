@@ -7,94 +7,6 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 
-export interface WorkflowStatus {
-  status: string;
-  step: string;
-  completedSteps: string[];
-  pendingSteps: string[];
-}
-
-export interface WorkflowTransition {
-  from: string;
-  to: string;
-  action: string;
-  userId: number;
-  timestamp: Date;
-}
-
-/**
- * Get workflow status for a subject
- */
-export const getSubjectWorkflowStatus = async (
-  studySubjectId: number
-): Promise<WorkflowStatus | null> => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        ss.status_id,
-        s.name as status_name
-      FROM study_subject ss
-      LEFT JOIN status s ON ss.status_id = s.status_id
-      WHERE ss.study_subject_id = $1
-    `, [studySubjectId]);
-
-    if (result.rows.length === 0) {
-      return null;
-    }
-
-    const statusId = result.rows[0].status_id;
-    const statusName = result.rows[0].status_name || 'unknown';
-
-    return {
-      status: statusName,
-      step: statusName,
-      completedSteps: [],
-      pendingSteps: []
-    };
-  } catch (error: any) {
-    logger.error('Failed to get subject workflow status', { 
-      studySubjectId, 
-      error: error.message 
-    });
-    return null;
-  }
-};
-
-/**
- * Get workflow status for an event
- */
-export const getEventWorkflowStatus = async (
-  studyEventId: number
-): Promise<WorkflowStatus | null> => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        se.subject_event_status_id,
-        ses.name as status_name
-      FROM study_event se
-      LEFT JOIN subject_event_status ses ON se.subject_event_status_id = ses.subject_event_status_id
-      WHERE se.study_event_id = $1
-    `, [studyEventId]);
-
-    if (result.rows.length === 0) {
-      return null;
-    }
-
-    return {
-      status: result.rows[0].status_name || 'unknown',
-      step: result.rows[0].status_name || 'unknown',
-      completedSteps: [],
-      pendingSteps: []
-    };
-  } catch (error: any) {
-    logger.error('Failed to get event workflow status', { 
-      studyEventId, 
-      error: error.message 
-    });
-    return null;
-  }
-};
-
 /**
  * CRF Lifecycle phases (ordered).
  */
@@ -136,6 +48,7 @@ export const getCrfLifecycleStatus = async (
         ec.status_id,
         ec.completion_status_id,
         COALESCE(ec.sdv_status, false) as sdv_verified,
+        COALESCE(ec.electronic_signature_status, false) as is_signed,
         cv.crf_id
       FROM event_crf ec
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
@@ -148,6 +61,7 @@ export const getCrfLifecycleStatus = async (
     const statusId = row.status_id;          // 1=available, 2=data_complete, 6=locked
     const completionStatusId = row.completion_status_id; // 1=not_started..5=signed
     const sdvVerified = row.sdv_verified;
+    const isSigned = row.is_signed;
     const crfId = row.crf_id;
 
     // 2. Load workflow config for this CRF
@@ -186,7 +100,7 @@ export const getCrfLifecycleStatus = async (
     let currentPhase: CrfLifecyclePhase = 'not_started';
     if (statusId === 6) {
       currentPhase = 'locked';
-    } else if (completionStatusId >= 5) {
+    } else if (completionStatusId >= 5 || isSigned) {
       currentPhase = 'signed';
     } else if (sdvVerified) {
       currentPhase = 'sdv_complete';
@@ -233,140 +147,6 @@ export const getCrfLifecycleStatus = async (
   } catch (error: any) {
     logger.error('Failed to compute CRF lifecycle status', { eventCrfId, error: error.message });
     return null;
-  }
-};
-
-/**
- * Get the legacy simplified workflow status for a CRF.
- */
-export const getCRFWorkflowStatus = async (
-  eventCrfId: number
-): Promise<WorkflowStatus | null> => {
-  try {
-    const lifecycle = await getCrfLifecycleStatus(eventCrfId);
-    if (!lifecycle) return null;
-
-    return {
-      status: lifecycle.currentPhase,
-      step: lifecycle.currentPhase,
-      completedSteps: lifecycle.completedPhases,
-      pendingSteps: lifecycle.pendingPhases
-    };
-  } catch (error: any) {
-    logger.error('Failed to get CRF workflow status', { 
-      eventCrfId, 
-      error: error.message 
-    });
-    return null;
-  }
-};
-
-/**
- * Transition workflow state
- */
-export const transitionWorkflow = async (
-  entityType: 'subject' | 'event' | 'crf',
-  entityId: number,
-  newStatus: string,
-  userId: number,
-  reason?: string
-): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Transitioning workflow', { entityType, entityId, newStatus, userId });
-
-  try {
-    let table: string;
-    let idColumn: string;
-    
-    switch (entityType) {
-      case 'subject':
-        table = 'study_subject';
-        idColumn = 'study_subject_id';
-        break;
-      case 'event':
-        table = 'study_event';
-        idColumn = 'study_event_id';
-        break;
-      case 'crf':
-        table = 'event_crf';
-        idColumn = 'event_crf_id';
-        break;
-      default:
-        return { success: false, message: 'Invalid entity type' };
-    }
-
-    // Get status ID from name
-    const statusResult = await pool.query(
-      'SELECT status_id FROM status WHERE name ILIKE $1 LIMIT 1',
-      [newStatus]
-    );
-
-    if (statusResult.rows.length === 0) {
-      return { success: false, message: `Unknown status: ${newStatus}` };
-    }
-
-    const statusId = statusResult.rows[0].status_id;
-
-    // Update entity status
-    await pool.query(
-      `UPDATE ${table} SET status_id = $1, update_id = $2, date_updated = NOW() WHERE ${idColumn} = $3`,
-      [statusId, userId, entityId]
-    );
-
-    // Log audit trail
-    await pool.query(`
-      INSERT INTO audit_log_event (
-        audit_log_event_type_id, audit_date, audit_table, 
-        entity_id, entity_name, user_id, new_value, reason_for_change
-      ) VALUES (1, NOW(), $1, $2, $3, $4, $5, $6)
-    `, [
-      table,
-      entityId,
-      `${entityType}_workflow_transition`,
-      userId,
-      JSON.stringify({ newStatus, statusId }),
-      reason || 'Workflow transition'
-    ]);
-
-    logger.info('Workflow transitioned successfully', { 
-      entityType, 
-      entityId, 
-      newStatus 
-    });
-
-    return { success: true, message: `Workflow transitioned to ${newStatus}` };
-  } catch (error: any) {
-    logger.error('Workflow transition failed', { 
-      entityType, 
-      entityId, 
-      error: error.message 
-    });
-    return { success: false, message: error.message };
-  }
-};
-
-/**
- * Get available workflow transitions for an entity.
- * For CRFs, uses the lifecycle state machine respecting workflow configuration.
- */
-export const getAvailableTransitions = async (
-  entityType: 'subject' | 'event' | 'crf',
-  entityId: number
-): Promise<string[]> => {
-  switch (entityType) {
-    case 'subject':
-      return ['available', 'signed', 'locked', 'removed'];
-    case 'event':
-      return ['scheduled', 'data_entry_started', 'completed', 'signed', 'locked'];
-    case 'crf': {
-      // Use the real lifecycle state machine
-      const lifecycle = await getCrfLifecycleStatus(entityId);
-      if (lifecycle) {
-        return lifecycle.availableTransitions;
-      }
-      return ['initial_data_entry', 'double_data_entry', 'complete', 'locked'];
-    }
-    default:
-      return [];
   }
 };
 
@@ -952,12 +732,7 @@ export const handoffWorkflow = async (
 };
 
 export default {
-  getSubjectWorkflowStatus,
-  getEventWorkflowStatus,
-  getCRFWorkflowStatus,
   getCrfLifecycleStatus,
-  transitionWorkflow,
-  getAvailableTransitions,
   triggerSDVCompletedWorkflow,
   triggerFormSubmittedWorkflow,
   triggerSubjectEnrolledWorkflow,
