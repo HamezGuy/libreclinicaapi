@@ -296,7 +296,7 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
          AND rs.name NOT IN ('Closed', 'Not Applicable')) as open_queries,
         (SELECT COUNT(DISTINCT s2.study_id) FROM study s2 WHERE s2.parent_study_id = $1) as site_count,
         (SELECT COUNT(*) FROM study_event_definition WHERE study_id = $1) as event_count,
-        (SELECT COUNT(*) FROM crf WHERE source_study_id = $1) as form_count
+        (SELECT COUNT(*) FROM crf WHERE source_study_id = $1 AND status_id NOT IN (5, 6, 7)) as form_count
       FROM study s
       WHERE s.study_id = $1
     `;

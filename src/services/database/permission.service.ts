@@ -53,6 +53,7 @@ export const AVAILABLE_PERMISSIONS: { key: string; label: string; category: stri
   { key: 'canExportData',            label: 'Export Study Data',            category: '§11.10(e) Audit, Export & Compliance' },
   { key: 'canManageDataLocks',       label: 'Manage Data Locks',            category: '§11.10(e) Audit, Export & Compliance' },
   { key: 'canManageValidationRules', label: 'Manage Validation Rules',      category: '§11.10(e) Audit, Export & Compliance' },
+  { key: 'canManageBranchingLogic',  label: 'Manage Branching / Skip Logic', category: '§11.10(e) Audit, Export & Compliance' },
 
   // §11.10(g) Study & System Administration — authority checks, configuration
   { key: 'canCreateStudy',       label: 'Create Studies',              category: '§11.10(g) Study & System Admin' },

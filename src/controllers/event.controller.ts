@@ -138,14 +138,17 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
 // ============================================
 
 /**
- * Get available CRFs that can be assigned to an event
+ * Get available CRFs that can be assigned to an event.
+ * Scoped by study and organization membership.
  */
 export const getAvailableCrfs = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, eventId } = req.params;
+  const user = (req as any).user;
 
   const result = await eventService.getAvailableCrfsForEvent(
     parseInt(studyId),
-    parseInt(eventId)
+    parseInt(eventId),
+    user?.userId
   );
 
   res.json({

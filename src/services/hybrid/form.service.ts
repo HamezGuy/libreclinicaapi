@@ -277,18 +277,39 @@ const saveFormDataDirect = async (
     }
 
     // 4. Get item mappings for this CRF version
+    // Include description to extract technical fieldName from extended_properties
     const itemsResult = await client.query(`
-      SELECT i.item_id, i.name, i.oc_oid
+      SELECT i.item_id, i.name, i.oc_oid, i.description
       FROM item i
       INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+      LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
       WHERE igm.crf_version_id = $1
+        AND (ifm.show_item IS DISTINCT FROM false)
     `, [crfVersionId]);
 
     const itemMap = new Map<string, number>();
     for (const item of itemsResult.rows) {
+      // Map by display label (item.name in DB)
       itemMap.set(item.name.toLowerCase(), item.item_id);
+      // Map by OID
       if (item.oc_oid) {
         itemMap.set(item.oc_oid.toLowerCase(), item.item_id);
+      }
+      // Map by technical fieldName from extended_properties
+      // This is critical: the frontend uses fieldName as the form control key,
+      // but item.name stores the display label (which is different)
+      if (item.description && item.description.includes('---EXTENDED_PROPS---')) {
+        try {
+          const propsJson = item.description.split('---EXTENDED_PROPS---')[1]?.trim();
+          if (propsJson) {
+            const extProps = JSON.parse(propsJson);
+            if (extProps.fieldName) {
+              itemMap.set(extProps.fieldName.toLowerCase(), item.item_id);
+            }
+          }
+        } catch (e) {
+          // Ignore parse errors — fall back to name-based matching
+        }
       }
     }
 
@@ -536,7 +557,9 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     const query = `
       SELECT 
         id.item_data_id,
+        i.item_id,
         i.name as item_name,
+        i.description as item_description,
         i.oc_oid as item_oid,
         id.value,
         id.status_id,
@@ -552,6 +575,25 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     `;
 
     const result = await pool.query(query, [eventCrfId]);
+    
+    // Enrich each item with the technical fieldName from extended_properties
+    for (const row of result.rows) {
+      if (row.item_description && row.item_description.includes('---EXTENDED_PROPS---')) {
+        try {
+          const propsJson = row.item_description.split('---EXTENDED_PROPS---')[1]?.trim();
+          if (propsJson) {
+            const extProps = JSON.parse(propsJson);
+            if (extProps.fieldName) {
+              row.field_name = extProps.fieldName; // Technical name used by frontend
+            }
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+      // Clean up — don't send the full description to the frontend
+      delete row.item_description;
+    }
 
     // 21 CFR Part 11 §11.10(a) - Decrypt encrypted form data
     // Transparently decrypt any encrypted values before returning
@@ -676,6 +718,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
       LEFT JOIN section s ON ifm.section_id = s.section_id
       WHERE igm.crf_version_id = $1
+        AND (ifm.show_item IS DISTINCT FROM false)
       ORDER BY COALESCE(ifm.ordinal, igm.ordinal)
     `;
     const itemsResult = await pool.query(itemsQuery, [versionId]);
@@ -771,15 +814,19 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
 
     // Parse items with all properties including extended props
     const items = itemsResult.rows.map(item => {
-      // Parse options
+      // Parse options — supports both newline-delimited (new) and comma-delimited (legacy)
       let options = null;
       if (item.options_text && item.options_values) {
-        const labels = item.options_text.split(',');
-        const values = item.options_values.split(',');
-        options = labels.map((label: string, idx: number) => ({
-          label: label.trim(),
-          value: values[idx]?.trim() || label.trim()
-        }));
+        // Use newline as primary delimiter; fall back to comma only for legacy data
+        const delimiter = item.options_text.includes('\n') ? '\n' : ',';
+        const labels = item.options_text.split(delimiter);
+        const values = item.options_values.split(delimiter);
+        options = labels
+          .map((label: string, idx: number) => ({
+            label: label.trim(),
+            value: values[idx]?.trim() || label.trim()
+          }))
+          .filter(opt => opt.label !== ''); // Remove empty entries from trailing delimiters
       }
       
       // Parse description for help text and extended properties
@@ -842,7 +889,8 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         // Core identifiers
         id: item.item_id?.toString(),
         item_id: item.item_id,
-        name: item.name,
+        // Use the preserved technical field name from extended props, fall back to DB name
+        name: extendedProps.fieldName || item.name,
         oc_oid: item.oc_oid,
         
         // Type info
@@ -851,7 +899,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         data_type_code: item.data_type_code,
         response_type: item.response_type,
         
-        // Display
+        // Display — item.name in DB stores the display label
         label: item.name,
         description: helpText,
         helpText: helpText,
@@ -938,7 +986,30 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         // Table field properties
         tableColumns: extendedProps.tableColumns,
         tableRows: extendedProps.tableRows,
-        tableSettings: extendedProps.tableSettings
+        tableSettings: extendedProps.tableSettings,
+        
+        // Inline group field properties
+        inlineFields: extendedProps.inlineFields,
+        inlineGroupSettings: extendedProps.inlineGroupSettings,
+        
+        // Criteria list field properties
+        criteriaItems: extendedProps.criteriaItems,
+        criteriaListSettings: extendedProps.criteriaListSettings,
+        
+        // Question table field properties
+        questionRows: extendedProps.questionRows,
+        questionTableSettings: extendedProps.questionTableSettings,
+        
+        // Static content / Section header
+        staticContent: extendedProps.staticContent,
+        headerLevel: extendedProps.headerLevel,
+        
+        // Barcode / QR Code
+        barcodeFormat: extendedProps.barcodeFormat,
+        barcodePattern: extendedProps.barcodePattern,
+        
+        // Calculation type
+        calculationType: extendedProps.calculationType
       };
     });
 
@@ -1180,7 +1251,8 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
     `);
     const hasCategoryColumn = columnCheck.rows.length > 0;
 
-    // Filter out archived forms (status_id 5=removed, 6=archived) for 21 CFR Part 11 compliance
+    // Filter out deleted/archived forms for 21 CFR Part 11 compliance
+    // status_id: 5=removed, 6=archived, 7=auto-removed
     // Archived forms are only visible to admins via the /archived endpoint
     const query = `
       SELECT 
@@ -1198,7 +1270,7 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       WHERE c.source_study_id = $1
-        AND c.status_id NOT IN (5, 6)
+        AND c.status_id NOT IN (5, 6, 7)
       ORDER BY c.name
     `;
 
@@ -1213,6 +1285,10 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
 /**
  * Get all CRFs (templates) - includes drafts and published
  * Status IDs: 1=available, 2=unavailable/locked, 5=removed
+ * 
+ * WARNING: This method returns forms across ALL studies for the user's organization.
+ * Prefer getStudyForms(studyId) when a study context is available, or
+ * getAvailableCrfsForEvent(studyId, eventId) for event CRF assignment.
  */
 export const getAllForms = async (userId?: number): Promise<any[]> => {
   logger.info('Getting all forms', { userId });
@@ -1310,6 +1386,7 @@ export const getFormById = async (crfId: number, callerUserId?: number): Promise
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN study st ON c.source_study_id = st.study_id
       WHERE c.crf_id = $1
+        AND c.status_id NOT IN (5, 6, 7)
     `;
 
     const result = await pool.query(query, [crfId]);
@@ -1504,6 +1581,32 @@ interface FormField {
   tableColumns?: any[];
   tableRows?: any[];
   tableSettings?: Record<string, any>;
+  
+  // Inline group field properties
+  inlineFields?: any[];
+  inlineGroupSettings?: Record<string, any>;
+  
+  // Criteria list field properties
+  criteriaItems?: any[];
+  criteriaListSettings?: Record<string, any>;
+  
+  // Question table field properties
+  questionRows?: any[];
+  questionTableSettings?: Record<string, any>;
+  
+  // Static content / Section header
+  staticContent?: string;
+  headerLevel?: number;
+  
+  // Barcode / QR Code
+  barcodeFormat?: string;
+  barcodePattern?: string;
+  
+  // Calculation type
+  calculationType?: string;
+  
+  // Column number (layout)
+  columnNumber?: number;
 }
 
 /**
@@ -1513,6 +1616,10 @@ const serializeExtendedProperties = (field: FormField): string => {
   const extended = {
     // Field type (preserves types like 'yesno', 'textarea', 'radio' that map to LibreClinica types)
     type: field.type,
+    
+    // Technical field name (lowercase_underscored identifier, distinct from the display label)
+    // The DB item.name stores the display label; this preserves the technical ID for formulas, etc.
+    fieldName: field.name,
     
     // PHI and Compliance
     isPhiField: field.isPhiField,
@@ -1572,7 +1679,30 @@ const serializeExtendedProperties = (field: FormField): string => {
     // Table field properties
     tableColumns: field.tableColumns,
     tableRows: field.tableRows,
-    tableSettings: field.tableSettings
+    tableSettings: field.tableSettings,
+    
+    // Inline group field properties
+    inlineFields: field.inlineFields,
+    inlineGroupSettings: field.inlineGroupSettings,
+    
+    // Criteria list field properties
+    criteriaItems: field.criteriaItems,
+    criteriaListSettings: field.criteriaListSettings,
+    
+    // Question table field properties
+    questionRows: field.questionRows,
+    questionTableSettings: field.questionTableSettings,
+    
+    // Static content / Section header
+    staticContent: field.staticContent,
+    headerLevel: field.headerLevel,
+    
+    // Barcode / QR Code
+    barcodeFormat: field.barcodeFormat,
+    barcodePattern: field.barcodePattern,
+    
+    // Calculation type
+    calculationType: field.calculationType
   };
   
   // Remove undefined values
@@ -1611,8 +1741,8 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
     'radio': 5,
     'select': 6,
     'dropdown': 6,
-    'multiselect': 7,
-    'multi-select': 7,
+    'multiselect': 3,  // multiselect is now treated as checkbox
+    'multi-select': 3, // multiselect is now treated as checkbox
     
     // Calculated types (8-9)
     'calculation': 8,
@@ -1649,8 +1779,20 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
     'respiration_rate': 1,
     'yesno': 5,        // Yes/No uses radio type
     
-    // Table type - uses a special response type for repeating/grid data
-    'table': 11        // Table field (repeating group with structure)
+    // Complex/structured types — stored as text response type, structure lives in extended_properties
+    'table': 1,
+    'inline_group': 1,
+    'criteria_list': 1,
+    'question_table': 1,
+    'section_header': 1,
+    'static_text': 1,
+    'signature': 1,
+    'date_of_birth': 1,
+    'patient_name': 1,
+    'patient_id': 1,
+    'address': 1,
+    'ssn': 1,
+    'medical_record_number': 1
   };
   return typeMap[fieldType?.toLowerCase()] || 1;
 };
@@ -1673,8 +1815,8 @@ const mapResponseTypeToFieldType = (responseType: string | null | undefined): st
     'single-select': 'select',
     'select': 'select',
     'dropdown': 'select',
-    'multi-select': 'multiselect',
-    'multiselect': 'multiselect',
+    'multi-select': 'checkbox',
+    'multiselect': 'checkbox',
     'calculation': 'calculation',
     'group-calculation': 'calculation',
     'instant-calculation': 'barcode',
@@ -1896,8 +2038,9 @@ export const createForm = async (
         // Create response_set for fields with options (select, radio, checkbox)
         let responseSetId = 1; // Default to text response type
         if (field.options && field.options.length > 0) {
-          const optionsText = field.options.map(o => o.label).join(',');
-          const optionsValues = field.options.map(o => o.value).join(',');
+          // Use newline delimiter to avoid breaking labels that contain commas
+          const optionsText = field.options.map(o => o.label).join('\n');
+          const optionsValues = field.options.map(o => o.value).join('\n');
           const responseTypeId = mapFieldTypeToResponseType(field.type);
 
           const responseSetResult = await client.query(`
@@ -2306,25 +2449,39 @@ export const updateForm = async (
         itemGroupId = itemGroupResult.rows[0].item_group_id;
       }
 
-      // Get existing items for this form
+      // Get existing items for this form — keyed by item_id for stable matching
+      // (name-based matching breaks when users rename field labels)
       const existingItemsResult = await client.query(`
         SELECT i.item_id, i.name, i.oc_oid
         FROM item i
         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+        LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
         WHERE igm.crf_version_id = $1
+          AND (ifm.show_item IS DISTINCT FROM false)
       `, [crfVersionId]);
 
-      const existingItems = new Map(existingItemsResult.rows.map(row => [row.name, row]));
+      // Primary lookup by item_id (stable), fallback by name (for brand-new fields)
+      const existingItemsById = new Map(existingItemsResult.rows.map(row => [row.item_id, row]));
+      const existingItemsByName = new Map(existingItemsResult.rows.map(row => [row.name, row]));
 
       // Get CRF OID for generating item OIDs
       const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
       const ocOid = crfOidResult.rows[0]?.oc_oid || `CRF_${crfId}`;
 
+      // Track which existing item_ids were matched so we can soft-delete the rest
+      const matchedItemIds = new Set<number>();
+
       // Process each field
       for (let i = 0; i < data.fields.length; i++) {
         const field = data.fields[i];
         const fieldName = field.label || field.name || `Field ${i + 1}`;
-        const existingItem = existingItems.get(fieldName);
+        
+        // Match by item_id first (stable), then fall back to name (for legacy data)
+        const fieldItemId = field.id ? parseInt(String(field.id), 10) : NaN;
+        let existingItem = !isNaN(fieldItemId) ? existingItemsById.get(fieldItemId) : undefined;
+        if (!existingItem) {
+          existingItem = existingItemsByName.get(fieldName);
+        }
         
         // Serialize extended properties
         const extendedProps = serializeExtendedProperties(field);
@@ -2338,14 +2495,14 @@ export const updateForm = async (
         let itemId: number;
 
         if (existingItem) {
-          // Update existing item
+          // Update existing item — also update the name in case the label changed
           await client.query(`
             UPDATE item
-            SET description = $1, units = $2, phi_status = $3, item_data_type_id = $4, date_updated = NOW()
-            WHERE item_id = $5
-          `, [description, field.unit || '', field.isPhiField || false, dataTypeId, existingItem.item_id]);
+            SET name = $1, description = $2, units = $3, phi_status = $4, item_data_type_id = $5, date_updated = NOW()
+            WHERE item_id = $6
+          `, [fieldName, description, field.unit || '', field.isPhiField || false, dataTypeId, existingItem.item_id]);
           itemId = existingItem.item_id;
-          existingItems.delete(fieldName); // Mark as processed
+          matchedItemIds.add(itemId); // Mark as still present
         } else {
           // Create new item
           const itemRandom = Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -2361,6 +2518,7 @@ export const updateForm = async (
             RETURNING item_id
           `, [fieldName, description, field.unit || '', field.isPhiField || false, dataTypeId, userId, itemOid]);
           itemId = newItemResult.rows[0].item_id;
+          matchedItemIds.add(itemId);
 
           // Link to item group
           await client.query(`
@@ -2385,8 +2543,9 @@ export const updateForm = async (
         if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].response_set_id) {
           // Update existing response set
           if (field.options && field.options.length > 0) {
-            const optionsText = field.options.map((o: any) => o.label).join(',');
-            const optionsValues = field.options.map((o: any) => o.value).join(',');
+            // Use newline delimiter to avoid breaking labels that contain commas
+            const optionsText = field.options.map((o: any) => o.label).join('\n');
+            const optionsValues = field.options.map((o: any) => o.value).join('\n');
             await client.query(`
               UPDATE response_set
               SET options_text = $1, options_values = $2, response_type_id = $3
@@ -2397,8 +2556,9 @@ export const updateForm = async (
         } else {
           // Create new response set (required for all fields, not just option fields)
           if (field.options && field.options.length > 0) {
-            const optionsText = field.options.map((o: any) => o.label).join(',');
-            const optionsValues = field.options.map((o: any) => o.value).join(',');
+            // Use newline delimiter to avoid breaking labels that contain commas
+            const optionsText = field.options.map((o: any) => o.label).join('\n');
+            const optionsValues = field.options.map((o: any) => o.value).join('\n');
             const rsResult = await client.query(`
               INSERT INTO response_set (response_type_id, label, options_text, options_values, version_id)
               VALUES ($1, $2, $3, $4, $5)
@@ -2454,12 +2614,16 @@ export const updateForm = async (
           SELECT 1 FROM item_form_metadata WHERE item_id = $1 AND crf_version_id = $2
         `, [itemId, crfVersionId]);
 
+        // Resolve column_number from field data (mirrors createForm logic)
+        const columnNumber = (field as any).columnPosition || (field as any).columnNumber || 1;
+
         if (existingMetaResult.rows.length > 0) {
           await client.query(`
             UPDATE item_form_metadata
             SET response_set_id = $1, ordinal = $2, left_item_text = $3, required = $4,
-                default_value = $5, regexp = $6, regexp_error_msg = $7, show_item = $8, width_decimal = $9
-            WHERE item_id = $10 AND crf_version_id = $11
+                default_value = $5, regexp = $6, regexp_error_msg = $7, show_item = $8, width_decimal = $9,
+                column_number = $10
+            WHERE item_id = $11 AND crf_version_id = $12
           `, [
             responseSetId, field.order || (i + 1), field.placeholder || '',
             field.required || field.isRequired || false,
@@ -2467,33 +2631,38 @@ export const updateForm = async (
             regexpPattern, regexpErrorMsg,
             field.hidden !== true && field.isHidden !== true,
             widthDecimal,
+            columnNumber,
             itemId, crfVersionId
           ]);
         } else {
           await client.query(`
             INSERT INTO item_form_metadata (
               item_id, crf_version_id, section_id, response_set_id, ordinal,
-              left_item_text, required, default_value, regexp, regexp_error_msg, show_item, width_decimal
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+              left_item_text, required, default_value, regexp, regexp_error_msg, show_item, width_decimal,
+              column_number
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           `, [
             itemId, crfVersionId, sectionId, responseSetId, field.order || (i + 1),
             field.placeholder || '', field.required || field.isRequired || false,
             field.defaultValue !== undefined ? String(field.defaultValue) : null,
             regexpPattern, regexpErrorMsg,
             field.hidden !== true && field.isHidden !== true,
-            widthDecimal
+            widthDecimal,
+            columnNumber
           ]);
         }
       }
 
-      // Optionally remove items that were deleted (items still in existingItems map)
-      // For safety, we'll just mark them as hidden instead of deleting
-      for (const [name, item] of existingItems) {
-        logger.info('Hiding removed field', { itemId: item.item_id, name });
-        await client.query(`
-          UPDATE item_form_metadata SET show_item = false
-          WHERE item_id = $1 AND crf_version_id = $2
-        `, [item.item_id, crfVersionId]);
+      // Soft-delete items that were NOT in the incoming field list.
+      // Any existing item whose item_id is not in matchedItemIds was removed by the user.
+      for (const [itemIdKey, item] of existingItemsById) {
+        if (!matchedItemIds.has(itemIdKey)) {
+          logger.info('Hiding removed field', { itemId: item.item_id, name: item.name });
+          await client.query(`
+            UPDATE item_form_metadata SET show_item = false
+            WHERE item_id = $1 AND crf_version_id = $2
+          `, [item.item_id, crfVersionId]);
+        }
       }
 
       // ========================================

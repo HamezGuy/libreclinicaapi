@@ -138,7 +138,7 @@ describe('Validation Rule Application (applyRule)', () => {
       expect(result.valid).toBe(true);
     });
 
-    it('should PASS for array value (multi-select)', () => {
+    it('should PASS for array value (checkbox)', () => {
       const result = validationRulesService.testRuleDirectly(requiredRule, ['opt1', 'opt2'], {});
       expect(result.valid).toBe(true);
     });
@@ -363,10 +363,10 @@ describe('Field Matching in validateFormData', () => {
 });
 
 // ============================================================================
-// 3. CHECKBOX / MULTI-SELECT HANDLING TESTS
+// 3. CHECKBOX HANDLING TESTS
 // ============================================================================
 
-describe('Checkbox and Multi-Select Validation', () => {
+describe('Checkbox Validation', () => {
   
   it('should NOT fail range validation for comma-separated checkbox values', () => {
     const rangeRule: any = {

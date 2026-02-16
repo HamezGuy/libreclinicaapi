@@ -138,7 +138,7 @@ describe('E2E Full Flow Integration Tests', () => {
           {
             label: 'Symptoms',
             name: 'symptoms',
-            type: 'multiselect',
+            type: 'checkbox',
             options: [
               { label: 'Fatigue', value: 'fatigue' },
               { label: 'Weight Loss', value: 'weight_loss' },
@@ -562,7 +562,7 @@ describe('Database Schema Verification', () => {
     expect(result.rows.some(r => r.response_type_id === 4)).toBe(true); // file
     expect(result.rows.some(r => r.response_type_id === 5)).toBe(true); // radio
     expect(result.rows.some(r => r.response_type_id === 6)).toBe(true); // select
-    expect(result.rows.some(r => r.response_type_id === 7)).toBe(true); // multiselect
+    expect(result.rows.some(r => r.response_type_id === 3)).toBe(true); // checkbox (multi-value)
   });
 });
 

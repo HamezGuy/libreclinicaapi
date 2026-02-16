@@ -146,6 +146,7 @@ export const getEventCRFs = async (eventDefinitionId: number): Promise<any[]> =>
       LEFT JOIN crf_version cv ON edc.default_version_id = cv.crf_version_id
       WHERE edc.study_event_definition_id = $1
         AND edc.status_id = 1
+        AND c.status_id NOT IN (5, 6, 7)
       ORDER BY edc.ordinal
     `;
 
@@ -455,7 +456,7 @@ export const createStudyEvent = async (
     studyId: number;
     name: string;
     description?: string;
-    ordinal: number;
+    ordinal?: number;
     type?: string;
     repeating?: boolean;
     category?: string;
@@ -468,6 +469,17 @@ export const createStudyEvent = async (
 
   try {
     await client.query('BEGIN');
+
+    // Auto-calculate ordinal if not provided
+    let ordinal = data.ordinal;
+    if (!ordinal) {
+      const maxOrdinalResult = await client.query(
+        `SELECT COALESCE(MAX(ordinal), 0) + 1 as next_ordinal 
+         FROM study_event_definition WHERE study_id = $1`,
+        [data.studyId]
+      );
+      ordinal = maxOrdinalResult.rows[0]?.next_ordinal || 1;
+    }
 
     // Generate OC OID
     const ocOid = `SE_${data.studyId}_${data.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
@@ -487,7 +499,7 @@ export const createStudyEvent = async (
       data.studyId,
       data.name,
       data.description || '',
-      data.ordinal,
+      ordinal,
       data.type || 'scheduled',
       data.repeating || false,
       data.category || 'Study Event',
@@ -708,16 +720,40 @@ export const deleteStudyEvent = async (
 // ============================================
 
 /**
- * Get all CRFs available to assign to an event (for a study)
+ * Get CRFs available to assign to an event, filtered by study and organization.
+ * Only returns forms belonging to the specified study (via source_study_id)
+ * that are not already assigned to this event definition, not archived/removed,
+ * and owned by members of the caller's organization.
  */
 export const getAvailableCrfsForEvent = async (
   studyId: number,
-  eventDefinitionId: number
+  eventDefinitionId: number,
+  callerUserId?: number
 ): Promise<any[]> => {
-  logger.info('Getting available CRFs for event', { studyId, eventDefinitionId });
+  logger.info('Getting available CRFs for event', { studyId, eventDefinitionId, callerUserId });
 
   try {
-    // Get CRFs not already assigned to this event
+    // Build org-scoping filter
+    let orgFilter = '';
+    const params: any[] = [studyId, eventDefinitionId];
+    let paramIndex = 3;
+
+    if (callerUserId) {
+      const orgCheck = await pool.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+        [callerUserId]
+      );
+      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+
+      if (userOrgIds.length > 0) {
+        params.push(userOrgIds);
+        orgFilter = `AND c.owner_id IN (
+          SELECT m.user_id FROM acc_organization_member m
+          WHERE m.organization_id = ANY($${paramIndex++}::int[]) AND m.status = 'active'
+        )`;
+      }
+    }
+
     const query = `
       SELECT 
         c.crf_id,
@@ -735,15 +771,18 @@ export const getAvailableCrfsForEvent = async (
         FROM crf_version
         ORDER BY crf_id, crf_version_id DESC
       ) cv ON c.crf_id = cv.crf_id
-      WHERE c.status_id = 1
+      WHERE c.status_id IN (1, 2)
+        AND c.source_study_id = $1
         AND c.crf_id NOT IN (
           SELECT crf_id FROM event_definition_crf 
-          WHERE study_event_definition_id = $1 AND status_id = 1
+          WHERE study_event_definition_id = $2 AND status_id = 1
         )
+        ${orgFilter}
       ORDER BY c.name
     `;
 
-    const result = await pool.query(query, [eventDefinitionId]);
+    const result = await pool.query(query, params);
+    logger.info('Available CRFs for event', { studyId, eventDefinitionId, count: result.rows.length });
     return result.rows;
   } catch (error: any) {
     logger.error('Get available CRFs error', { error: error.message });

@@ -39,7 +39,7 @@ export const getEnrollmentStats = async (
     const start = startDate || new Date(new Date().setFullYear(new Date().getFullYear() - 1));
     const end = endDate || new Date();
 
-    // Get overall counts
+    // Get overall counts (includes all subjects for accurate enrollment picture)
     const countsQuery = `
       SELECT 
         COUNT(*) as total_subjects,
@@ -127,22 +127,30 @@ export const getEnrollmentStats = async (
 /**
  * Get form completion statistics
  * RED X Feature: Completion Dashboard
+ * 
+ * Filters:
+ * - Only includes event_crfs for the selected study (via study_subject)
+ * - Excludes soft-deleted event_crfs (status_id NOT IN 5, 7)
+ * - Excludes removed/withdrawn study_subjects (status_id NOT IN 5, 7)
+ * - Excludes soft-deleted CRFs (status_id NOT IN 5, 7)
  */
 export const getCompletionStats = async (studyId: number): Promise<CompletionStats> => {
   logger.info('Getting completion statistics', { studyId });
 
   try {
-    // Get overall completion counts
+    // Get overall completion counts - scoped to study, excluding soft-deleted records
     const overallQuery = `
       SELECT 
         COUNT(*) as total_crfs,
         COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END) as completed_crfs,
-        COUNT(CASE WHEN cs.name NOT IN ('complete', 'signed') THEN 1 END) as incomplete_crfs
+        COUNT(CASE WHEN cs.name NOT IN ('complete', 'signed') OR cs.name IS NULL THEN 1 END) as incomplete_crfs
       FROM event_crf ec
       INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
       INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       WHERE ss.study_id = $1
+        AND ss.status_id NOT IN (5, 7)
+        AND ec.status_id NOT IN (5, 7)
     `;
 
     const overallResult = await pool.query(overallQuery, [studyId]);
@@ -155,14 +163,17 @@ export const getCompletionStats = async (studyId: number): Promise<CompletionSta
       ? Math.round((completedCRFs / totalCRFs) * 100) 
       : 0;
 
-    // Get completion by form
+    // Get completion by form - properly scoped and excluding soft-deleted
     const byFormQuery = `
       SELECT 
         c.crf_id,
         c.name as crf_name,
         COUNT(*) as total_expected,
         COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END) as completed,
-        ROUND(COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END)::numeric / COUNT(*)::numeric * 100, 2) as completion_percentage
+        ROUND(
+          COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END)::numeric 
+          / NULLIF(COUNT(*)::numeric, 0) * 100, 2
+        ) as completion_percentage
       FROM event_crf ec
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
       INNER JOIN crf c ON cv.crf_id = c.crf_id
@@ -170,6 +181,9 @@ export const getCompletionStats = async (studyId: number): Promise<CompletionSta
       INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       WHERE ss.study_id = $1
+        AND ss.status_id NOT IN (5, 7)
+        AND ec.status_id NOT IN (5, 7)
+        AND c.status_id NOT IN (5, 7)
       GROUP BY c.crf_id, c.name
       ORDER BY completion_percentage DESC
     `;
@@ -181,10 +195,10 @@ export const getCompletionStats = async (studyId: number): Promise<CompletionSta
       crfName: row.crf_name,
       totalExpected: parseInt(row.total_expected),
       completed: parseInt(row.completed),
-      completionPercentage: parseFloat(row.completion_percentage)
+      completionPercentage: parseFloat(row.completion_percentage) || 0
     }));
 
-    // Calculate average completion time
+    // Calculate average completion time - only for completed, non-deleted records
     const avgTimeQuery = `
       SELECT 
         AVG(EXTRACT(EPOCH FROM (ec.date_updated - ec.date_created)) / 86400) as avg_days
@@ -195,6 +209,8 @@ export const getCompletionStats = async (studyId: number): Promise<CompletionSta
       WHERE ss.study_id = $1
         AND cs.name IN ('complete', 'signed')
         AND ec.date_updated IS NOT NULL
+        AND ss.status_id NOT IN (5, 7)
+        AND ec.status_id NOT IN (5, 7)
     `;
 
     const avgTimeResult = await pool.query(avgTimeQuery, [studyId]);
@@ -562,7 +578,8 @@ export const getEnrollmentTrend = async (
 
 /**
  * Get completion trend over time
- * Note: Uses date_updated when completion_status_id indicates complete (4 or 5)
+ * Note: Uses date_updated when completion_status_id indicates complete
+ * Excludes soft-deleted records (status_id IN 5, 7)
  */
 export const getCompletionTrend = async (
   studyId: number,
@@ -582,6 +599,8 @@ export const getCompletionTrend = async (
       WHERE ss.study_id = $1
         AND cs.name IN ('complete', 'signed')
         AND ec.date_updated >= CURRENT_DATE - INTERVAL '${days} days'
+        AND ss.status_id NOT IN (5, 7)
+        AND ec.status_id NOT IN (5, 7)
       GROUP BY DATE(ec.date_updated)
       ORDER BY date
     `;
@@ -599,6 +618,7 @@ export const getCompletionTrend = async (
 
 /**
  * Get site performance metrics
+ * Excludes soft-deleted subjects and event_crfs (status_id IN 5, 7)
  */
 export const getSitePerformance = async (studyId: number): Promise<any[]> => {
   logger.info('Getting site performance', { studyId });
@@ -610,17 +630,18 @@ export const getSitePerformance = async (studyId: number): Promise<any[]> => {
         s.study_id as site_id,
         s.name as site_name,
         s.unique_identifier as site_number,
-        COUNT(DISTINCT ss.study_subject_id) as enrolled_subjects,
-        COUNT(DISTINCT ec.event_crf_id) as total_forms,
-        COUNT(DISTINCT CASE WHEN cs.name IN ('complete', 'signed') THEN ec.event_crf_id END) as completed_forms,
-        COUNT(DISTINCT dn.discrepancy_note_id) as open_queries
+        COUNT(DISTINCT CASE WHEN ss.status_id NOT IN (5, 7) THEN ss.study_subject_id END) as enrolled_subjects,
+        COUNT(DISTINCT CASE WHEN ec.status_id NOT IN (5, 7) AND ss.status_id NOT IN (5, 7) THEN ec.event_crf_id END) as total_forms,
+        COUNT(DISTINCT CASE WHEN cs.name IN ('complete', 'signed') AND ec.status_id NOT IN (5, 7) AND ss.status_id NOT IN (5, 7) THEN ec.event_crf_id END) as completed_forms,
+        COUNT(DISTINCT CASE WHEN dn.parent_dn_id IS NULL THEN dn.discrepancy_note_id END) as open_queries
       FROM study s
       LEFT JOIN study_subject ss ON ss.study_id = s.study_id
       LEFT JOIN study_event se ON se.study_subject_id = ss.study_subject_id
       LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
-      LEFT JOIN discrepancy_note dn ON dn.study_id = s.study_id AND dn.resolution_status_id IN (1,2,3)
+      LEFT JOIN discrepancy_note dn ON dn.study_id = s.study_id AND dn.resolution_status_id IN (1,2,3) AND dn.parent_dn_id IS NULL
       WHERE s.parent_study_id = $1
+        AND s.status_id NOT IN (5, 7)
       GROUP BY s.study_id, s.name, s.unique_identifier
       ORDER BY s.name
     `;
@@ -646,6 +667,13 @@ export const getSitePerformance = async (studyId: number): Promise<any[]> => {
 
 /**
  * Get form completion rates by CRF
+ * 
+ * FIXED: Previous query had a buggy JOIN condition (OR cv.crf_id = c.crf_id)
+ * that was always true, creating a cartesian product and pulling CRFs from 
+ * ALL studies/organizations. Now properly scopes through event_crf -> study_event 
+ * -> study_subject to only show forms for the selected study.
+ * 
+ * Also excludes soft-deleted records (status_id IN 5, 7).
  */
 export const getFormCompletionRates = async (studyId: number): Promise<any[]> => {
   logger.info('Getting form completion rates', { studyId });
@@ -657,14 +685,17 @@ export const getFormCompletionRates = async (studyId: number): Promise<any[]> =>
         c.name as form_name,
         COUNT(ec.event_crf_id) as total_instances,
         COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END) as completed,
-        COUNT(CASE WHEN cs.name NOT IN ('complete', 'signed') THEN 1 END) as incomplete
-      FROM crf c
-      INNER JOIN crf_version cv ON c.crf_id = cv.crf_id
-      INNER JOIN event_definition_crf edc ON cv.crf_version_id = edc.default_version_id OR cv.crf_id = c.crf_id
-      INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
-      LEFT JOIN event_crf ec ON ec.crf_version_id = cv.crf_version_id
+        COUNT(CASE WHEN cs.name NOT IN ('complete', 'signed') OR cs.name IS NULL THEN 1 END) as incomplete
+      FROM event_crf ec
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
-      WHERE sed.study_id = $1
+      WHERE ss.study_id = $1
+        AND ss.status_id NOT IN (5, 7)
+        AND ec.status_id NOT IN (5, 7)
+        AND c.status_id NOT IN (5, 7)
       GROUP BY c.crf_id, c.name
       ORDER BY c.name
     `;
@@ -688,6 +719,7 @@ export const getFormCompletionRates = async (studyId: number): Promise<any[]> =>
 
 /**
  * Get data quality metrics
+ * Excludes soft-deleted records (status_id IN 5, 7)
  */
 export const getDataQualityMetrics = async (studyId: number): Promise<any> => {
   logger.info('Getting data quality metrics', { studyId });
@@ -701,11 +733,13 @@ export const getDataQualityMetrics = async (studyId: number): Promise<any> => {
         (SELECT COUNT(*) FROM event_crf ec 
          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
          INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-         WHERE ss.study_id = $1 AND ec.sdv_status = true) as sdv_verified,
+         WHERE ss.study_id = $1 AND ec.sdv_status = true
+           AND ss.status_id NOT IN (5, 7) AND ec.status_id NOT IN (5, 7)) as sdv_verified,
         (SELECT COUNT(*) FROM event_crf ec 
          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
          INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-         WHERE ss.study_id = $1) as total_crfs,
+         WHERE ss.study_id = $1
+           AND ss.status_id NOT IN (5, 7) AND ec.status_id NOT IN (5, 7)) as total_crfs,
         (SELECT COUNT(*) FROM audit_log_event ale
          WHERE ale.audit_date >= CURRENT_DATE - INTERVAL '30 days') as audit_events_30d
     `;
@@ -719,7 +753,7 @@ export const getDataQualityMetrics = async (studyId: number): Promise<any> => {
       resolvedQueries: parseInt(row.resolved_queries) || 0,
       queryResolutionRate: row.total_queries > 0 
         ? Math.round((parseInt(row.resolved_queries) / parseInt(row.total_queries)) * 100) 
-        : 0, // No queries = no resolution data
+        : 0,
       sdvVerified: parseInt(row.sdv_verified) || 0,
       totalCRFs: parseInt(row.total_crfs) || 0,
       sdvRate: row.total_crfs > 0 

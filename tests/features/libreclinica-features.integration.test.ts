@@ -119,10 +119,10 @@ describe('LibreClinica Features Integration Tests', () => {
               { label: 'UK', value: 'UK' }
             ]
           },
-          // Response Type 7: Multi-Select
+          // Response Type 3: Checkbox (multi-value)
           {
             label: 'Symptoms',
-            type: 'multiselect',
+            type: 'checkbox',
             options: [
               { label: 'Headache', value: 'headache' },
               { label: 'Fever', value: 'fever' }

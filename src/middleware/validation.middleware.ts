@@ -809,7 +809,7 @@ export const eventSchemas = {
     studyId: Joi.number().integer().positive().required(),
     name: Joi.string().required().min(3).max(255),
     description: Joi.string().optional().max(1000),
-    ordinal: Joi.number().integer().min(1).required(),
+    ordinal: Joi.number().integer().min(1).optional(), // Auto-calculated if not provided
     type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
     repeating: Joi.boolean().optional(),
     category: Joi.string().optional().max(100)

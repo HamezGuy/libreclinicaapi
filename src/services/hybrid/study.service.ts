@@ -230,7 +230,7 @@ export const getStudies = async (
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id AND status_id = 1) as active_subjects,
         (SELECT COUNT(DISTINCT sed.study_event_definition_id) FROM study_event_definition sed WHERE sed.study_id = s.study_id) as total_events,
-        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id) as total_forms,
+        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id AND c.status_id NOT IN (5, 6, 7)) as total_forms,
         (SELECT COUNT(DISTINCT s2.study_id) FROM study s2 WHERE s2.parent_study_id = s.study_id) as total_sites
       FROM study s
       INNER JOIN status st ON s.status_id = st.status_id
@@ -367,7 +367,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as total_subjects,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id AND status_id = 1) as active_subjects,
         (SELECT COUNT(*) FROM study_event_definition WHERE study_id = s.study_id) as total_events,
-        (SELECT COUNT(*) FROM crf WHERE source_study_id = s.study_id) as total_forms,
+        (SELECT COUNT(*) FROM crf WHERE source_study_id = s.study_id AND status_id NOT IN (5, 6, 7)) as total_forms,
         (SELECT COUNT(*) FROM discrepancy_note WHERE study_id = s.study_id AND parent_dn_id IS NULL) as total_queries
       FROM study s
       INNER JOIN status st ON s.status_id = st.status_id
@@ -2002,7 +2002,7 @@ async function enrichStudiesWithStats(soapStudies: any[], userId: number): Promi
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id AND status_id = 1) as active_subjects,
         (SELECT COUNT(DISTINCT sed.study_event_definition_id) FROM study_event_definition sed WHERE sed.study_id = s.study_id) as total_events,
-        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id) as total_forms
+        (SELECT COUNT(DISTINCT c.crf_id) FROM crf c WHERE c.source_study_id = s.study_id AND c.status_id NOT IN (5, 6, 7)) as total_forms
       FROM study s
       INNER JOIN status st ON s.status_id = st.status_id
       WHERE s.oc_oid = ANY($1) OR s.unique_identifier = ANY($1)
