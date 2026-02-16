@@ -1437,7 +1437,22 @@ export interface FormPermissions {
 }
 
 /**
- * Workflow task for task management
+ * Workflow task types — stored in acc_workflow_tasks.task_type
+ */
+export type WorkflowType = 'data_entry' | 'review' | 'sdv' | 'signature' | 'query' | 'custom';
+
+/**
+ * Workflow task priorities — stored in acc_workflow_tasks.priority
+ */
+export type WorkflowPriority = 'low' | 'medium' | 'high' | 'critical';
+
+/**
+ * Workflow task statuses — stored in acc_workflow_tasks.status
+ */
+export type WorkflowStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'overdue';
+
+/**
+ * Workflow task for task management (acc_workflow_tasks)
  */
 export interface WorkflowTask {
   id: string;

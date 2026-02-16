@@ -6,6 +6,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { WorkflowType, WorkflowPriority, WorkflowStatus } from '../../types/libreclinica-models';
 
 /**
  * CRF Lifecycle phases (ordered).
@@ -233,8 +234,8 @@ export const triggerSubjectEnrolledWorkflow = async (
 // Task-based workflow management (used by workflow.controller.ts)
 // ============================================================================
 
-export type WorkflowPriority = 'low' | 'medium' | 'high' | 'critical';
-export type WorkflowType = 'data_entry' | 'review' | 'sdv' | 'signature' | 'query' | 'custom';
+// Re-export from types layer so controller can access via workflowService.WorkflowStatus etc.
+export { WorkflowType, WorkflowPriority, WorkflowStatus };
 
 interface WorkflowFilter {
   status?: WorkflowStatus;
