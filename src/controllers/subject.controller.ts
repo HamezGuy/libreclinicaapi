@@ -445,12 +445,14 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
   logger.info('Getting subject forms', { subjectId: id });
 
   try {
-    const query = `
+    // Get forms WITH existing data (event_crf entries)
+    const existingFormsQuery = `
       SELECT 
         ec.event_crf_id,
         ec.study_event_id,
         se.study_subject_id,
         sed.name as event_name,
+        sed.study_event_definition_id,
         c.crf_id,
         c.name as form_name,
         c.description as form_description,
@@ -458,7 +460,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
         cv.name as version_name,
         ec.date_interviewed,
         ec.interviewer_name,
-        cs.name as completion_status,
+        COALESCE(cs.name, 'initial_data_entry') as completion_status,
         st.name as status,
         ec.date_created,
         ec.date_updated,
@@ -470,23 +472,62 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
       INNER JOIN crf c ON cv.crf_id = c.crf_id
-      INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       INNER JOIN status st ON ec.status_id = st.status_id
       WHERE se.study_subject_id = $1
+        AND ec.status_id NOT IN (5, 7)
       ORDER BY sed.ordinal, c.name
     `;
 
-    const result = await pool.query(query, [parseInt(id)]);
+    const existingResult = await pool.query(existingFormsQuery, [parseInt(id)]);
+    
+    // Track which (study_event_id, crf_id) pairs already have event_crf entries
+    const existingPairs = new Set(
+      existingResult.rows.map((r: any) => `${r.study_event_id}_${r.crf_id}`)
+    );
 
-    const forms = result.rows.map(form => ({
+    // Get forms ASSIGNED to events but WITHOUT data yet (from event_definition_crf)
+    // These are forms the patient should fill out but hasn't started
+    const assignedFormsQuery = `
+      SELECT 
+        se.study_event_id,
+        se.study_subject_id,
+        sed.name as event_name,
+        sed.study_event_definition_id,
+        edc.crf_id,
+        c.name as form_name,
+        c.description as form_description,
+        (SELECT cv2.crf_version_id FROM crf_version cv2 
+         WHERE cv2.crf_id = edc.crf_id AND cv2.status_id NOT IN (5, 7) 
+         ORDER BY cv2.crf_version_id DESC LIMIT 1) as crf_version_id,
+        (SELECT cv2.name FROM crf_version cv2 
+         WHERE cv2.crf_id = edc.crf_id AND cv2.status_id NOT IN (5, 7) 
+         ORDER BY cv2.crf_version_id DESC LIMIT 1) as version_name,
+        edc.required_crf,
+        edc.ordinal as crf_ordinal
+      FROM study_event se
+      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+      INNER JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id
+      INNER JOIN crf c ON edc.crf_id = c.crf_id
+      WHERE se.study_subject_id = $1
+        AND se.status_id NOT IN (5, 7)
+        AND edc.status_id NOT IN (5, 7)
+        AND c.status_id NOT IN (5, 7)
+      ORDER BY sed.ordinal, edc.ordinal, c.name
+    `;
+
+    const assignedResult = await pool.query(assignedFormsQuery, [parseInt(id)]);
+
+    // Map existing forms (with data)
+    const forms = existingResult.rows.map((form: any) => ({
       id: form.event_crf_id.toString(),
       eventId: form.study_event_id.toString(),
       eventName: form.event_name,
       formId: form.crf_id.toString(),
       formName: form.form_name,
       formDescription: form.form_description || '',
-      versionId: form.crf_version_id.toString(),
-      versionName: form.version_name,
+      versionId: form.crf_version_id?.toString() || '',
+      versionName: form.version_name || '',
       interviewDate: form.date_interviewed,
       interviewer: form.interviewer_name || '',
       completionStatus: form.completion_status,
@@ -497,6 +538,34 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
       dateValidated: form.date_validate,
       validatorId: form.validator_id
     }));
+
+    // Add assigned but not-yet-started forms (no event_crf entry yet)
+    for (const assigned of assignedResult.rows) {
+      const pairKey = `${assigned.study_event_id}_${assigned.crf_id}`;
+      if (!existingPairs.has(pairKey)) {
+        forms.push({
+          id: `pending_${assigned.study_event_id}_${assigned.crf_id}`,
+          eventId: assigned.study_event_id.toString(),
+          eventName: assigned.event_name,
+          formId: assigned.crf_id.toString(),
+          formName: assigned.form_name,
+          formDescription: assigned.form_description || '',
+          versionId: assigned.crf_version_id?.toString() || '',
+          versionName: assigned.version_name || '',
+          interviewDate: null,
+          interviewer: '',
+          completionStatus: 'not_started',
+          status: 'available',
+          dateCreated: null,
+          dateUpdated: null,
+          dateCompleted: null,
+          dateValidated: null,
+          validatorId: null
+        });
+        // Track this pair so we don't add duplicates
+        existingPairs.add(pairKey);
+      }
+    }
 
     res.json({ success: true, data: forms });
   } catch (error: any) {
