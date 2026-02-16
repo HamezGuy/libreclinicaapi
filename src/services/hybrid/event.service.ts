@@ -826,10 +826,6 @@ export const getAvailableCrfsForEvent = async (
       ) cv ON c.crf_id = cv.crf_id
       WHERE c.status_id IN (1, 2)
         AND ${visibilityFilter}
-        AND c.crf_id NOT IN (
-          SELECT crf_id FROM event_definition_crf 
-          WHERE study_event_definition_id = $2 AND status_id NOT IN (5, 7)
-        )
         AND EXISTS (SELECT 1 FROM crf_version v WHERE v.crf_id = c.crf_id AND v.status_id NOT IN (5, 7))
       ORDER BY c.name
     `;
@@ -869,19 +865,8 @@ export const assignCrfToEvent = async (
   try {
     await client.query('BEGIN');
 
-    // Check if already assigned
-    const existingQuery = `
-      SELECT event_definition_crf_id FROM event_definition_crf 
-      WHERE study_event_definition_id = $1 AND crf_id = $2 AND status_id = 1
-    `;
-    const existing = await client.query(existingQuery, [data.studyEventDefinitionId, data.crfId]);
-    
-    if (existing.rows.length > 0) {
-      return {
-        success: false,
-        message: 'CRF is already assigned to this event'
-      };
-    }
+    // Allow the same CRF to be assigned multiple times to the same event
+    // (each assignment gets its own event_definition_crf_id and ordinal)
 
     // Get study ID from event definition
     const studyQuery = `SELECT study_id FROM study_event_definition WHERE study_event_definition_id = $1`;
