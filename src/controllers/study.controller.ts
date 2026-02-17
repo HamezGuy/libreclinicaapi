@@ -162,7 +162,9 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
         s.facility_address,
         s.facility_city,
         s.facility_state,
+        s.facility_zip,
         s.facility_country,
+        s.facility_recruitment_status,
         s.facility_contact_email,
         s.facility_contact_phone,
         st.name as status_name,
@@ -182,6 +184,7 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
       id: site.study_id.toString(),
       siteNumber: site.unique_identifier,
       siteName: site.name,
+      uniqueIdentifier: site.unique_identifier,
       description: site.summary || '',
       principalInvestigator: site.principal_investigator || '',
       status: mapSiteStatus(site.status_id),
@@ -190,6 +193,7 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
         street: site.facility_address || '',
         city: site.facility_city || '',
         state: site.facility_state || '',
+        zip: site.facility_zip || '',
         country: site.facility_country || ''
       },
       // Also provide flat field names for frontend compatibility
@@ -197,7 +201,9 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
       facilityAddress: site.facility_address || '',
       facilityCity: site.facility_city || '',
       facilityState: site.facility_state || '',
+      facilityZip: site.facility_zip || '',
       facilityCountry: site.facility_country || '',
+      facilityRecruitmentStatus: site.facility_recruitment_status || '',
       contact: {
         email: site.facility_contact_email || '',
         phone: site.facility_contact_phone || ''

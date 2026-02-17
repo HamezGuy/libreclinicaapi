@@ -34,6 +34,12 @@ router.get('/subject/:subjectId', validate({ params: commonSchemas.subjectIdPara
 // Get patient's event_crfs for a specific study_event instance (editable copies)
 router.get('/instance/:studyEventId/crfs', controller.getPatientEventCRFs);
 
+// Get CRF completion statuses for a patient's visit instance (used by data entry UI)
+router.get('/instance/:studyEventId/crfs/status', controller.getPatientEventCRFStatuses);
+
+// Get ALL forms for a patient's visit (template forms + patient status in one call)
+router.get('/instance/:studyEventId/visit-forms', controller.getVisitForms);
+
 // Create/Update/Delete - require coordinator or admin role + signature
 router.post('/', 
   requireRole('admin', 'data_manager'), 
@@ -73,6 +79,7 @@ router.get('/study/:studyId/event/:eventId/available-crfs', controller.getAvaila
 // Assign CRF to event (signature required)
 router.post('/:eventId/crfs', 
   requireRole('admin', 'data_manager'), 
+  validate({ body: eventSchemas.assignCrf }),
   requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
   controller.assignCrf
 );
@@ -103,6 +110,50 @@ router.post('/:eventId/crfs/bulk',
   requireRole('admin', 'data_manager'), 
   requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
   controller.bulkAssignCrfs
+);
+
+// ============================================
+// PATIENT-SPECIFIC VISIT/FORM ROUTES
+// ============================================
+
+// Assign form to a specific patient visit instance (does NOT modify template)
+router.post('/instance/:studyEventId/crfs', 
+  requireRole('admin', 'data_manager', 'coordinator'),
+  validate({ body: eventSchemas.assignFormToPatientVisit }),
+  controller.assignFormToPatientVisit
+);
+
+// Create an unscheduled visit on the fly for a patient
+router.post('/unscheduled', 
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
+  validate({ body: eventSchemas.createUnscheduled }),
+  controller.createUnscheduledVisit
+);
+
+// Get patient form snapshots for a visit
+router.get('/instance/:studyEventId/form-snapshots', 
+  controller.getPatientFormSnapshots
+);
+
+// Save patient form data to a snapshot
+router.put('/patient-form/:patientEventFormId/data', 
+  validate({ body: eventSchemas.savePatientFormData }),
+  controller.savePatientFormData
+);
+
+// ============================================
+// VERIFICATION / TEST QUERIES
+// ============================================
+
+// Compare study source-of-truth with patient copies (events, forms, snapshots)
+router.get('/verify/subject/:subjectId',
+  controller.verifyPatientFormIntegrity
+);
+
+// Repair missing patient_event_form snapshots
+router.post('/verify/subject/:subjectId/repair',
+  requireRole('admin', 'data_manager'),
+  controller.repairMissingSnapshots
 );
 
 export default router;

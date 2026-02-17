@@ -9,7 +9,16 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import * as eventSoap from '../soap/eventSoap.service';
+import { getFormMetadata } from './form.service';
 import { ApiResponse, PaginatedResponse } from '../../types';
+import {
+  CreateEventRequest,
+  UpdateEventRequest,
+  ScheduleEventRequest,
+  CreateUnscheduledVisitRequest,
+  AssignCrfToEventRequest,
+  AssignFormToPatientVisitRequest
+} from '../../types/event.dto';
 
 /**
  * Get all study events (phases) for a study
@@ -216,18 +225,82 @@ export const getPatientEventCRFs = async (studyEventId: number): Promise<any[]> 
 };
 
 /**
+ * Get ALL forms for a patient's visit — the single source of truth for the visit detail UI.
+ * 
+ * Combines:
+ *   1. Template-level forms (event_definition_crf) — which forms SHOULD exist for this visit type
+ *   2. Patient-level form instances (event_crf) — which forms the patient has started/completed
+ * 
+ * Returns one row per form. If the patient has an event_crf for that form, it includes
+ * status/progress. If not, status = 'not_started'.
+ */
+export const getVisitForms = async (studyEventId: number): Promise<any[]> => {
+  logger.info('Getting visit forms', { studyEventId });
+
+  try {
+    const query = `
+      WITH visit_info AS (
+        SELECT study_event_definition_id, study_subject_id
+        FROM study_event
+        WHERE study_event_id = $1
+      )
+      SELECT
+        edc.event_definition_crf_id,
+        edc.crf_id,
+        c.name             AS crf_name,
+        c.description      AS crf_description,
+        edc.required_crf,
+        edc.double_entry,
+        edc.ordinal,
+        edc.electronic_signature,
+        edc.default_version_id,
+        cv_def.name        AS default_version_name,
+        -- Patient-specific instance (may be NULL if form not yet started)
+        ec.event_crf_id,
+        ec.crf_version_id  AS patient_version_id,
+        COALESCE(cs.name, 'not_started') AS completion_status,
+        ec.completion_status_id,
+        ec.date_created    AS started_at,
+        ec.date_completed  AS completed_at,
+        COALESCE(
+          (SELECT COUNT(*) FROM item_data id2
+           WHERE id2.event_crf_id = ec.event_crf_id AND id2.deleted = false), 0
+        ) AS filled_fields,
+        COALESCE(
+          (SELECT COUNT(DISTINCT i.item_id)
+           FROM item i
+           INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+           WHERE igm.crf_version_id = COALESCE(ec.crf_version_id, edc.default_version_id)), 0
+        ) AS total_fields
+      FROM event_definition_crf edc
+      INNER JOIN crf c ON edc.crf_id = c.crf_id
+      LEFT JOIN crf_version cv_def ON edc.default_version_id = cv_def.crf_version_id
+      -- Join patient's form instances for THIS visit
+      LEFT JOIN event_crf ec
+        ON ec.study_event_id = $1
+        AND ec.crf_version_id IN (
+          SELECT cv2.crf_version_id FROM crf_version cv2 WHERE cv2.crf_id = edc.crf_id
+        )
+      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      WHERE edc.study_event_definition_id = (SELECT study_event_definition_id FROM visit_info)
+        AND edc.status_id = 1
+        AND c.status_id NOT IN (5, 6, 7)
+      ORDER BY edc.ordinal, c.name
+    `;
+
+    const result = await pool.query(query, [studyEventId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get visit forms error', { error: error.message, studyEventId });
+    throw error;
+  }
+};
+
+/**
  * Schedule subject event (via SOAP for GxP compliance, with direct SQL fallback)
  */
 export const scheduleSubjectEvent = async (
-  data: {
-    studySubjectId: number;
-    studyEventDefinitionId: number;
-    startDate?: string;
-    endDate?: string;
-    location?: string;
-    scheduledDate?: string;
-    isUnscheduled?: boolean;
-  },
+  data: ScheduleEventRequest,
   userId: number,
   username: string
 ): Promise<ApiResponse<any>> => {
@@ -354,7 +427,6 @@ export const scheduleSubjectEvent = async (
 
       let createdCrfCount = 0;
       for (const crf of crfAssignments.rows) {
-        // Get the latest CRF version if no default is set
         let crfVersionId = crf.crf_version_id || crf.default_version_id;
         if (!crfVersionId) {
           const latestVersionQuery = `
@@ -366,35 +438,37 @@ export const scheduleSubjectEvent = async (
           if (latestVersion.rows.length > 0) {
             crfVersionId = latestVersion.rows[0].crf_version_id;
           } else {
-            logger.warn('No CRF version found for CRF', { 
-              crfId: crf.crf_id, 
-              crfName: crf.crf_name 
-            });
+            logger.warn('No CRF version found for CRF', { crfId: crf.crf_id, crfName: crf.crf_name });
           }
         }
 
         if (crfVersionId) {
-          // CRITICAL: Include study_subject_id for proper foreign key reference
           const insertEventCrfQuery = `
             INSERT INTO event_crf (
               study_event_id, crf_version_id, study_subject_id,
               status_id, owner_id, date_created, completion_status_id, sdv_status
-            ) VALUES (
-              $1, $2, $3, 1, $4, NOW(), 1, false
-            )
+            ) VALUES ($1, $2, $3, 1, $4, NOW(), 1, false)
+            RETURNING event_crf_id
           `;
-          await client.query(insertEventCrfQuery, [
-            studyEventId, 
-            crfVersionId, 
-            data.studySubjectId,  // Added: study_subject_id
-            userId
+          const ecResult = await client.query(insertEventCrfQuery, [
+            studyEventId, crfVersionId, data.studySubjectId, userId
           ]);
+          const eventCrfId = ecResult.rows[0].event_crf_id;
           createdCrfCount++;
-          logger.debug('Created event_crf for patient phase', {
-            studyEventId,
-            crfId: crf.crf_id,
-            crfName: crf.crf_name,
-            studySubjectId: data.studySubjectId
+
+          // Create patient_event_form snapshot (frozen copy of form structure).
+          // This is MANDATORY — every patient must have their own copy of each
+          // form. If snapshot creation fails the entire event scheduling must
+          // roll back so we never end up with event_crf records that have no
+          // corresponding patient_event_form snapshot.
+          await createPatientFormSnapshot(
+            client, studyEventId, eventCrfId, crf.crf_id, crfVersionId,
+            data.studySubjectId, crf.crf_name, createdCrfCount, userId
+          );
+
+          logger.debug('Created event_crf + snapshot for patient phase', {
+            studyEventId, crfId: crf.crf_id, crfName: crf.crf_name,
+            eventCrfId, studySubjectId: data.studySubjectId
           });
         }
       }
@@ -456,19 +530,7 @@ export const scheduleSubjectEvent = async (
  * Create study event definition
  */
 export const createStudyEvent = async (
-  data: {
-    studyId: number;
-    name: string;
-    description?: string;
-    ordinal?: number;
-    type?: string;
-    repeating?: boolean;
-    category?: string;
-    scheduleDay?: number;
-    minDay?: number;
-    maxDay?: number;
-    referenceEventId?: number;
-  },
+  data: CreateEventRequest,
   userId: number
 ): Promise<{ success: boolean; eventDefinitionId?: number; message?: string }> => {
   logger.info('Creating study event', { data, userId });
@@ -560,18 +622,7 @@ export const createStudyEvent = async (
  */
 export const updateStudyEvent = async (
   eventDefinitionId: number,
-  data: {
-    name?: string;
-    description?: string;
-    ordinal?: number;
-    type?: string;
-    repeating?: boolean;
-    category?: string;
-    scheduleDay?: number | null;
-    minDay?: number | null;
-    maxDay?: number | null;
-    referenceEventId?: number | null;
-  },
+  data: UpdateEventRequest,
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
   logger.info('Updating study event', { eventDefinitionId, userId });
@@ -776,8 +827,8 @@ export const getAvailableCrfsForEvent = async (
     //   b) source_study_id is NULL (shared/unlinked CRF)
     //   c) CRF is owned by someone in the user's organization
     let visibilityFilter = `(c.source_study_id = $1 OR c.source_study_id IS NULL)`;
-    const params: any[] = [studyId, eventDefinitionId];
-    let paramIndex = 3;
+    const params: any[] = [studyId];
+    let paramIndex = 2;
 
     if (callerUserId) {
       const orgCheck = await pool.query(
@@ -846,16 +897,7 @@ export const getAvailableCrfsForEvent = async (
  * Assign a CRF (template) to a study event (phase)
  */
 export const assignCrfToEvent = async (
-  data: {
-    studyEventDefinitionId: number;
-    crfId: number;
-    crfVersionId?: number;
-    required?: boolean;
-    doubleEntry?: boolean;
-    hideCrf?: boolean;
-    ordinal?: number;
-    electronicSignature?: boolean;
-  },
+  data: AssignCrfToEventRequest & { studyEventDefinitionId: number },
   userId: number
 ): Promise<{ success: boolean; eventDefinitionCrfId?: number; message?: string }> => {
   logger.info('Assigning CRF to event', { data, userId });
@@ -1243,11 +1285,590 @@ export const bulkAssignCrfsToEvent = async (
   };
 };
 
+/**
+ * Create a frozen JSONB snapshot of a form's structure for a patient visit.
+ *
+ * Uses getFormMetadata() as the SINGLE SOURCE OF TRUTH so the snapshot stores
+ * the exact same field objects that the /api/forms/:id/metadata endpoint returns.
+ * This ensures the frontend FormField DTOs work identically whether a form is
+ * loaded from a shared template or from a patient-specific snapshot.
+ */
+const createPatientFormSnapshot = async (
+  client: any,
+  studyEventId: number,
+  eventCrfId: number,
+  crfId: number,
+  crfVersionId: number,
+  studySubjectId: number,
+  formName: string,
+  ordinal: number,
+  userId: number
+): Promise<number> => {
+  // Reuse getFormMetadata — the same function the /api/forms/:id/metadata
+  // endpoint calls. This returns items in the full DTO format (60+ properties)
+  // including type, showWhen, tableColumns, calculationFormula, unit, etc.
+  const metadata = await getFormMetadata(crfId);
+
+  if (!metadata || !metadata.items || metadata.items.length === 0) {
+    logger.warn('getFormMetadata returned no items for snapshot', { crfId, crfVersionId });
+  }
+
+  const fields = metadata?.items || [];
+
+  const formStructure = {
+    crfId,
+    crfVersionId,
+    name: formName,
+    snapshotDate: new Date().toISOString(),
+    fieldCount: fields.length,
+    fields
+  };
+
+  const insertQuery = `
+    INSERT INTO patient_event_form (
+      study_event_id, event_crf_id, crf_id, crf_version_id,
+      study_subject_id, form_name, form_structure, form_data,
+      completion_status, ordinal, created_by
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, '{}'::jsonb, 'not_started', $8, $9)
+    RETURNING patient_event_form_id
+  `;
+  const result = await client.query(insertQuery, [
+    studyEventId, eventCrfId, crfId, crfVersionId,
+    studySubjectId, formName, JSON.stringify(formStructure),
+    ordinal, userId
+  ]);
+
+  logger.info('Patient form snapshot created', {
+    patientEventFormId: result.rows[0].patient_event_form_id,
+    studyEventId, crfId, fieldCount: fields.length
+  });
+
+  return result.rows[0].patient_event_form_id;
+};
+
+/**
+ * Assign a form to a specific patient visit instance (not the template).
+ * Creates event_crf + patient_event_form for that patient's visit.
+ */
+export const assignFormToPatientVisit = async (
+  studyEventId: number,
+  crfId: number,
+  studySubjectId: number,
+  userId: number
+): Promise<{ success: boolean; eventCrfId?: number; patientEventFormId?: number; message?: string }> => {
+  logger.info('Assigning form to patient visit', { studyEventId, crfId, studySubjectId });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Get latest CRF version
+    const versionQuery = `
+      SELECT cv.crf_version_id, c.name as crf_name
+      FROM crf_version cv
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      WHERE cv.crf_id = $1 AND cv.status_id IN (1, 2)
+      ORDER BY cv.crf_version_id DESC LIMIT 1
+    `;
+    const versionResult = await client.query(versionQuery, [crfId]);
+    if (versionResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'No active version found for this form' };
+    }
+    const crfVersionId = versionResult.rows[0].crf_version_id;
+    const crfName = versionResult.rows[0].crf_name;
+
+    // Check if this form is already assigned to this patient's visit
+    const existsCheck = await client.query(
+      `SELECT event_crf_id FROM event_crf WHERE study_event_id = $1 AND crf_version_id = $2 AND study_subject_id = $3`,
+      [studyEventId, crfVersionId, studySubjectId]
+    );
+    if (existsCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: `Form "${crfName}" is already assigned to this visit` };
+    }
+
+    // Create event_crf record
+    const insertEventCrf = `
+      INSERT INTO event_crf (
+        study_event_id, crf_version_id, study_subject_id,
+        status_id, owner_id, date_created, completion_status_id, sdv_status
+      ) VALUES ($1, $2, $3, 1, $4, NOW(), 1, false)
+      RETURNING event_crf_id
+    `;
+    const ecResult = await client.query(insertEventCrf, [studyEventId, crfVersionId, studySubjectId, userId]);
+    const eventCrfId = ecResult.rows[0].event_crf_id;
+
+    // Get ordinal
+    const ordResult = await client.query(
+      `SELECT COALESCE(MAX(ordinal), 0) + 1 as next FROM patient_event_form WHERE study_event_id = $1`,
+      [studyEventId]
+    );
+    const ordinal = ordResult.rows[0].next;
+
+    // Create snapshot — MANDATORY. Every patient form must have its own
+    // frozen copy. If this fails the transaction rolls back entirely.
+    const patientEventFormId = await createPatientFormSnapshot(
+      client, studyEventId, eventCrfId, crfId, crfVersionId,
+      studySubjectId, crfName, ordinal, userId
+    );
+
+    await client.query('COMMIT');
+
+    return { success: true, eventCrfId, patientEventFormId, message: 'Form assigned to patient visit' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Assign form to patient visit error', { error: error.message });
+    return { success: false, message: `Failed: ${error.message}` };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Create an unscheduled visit on the fly for a patient.
+ * Creates a study_event_definition (if name doesn't exist) + study_event + event_crfs.
+ */
+export const createUnscheduledVisit = async (
+  data: CreateUnscheduledVisitRequest,
+  userId: number,
+  username: string
+): Promise<ApiResponse<any>> => {
+  logger.info('Creating unscheduled visit', { data, userId });
+
+  const visitName = data.name || 'Unscheduled Visit';
+
+  try {
+    // Validate study exists
+    const studyCheck = await pool.query(`SELECT study_id FROM study WHERE study_id = $1`, [data.studyId]);
+    if (studyCheck.rows.length === 0) {
+      return { success: false, message: `Study ${data.studyId} not found` };
+    }
+
+    // Validate subject exists and belongs to study
+    const subjectCheck = await pool.query(
+      `SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1 AND study_id = $2`,
+      [data.studySubjectId, data.studyId]
+    );
+    if (subjectCheck.rows.length === 0) {
+      return { success: false, message: `Subject ${data.studySubjectId} not found in study ${data.studyId}` };
+    }
+
+    // Ensure required status records exist (seed data)
+    await pool.query(`
+      INSERT INTO subject_event_status (subject_event_status_id, name, description)
+      VALUES (1, 'scheduled', 'Event is scheduled'),
+             (2, 'not_scheduled', 'Event is not yet scheduled'),
+             (3, 'data_entry_started', 'Data entry has started'),
+             (4, 'completed', 'Event is completed')
+      ON CONFLICT (subject_event_status_id) DO NOTHING
+    `);
+    await pool.query(`
+      INSERT INTO completion_status (completion_status_id, status_id, name)
+      VALUES (1, 1, 'not_started')
+      ON CONFLICT (completion_status_id) DO NOTHING
+    `);
+
+    // Check if an unscheduled event definition with this name already exists
+    let eventDefId: number;
+    const existsResult = await pool.query(`
+      SELECT study_event_definition_id FROM study_event_definition
+      WHERE study_id = $1 AND name = $2 AND type = 'unscheduled' AND status_id = 1
+    `, [data.studyId, visitName]);
+
+    if (existsResult.rows.length > 0) {
+      eventDefId = existsResult.rows[0].study_event_definition_id;
+    } else {
+      // Create the event definition and assign CRFs in a transaction
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const maxOrd = await client.query(
+          `SELECT COALESCE(MAX(ordinal), 0) + 1 as next FROM study_event_definition WHERE study_id = $1`,
+          [data.studyId]
+        );
+        const ocOid = `SE_${data.studyId}_UNSCHED_${Date.now()}`;
+        const insertDef = await client.query(`
+          INSERT INTO study_event_definition (
+            study_id, name, description, ordinal, type, repeating, category,
+            status_id, owner_id, date_created, oc_oid
+          ) VALUES ($1, $2, $3, $4, 'unscheduled', true, 'Unscheduled', 1, $5, NOW(), $6)
+          RETURNING study_event_definition_id
+        `, [data.studyId, visitName, data.description || '', maxOrd.rows[0].next, userId, ocOid]);
+        eventDefId = insertDef.rows[0].study_event_definition_id;
+
+        // Assign selected CRFs to the definition
+        if (data.crfIds && data.crfIds.length > 0) {
+          for (let i = 0; i < data.crfIds.length; i++) {
+            const crfId = data.crfIds[i];
+            // Validate CRF exists
+            const crfCheck = await client.query(`SELECT crf_id FROM crf WHERE crf_id = $1 AND status_id NOT IN (5,7)`, [crfId]);
+            if (crfCheck.rows.length === 0) {
+              throw new Error(`CRF ${crfId} not found or is inactive`);
+            }
+            const versionQ = await client.query(
+              `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
+              [crfId]
+            );
+            const defVersionId = versionQ.rows[0]?.crf_version_id || null;
+            await client.query(`
+              INSERT INTO event_definition_crf (
+                study_event_definition_id, study_id, crf_id, required_crf,
+                double_entry, hide_crf, ordinal, status_id, owner_id, date_created, default_version_id
+              ) VALUES ($1, $2, $3, false, false, false, $4, 1, $5, NOW(), $6)
+            `, [eventDefId, data.studyId, crfId, i + 1, userId, defVersionId]);
+          }
+        }
+
+        await client.query('COMMIT');
+      } catch (txErr: any) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+    }
+
+    // Schedule the event for the patient (separate transaction inside scheduleSubjectEvent)
+    const scheduleResult = await scheduleSubjectEvent({
+      studySubjectId: data.studySubjectId,
+      studyEventDefinitionId: eventDefId,
+      startDate: data.startDate || new Date().toISOString(),
+      endDate: data.endDate,
+      isUnscheduled: true,
+      scheduledDate: data.startDate || new Date().toISOString()
+    }, userId, username);
+
+    return scheduleResult;
+  } catch (error: any) {
+    logger.error('Create unscheduled visit error', { error: error.message });
+    return { success: false, message: `Failed to create unscheduled visit: ${error.message}` };
+  }
+};
+
+/**
+ * Get patient_event_form records for a specific study_event (visit instance).
+ * Returns the frozen form snapshots with patient data.
+ */
+export const getPatientFormSnapshots = async (studyEventId: number): Promise<any[]> => {
+  try {
+    const query = `
+      SELECT 
+        pef.patient_event_form_id,
+        pef.study_event_id,
+        pef.event_crf_id,
+        pef.crf_id,
+        pef.crf_version_id,
+        pef.study_subject_id,
+        pef.form_name,
+        pef.form_structure,
+        pef.form_data,
+        pef.completion_status,
+        pef.is_locked,
+        pef.is_frozen,
+        pef.sdv_status,
+        pef.ordinal,
+        pef.date_created,
+        pef.date_updated
+      FROM patient_event_form pef
+      WHERE pef.study_event_id = $1
+      ORDER BY pef.ordinal, pef.date_created
+    `;
+    const result = await pool.query(query, [studyEventId]);
+    return result.rows;
+  } catch (error: any) {
+    logger.error('Get patient form snapshots error', { error: error.message });
+    return [];
+  }
+};
+
+/**
+ * Save patient form data to the patient_event_form snapshot.
+ */
+export const savePatientFormData = async (
+  patientEventFormId: number,
+  formData: Record<string, any>,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  try {
+    await pool.query(`
+      UPDATE patient_event_form
+      SET form_data = $1::jsonb,
+          completion_status = CASE WHEN $1::jsonb = '{}'::jsonb THEN 'not_started' ELSE 'in_progress' END,
+          date_updated = NOW(),
+          updated_by = $2
+      WHERE patient_event_form_id = $3
+    `, [JSON.stringify(formData), userId, patientEventFormId]);
+
+    return { success: true, message: 'Form data saved' };
+  } catch (error: any) {
+    logger.error('Save patient form data error', { error: error.message });
+    return { success: false, message: error.message };
+  }
+};
+
+// ============================================================================
+// Verification / Test Queries
+// ============================================================================
+
+/**
+ * Compare study source-of-truth (event_definition_crf) with patient copies
+ * (event_crf + patient_event_form) for a given subject.
+ *
+ * Returns:
+ *  - sourceOfTruth: forms defined at the study level
+ *  - patientCopies: per-patient event_crf + snapshot records
+ *  - mismatches: any missing snapshots or orphan records
+ */
+export const verifyPatientFormIntegrity = async (
+  studySubjectId: number
+): Promise<any> => {
+  logger.info('Running patient form integrity check', { studySubjectId });
+
+  try {
+    // 1. Study Source of Truth: event definitions → assigned CRFs
+    const sourceQuery = `
+      SELECT
+        sed.study_event_definition_id,
+        sed.name        AS event_name,
+        sed.ordinal     AS event_ordinal,
+        edc.event_definition_crf_id,
+        edc.crf_id,
+        c.name          AS crf_name,
+        edc.required_crf,
+        edc.ordinal     AS crf_ordinal,
+        edc.default_version_id,
+        cv.name         AS default_version_name,
+        (SELECT COUNT(*) FROM item i
+         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+         WHERE igm.crf_version_id = COALESCE(edc.default_version_id,
+           (SELECT crf_version_id FROM crf_version WHERE crf_id = edc.crf_id
+            ORDER BY crf_version_id DESC LIMIT 1))
+        ) AS field_count
+      FROM study_event_definition sed
+      INNER JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id
+      INNER JOIN crf c ON edc.crf_id = c.crf_id
+      LEFT JOIN crf_version cv ON edc.default_version_id = cv.crf_version_id
+      WHERE sed.study_id = (SELECT study_id FROM study_subject WHERE study_subject_id = $1)
+        AND edc.status_id NOT IN (5, 7)
+        AND c.status_id  NOT IN (5, 7)
+      ORDER BY sed.ordinal, edc.ordinal
+    `;
+    const sourceResult = await pool.query(sourceQuery, [studySubjectId]);
+
+    // 2. Patient copies: study_event → event_crf → patient_event_form
+    const patientQuery = `
+      SELECT
+        se.study_event_id,
+        se.study_event_definition_id,
+        sed.name        AS event_name,
+        se.scheduled_date,
+        sest.name       AS event_status,
+        ec.event_crf_id,
+        ec.crf_version_id,
+        c.crf_id,
+        c.name          AS crf_name,
+        cv.name         AS version_name,
+        COALESCE(cs.name, 'not_started') AS completion_status,
+        pef.patient_event_form_id,
+        pef.form_name   AS snapshot_name,
+        pef.completion_status AS snapshot_status,
+        CASE WHEN pef.form_structure IS NOT NULL
+             THEN (pef.form_structure->>'fieldCount')::int
+             ELSE NULL END AS snapshot_field_count,
+        pef.date_created AS snapshot_created,
+        (SELECT COUNT(*) FROM item_data id
+         WHERE id.event_crf_id = ec.event_crf_id AND id.deleted = false
+        ) AS data_items_entered
+      FROM study_event se
+      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+      INNER JOIN subject_event_status sest ON se.subject_event_status_id = sest.subject_event_status_id
+      LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+      LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      LEFT JOIN crf c ON cv.crf_id = c.crf_id
+      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+      LEFT JOIN patient_event_form pef ON pef.event_crf_id = ec.event_crf_id
+      WHERE se.study_subject_id = $1
+      ORDER BY se.scheduled_date, sed.ordinal, ec.event_crf_id
+    `;
+    const patientResult = await pool.query(patientQuery, [studySubjectId]);
+
+    // 3. Build mismatch report
+    const mismatches: any[] = [];
+
+    // Check event_crf records that lack a patient_event_form snapshot
+    for (const row of patientResult.rows) {
+      if (row.event_crf_id && !row.patient_event_form_id) {
+        mismatches.push({
+          type: 'missing_snapshot',
+          eventCrfId: row.event_crf_id,
+          crfName: row.crf_name,
+          eventName: row.event_name,
+          studyEventId: row.study_event_id,
+          message: `event_crf ${row.event_crf_id} (${row.crf_name}) has no patient_event_form snapshot`
+        });
+      }
+      if (row.patient_event_form_id && row.snapshot_field_count === 0) {
+        mismatches.push({
+          type: 'empty_snapshot',
+          patientEventFormId: row.patient_event_form_id,
+          crfName: row.crf_name,
+          eventName: row.event_name,
+          message: `Snapshot ${row.patient_event_form_id} for ${row.crf_name} has 0 fields`
+        });
+      }
+    }
+
+    // Check source forms that have no patient event_crf at all
+    const patientEventDefIds = new Set(patientResult.rows.map((r: any) =>
+      `${r.study_event_definition_id}_${r.crf_id}`
+    ));
+    // Build a set of event definitions the patient actually has events for
+    const patientScheduledDefs = new Set(
+      patientResult.rows.map((r: any) => r.study_event_definition_id)
+    );
+    for (const src of sourceResult.rows) {
+      if (patientScheduledDefs.has(src.study_event_definition_id)
+          && !patientEventDefIds.has(`${src.study_event_definition_id}_${src.crf_id}`)) {
+        mismatches.push({
+          type: 'missing_event_crf',
+          eventName: src.event_name,
+          crfName: src.crf_name,
+          crfId: src.crf_id,
+          message: `Study defines ${src.crf_name} for ${src.event_name} but patient has no event_crf record`
+        });
+      }
+    }
+
+    return {
+      studySubjectId,
+      sourceOfTruth: sourceResult.rows.map((r: any) => ({
+        eventDefinitionId: r.study_event_definition_id,
+        eventName: r.event_name,
+        eventOrdinal: r.event_ordinal,
+        crfId: r.crf_id,
+        crfName: r.crf_name,
+        required: r.required_crf,
+        crfOrdinal: r.crf_ordinal,
+        defaultVersionId: r.default_version_id,
+        defaultVersionName: r.default_version_name,
+        fieldCount: parseInt(r.field_count) || 0
+      })),
+      patientCopies: patientResult.rows.map((r: any) => ({
+        studyEventId: r.study_event_id,
+        eventDefinitionId: r.study_event_definition_id,
+        eventName: r.event_name,
+        scheduledDate: r.scheduled_date,
+        eventStatus: r.event_status,
+        eventCrfId: r.event_crf_id,
+        crfId: r.crf_id,
+        crfName: r.crf_name,
+        versionName: r.version_name,
+        completionStatus: r.completion_status,
+        snapshotId: r.patient_event_form_id,
+        snapshotName: r.snapshot_name,
+        snapshotStatus: r.snapshot_status,
+        snapshotFieldCount: r.snapshot_field_count,
+        snapshotCreated: r.snapshot_created,
+        dataItemsEntered: parseInt(r.data_items_entered) || 0
+      })),
+      mismatches,
+      summary: {
+        sourceFormAssignments: sourceResult.rows.length,
+        patientFormCopies: patientResult.rows.filter((r: any) => r.event_crf_id).length,
+        patientSnapshots: patientResult.rows.filter((r: any) => r.patient_event_form_id).length,
+        mismatchCount: mismatches.length,
+        healthy: mismatches.length === 0
+      }
+    };
+  } catch (error: any) {
+    logger.error('Form integrity check error', { error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Repair missing patient_event_form snapshots.
+ * For every event_crf that lacks a snapshot, creates one from the current template.
+ */
+export const repairMissingSnapshots = async (
+  studySubjectId: number,
+  userId: number
+): Promise<{ repaired: number; errors: string[] }> => {
+  logger.info('Repairing missing snapshots', { studySubjectId });
+
+  const errors: string[] = [];
+  let repaired = 0;
+
+  try {
+    // Find event_crf records without a patient_event_form
+    const query = `
+      SELECT
+        ec.event_crf_id,
+        ec.study_event_id,
+        ec.crf_version_id,
+        cv.crf_id,
+        c.name AS crf_name,
+        ec.study_subject_id
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      LEFT JOIN patient_event_form pef ON pef.event_crf_id = ec.event_crf_id
+      WHERE se.study_subject_id = $1
+        AND pef.patient_event_form_id IS NULL
+        AND ec.status_id NOT IN (5, 7)
+    `;
+    const result = await pool.query(query, [studySubjectId]);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      let ordinal = 1;
+
+      for (const row of result.rows) {
+        try {
+          await createPatientFormSnapshot(
+            client,
+            row.study_event_id,
+            row.event_crf_id,
+            row.crf_id,
+            row.crf_version_id,
+            row.study_subject_id,
+            row.crf_name,
+            ordinal++,
+            userId
+          );
+          repaired++;
+        } catch (snapErr: any) {
+          errors.push(`Failed to create snapshot for event_crf ${row.event_crf_id}: ${snapErr.message}`);
+        }
+      }
+
+      await client.query('COMMIT');
+    } catch (txErr: any) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    logger.info('Snapshot repair complete', { studySubjectId, repaired, errors: errors.length });
+    return { repaired, errors };
+  } catch (error: any) {
+    logger.error('Snapshot repair error', { error: error.message });
+    throw error;
+  }
+};
+
 export default {
   getStudyEvents,
   getStudyEventById,
   getSubjectEvents,
   getEventCRFs,
+  getPatientEventCRFs,
+  getVisitForms,
   scheduleSubjectEvent,
   createStudyEvent,
   updateStudyEvent,
@@ -1258,6 +1879,14 @@ export default {
   updateEventCrf,
   removeCrfFromEvent,
   reorderEventCrfs,
-  bulkAssignCrfsToEvent
+  bulkAssignCrfsToEvent,
+  // Patient-specific visit/form operations
+  assignFormToPatientVisit,
+  createUnscheduledVisit,
+  getPatientFormSnapshots,
+  savePatientFormData,
+  // Verification / repair
+  verifyPatientFormIntegrity,
+  repairMissingSnapshots
 };
 

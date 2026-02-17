@@ -335,6 +335,204 @@ export interface FormDataRequest {
   electronicSignature?: ElectronicSignature;
 }
 
+/**
+ * ============================================================================
+ * SHARED FORM FIELD DTOs – SINGLE SOURCE OF TRUTH
+ * ============================================================================
+ *
+ * These interfaces define the canonical shape of every form-field sub-type.
+ * The frontend form.models.ts MIRRORS these definitions exactly.
+ *
+ * >>> When you change an interface here, update the frontend copy too:
+ *     ElectronicDataCaptureReal/src/app/models/form.models.ts
+ */
+
+// ---------------------------------------------------------------------------
+// Field options & validation
+// ---------------------------------------------------------------------------
+
+/** Option for select / radio / checkbox fields */
+export interface FormFieldOption {
+  label: string;
+  value: string;
+  order?: number;
+}
+
+/** Validation rule attached to a form field */
+export interface ValidationRule {
+  type: string;
+  value?: any;
+  message?: string;
+}
+
+/** Cross-field validation (like Medidata Rave edit checks) */
+export interface EditCheck {
+  id: string;
+  name: string;
+  description?: string;
+  sourceFieldId: string;
+  targetFieldId?: string;
+  operator: 'equals' | 'notEquals' | 'greaterThan' | 'lessThan' | 'greaterOrEqual' | 'lessOrEqual' |
+            'between' | 'contains' | 'startsWith' | 'endsWith' | 'regex' | 'custom';
+  value?: any;
+  value2?: any;
+  customFormula?: string;
+  errorMessage: string;
+  severity: 'error' | 'warning' | 'info';
+  isActive: boolean;
+  requiresQuery?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Branching / skip logic
+// ---------------------------------------------------------------------------
+
+/** All supported operators for showWhen / hideWhen / requiredWhen conditions */
+export type ShowWhenOperator =
+  | 'equals' | 'notEquals' | 'not_equals'
+  | 'greaterThan' | 'greater_than' | 'lessThan' | 'less_than'
+  | 'greater_than_or_equal' | 'less_than_or_equal'
+  | 'contains' | 'not_contains'
+  | 'starts_with' | 'ends_with'
+  | 'isEmpty' | 'isNotEmpty' | 'is_empty' | 'is_not_empty'
+  | 'between' | 'not_between'
+  | 'is_true' | 'is_false'
+  | 'in_list' | 'not_in_list'
+  | 'matches_regex'
+  | 'date_before' | 'date_after' | 'date_between'
+  | 'age_greater_than' | 'age_less_than';
+
+/** Condition that controls field visibility / requirement */
+export interface ShowWhenCondition {
+  fieldId: string;
+  operator: ShowWhenOperator;
+  value?: any;
+  value2?: any;
+  message?: string;
+  logicalOperator?: 'AND' | 'OR';
+}
+
+// ---------------------------------------------------------------------------
+// Form linking (branch to another form)
+// ---------------------------------------------------------------------------
+
+export interface FormLinkDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  targetFormId: number;
+  targetFormName?: string;
+  triggerConditions: ShowWhenCondition[];
+  linkType: 'modal' | 'redirect' | 'new_tab' | 'embedded';
+  required: boolean;
+  autoOpen: boolean;
+  prefillFields?: { sourceFieldId: string; targetFieldId: string }[];
+}
+
+// ---------------------------------------------------------------------------
+// Table field types
+// ---------------------------------------------------------------------------
+
+export interface TableColumnDefinition {
+  id: string;
+  name: string;
+  label: string;
+  type: 'text' | 'number' | 'textarea' | 'date' | 'select' | 'radio' | 'checkbox' | 'yesno';
+  width?: string;
+  required?: boolean;
+  options?: { label: string; value: string }[];
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  readonly?: boolean;
+  defaultValue?: string;
+}
+
+export interface TableRowDefinition {
+  id: string;
+  label: string;
+}
+
+export interface TableSettings {
+  minRows?: number;
+  maxRows?: number;
+  allowAddRows?: boolean;
+  allowDeleteRows?: boolean;
+  showRowNumbers?: boolean;
+  defaultRows?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Inline group field types
+// ---------------------------------------------------------------------------
+
+export interface InlineFieldDefinition {
+  id: string;
+  label: string;
+  type: 'text' | 'number' | 'date' | 'select' | 'checkbox';
+  width?: string;
+  placeholder?: string;
+  required?: boolean;
+  options?: { label: string; value: string }[];
+  unit?: string;
+  min?: number;
+  max?: number;
+}
+
+export interface InlineGroupSettings {
+  labelPosition: 'before' | 'above';
+  separator?: string;
+  alignment?: 'left' | 'center' | 'right';
+}
+
+// ---------------------------------------------------------------------------
+// Criteria list field types
+// ---------------------------------------------------------------------------
+
+export interface CriteriaItem {
+  id: string;
+  number?: number;
+  text: string;
+  responseType: 'yesno' | 'checkbox' | 'text' | 'select' | 'initials';
+  required?: boolean;
+  options?: { label: string; value: string }[];
+  failValue?: string;
+  helpText?: string;
+}
+
+export interface CriteriaListSettings {
+  showNumbers?: boolean;
+  numberStyle?: 'number' | 'letter' | 'roman';
+  requireAll?: boolean;
+  inclusionCriteria?: boolean;
+  responseColumnHeader?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Question table field types
+// ---------------------------------------------------------------------------
+
+export interface QuestionRow {
+  id: string;
+  question: string;
+  answerColumns: {
+    id: string;
+    type: 'text' | 'number' | 'date' | 'select' | 'checkbox' | 'yesno';
+    header?: string;
+    width?: string;
+    required?: boolean;
+    options?: { label: string; value: string }[];
+  }[];
+}
+
+export interface QuestionTableSettings {
+  questionColumnHeader?: string;
+  questionColumnWidth?: string;
+  showRowNumbers?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+
 export interface ElectronicSignature {
   username: string;
   password: string;

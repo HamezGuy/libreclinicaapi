@@ -370,6 +370,8 @@ export interface StudySubject {
   
   // Enrollment
   enrollmentDate?: Date | string;
+  screeningDate?: Date | string;
+  enrollmentStatus?: string;  // 'screening' | 'enrolled' | 'screen_failure'
   
   // OID
   oid?: string;
@@ -1185,6 +1187,7 @@ export function toSubject(row: any): Subject {
  * Convert database row (snake_case) to StudySubject (camelCase)
  */
 export function toStudySubject(row: any): StudySubject {
+  const statusId = row.status_id || 1;
   return {
     studySubjectId: row.study_subject_id,
     label: row.label || '',
@@ -1192,9 +1195,11 @@ export function toStudySubject(row: any): StudySubject {
     subjectId: row.subject_id,
     studyId: row.study_id,
     enrollmentDate: row.enrollment_date,
+    screeningDate: row.screening_date ?? row.screeningDate ?? row.enrollment_date,
+    enrollmentStatus: row.enrollment_status ?? row.enrollmentStatus ?? (statusId === 1 ? 'enrolled' : (statusId === 5 ? 'screen_failure' : 'screening')),
     oid: row.oc_oid,
-    statusId: row.status_id || 1,
-    status: getStatusFromId(row.status_id || 1),
+    statusId: statusId,
+    status: getStatusFromId(statusId),
     ownerId: row.owner_id,
     dateCreated: row.date_created,
     dateUpdated: row.date_updated,

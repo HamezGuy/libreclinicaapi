@@ -189,6 +189,7 @@ router.get('/:id/versions', validate({ params: commonSchemas.idParam }), control
 // Form templates (CRFs) - write operations (signature required per §11.50)
 router.post('/', 
   requireRole('admin', 'data_manager'), 
+  validate({ body: formSchemas.create }),
   requireSignatureFor(SignatureMeanings.CRF_CREATE),
   controller.create
 );

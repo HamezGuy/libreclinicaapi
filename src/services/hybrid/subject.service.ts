@@ -29,6 +29,7 @@ import {
   toStudySubject
 } from '../../types/libreclinica-models';
 import * as workflowService from '../database/workflow.service';
+import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp } from '../../utils/date.util';
 
 /**
  * Request type for creating a subject
@@ -54,6 +55,7 @@ export interface SubjectCreateRequest {
   studySubjectId: string;             // label column (varchar 30)
   secondaryId?: string;               // secondary_label column (varchar 30)
   enrollmentDate?: string;            // enrollment_date column
+  screeningDate?: string;             // screening enrollment date (app-level, not in LC schema)
   timeZone?: string;                  // time_zone column (varchar 255)
   
   // === SUBJECT TABLE FIELDS (demographics) ===
@@ -75,6 +77,74 @@ export interface SubjectCreateRequest {
     startDate?: string;
   };
 }
+
+/**
+ * Create a patient form snapshot during enrollment (inline helper).
+ * Captures form structure with fields, validation rules, and options.
+ */
+const createPatientFormSnapshotForEnrollment = async (
+  client: any, studyEventId: number, eventCrfId: number,
+  crfId: number, crfVersionId: number, studySubjectId: number,
+  formName: string, ordinal: number, userId: number
+): Promise<void> => {
+  const itemsQ = `
+    SELECT i.item_id, i.name, i.description, i.units, i.phi_status,
+      idt.name as data_type, idt.code as data_type_code,
+      igm.ordinal, ig.name as group_name,
+      ifm.required, ifm.default_value, ifm.left_item_text as label,
+      ifm.regexp as validation_pattern, ifm.regexp_error_msg as validation_message,
+      ifm.column_number,
+      rs.options_text, rs.options_values, rt.name as response_type,
+      s.label as section_name, s.ordinal as section_ordinal
+    FROM item i
+    INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+    INNER JOIN item_group ig ON igm.item_group_id = ig.item_group_id
+    INNER JOIN item_data_type idt ON i.item_data_type_id = idt.item_data_type_id
+    LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
+    LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
+    LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
+    LEFT JOIN section s ON ifm.section_id = s.section_id
+    WHERE igm.crf_version_id = $1 AND (ifm.show_item IS DISTINCT FROM false)
+    ORDER BY COALESCE(s.ordinal, 0), COALESCE(ifm.ordinal, igm.ordinal)
+  `;
+  const items = await client.query(itemsQ, [crfVersionId]);
+
+  const fields = items.rows.map((it: any) => {
+    const f: any = {
+      itemId: it.item_id, name: it.name,
+      label: it.label || it.description || it.name,
+      dataType: it.data_type_code || it.data_type,
+      units: it.units || null,
+      required: it.required || false,
+      defaultValue: it.default_value || '',
+      columnNumber: it.column_number || 1,
+      section: it.section_name || 'Default',
+      group: it.group_name || 'Ungrouped',
+      ordinal: it.ordinal
+    };
+    if (it.validation_pattern) {
+      f.validationPattern = it.validation_pattern;
+      f.validationMessage = it.validation_message || 'Invalid value';
+    }
+    if (it.options_text && it.options_values) {
+      const texts = it.options_text.split(',');
+      const vals = it.options_values.split(',');
+      f.responseType = it.response_type;
+      f.options = texts.map((t: string, i: number) => ({ label: t.trim(), value: (vals[i] || t).trim() }));
+    }
+    return f;
+  });
+
+  const structure = { crfId, crfVersionId, name: formName, snapshotDate: new Date().toISOString(), fieldCount: fields.length, fields };
+  
+  await client.query(`
+    INSERT INTO patient_event_form (
+      study_event_id, event_crf_id, crf_id, crf_version_id,
+      study_subject_id, form_name, form_structure, form_data,
+      completion_status, ordinal, created_by
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, '{}'::jsonb, 'not_started', $8, $9)
+  `, [studyEventId, eventCrfId, crfId, crfVersionId, studySubjectId, formName, JSON.stringify(structure), ordinal, userId]);
+};
 
 /**
  * Create subject via SOAP or direct database (depending on config)
@@ -319,7 +389,7 @@ const createSubjectDirect = async (
       request.secondaryId || '',
       subjectId,
       request.studyId,
-      request.enrollmentDate || new Date().toISOString().split('T')[0],
+      request.enrollmentDate || todayIso(),
       timeZone,
       userId,
       ocOid
@@ -372,7 +442,7 @@ const createSubjectDirect = async (
     // This implements the COPY PHASES TO PATIENT requirement
     let scheduledEventIds: number[] = [];
     let totalFormsCreated = 0;
-    const enrollmentDate = request.enrollmentDate || new Date().toISOString().split('T')[0];
+    const enrollmentDate = request.enrollmentDate || todayIso();
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
     // Get all study event definitions for this study
@@ -413,7 +483,7 @@ const createSubjectDirect = async (
             eventDef.study_event_definition_id,
             studySubjectId,
             request.scheduleEvent?.location || '',
-            eventStartDate.toISOString().split('T')[0],
+            formatIsoDate(eventStartDate),
             userId
           ]);
           
@@ -459,18 +529,31 @@ const createSubjectDirect = async (
                 
                 if (crfVersionId) {
                   // Create event_crf - the editable copy of the template for this patient
-                  await client.query(`
+                  const ecResult = await client.query(`
                     INSERT INTO event_crf (
                       study_event_id, crf_version_id, study_subject_id,
                       completion_status_id, status_id, owner_id, date_created
                     ) VALUES ($1, $2, $3, 1, 1, $4, NOW())
+                    RETURNING event_crf_id
                   `, [studyEventId, crfVersionId, studySubjectId, userId]);
                   
+                  const eventCrfId = ecResult.rows[0].event_crf_id;
                   phaseFormsCreated++;
                   totalFormsCreated++;
                   
-                  logger.debug('📋 Created event_crf for patient phase', {
-                    studyEventId,
+                  // Create patient_event_form snapshot (frozen copy of form structure)
+                  try {
+                    await createPatientFormSnapshotForEnrollment(
+                      client, studyEventId, eventCrfId,
+                      crfAssign.crf_id, crfVersionId, studySubjectId,
+                      crfAssign.crf_name, phaseFormsCreated, userId
+                    );
+                  } catch (snapErr: any) {
+                    logger.warn('Form snapshot warning (non-blocking)', { error: snapErr.message });
+                  }
+                  
+                  logger.debug('📋 Created event_crf + snapshot for patient phase', {
+                    studyEventId, eventCrfId,
                     crfId: crfAssign.crf_id,
                     crfName: crfAssign.crf_name,
                     studySubjectId
@@ -526,7 +609,7 @@ const createSubjectDirect = async (
         newValue: JSON.stringify({
           label: request.studySubjectId,
           studyId: request.studyId,
-          enrollmentDate: request.enrollmentDate || new Date().toISOString().split('T')[0],
+          enrollmentDate: request.enrollmentDate || todayIso(),
           gender: request.gender,
           dateOfBirth: request.dateOfBirth
         }),
@@ -569,6 +652,7 @@ const createSubjectDirect = async (
         secondaryLabel: request.secondaryId || '',
         studyId: request.studyId,
         enrollmentDate: request.enrollmentDate,
+        screeningDate: request.screeningDate || request.enrollmentDate,
         timeZone: timeZone,
         ocOid,
         

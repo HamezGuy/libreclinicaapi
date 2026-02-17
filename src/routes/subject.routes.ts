@@ -23,6 +23,7 @@ import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.mid
 import * as studyParamsService from '../services/database/studyParameters.service';
 import * as studyGroupsService from '../services/database/studyGroups.service';
 import { logger } from '../config/logger';
+import { pool } from '../config/database';
 
 const router = express.Router();
 
@@ -85,6 +86,48 @@ router.get('/enrollment-config/:studyId', async (req: Request, res: Response) =>
   }
 });
 
+/**
+ * GET /api/subjects/check-label/:studyId/:label
+ * Check if a subject label already exists in a study (for real-time validation)
+ * Returns { exists: boolean } so the frontend can warn before submission
+ */
+router.get('/check-label/:studyId/:label', async (req: Request, res: Response) => {
+  try {
+    const studyId = parseInt(req.params.studyId);
+    const label = decodeURIComponent(req.params.label).trim();
+
+    if (isNaN(studyId) || !label) {
+      res.status(400).json({ success: false, message: 'Invalid study ID or label' });
+      return;
+    }
+
+    const query = `
+      SELECT study_subject_id FROM study_subject 
+      WHERE (study_id = $1 OR study_id IN (
+        SELECT study_id FROM study WHERE parent_study_id = $1
+      ))
+      AND label = $2 AND status_id != 5
+      LIMIT 1
+    `;
+    const result = await pool.query(query, [studyId, label]);
+
+    res.json({
+      success: true,
+      data: {
+        exists: result.rows.length > 0,
+        label
+      }
+    });
+  } catch (error: any) {
+    logger.error('Failed to check subject label', {
+      studyId: req.params.studyId,
+      label: req.params.label,
+      error: error.message
+    });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Read operations (no signature required)
 router.get('/', validate({ query: subjectSchemas.list }), controller.list);
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
@@ -102,13 +145,13 @@ router.post('/',
 );
 router.put('/:id', 
   requireRole('data_manager', 'coordinator', 'investigator'), 
-  validate({ params: commonSchemas.idParam }), 
+  validate({ params: commonSchemas.idParam, body: subjectSchemas.update }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_UPDATE),
   controller.update
 );
 router.put('/:id/status', 
   requireRole('data_manager', 'coordinator', 'investigator'), 
-  validate({ params: commonSchemas.idParam }), 
+  validate({ params: commonSchemas.idParam, body: subjectSchemas.updateStatus }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_WITHDRAW),
   controller.updateStatus
 );

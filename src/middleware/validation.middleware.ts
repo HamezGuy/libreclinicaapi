@@ -185,6 +185,10 @@ export const subjectSchemas = {
       Joi.date().iso(),
       Joi.string().isoDate()
     ).optional(),
+    screeningDate: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate()
+    ).optional(),
     timeZone: Joi.string().optional().allow('').max(255),
 
     // === OPTIONAL SUBJECT (DEMOGRAPHICS) FIELDS ===
@@ -217,6 +221,37 @@ export const subjectSchemas = {
     }).optional(),
 
     // === ELECTRONIC SIGNATURE (21 CFR Part 11, §11.50) ===
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500)
+  }),
+
+  // Update subject (SubjectUpdateRequest)
+  update: Joi.object({
+    secondaryLabel: Joi.string().optional().allow('').max(30),
+    secondaryId: Joi.string().optional().allow('').max(30),
+    gender: Joi.string().valid('m', 'f', 'Male', 'Female', 'male', 'female', '').optional(),
+    dateOfBirth: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate()
+    ).optional(),
+    personId: Joi.string().optional().allow('').max(255),
+    timeZone: Joi.string().optional().allow('').max(255),
+    enrollmentDate: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate()
+    ).optional(),
+    // Electronic signature
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500)
+  }),
+
+  // Update subject status
+  updateStatus: Joi.object({
+    statusId: Joi.number().integer().min(1).max(10).required(),
+    reason: Joi.string().optional().allow('').max(500),
+    // Electronic signature
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500)
@@ -256,44 +291,51 @@ export const subjectSchemas = {
  * validation-rules configuration screen, not hard-coded in Joi schemas.
  */
 export const formSchemas = {
+  create: Joi.object({
+    name: Joi.string().required().min(1).max(255)
+      .messages({ 'any.required': 'Form name is required' }),
+    description: Joi.string().optional().max(10000).allow(''),
+    studyId: Joi.number().integer().positive().optional(),
+    category: Joi.string().optional().max(64).allow(''),
+    version: Joi.string().optional().max(30).allow(''),
+    status: Joi.string().optional().valid('draft', 'published', 'archived'),
+    fields: Joi.array().items(Joi.object().unknown(true)).optional(),
+    editChecks: Joi.array().items(Joi.object().unknown(true)).optional(),
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500),
+  }),
+
   saveData: Joi.object({
-    // Study ID - required
+    // Required identifiers
     studyId: Joi.number().integer().positive().required(),
-
-    // Subject ID - required
     subjectId: Joi.number().integer().positive().required(),
+    studyEventDefinitionId: Joi.number().integer().positive().required(),
+    crfId: Joi.number().integer().positive().required(),
+    formData: Joi.object().required(),
 
-    // Event ID - accept both frontend and backend naming conventions
-    eventId: Joi.number().integer().positive().optional(),
-    studyEventDefinitionId: Joi.number().integer().positive().optional(),
+    // Precision helpers (optional — used for faster lookups, not as replacements)
     studyEventId: Joi.number().integer().positive().optional(),
-    // eventCrfId: passed through explicitly so the service layer can use it
-    // for itemId-based field matching during validation rule evaluation.
     eventCrfId: Joi.number().integer().positive().optional(),
-
-    // Form ID - accept both frontend and backend naming conventions
-    formId: Joi.number().integer().positive().optional(),
-    crfId: Joi.number().integer().positive().optional(),
-    crfVersionId: Joi.number().integer().positive().optional(),
-
-    // Form data — free-form objects; field-level validation is handled by
-    // validation-rules.service.ts (Layer 2), not here.
-    data: Joi.object().optional(),
-    formData: Joi.object().optional(),
 
     // Interview information
     interviewDate: Joi.string().isoDate().optional().allow('', null),
     interviewerName: Joi.string().optional().allow('', null),
+
+    // 21 CFR Part 11 §11.10(e) - Reason for change
+    reasonForChange: Joi.string().optional().allow('', null),
 
     // Electronic signature
     electronicSignature: Joi.object({
       username: Joi.string().required(),
       password: Joi.string().required(),
       meaning: Joi.string().required().valid('Data Entry', 'Review', 'Approval')
-    }).optional()
-  }).or('eventId', 'studyEventDefinitionId', 'studyEventId', 'eventCrfId') // At least one event identifier
-   .or('formId', 'crfId', 'crfVersionId') // At least one form identifier
-   .or('data', 'formData'), // At least one data object
+    }).optional(),
+    signatureUsername: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
+  }),
 
   getData: Joi.object({
     subjectId: Joi.number().integer().positive().required(),
@@ -338,15 +380,16 @@ const groupSchema = Joi.object({
 const groupClassSchema = Joi.object({
   studyGroupClassId: Joi.number().integer().optional(), // For existing groups (update)
   name: Joi.string().required().max(255),
-  // Accept both 'type' and 'groupClassTypeId' from frontend
+  // Accept both 'type' and 'groupClassTypeId' from frontend (5 = Custom)
   type: Joi.alternatives().try(
-    Joi.number().integer().min(1).max(4),
+    Joi.number().integer().min(1).max(5),
     Joi.string()
   ).optional(),
   groupClassTypeId: Joi.alternatives().try(
-    Joi.number().integer().min(1).max(4),
+    Joi.number().integer().min(1).max(5),
     Joi.string()
   ).optional(),
+  customTypeName: Joi.string().optional().max(255).allow(''),
   subjectAssignment: Joi.string().optional().allow(''),
   description: Joi.string().optional().max(1000).allow(''),
   groups: Joi.array().items(groupSchema).optional()
@@ -439,6 +482,7 @@ export const studySchemas = {
     summary: Joi.string().optional().max(10000).allow(''),
     officialTitle: Joi.string().optional().max(255).allow(''),
     secondaryIdentifier: Joi.string().optional().max(255).allow(''),
+    studyAcronym: Joi.string().optional().max(64).allow(''),
     collaborators: Joi.string().optional().max(10000).allow(''),
     protocolType: Joi.string().optional().valid('interventional', 'observational'),
     targetEnrollment: Joi.number().integer().min(0).optional(),
@@ -447,6 +491,12 @@ export const studySchemas = {
       Joi.string().allow('')
     ).optional(),
     parentStudyId: Joi.number().integer().positive().optional(),
+
+    // Timeline milestones
+    fpfvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    lpfvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    lplvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    databaseLockDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
 
     // Facility fields
     facilityName: Joi.string().optional().max(255).allow(''),
@@ -464,10 +514,19 @@ export const studySchemas = {
     // Protocol fields - protocolDescription supports multiple pages
     protocolDescription: Joi.string().optional().max(100000).allow(''),
     protocolDateVerification: Joi.string().optional().allow(''),
+    protocolVersion: Joi.string().optional().max(30).allow(''),
+    protocolAmendmentNumber: Joi.string().optional().max(30).allow(''),
     medlineIdentifier: Joi.string().optional().max(255).allow(''),
     url: Joi.string().optional().max(255).allow(''),
     urlDescription: Joi.string().optional().max(255).allow(''),
     resultsReference: Joi.boolean().optional(),
+
+    // Regulatory fields
+    therapeuticArea: Joi.string().optional().max(255).allow(''),
+    indication: Joi.string().optional().max(255).allow(''),
+    nctNumber: Joi.string().optional().max(30).allow(''),
+    irbNumber: Joi.string().optional().max(255).allow(''),
+    regulatoryAuthority: Joi.string().optional().max(255).allow(''),
 
     // Eligibility fields - support long clinical criteria text
     conditions: Joi.string().optional().max(50000).allow(''),
@@ -479,16 +538,17 @@ export const studySchemas = {
     ageMax: Joi.string().optional().max(3).allow(''),
     healthyVolunteerAccepted: Joi.boolean().optional(),
 
-    // Study Design fields
+    // Study Design fields (all varchar 64 in DB)
     purpose: Joi.string().optional().max(64).allow(''),
     allocation: Joi.string().optional().max(64).allow(''),
-    masking: Joi.string().optional().max(30).allow(''),
-    control: Joi.string().optional().max(30).allow(''),
-    assignment: Joi.string().optional().max(30).allow(''),
+    masking: Joi.string().optional().max(64).allow(''),
+    control: Joi.string().optional().max(64).allow(''),
+    assignment: Joi.string().optional().max(64).allow(''),
     endpoint: Joi.string().optional().max(64).allow(''),
-    duration: Joi.string().optional().max(30).allow(''),
-    selection: Joi.string().optional().max(30).allow(''),
-    timing: Joi.string().optional().max(30).allow(''),
+    duration: Joi.string().optional().max(64).allow(''),
+    selection: Joi.string().optional().max(64).allow(''),
+    timing: Joi.string().optional().max(64).allow(''),
+    sdvRequirement: Joi.string().optional().max(64).allow(''),
 
     // Nested data structures
     eventDefinitions: Joi.array().items(eventDefinitionSchema).optional(),
@@ -528,6 +588,7 @@ export const studySchemas = {
     summary: Joi.string().optional().max(10000).allow(''),
     officialTitle: Joi.string().optional().max(255).allow(''),
     secondaryIdentifier: Joi.string().optional().max(255).allow(''),
+    studyAcronym: Joi.string().optional().max(64).allow(''),
     principalInvestigator: Joi.string().optional().max(255).allow(''),
     sponsor: Joi.string().optional().max(255).allow(''),
     collaborators: Joi.string().optional().max(10000).allow(''),
@@ -542,6 +603,12 @@ export const studySchemas = {
       Joi.date().iso(),
       Joi.string().allow('')
     ).optional(),
+
+    // Timeline milestones
+    fpfvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    lpfvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    lplvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    databaseLockDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
 
     // Facility fields
     facilityName: Joi.string().optional().max(255).allow(''),
@@ -559,10 +626,19 @@ export const studySchemas = {
     // Protocol fields - protocolDescription supports multiple pages
     protocolDescription: Joi.string().optional().max(100000).allow(''),
     protocolDateVerification: Joi.string().optional().allow(''),
+    protocolVersion: Joi.string().optional().max(30).allow(''),
+    protocolAmendmentNumber: Joi.string().optional().max(30).allow(''),
     medlineIdentifier: Joi.string().optional().max(255).allow(''),
     url: Joi.string().optional().max(255).allow(''),
     urlDescription: Joi.string().optional().max(255).allow(''),
     resultsReference: Joi.boolean().optional(),
+
+    // Regulatory fields
+    therapeuticArea: Joi.string().optional().max(255).allow(''),
+    indication: Joi.string().optional().max(255).allow(''),
+    nctNumber: Joi.string().optional().max(30).allow(''),
+    irbNumber: Joi.string().optional().max(255).allow(''),
+    regulatoryAuthority: Joi.string().optional().max(255).allow(''),
 
     // Eligibility fields - support long clinical criteria text
     conditions: Joi.string().optional().max(50000).allow(''),
@@ -574,16 +650,17 @@ export const studySchemas = {
     ageMax: Joi.string().optional().max(3).allow(''),
     healthyVolunteerAccepted: Joi.boolean().optional(),
 
-    // Design fields
+    // Design fields (all varchar 64 in DB)
     purpose: Joi.string().optional().max(64).allow(''),
     allocation: Joi.string().optional().max(64).allow(''),
-    masking: Joi.string().optional().max(30).allow(''),
-    control: Joi.string().optional().max(30).allow(''),
-    assignment: Joi.string().optional().max(30).allow(''),
+    masking: Joi.string().optional().max(64).allow(''),
+    control: Joi.string().optional().max(64).allow(''),
+    assignment: Joi.string().optional().max(64).allow(''),
     endpoint: Joi.string().optional().max(64).allow(''),
-    duration: Joi.string().optional().max(30).allow(''),
-    selection: Joi.string().optional().max(30).allow(''),
-    timing: Joi.string().optional().max(30).allow(''),
+    duration: Joi.string().optional().max(64).allow(''),
+    selection: Joi.string().optional().max(64).allow(''),
+    timing: Joi.string().optional().max(64).allow(''),
+    sdvRequirement: Joi.string().optional().max(64).allow(''),
 
     // Nested data structures
     eventDefinitions: Joi.array().items(eventDefinitionSchema).optional(),
@@ -792,52 +869,102 @@ export const reportSchemas = {
 };
 
 /**
- * Event Scheduling Schemas
+ * Event/Visit Schemas
+ * Must match: libreclinicaapi/src/types/event.dto.ts
  */
 export const eventSchemas = {
+  // Schedule a visit for a patient (ScheduleEventRequest)
   schedule: Joi.object({
     studySubjectId: Joi.number().integer().positive().required(),
     studyEventDefinitionId: Joi.number().integer().positive().required(),
-    startDate: Joi.date().iso().optional(),
-    endDate: Joi.date().iso().optional(),
-    location: Joi.string().optional().max(255),
-    scheduledDate: Joi.date().iso().optional(),
-    isUnscheduled: Joi.boolean().optional()
-  }),
-
-  create: Joi.object({
-    studyId: Joi.number().integer().positive().required(),
-    name: Joi.string().required().min(3).max(255),
-    description: Joi.string().optional().max(1000),
-    ordinal: Joi.number().integer().min(1).optional(),
-    type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
-    repeating: Joi.boolean().optional(),
-    category: Joi.string().optional().max(100),
-    scheduleDay: Joi.number().integer().min(0).optional().allow(null),
-    minDay: Joi.number().integer().min(0).optional().allow(null),
-    maxDay: Joi.number().integer().min(0).optional().allow(null),
-    referenceEventId: Joi.number().integer().positive().optional().allow(null),
+    startDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    endDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    location: Joi.string().optional().max(2000).allow(''),
+    scheduledDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    isUnscheduled: Joi.boolean().optional(),
+    estimatedStart: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    estimatedEnd: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
     password: Joi.string().optional(),
     signatureMeaning: Joi.string().optional()
   }),
 
-  update: Joi.object({
-    name: Joi.string().optional().min(3).max(255),
-    description: Joi.string().optional().max(1000),
+  // Create a visit definition (CreateEventRequest)
+  create: Joi.object({
+    studyId: Joi.number().integer().positive().required(),
+    name: Joi.string().required().min(3).max(255),
+    description: Joi.string().optional().max(2000).allow(''),
     ordinal: Joi.number().integer().min(1).optional(),
     type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
     repeating: Joi.boolean().optional(),
-    category: Joi.string().optional().max(100),
+    category: Joi.string().optional().max(2000).allow(''),
     scheduleDay: Joi.number().integer().min(0).optional().allow(null),
     minDay: Joi.number().integer().min(0).optional().allow(null),
     maxDay: Joi.number().integer().min(0).optional().allow(null),
-    referenceEventId: Joi.number().integer().positive().optional().allow(null)
+    referenceEventId: Joi.number().integer().positive().optional().allow(null),
+    estimatedDurationHours: Joi.number().min(0).optional().allow(null),
+    password: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
   }),
 
+  // Update a visit definition (UpdateEventRequest)
+  update: Joi.object({
+    name: Joi.string().optional().min(3).max(255),
+    description: Joi.string().optional().max(2000).allow(''),
+    ordinal: Joi.number().integer().min(1).optional(),
+    type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
+    repeating: Joi.boolean().optional(),
+    category: Joi.string().optional().max(2000).allow(''),
+    scheduleDay: Joi.number().integer().min(0).optional().allow(null),
+    minDay: Joi.number().integer().min(0).optional().allow(null),
+    maxDay: Joi.number().integer().min(0).optional().allow(null),
+    referenceEventId: Joi.number().integer().positive().optional().allow(null),
+    estimatedDurationHours: Joi.number().min(0).optional().allow(null),
+    password: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
+  }),
+
+  // List events
   list: Joi.object({
     studyId: Joi.number().integer().positive().required(),
     subjectId: Joi.number().integer().positive().optional(),
     status: Joi.string().valid('scheduled', 'data_entry_started', 'completed', 'stopped', 'skipped').optional()
+  }),
+
+  // Create unscheduled visit for patient (CreateUnscheduledVisitRequest)
+  createUnscheduled: Joi.object({
+    studyId: Joi.number().integer().positive().required(),
+    studySubjectId: Joi.number().integer().positive().required(),
+    name: Joi.string().optional().max(255).allow(''),
+    description: Joi.string().optional().max(2000).allow(''),
+    startDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    endDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    estimatedStart: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    estimatedEnd: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    crfIds: Joi.array().items(Joi.number().integer().positive()).optional()
+  }),
+
+  // Assign form to patient visit instance (AssignFormToPatientVisitRequest)
+  assignFormToPatientVisit: Joi.object({
+    crfId: Joi.number().integer().positive().required(),
+    studySubjectId: Joi.number().integer().positive().required()
+  }),
+
+  // Assign CRF to event template (AssignCrfToEventRequest)
+  assignCrf: Joi.object({
+    crfId: Joi.number().integer().positive().required(),
+    crfVersionId: Joi.number().integer().positive().optional(),
+    required: Joi.boolean().optional(),
+    doubleEntry: Joi.boolean().optional(),
+    hideCrf: Joi.boolean().optional(),
+    ordinal: Joi.number().integer().min(1).optional(),
+    electronicSignature: Joi.boolean().optional(),
+    password: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
+  }),
+
+  // Save patient form data (SavePatientFormDataRequest)
+  savePatientFormData: Joi.object({
+    formData: Joi.object().required()
   })
 };
 

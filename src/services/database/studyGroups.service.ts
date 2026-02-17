@@ -13,8 +13,8 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 
-// Group class types from LibreClinica
-export type GroupClassType = 'Arm' | 'Family/Pedigree' | 'Demographic' | 'Other';
+// Group class types from LibreClinica (predefined + custom)
+export type GroupClassType = 'Arm' | 'Family/Pedigree' | 'Demographic' | 'Other' | 'Custom' | 'Cohort' | 'Stratification Factor' | 'Dose Group';
 
 export interface StudyGroupClass {
   studyGroupClassId: number;
@@ -22,6 +22,7 @@ export interface StudyGroupClass {
   studyId: number;
   groupClassTypeId: number;
   groupClassTypeName: string;
+  customTypeName?: string;
   subjectAssignment: 'Required' | 'Optional';
   statusId: number;
   statusName: string;
@@ -65,7 +66,11 @@ export const getGroupClassTypes = async (): Promise<{ id: number; name: string }
       { id: 1, name: 'Arm' },
       { id: 2, name: 'Family/Pedigree' },
       { id: 3, name: 'Demographic' },
-      { id: 4, name: 'Other' }
+      { id: 4, name: 'Other' },
+      { id: 5, name: 'Custom' },
+      { id: 6, name: 'Cohort' },
+      { id: 7, name: 'Stratification Factor' },
+      { id: 8, name: 'Dose Group' }
     ];
   }
 };
@@ -89,6 +94,7 @@ export const getStudyGroupClasses = async (studyId: number): Promise<StudyGroupC
         sgc.name,
         sgc.study_id,
         sgc.group_class_type_id,
+        sgc.custom_type_name,
         gct.name as group_class_type_name,
         sgc.subject_assignment,
         sgc.status_id,
@@ -128,6 +134,7 @@ export const getStudyGroupClasses = async (studyId: number): Promise<StudyGroupC
         studyId: row.study_id,
         groupClassTypeId: row.group_class_type_id,
         groupClassTypeName: row.group_class_type_name,
+        customTypeName: row.custom_type_name || undefined,
         subjectAssignment: row.subject_assignment || 'Optional',
         statusId: row.status_id,
         statusName: row.status_name,
@@ -163,6 +170,7 @@ export const createStudyGroupClass = async (
     studyId: number;
     name: string;
     groupClassTypeId: number;
+    customTypeName?: string;
     subjectAssignment?: 'Required' | 'Optional';
   },
   userId: number
@@ -175,8 +183,8 @@ export const createStudyGroupClass = async (
     const insertQuery = `
       INSERT INTO study_group_class (
         name, study_id, owner_id, date_created, 
-        group_class_type_id, status_id, subject_assignment
-      ) VALUES ($1, $2, $3, NOW(), $4, 1, $5)
+        group_class_type_id, custom_type_name, status_id, subject_assignment
+      ) VALUES ($1, $2, $3, NOW(), $4, $5, 1, $6)
       RETURNING study_group_class_id
     `;
 
@@ -185,6 +193,7 @@ export const createStudyGroupClass = async (
       data.studyId,
       userId,
       data.groupClassTypeId,
+      data.customTypeName || null,
       data.subjectAssignment || 'Optional'
     ]);
 

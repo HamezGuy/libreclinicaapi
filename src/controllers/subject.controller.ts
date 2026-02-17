@@ -371,10 +371,11 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
         COALESCE(se.is_unscheduled, false) as is_unscheduled,
         sest.name as status,
         se.date_created,
-        (
-          SELECT COUNT(*)
-          FROM event_crf ec
-          WHERE ec.study_event_id = se.study_event_id
+        -- Total forms = count of forms assigned to the visit template
+        GREATEST(
+          (SELECT COUNT(*) FROM event_definition_crf edc 
+           WHERE edc.study_event_definition_id = sed.study_event_definition_id AND edc.status_id = 1),
+          (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id)
         ) as total_forms,
         (
           SELECT COUNT(*)

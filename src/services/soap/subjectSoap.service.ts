@@ -20,6 +20,7 @@ import { config } from '../../config/environment';
 import { logger } from '../../config/logger';
 import { SubjectCreateRequest, ApiResponse } from '../../types';
 import { parseStringPromise } from 'xml2js';
+import { today as todayIso } from '../../utils/date.util';
 
 /**
  * SOAP Subject response
@@ -128,7 +129,7 @@ export const createSubject = async (
          <v1:studySubject>
             <v1:label>${escapeXml(request.studySubjectId)}</v1:label>
             <v1:secondaryLabel>${escapeXml(request.secondaryId || '')}</v1:secondaryLabel>
-            <v1:enrollmentDate>${request.enrollmentDate || new Date().toISOString().split('T')[0]}</v1:enrollmentDate>
+            <v1:enrollmentDate>${request.enrollmentDate || todayIso()}</v1:enrollmentDate>
             <v1:subject>
                <v1:uniqueIdentifier>${escapeXml(request.studySubjectId)}</v1:uniqueIdentifier>
                ${gender ? `<v1:gender>${gender}</v1:gender>` : ''}

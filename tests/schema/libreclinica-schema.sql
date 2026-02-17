@@ -80,6 +80,22 @@ INSERT INTO study_type (study_type_id, name, description) VALUES
 (3, 'interventional', 'Interventional Study'),
 (4, 'other', 'Other');
 
+CREATE TABLE group_class_types (
+    group_class_type_id SERIAL PRIMARY KEY,
+    name VARCHAR(255),
+    description VARCHAR(1000)
+);
+
+INSERT INTO group_class_types (group_class_type_id, name, description) VALUES
+(1, 'Arm', 'Treatment arm for randomized interventions'),
+(2, 'Family/Pedigree', 'Family/Pedigree grouping for genetic studies'),
+(3, 'Demographic', 'Demographic grouping'),
+(4, 'Other', 'Other grouping'),
+(5, 'Custom', 'User-defined group class type'),
+(6, 'Cohort', 'Cohort grouping for dose escalation or enrollment waves'),
+(7, 'Stratification Factor', 'Stratification factors for randomization balancing'),
+(8, 'Dose Group', 'Dose-level grouping for dose-finding studies');
+
 CREATE TABLE user_type (
     user_type_id SERIAL PRIMARY KEY,
     user_type VARCHAR(50) NOT NULL
@@ -264,7 +280,24 @@ CREATE TABLE study (
     facility_contact_phone VARCHAR(255),
     facility_contact_email VARCHAR(255),
     principal_investigator VARCHAR(255),
-    oc_oid VARCHAR(255)
+    oc_oid VARCHAR(255),
+    -- Regulatory fields
+    therapeutic_area VARCHAR(255),
+    indication VARCHAR(255),
+    nct_number VARCHAR(30),
+    irb_number VARCHAR(255),
+    regulatory_authority VARCHAR(255),
+    -- Protocol versioning
+    protocol_version VARCHAR(30),
+    protocol_amendment_number VARCHAR(30),
+    -- Timeline milestones
+    fpfv_date DATE,
+    lpfv_date DATE,
+    lplv_date DATE,
+    database_lock_date DATE,
+    -- Operational
+    study_acronym VARCHAR(64),
+    sdv_requirement VARCHAR(64)
 );
 
 CREATE TABLE study_user_role (
@@ -324,6 +357,7 @@ CREATE TABLE study_group_class (
     name VARCHAR(255),
     type VARCHAR(255),
     group_class_type_id INTEGER DEFAULT 1,
+    custom_type_name VARCHAR(255),
     status_id INTEGER DEFAULT 1 REFERENCES status(status_id),
     date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

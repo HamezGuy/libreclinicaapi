@@ -10,6 +10,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { ReportRequest } from '../../types';
+import { formatDate, toISOTimestamp } from '../../utils/date.util';
 
 /**
  * Generate enrollment report
@@ -51,12 +52,12 @@ export const generateEnrollmentReport = async (
         result.rows.map(r => [
           r.subject_id,
           r.secondary_label || '',
-          r.enrollment_date?.toISOString().split('T')[0] || '',
+          formatDate(r.enrollment_date),
           r.status,
           r.gender || '',
-          r.date_of_birth?.toISOString().split('T')[0] || '',
+          formatDate(r.date_of_birth),
           r.enrolled_by,
-          r.date_created?.toISOString() || ''
+          toISOTimestamp(r.date_created)
         ])
       );
     }
@@ -110,8 +111,8 @@ export const generateCompletionReport = async (
           r.event_name,
           r.form_name,
           r.completion_status,
-          r.date_created?.toISOString() || '',
-          r.date_updated?.toISOString() || '',
+          toISOTimestamp(r.date_created),
+          toISOTimestamp(r.date_updated),
           r.completed_by || ''
         ])
       );
@@ -170,7 +171,7 @@ export const generateQueryReport = async (
           `"${r.description.replace(/"/g, '""')}"`,
           r.status,
           r.created_by,
-          r.date_created?.toISOString() || '',
+          toISOTimestamp(r.date_created),
           r.assigned_to || '',
           r.response_count.toString()
         ])

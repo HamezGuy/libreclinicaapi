@@ -16,9 +16,9 @@ import xml2js from 'xml2js';
 
 // Local interface for SOAP metadata response (uses snake_case to match raw data)
 interface SoapStudyMetadata {
-  study: any;
-  events: any[];
-  crfs: any[];
+  study: Record<string, unknown>;
+  events: Record<string, unknown>[];
+  crfs: Record<string, unknown>[];
 }
 
 /**

@@ -45,6 +45,8 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'user_account_extended', fn: createUserAccountExtendedTable },
     { name: 'file_uploads', fn: createFileUploadsTable },
     { name: 'audit_user_api_log', fn: createAuditUserApiLogTable },
+    { name: 'study_extended_columns', fn: createStudyExtendedColumns },
+    { name: 'event_crf_extended', fn: createEventCrfExtendedColumns },
   ];
 
   let successCount = 0;
@@ -1165,6 +1167,22 @@ async function createValidationRulesTable(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_validation_rules_crf ON validation_rules(crf_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_validation_rules_item ON validation_rules(item_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_validation_rules_active ON validation_rules(active)`);
+
+  // Add columns that may be missing if the table was created by an earlier migration
+  const columnsToAdd = [
+    { name: 'format_type', type: 'VARCHAR(50)' },
+    { name: 'operator', type: 'VARCHAR(20)' },
+    { name: 'compare_field_path', type: 'VARCHAR(255)' },
+    { name: 'custom_expression', type: 'TEXT' },
+  ];
+  for (const col of columnsToAdd) {
+    try {
+      await pool.query(`ALTER TABLE validation_rules ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
+    } catch (e: any) {
+      // Column may already exist — safe to ignore
+    }
+  }
+
   logger.info('Validation rules table verified');
 }
 
@@ -1175,7 +1193,7 @@ async function createUserCustomPermissionsTable(pool: any): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_custom_permissions (
       id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
       permission_key VARCHAR(64) NOT NULL,
       granted BOOLEAN NOT NULL DEFAULT true,
       granted_by INTEGER,
@@ -1252,4 +1270,82 @@ async function createAuditUserApiLogTable(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_api_log_user ON audit_user_api_log(user_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_api_log_created ON audit_user_api_log(created_at)`);
   logger.info('Audit user API log table verified');
+}
+
+// ============================================================================
+// Study Extended Columns
+// Adds columns to the study table that may be missing on older DB schemas
+// ============================================================================
+async function createStudyExtendedColumns(pool: any): Promise<void> {
+  const columnsToAdd = [
+    { name: 'study_acronym', type: 'VARCHAR(64)' },
+    { name: 'protocol_version', type: 'VARCHAR(30)' },
+    { name: 'protocol_amendment_number', type: 'VARCHAR(30)' },
+    { name: 'therapeutic_area', type: 'VARCHAR(255)' },
+    { name: 'indication', type: 'VARCHAR(255)' },
+    { name: 'nct_number', type: 'VARCHAR(30)' },
+    { name: 'irb_number', type: 'VARCHAR(255)' },
+    { name: 'regulatory_authority', type: 'VARCHAR(255)' },
+    { name: 'fpfv_date', type: 'DATE' },
+    { name: 'lpfv_date', type: 'DATE' },
+    { name: 'lplv_date', type: 'DATE' },
+    { name: 'database_lock_date', type: 'DATE' },
+    { name: 'sdv_requirement', type: 'VARCHAR(64)' },
+  ];
+
+  for (const col of columnsToAdd) {
+    try {
+      await pool.query(`ALTER TABLE study ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
+    } catch (e: any) {
+      // Column may already exist — safe to ignore
+    }
+  }
+
+  logger.info('Study extended columns verified');
+}
+
+// ============================================================================
+// Event CRF Extended Columns
+// The form.service.ts references 'frozen' and 'completion_status_id'
+// which may not exist on older LibreClinica schemas.
+// ============================================================================
+async function createEventCrfExtendedColumns(pool: any): Promise<void> {
+  // Add 'frozen' column for data freeze functionality
+  try {
+    await pool.query(`ALTER TABLE event_crf ADD COLUMN IF NOT EXISTS frozen BOOLEAN DEFAULT false`);
+  } catch { /* already exists */ }
+
+  // Add 'sdv_status' for source data verification tracking
+  try {
+    await pool.query(`ALTER TABLE event_crf ADD COLUMN IF NOT EXISTS sdv_status BOOLEAN DEFAULT false`);
+  } catch { /* already exists */ }
+
+  // Add 'electronic_signature_status' for e-sig tracking
+  try {
+    await pool.query(`ALTER TABLE event_crf ADD COLUMN IF NOT EXISTS electronic_signature_status BOOLEAN DEFAULT false`);
+  } catch { /* already exists */ }
+
+  // Ensure completion_status table has the required rows for form lifecycle.
+  // The form save service uses: 1=initial, 2=data entry started, 4=complete.
+  // LibreClinica Core only seeds ID 1; we need 2-6 for data entry tracking.
+  try {
+    const requiredRows = [
+      { id: 2, name: 'data entry started', desc: 'Data Entry Started' },
+      { id: 3, name: 'data entry complete', desc: 'Data Entry Complete' },
+      { id: 4, name: 'complete', desc: 'Complete' },
+      { id: 5, name: 'initial data entry complete', desc: 'Initial Data Entry Complete' },
+      { id: 6, name: 'double data entry complete', desc: 'Double Data Entry Complete' },
+    ];
+    for (const row of requiredRows) {
+      await pool.query(`
+        INSERT INTO completion_status (completion_status_id, status_id, name, description)
+        VALUES ($1, 1, $2, $3)
+        ON CONFLICT (completion_status_id) DO NOTHING
+      `, [row.id, row.name, row.desc]);
+    }
+  } catch (e: any) {
+    // Table structure may differ — ignore
+  }
+
+  logger.info('Event CRF extended columns verified');
 }

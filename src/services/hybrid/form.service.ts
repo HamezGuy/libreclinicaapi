@@ -12,7 +12,14 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
 import * as dataSoap from '../soap/dataSoap.service';
-import { FormDataRequest, ApiResponse } from '../../types';
+import {
+  FormDataRequest, ApiResponse,
+  FormFieldOption, ValidationRule, ShowWhenCondition, FormLinkDefinition,
+  TableColumnDefinition, TableRowDefinition, TableSettings,
+  InlineFieldDefinition, InlineGroupSettings,
+  CriteriaItem, CriteriaListSettings,
+  QuestionRow, QuestionTableSettings
+} from '../../types';
 import { trackUserAction, trackDocumentAccess } from '../database/audit.service';
 import * as validationRulesService from '../database/validation-rules.service';
 import { encryptField, decryptField, isEncrypted } from '../../utils/encryption.util';
@@ -32,73 +39,53 @@ import * as workflowService from '../database/workflow.service';
  * 21 CFR Part 11 §11.10(h) - Device checks to determine validity
  */
 export const saveFormData = async (
-  request: FormDataRequest & { 
-    formId?: number; 
-    data?: Record<string, any>;
-    eventId?: number;  // Frontend naming
-  },
+  request: FormDataRequest,
   userId: number,
   username: string
 ): Promise<ApiResponse<any>> => {
   logger.info('Saving form data', { 
     studyId: request.studyId,
     subjectId: request.subjectId,
-    eventId: request.studyEventDefinitionId || (request as any).eventId,
-    crfId: request.crfId || (request as any).formId,
+    studyEventDefinitionId: request.studyEventDefinitionId,
+    crfId: request.crfId,
     userId 
   });
 
-  // Handle both naming conventions (frontend uses formId/data/eventId, backend uses crfId/formData/studyEventDefinitionId)
-  const crfId = request.crfId || (request as any).formId;
-  const formData = request.formData || (request as any).data;
-  const eventDefId = request.studyEventDefinitionId || (request as any).eventId;
-
   // Validate required fields
-  if (!request.studyId || !request.subjectId || !eventDefId || !crfId) {
+  if (!request.studyId || !request.subjectId || !request.studyEventDefinitionId || !request.crfId) {
     logger.warn('Missing required fields for form save', {
       studyId: request.studyId,
       subjectId: request.subjectId,
-      eventDefId,
-      crfId
+      studyEventDefinitionId: request.studyEventDefinitionId,
+      crfId: request.crfId
     });
     return {
       success: false,
-      message: 'Missing required fields: studyId, subjectId, eventId/studyEventDefinitionId, formId/crfId'
+      message: 'Missing required fields: studyId, subjectId, studyEventDefinitionId, crfId'
     };
   }
 
   // ===== PRE-SAVE VALIDATION (dry run - no query creation) =====
-  // Validate BEFORE saving but do NOT create queries yet.
-  // Queries are created AFTER successful save to avoid orphaned queries.
-  // Hard edit errors (severity: 'error') block the save.
-  // Soft edit warnings (severity: 'warning') allow save, queries created post-save.
   let validationWarnings: any[] = [];
-  if (crfId && formData) {
+  if (request.crfId && request.formData) {
     try {
-      // Pass eventCrfId if available (for editing existing forms) to enable
-      // item_id-based field matching. Without this, rules that only match by
-      // item_id would be silently skipped in pre-save but caught in post-save.
-      const existingEventCrfId = (request as any).eventCrfId;
-      
       const validationResult = await validationRulesService.validateFormData(
-        crfId,
-        formData,
+        request.crfId,
+        request.formData,
         {
-          createQueries: false,  // DO NOT create queries before save
+          createQueries: false,
           studyId: request.studyId,
           subjectId: request.subjectId,
           userId: userId,
-          eventCrfId: existingEventCrfId || undefined
+          eventCrfId: (request as any).eventCrfId || undefined
         }
       );
 
-      // If there are hard edit errors, block the save (no queries created)
       if (!validationResult.valid && validationResult.errors.length > 0) {
         logger.warn('Form data validation failed - save blocked', { 
-          crfId, 
+          crfId: request.crfId, 
           errorCount: validationResult.errors.length
         });
-        
         return {
           success: false,
           message: 'Validation failed',
@@ -108,21 +95,17 @@ export const saveFormData = async (
         } as any;
       }
 
-      // Store warnings for post-save query creation
       validationWarnings = validationResult.warnings || [];
       if (validationWarnings.length > 0) {
-        logger.info('Form data has validation warnings, will create queries after save', { 
-          crfId, 
+        logger.info('Validation warnings — queries will be created after save', { 
+          crfId: request.crfId, 
           warningCount: validationWarnings.length 
         });
       }
     } catch (validationError: any) {
-      // Configurable fail-safe: if VALIDATION_FAIL_SAFE=true (default: false),
-      // block the save when the validation service itself crashes.  This prevents
-      // potentially invalid data from being persisted when validation is unavailable.
       const failSafe = process.env.VALIDATION_FAIL_SAFE === 'true';
       if (failSafe) {
-        logger.error('Pre-save validation service crashed — blocking save (VALIDATION_FAIL_SAFE=true)', {
+        logger.error('Pre-save validation crashed — blocking save (VALIDATION_FAIL_SAFE=true)', {
           error: validationError.message
         });
         return {
@@ -130,51 +113,122 @@ export const saveFormData = async (
           message: 'Validation service is temporarily unavailable. Please try again shortly.'
         };
       }
-      logger.warn('Pre-save validation check failed, proceeding with save (VALIDATION_FAIL_SAFE=false)', { 
-        error: validationError.message 
-      });
+      logger.warn('Pre-save validation failed, proceeding with save', { error: validationError.message });
     }
   }
 
-  // Normalize request for SOAP service
-  const normalizedRequest: FormDataRequest = {
+  // Build the full request for saveFormDataDirect, including optional precision IDs
+  const fullRequest: FormDataRequest & {
+    studyEventId?: number;
+    eventCrfId?: number;
+    reasonForChange?: string;
+    interviewerName?: string;
+    interviewDate?: string;
+  } = {
     studyId: request.studyId,
     subjectId: request.subjectId,
-    studyEventDefinitionId: eventDefId,
-    crfId: crfId,
-    formData: formData || {}
+    studyEventDefinitionId: request.studyEventDefinitionId,
+    crfId: request.crfId,
+    formData: request.formData || {},
+    studyEventId: (request as any).studyEventId || undefined,
+    eventCrfId: (request as any).eventCrfId || undefined,
+    reasonForChange: (request as any).reasonForChange || undefined,
+    interviewerName: (request as any).interviewerName || undefined,
+    interviewDate: (request as any).interviewDate || undefined
   };
 
   // Try SOAP service first for GxP-compliant data entry
+  let saveResult: ApiResponse<any> | null = null;
+
   try {
-    const soapResult = await dataSoap.importData(normalizedRequest, userId, username);
+    const soapResult = await dataSoap.importData(fullRequest, userId, username);
     if (soapResult.success) {
-      return soapResult;
+      saveResult = soapResult;
+    } else {
+      logger.warn('SOAP import failed, falling back to database', { error: soapResult.message });
     }
-    logger.warn('SOAP import failed, falling back to database', { error: soapResult.message });
   } catch (soapError: any) {
-    logger.warn('SOAP service unavailable, falling back to database', { error: soapError.message });
+    logger.warn('SOAP service unavailable, falling back to database', { error: (soapError as Error).message });
   }
 
   // Fallback: Direct database insert for data entry
-  // This maintains audit trail compliance by using the existing LibreClinica tables
-  return await saveFormDataDirect(normalizedRequest, userId, username);
+  if (!saveResult) {
+    saveResult = await saveFormDataDirect(fullRequest, userId, username);
+  }
+
+  // ===== POST-SAVE VALIDATION: Create queries for soft warnings =====
+  // This runs after ANY successful save (SOAP or direct DB).
+  // The saveFormDataDirect path also runs its own post-save check, but
+  // the SOAP path previously skipped this entirely — causing warning
+  // queries to never be created when SOAP was the save mechanism.
+  if (saveResult.success && request.crfId && request.formData) {
+    const savedEventCrfId = (saveResult as any).eventCrfId
+      ?? (saveResult as any).data?.eventCrfId;
+
+    if (savedEventCrfId) {
+      try {
+        const postSaveValidation = await validationRulesService.validateFormData(
+          request.crfId,
+          request.formData,
+          {
+            createQueries: true,
+            studyId: request.studyId,
+            subjectId: request.subjectId,
+            eventCrfId: savedEventCrfId,
+            userId: userId
+          }
+        );
+        const queriesCreated = postSaveValidation.queriesCreated || 0;
+        if (queriesCreated > 0) {
+          logger.info('Post-save validation created queries for warnings', {
+            eventCrfId: savedEventCrfId,
+            crfId: request.crfId,
+            queriesCreated,
+            warningCount: postSaveValidation.warnings?.length || 0
+          });
+          // Attach queriesCreated to the save result so it's visible in the API response
+          (saveResult as any).queriesCreated = ((saveResult as any).queriesCreated || 0) + queriesCreated;
+        }
+      } catch (postValidationError: any) {
+        logger.warn('Post-save validation query creation failed (non-blocking)', {
+          error: postValidationError.message,
+          eventCrfId: savedEventCrfId,
+          crfId: request.crfId
+        });
+      }
+    }
+  }
+
+  return saveResult;
 };
 
 /**
  * Direct database save fallback for form data
  * Uses LibreClinica's existing tables: event_crf, item_data
  * 21 CFR Part 11 compliant with proper audit logging
+ *
+ * Resolution strategy for finding the correct records:
+ *   1. eventCrfId  — if the frontend already knows the event_crf record, use it directly
+ *   2. studyEventId — if the frontend knows the patient's visit instance, use it
+ *   3. studyEventDefinitionId + subjectId — fallback: look up the visit by definition
  */
 const saveFormDataDirect = async (
-  request: FormDataRequest,
+  request: FormDataRequest & {
+    studyEventId?: number;
+    eventCrfId?: number;
+    reasonForChange?: string;
+    interviewerName?: string;
+    interviewDate?: string;
+  },
   userId: number,
   username: string
 ): Promise<ApiResponse<any>> => {
   logger.info('Saving form data directly to database', {
     studyId: request.studyId,
     subjectId: request.subjectId,
-    crfId: request.crfId
+    crfId: request.crfId,
+    studyEventId: request.studyEventId,
+    eventCrfId: request.eventCrfId
   });
 
   const client = await pool.connect();
@@ -182,22 +236,67 @@ const saveFormDataDirect = async (
   try {
     await client.query('BEGIN');
 
-    // 1. Find or create the study_event for this subject and event definition
+    // 1. Resolve the study_event for this subject
+    // Priority: use provided studyEventId (instance) > look up by definition ID > create new
     let studyEventId: number | null = null;
-    const studyEventResult = await client.query(`
-      SELECT se.study_event_id 
-      FROM study_event se
-      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-      WHERE ss.study_subject_id = $1 
-        AND se.study_event_definition_id = $2
-      ORDER BY se.sample_ordinal DESC
-      LIMIT 1
-    `, [request.subjectId, request.studyEventDefinitionId]);
 
-    if (studyEventResult.rows.length > 0) {
-      studyEventId = studyEventResult.rows[0].study_event_id;
-    } else {
-      // Create the study event
+    // Strategy A: Use the provided studyEventId directly (most reliable — already resolved by frontend)
+    if (request.studyEventId) {
+      // Verify the event belongs to this subject
+      const verifyResult = await client.query(`
+        SELECT se.study_event_id
+        FROM study_event se
+        WHERE se.study_event_id = $1 AND se.study_subject_id = $2
+        LIMIT 1
+      `, [request.studyEventId, request.subjectId]);
+      if (verifyResult.rows.length > 0) {
+        studyEventId = verifyResult.rows[0].study_event_id;
+        logger.debug('Using provided studyEventId', { studyEventId });
+      } else {
+        logger.warn('Provided studyEventId does not belong to subject, falling back', {
+          studyEventId: request.studyEventId,
+          subjectId: request.subjectId
+        });
+      }
+    }
+
+    // Strategy A2: Resolve from eventCrfId (if we know the existing form, we can get the event)
+    if (!studyEventId && request.eventCrfId) {
+      const ecResult = await client.query(`
+        SELECT study_event_id FROM event_crf WHERE event_crf_id = $1
+        LIMIT 1
+      `, [request.eventCrfId]);
+      if (ecResult.rows.length > 0) {
+        studyEventId = ecResult.rows[0].study_event_id;
+        logger.debug('Resolved studyEventId from eventCrfId', { studyEventId, eventCrfId: request.eventCrfId });
+      }
+    }
+
+    // Strategy B: Look up by event definition ID
+    if (!studyEventId && request.studyEventDefinitionId) {
+      const studyEventResult = await client.query(`
+        SELECT se.study_event_id 
+        FROM study_event se
+        WHERE se.study_subject_id = $1 
+          AND se.study_event_definition_id = $2
+        ORDER BY se.sample_ordinal DESC
+        LIMIT 1
+      `, [request.subjectId, request.studyEventDefinitionId]);
+
+      if (studyEventResult.rows.length > 0) {
+        studyEventId = studyEventResult.rows[0].study_event_id;
+      }
+    }
+
+    // Strategy C: Create a new study_event (last resort)
+    if (!studyEventId) {
+      if (!request.studyEventDefinitionId) {
+        await client.query('ROLLBACK');
+        return {
+          success: false,
+          message: 'Cannot save: no study event found and no event definition ID to create one. Please schedule a visit first.'
+        };
+      }
       const createEventResult = await client.query(`
         INSERT INTO study_event (
           study_event_definition_id, study_subject_id, sample_ordinal,
@@ -223,26 +322,21 @@ const saveFormDataDirect = async (
     const crfVersionId = crfVersionResult.rows[0].crf_version_id;
 
     // 3. Find or create the event_crf
+    // Priority: use provided eventCrfId > look up by study_event + crf_version > look up by study_event + crf_id > create
     let eventCrfId: number | null = null;
-    const eventCrfResult = await client.query(`
-      SELECT event_crf_id FROM event_crf
-      WHERE study_event_id = $1 AND crf_version_id = $2
-      LIMIT 1
-    `, [studyEventId, crfVersionId]);
 
-    if (eventCrfResult.rows.length > 0) {
-      eventCrfId = eventCrfResult.rows[0].event_crf_id;
-      
-      // CHECK IF RECORD IS LOCKED OR FROZEN
-      // Locked (status_id = 6) = permanent, only admin can unlock
-      // Frozen = intermediate protection, DM/admin can unfreeze
-      // 21 CFR Part 11 compliance (§11.10(d))
-      const lockCheckResult = await client.query(`
-        SELECT status_id, COALESCE(frozen, false) as frozen FROM event_crf WHERE event_crf_id = $1
-      `, [eventCrfId]);
-      
-      if (lockCheckResult.rows.length > 0) {
-        const ecRow = lockCheckResult.rows[0];
+    // Strategy A: Use provided eventCrfId directly (editing existing form)
+    if (request.eventCrfId) {
+      const verifyResult = await client.query(`
+        SELECT event_crf_id, status_id, COALESCE(frozen, false) as frozen
+        FROM event_crf
+        WHERE event_crf_id = $1
+        LIMIT 1
+      `, [request.eventCrfId]);
+      if (verifyResult.rows.length > 0) {
+        eventCrfId = verifyResult.rows[0].event_crf_id;
+        // Check lock/freeze status
+        const ecRow = verifyResult.rows[0];
         if (ecRow.status_id === 6) {
           await client.query('ROLLBACK');
           logger.warn('Attempted to edit locked record', { eventCrfId, userId });
@@ -261,9 +355,66 @@ const saveFormDataDirect = async (
             errors: ['RECORD_FROZEN']
           };
         }
+        logger.debug('Using provided eventCrfId', { eventCrfId });
       }
-    } else {
-      // Create the event_crf
+    }
+
+    // Strategy B: Look up by study_event_id + crf_version_id
+    if (!eventCrfId) {
+      const eventCrfResult = await client.query(`
+        SELECT event_crf_id FROM event_crf
+        WHERE study_event_id = $1 AND crf_version_id = $2
+        LIMIT 1
+      `, [studyEventId, crfVersionId]);
+
+      if (eventCrfResult.rows.length > 0) {
+        eventCrfId = eventCrfResult.rows[0].event_crf_id;
+
+        // CHECK IF RECORD IS LOCKED OR FROZEN
+        const lockCheckResult = await client.query(`
+          SELECT status_id, COALESCE(frozen, false) as frozen FROM event_crf WHERE event_crf_id = $1
+        `, [eventCrfId]);
+        if (lockCheckResult.rows.length > 0) {
+          const ecRow = lockCheckResult.rows[0];
+          if (ecRow.status_id === 6) {
+            await client.query('ROLLBACK');
+            logger.warn('Attempted to edit locked record', { eventCrfId, userId });
+            return {
+              success: false,
+              message: 'Cannot edit data - this record is locked. Request an unlock through the Data Lock Management system.',
+              errors: ['RECORD_LOCKED']
+            };
+          }
+          if (ecRow.frozen) {
+            await client.query('ROLLBACK');
+            logger.warn('Attempted to edit frozen record', { eventCrfId, userId });
+            return {
+              success: false,
+              message: 'Cannot edit data - this record is frozen. Request an unfreeze from a Data Manager before editing.',
+              errors: ['RECORD_FROZEN']
+            };
+          }
+        }
+      }
+    }
+
+    // Strategy C: Look up by study_event_id + any version of this CRF (handles version mismatch)
+    if (!eventCrfId) {
+      const eventCrfByAnyVersion = await client.query(`
+        SELECT ec.event_crf_id FROM event_crf ec
+        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        WHERE ec.study_event_id = $1 AND cv.crf_id = $2
+        LIMIT 1
+      `, [studyEventId, request.crfId]);
+      if (eventCrfByAnyVersion.rows.length > 0) {
+        eventCrfId = eventCrfByAnyVersion.rows[0].event_crf_id;
+        logger.info('Found event_crf with different version (using existing)', { eventCrfId });
+      }
+    }
+
+    // Strategy D: Create new event_crf
+    if (!eventCrfId) {
+      const interviewerName = request.interviewerName || username;
       const createEventCrfResult = await client.query(`
         INSERT INTO event_crf (
           study_event_id, crf_version_id, study_subject_id,
@@ -271,12 +422,25 @@ const saveFormDataDirect = async (
           completion_status_id, status_id, owner_id, date_created
         ) VALUES ($1, $2, $3, CURRENT_DATE, $4, 1, 1, $5, NOW())
         RETURNING event_crf_id
-      `, [studyEventId, crfVersionId, request.subjectId, username, userId]);
+      `, [studyEventId, crfVersionId, request.subjectId, interviewerName, userId]);
       eventCrfId = createEventCrfResult.rows[0].event_crf_id;
       logger.info('Created event_crf', { eventCrfId });
     }
 
-    // 4. Get item mappings for this CRF version
+    // 4. Resolve the actual crf_version_id to query items against.
+    // If we reused an existing event_crf (strategies A-C), its version may differ
+    // from the latest active version. Use the version attached to the event_crf.
+    let resolvedVersionId = crfVersionId;
+    if (request.eventCrfId && eventCrfId === request.eventCrfId) {
+      const ecVersionResult = await client.query(
+        `SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1`, [eventCrfId]
+      );
+      if (ecVersionResult.rows.length > 0 && ecVersionResult.rows[0].crf_version_id) {
+        resolvedVersionId = ecVersionResult.rows[0].crf_version_id;
+      }
+    }
+
+    // Get item mappings for the resolved CRF version
     // Include description to extract technical fieldName from extended_properties
     const itemsResult = await client.query(`
       SELECT i.item_id, i.name, i.oc_oid, i.description
@@ -285,7 +449,7 @@ const saveFormDataDirect = async (
       LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
       WHERE igm.crf_version_id = $1
         AND (ifm.show_item IS DISTINCT FROM false)
-    `, [crfVersionId]);
+    `, [resolvedVersionId]);
 
     const itemMap = new Map<string, number>();
     for (const item of itemsResult.rows) {
@@ -315,13 +479,32 @@ const saveFormDataDirect = async (
 
     // 5. Save each form field value to item_data
     let savedCount = 0;
+    let skippedCount = 0;
     const formData = request.formData || {};
+    
+    logger.info('Starting field save loop', { 
+      fieldCount: Object.keys(formData).length,
+      itemMapSize: itemMap.size,
+      sampleMapKeys: Array.from(itemMap.keys()).slice(0, 10)
+    });
 
     for (const [fieldName, value] of Object.entries(formData)) {
-      // Find the item_id for this field
-      const itemId = itemMap.get(fieldName.toLowerCase());
+      // Find the item_id for this field - try multiple matching strategies
+      let itemId = itemMap.get(fieldName.toLowerCase());
+      
+      // Fallback: try matching by label (item.name stores the display label)
       if (!itemId) {
-        logger.debug('Field not found in CRF, skipping', { fieldName });
+        // Try exact case
+        itemId = itemMap.get(fieldName);
+      }
+      
+      if (!itemId) {
+        skippedCount++;
+        logger.warn('Field not found in CRF item map, skipping', { 
+          fieldName, 
+          fieldNameLower: fieldName.toLowerCase(),
+          availableKeys: Array.from(itemMap.keys()).filter(k => k.includes(fieldName.substring(0, 5).toLowerCase())).slice(0, 5)
+        });
         continue;
       }
 
@@ -381,14 +564,14 @@ const saveFormDataDirect = async (
             WHERE item_data_id = $3
           `, [stringValue, userId, existingResult.rows[0].item_data_id]);
 
-          // Log change to audit trail
+          // Log change to audit trail (21 CFR Part 11 §11.10(e) — include reason_for_change)
           await client.query(`
             INSERT INTO audit_log_event (
               audit_date, audit_table, user_id, entity_id,
               old_value, new_value, audit_log_event_type_id,
-              event_crf_id
-            ) VALUES (NOW(), 'item_data', $1, $2, $3, $4, 1, $5)
-          `, [userId, existingResult.rows[0].item_data_id, oldValue, stringValue, eventCrfId]);
+              event_crf_id, reason_for_change
+            ) VALUES (NOW(), 'item_data', $1, $2, $3, $4, 1, $5, $6)
+          `, [userId, existingResult.rows[0].item_data_id, oldValue, stringValue, eventCrfId, request.reasonForChange || null]);
         }
       } else {
         // Insert new
@@ -411,20 +594,68 @@ const saveFormDataDirect = async (
       savedCount++;
     }
 
-    // 6. Update event_crf completion status
+    // 6. Update event_crf completion status based on how many fields are filled
+    //    2 = initial_data_entry, 4 = complete
+    const totalItemsResult = await client.query(`
+      SELECT COUNT(DISTINCT i.item_id) as total
+      FROM item i
+      INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+      WHERE igm.crf_version_id = $1
+    `, [resolvedVersionId]);
+    const filledItemsResult = await client.query(`
+      SELECT COUNT(*) as filled
+      FROM item_data
+      WHERE event_crf_id = $1 AND deleted = false AND value IS NOT NULL AND value != ''
+    `, [eventCrfId]);
+
+    const totalItems = parseInt(totalItemsResult.rows[0]?.total) || 0;
+    const filledItems = parseInt(filledItemsResult.rows[0]?.filled) || 0;
+    const isComplete = totalItems > 0 && filledItems >= totalItems;
+    const completionStatusId = isComplete ? 4 : 2;
+
     await client.query(`
       UPDATE event_crf
-      SET completion_status_id = 2, date_updated = NOW(), update_id = $1
-      WHERE event_crf_id = $2
-    `, [userId, eventCrfId]);
+      SET completion_status_id = $1,
+          date_updated = NOW(),
+          update_id = $2,
+          date_completed = CASE WHEN $1 = 4 THEN NOW() ELSE date_completed END
+      WHERE event_crf_id = $3
+    `, [completionStatusId, userId, eventCrfId]);
+
+    // Also update the study_event status to 'data_entry_started' (3)
+    await client.query(`
+      UPDATE study_event
+      SET subject_event_status_id = GREATEST(subject_event_status_id, 3),
+          date_updated = NOW()
+      WHERE study_event_id = $1 AND subject_event_status_id < 3
+    `, [studyEventId]);
 
     await client.query('COMMIT');
 
     logger.info('Form data saved directly to database', {
       eventCrfId,
       savedCount,
-      totalFields: Object.keys(formData).length
+      skippedCount,
+      totalFields: Object.keys(formData).length,
+      allFieldsMatched: skippedCount === 0
     });
+
+    // 6b. Also persist form data to patient_event_form.form_data (JSONB snapshot).
+    // This provides a secondary data source and keeps the snapshot in sync.
+    try {
+      await pool.query(`
+        UPDATE patient_event_form
+        SET form_data = $1::jsonb,
+            completion_status = CASE WHEN $2 = 0 THEN 'not_started' WHEN $3 THEN 'complete' ELSE 'in_progress' END,
+            date_updated = NOW(),
+            updated_by = $4
+        WHERE event_crf_id = $5
+      `, [JSON.stringify(formData), savedCount, savedCount >= (parseInt(totalItemsResult.rows[0]?.total) || 999), userId, eventCrfId]);
+      logger.debug('Updated patient_event_form.form_data', { eventCrfId, fieldCount: Object.keys(formData).length });
+    } catch (snapUpdateError: any) {
+      // Non-blocking - item_data is the primary store
+      logger.warn('Failed to update patient_event_form.form_data (non-blocking)', { error: snapUpdateError.message });
+    }
 
     // 7. AUTO-TRIGGER WORKFLOW — deduplicated
     // Only create a 'form_submitted' event ONCE per eventCrfId.
@@ -514,8 +745,9 @@ const saveFormDataDirect = async (
 
     return {
       success: true,
-      eventCrfId,  // Top-level for frontend SaveFormDataResponse compatibility
-      data: { eventCrfId, savedCount },
+      eventCrfId,       // Top-level for frontend SaveFormDataResponse compatibility
+      studyEventId,     // The patient-visit instance that was used
+      data: { eventCrfId, studyEventId, savedCount },
       message: `Form data saved successfully (${savedCount} fields)`,
       queriesCreated
     } as any;
@@ -612,6 +844,53 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       }
       return row;
     });
+
+    // If item_data is empty, try loading from patient_event_form.form_data as fallback.
+    // This handles cases where data was stored in the snapshot but not yet in item_data,
+    // or where the data structures were migrated.
+    if (decryptedRows.length === 0) {
+      logger.info('No item_data found, checking patient_event_form.form_data fallback', { eventCrfId });
+      try {
+        const snapshotQuery = `
+          SELECT pef.form_data, pef.patient_event_form_id
+          FROM patient_event_form pef
+          WHERE pef.event_crf_id = $1
+            AND pef.form_data IS NOT NULL
+            AND pef.form_data::text != '{}'
+          LIMIT 1
+        `;
+        const snapshotResult = await pool.query(snapshotQuery, [eventCrfId]);
+        if (snapshotResult.rows.length > 0 && snapshotResult.rows[0].form_data) {
+          const snapData = snapshotResult.rows[0].form_data;
+          logger.info('Found form data in patient_event_form snapshot', {
+            eventCrfId,
+            snapshotId: snapshotResult.rows[0].patient_event_form_id,
+            fieldCount: Object.keys(snapData).length
+          });
+          // Convert snapshot JSONB data to the same format as item_data rows
+          // so the frontend mapping logic works identically
+          const syntheticRows = Object.entries(snapData).map(([fieldName, value]) => ({
+            item_data_id: null,
+            item_id: null,
+            item_name: fieldName,
+            item_oid: null,
+            field_name: fieldName,
+            value: String(value),
+            status_id: 1,
+            date_created: null,
+            date_updated: null,
+            entered_by: null
+          }));
+          return {
+            data: syntheticRows,
+            lockStatus: lockInfo,
+            source: 'patient_event_form'
+          };
+        }
+      } catch (snapError: any) {
+        logger.warn('Failed to check patient_event_form fallback', { error: snapError.message });
+      }
+    }
 
     // Return data with lock status for UI to respect
     return {
@@ -1443,45 +1722,42 @@ const mapFieldTypeToDataType = (fieldType: string): number => {
     'decimal': 7,   // REAL - Floating
     'float': 7,     // REAL - Floating
     'date': 9,      // DATE
+    'datetime': 9,  // DATE (stored as ISO string)
+    'time': 5,      // ST - stored as string
+    'date_of_birth': 9, // DATE
     'pdate': 10,    // PDATE - Partial date
     'checkbox': 1,  // BL - Boolean
     'radio': 5,     // ST - stored as string
+    'radiobutton': 5, // ST - stored as string (alias)
+    'yesno': 5,     // ST - stored as string
     'select': 5,    // ST - stored as string
+    'single-select': 5, // ST - stored as string
+    'dropdown': 5,  // ST - stored as string
+    'multiselect': 5, // ST - stored as comma-separated string
+    'multi-select': 5, // ST - stored as comma-separated string
     'file': 11,     // FILE
-    'table': 5      // ST - Table data stored as JSON string
+    'image': 11,    // FILE
+    'signature': 11, // FILE
+    'table': 5,     // ST - Table data stored as JSON string
+    'calculation': 7, // REAL - calculations may be numeric
+    'barcode': 5,   // ST - barcode value is a string
+    'qrcode': 5,    // ST - QR code value is a string
+    // Clinical vitals
+    'height': 7,    // REAL
+    'weight': 7,    // REAL
+    'blood_pressure': 5, // ST - stored as "120/80"
+    'temperature': 7, // REAL
+    'heart_rate': 6,  // INT
+    'respiration_rate': 6, // INT
+    'oxygen_saturation': 7, // REAL
+    'bmi': 7         // REAL - calculated
   };
   return typeMap[fieldType?.toLowerCase()] || 5; // Default to ST (string)
 };
 
 /**
- * Validation rule interface
- */
-interface ValidationRule {
-  type: string;
-  value?: any;
-  message?: string;
-}
-
-/**
- * Conditional rule interface
- */
-interface ConditionalRule {
-  fieldId: string;
-  operator: string;
-  value: any;
-}
-
-/**
- * Form field option interface
- */
-interface FormFieldOption {
-  label: string;
-  value: string;
-  order?: number;
-}
-
-/**
- * Form field interface - COMPLETE match to frontend FormField model
+ * Form field interface - uses shared DTOs from ../../types as source of truth.
+ * ValidationRule, FormFieldOption, ShowWhenCondition, etc. are imported from there.
  */
 interface FormField {
   // Core identifiers
@@ -1545,19 +1821,19 @@ interface FormField {
   calculationFormula?: string;
   dependsOn?: string[];
   
-  // Conditional Logic / Branching
-  showWhen?: ConditionalRule[];
-  hideWhen?: ConditionalRule[];
-  requiredWhen?: ConditionalRule[];
-  conditionalLogic?: any[];
-  visibilityConditions?: any[];
+  // Conditional Logic / Branching (uses shared ShowWhenCondition DTO)
+  showWhen?: ShowWhenCondition[];
+  hideWhen?: ShowWhenCondition[];
+  requiredWhen?: ShowWhenCondition[];
+  conditionalLogic?: ShowWhenCondition[];
+  visibilityConditions?: ShowWhenCondition[];
   
-  // Form Linking / Branch to Another Form
+  // Form Linking / Branch to Another Form (uses shared FormLinkDefinition DTO)
   linkedFormId?: number | string;
   linkedFormName?: string;
   linkedFormTriggerValue?: any;
   linkedFormRequired?: boolean;
-  formLinks?: any[];
+  formLinks?: FormLinkDefinition[];
   
   // Custom attributes
   customAttributes?: Record<string, any>;
@@ -1577,22 +1853,22 @@ interface FormField {
     reasonRequired: boolean;
   };
   
-  // Table field properties
-  tableColumns?: any[];
-  tableRows?: any[];
-  tableSettings?: Record<string, any>;
+  // Table field properties (types from shared DTO in ../../types)
+  tableColumns?: TableColumnDefinition[];
+  tableRows?: TableRowDefinition[];
+  tableSettings?: TableSettings;
   
-  // Inline group field properties
-  inlineFields?: any[];
-  inlineGroupSettings?: Record<string, any>;
+  // Inline group field properties (uses shared DTOs)
+  inlineFields?: InlineFieldDefinition[];
+  inlineGroupSettings?: InlineGroupSettings;
   
-  // Criteria list field properties
-  criteriaItems?: any[];
-  criteriaListSettings?: Record<string, any>;
+  // Criteria list field properties (uses shared DTOs)
+  criteriaItems?: CriteriaItem[];
+  criteriaListSettings?: CriteriaListSettings;
   
-  // Question table field properties
-  questionRows?: any[];
-  questionTableSettings?: Record<string, any>;
+  // Question table field properties (uses shared DTOs)
+  questionRows?: QuestionRow[];
+  questionTableSettings?: QuestionTableSettings;
   
   // Static content / Section header
   staticContent?: string;
@@ -1738,8 +2014,13 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
     'checkbox': 3,
     'file': 4,
     'image': 4,        // images also use file response type
+    'signature': 4,    // signatures also use file response type
     'radio': 5,
+    'radiobutton': 5,  // alias for radio
+    'radio-button': 5, // alias for radio
+    'yesno': 5,        // yes/no is essentially a radio with two options
     'select': 6,
+    'single-select': 6,
     'dropdown': 6,
     'multiselect': 3,  // multiselect is now treated as checkbox
     'multi-select': 3, // multiselect is now treated as checkbox
@@ -1777,7 +2058,6 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
     'blood_pressure': 1,
     'oxygen_saturation': 1,
     'respiration_rate': 1,
-    'yesno': 5,        // Yes/No uses radio type
     
     // Complex/structured types — stored as text response type, structure lives in extended_properties
     'table': 1,
@@ -1786,7 +2066,6 @@ const mapFieldTypeToResponseType = (fieldType: string): number => {
     'question_table': 1,
     'section_header': 1,
     'static_text': 1,
-    'signature': 1,
     'date_of_birth': 1,
     'patient_name': 1,
     'patient_id': 1,
@@ -1812,6 +2091,8 @@ const mapResponseTypeToFieldType = (responseType: string | null | undefined): st
     'checkbox': 'checkbox',
     'file': 'file',
     'radio': 'radio',
+    'radiobutton': 'radio',
+    'radio-button': 'radio',
     'single-select': 'select',
     'select': 'select',
     'dropdown': 'select',
@@ -3288,12 +3569,12 @@ export const createFormVersion = async (
 
       const newGroupResult = await client.query(`
         INSERT INTO item_group (
-          name, oc_oid, status_id, owner_id, date_created
+          name, crf_id, oc_oid, status_id, owner_id, date_created
         ) VALUES (
-          $1, $2, 1, $3, NOW()
+          $1, $2, $3, 1, $4, NOW()
         )
         RETURNING item_group_id
-      `, [group.name, newGroupOid, userId]);
+      `, [group.name, crfId, newGroupOid, userId]);
 
       const newGroupId = newGroupResult.rows[0].item_group_id;
       itemGroupMapping[group.item_group_id] = newGroupId;
@@ -3610,12 +3891,10 @@ export const forkForm = async (
       sectionMapping[section.section_id] = newSectionResult.rows[0].section_id;
     }
 
-    // 7. Copy item groups
+    // 7. Copy item groups (create group records only — metadata is copied after items)
     const itemGroupMapping: Record<number, number> = {};
     const itemGroupsResult = await client.query(`
-      SELECT ig.item_group_id, ig.name, ig.oc_oid,
-             igm.header, igm.subheader, igm.layout, igm.repeat_number,
-             igm.repeat_max, igm.show_group, igm.ordinal, igm.borders
+      SELECT DISTINCT ig.item_group_id, ig.name, ig.oc_oid
       FROM item_group ig
       INNER JOIN item_group_metadata igm ON ig.item_group_id = igm.item_group_id
       WHERE igm.crf_version_id = $1
@@ -3625,29 +3904,21 @@ export const forkForm = async (
       const newGroupOid = `IG_${newCrfId}_${Date.now().toString().slice(-4)}_${group.item_group_id}`;
 
       const newGroupResult = await client.query(`
-        INSERT INTO item_group (name, oc_oid, status_id, owner_id, date_created)
-        VALUES ($1, $2, 1, $3, NOW())
+        INSERT INTO item_group (name, crf_id, oc_oid, status_id, owner_id, date_created)
+        VALUES ($1, $2, $3, 1, $4, NOW())
         RETURNING item_group_id
-      `, [group.name, newGroupOid, userId]);
+      `, [group.name, newCrfId, newGroupOid, userId]);
 
-      const newGroupId = newGroupResult.rows[0].item_group_id;
-      itemGroupMapping[group.item_group_id] = newGroupId;
-
-      await client.query(`
-        INSERT INTO item_group_metadata (
-          item_group_id, crf_version_id, header, subheader, layout,
-          repeat_number, repeat_max, show_group, ordinal, borders
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      `, [
-        newGroupId, newVersionId, group.header, group.subheader, group.layout,
-        group.repeat_number, group.repeat_max, group.show_group, group.ordinal, group.borders
-      ]);
+      itemGroupMapping[group.item_group_id] = newGroupResult.rows[0].item_group_id;
     }
 
     // 8. Copy items
+    const ifmMapping: Record<number, number> = {}; // old item_form_metadata_id -> new
+    const itemIdMapping: Record<number, number> = {}; // old item_id -> new item_id
     const itemsResult = await client.query(`
       SELECT i.item_id, i.name, i.description, i.units, i.phi_status,
              i.item_data_type_id, i.item_reference_type_id, i.oc_oid,
+             ifm.item_form_metadata_id,
              ifm.header, ifm.subheader, ifm.left_item_text, ifm.right_item_text,
              ifm.parent_id, ifm.column_number, ifm.section_id, ifm.ordinal,
              ifm.response_set_id, ifm.required, ifm.regexp, ifm.regexp_error_msg,
@@ -3675,13 +3946,14 @@ export const forkForm = async (
       const newItemId = newItemResult.rows[0].item_id;
       const newSectionId = sectionMapping[item.section_id] || null;
 
-      await client.query(`
+      const newIfmResult = await client.query(`
         INSERT INTO item_form_metadata (
           item_id, crf_version_id, header, subheader, left_item_text, right_item_text,
           parent_id, column_number, section_id, ordinal, response_set_id,
           required, regexp, regexp_error_msg, show_item, question_number_label,
           default_value, width_decimal, response_layout
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        RETURNING item_form_metadata_id
       `, [
         newItemId, newVersionId, item.header, item.subheader, item.left_item_text,
         item.right_item_text, null, item.column_number, newSectionId, item.ordinal,
@@ -3690,20 +3962,84 @@ export const forkForm = async (
         item.width_decimal, item.response_layout
       ]);
 
-      // Copy item_group_map
-      const groupMapResult = await client.query(`
-        SELECT item_group_id FROM item_group_map WHERE item_id = $1 AND crf_version_id = $2
-      `, [item.item_id, sourceVersionId]);
+      ifmMapping[item.item_form_metadata_id] = newIfmResult.rows[0].item_form_metadata_id;
+      itemIdMapping[item.item_id] = newItemId;
 
-      if (groupMapResult.rows.length > 0) {
-        const oldGroupId = groupMapResult.rows[0].item_group_id;
-        const newGroupId = itemGroupMapping[oldGroupId];
-        if (newGroupId) {
-          await client.query(`
-            INSERT INTO item_group_map (item_group_id, item_id, crf_version_id)
-            VALUES ($1, $2, $3)
-          `, [newGroupId, newItemId, newVersionId]);
+      // Copy item_group_map (table may not exist on all installations)
+      try {
+        await client.query('SAVEPOINT copy_igm');
+        const groupMapResult = await client.query(`
+          SELECT item_group_id FROM item_group_map WHERE item_id = $1 AND crf_version_id = $2
+        `, [item.item_id, sourceVersionId]);
+
+        if (groupMapResult.rows.length > 0) {
+          const oldGroupId = groupMapResult.rows[0].item_group_id;
+          const newGroupId = itemGroupMapping[oldGroupId];
+          if (newGroupId) {
+            await client.query(`
+              INSERT INTO item_group_map (item_group_id, item_id, crf_version_id)
+              VALUES ($1, $2, $3)
+            `, [newGroupId, newItemId, newVersionId]);
+          }
         }
+        await client.query('RELEASE SAVEPOINT copy_igm');
+      } catch (igmError: any) {
+        await client.query('ROLLBACK TO SAVEPOINT copy_igm');
+      }
+    }
+
+    // 8b. Copy item_group_metadata (now that we have item ID mappings)
+    const igmResult = await client.query(`
+      SELECT igm.item_group_id, igm.item_id, igm.header, igm.subheader, igm.layout,
+             igm.repeat_number, igm.repeat_max, igm.show_group, igm.ordinal,
+             igm.borders, igm.repeating_group
+      FROM item_group_metadata igm
+      WHERE igm.crf_version_id = $1
+    `, [sourceVersionId]);
+
+    for (const igm of igmResult.rows) {
+      const newGroupId = itemGroupMapping[igm.item_group_id];
+      const newItemId = igm.item_id ? itemIdMapping[igm.item_id] : null;
+      if (!newGroupId) continue;
+
+      await client.query(`
+        INSERT INTO item_group_metadata (
+          item_group_id, crf_version_id, item_id, header, subheader, layout,
+          repeat_number, repeat_max, show_group, ordinal, borders, repeating_group
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `, [
+        newGroupId, newVersionId, newItemId,
+        igm.header, igm.subheader, igm.layout,
+        igm.repeat_number, igm.repeat_max, igm.show_group,
+        igm.ordinal, igm.borders, igm.repeating_group ?? false,
+      ]);
+    }
+
+    // 9. Copy SCD item metadata (skip logic / conditional display)
+    const scdResult = await client.query(`
+      SELECT scd.scd_item_form_metadata_id, scd.control_item_form_metadata_id,
+             scd.control_item_name, scd.option_value, scd.message, scd.version
+      FROM scd_item_metadata scd
+      INNER JOIN item_form_metadata ifm ON scd.scd_item_form_metadata_id = ifm.item_form_metadata_id
+      WHERE ifm.crf_version_id = $1
+    `, [sourceVersionId]);
+
+    for (const scd of scdResult.rows) {
+      const newTargetIfmId = ifmMapping[scd.scd_item_form_metadata_id];
+      const newControlIfmId = scd.control_item_form_metadata_id
+        ? ifmMapping[scd.control_item_form_metadata_id]
+        : null;
+
+      if (newTargetIfmId) {
+        await client.query(`
+          INSERT INTO scd_item_metadata (
+            scd_item_form_metadata_id, control_item_form_metadata_id,
+            control_item_name, option_value, message, version
+          ) VALUES ($1, $2, $3, $4, $5, $6)
+        `, [
+          newTargetIfmId, newControlIfmId || null,
+          scd.control_item_name, scd.option_value, scd.message, scd.version || 1
+        ]);
       }
     }
 

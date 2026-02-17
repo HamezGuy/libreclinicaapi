@@ -23,6 +23,7 @@ import {
   UserActivityStats,
   MonthlyEnrollment
 } from '../../types';
+import { formatDate, toISOTimestamp } from '../../utils/date.util';
 
 /**
  * Get enrollment statistics
@@ -472,7 +473,7 @@ export const getUserActivityStats = async (
     const byDayResult = await pool.query(byDayQuery, [startDate]);
 
     const activityByDay = byDayResult.rows.map(row => ({
-      date: row.date ? row.date.toISOString().split('T')[0] : '',
+      date: formatDate(row.date),
       logins: parseInt(row.logins) || 0,
       dataEntries: parseInt(row.data_entries) || 0,
       queries: parseInt(row.queries) || 0
@@ -526,7 +527,7 @@ export const getEnrollmentTrend = async (
 
     const result = await pool.query(query, [studyId]);
     return result.rows.map(row => ({
-      date: row.date?.toISOString().split('T')[0],
+      date: formatDate(row.date),
       enrolled: parseInt(row.enrolled),
       cumulative: parseInt(row.cumulative)
     }));
@@ -567,7 +568,7 @@ export const getCompletionTrend = async (
 
     const result = await pool.query(query, [studyId]);
     return result.rows.map(row => ({
-      date: row.date?.toISOString().split('T')[0],
+      date: formatDate(row.date),
       completed: parseInt(row.completed)
     }));
   } catch (error: any) {
@@ -1129,7 +1130,7 @@ export const getUserAnalytics = async (
 
     const activityTrendResult = await pool.query(activityTrendQuery, [startDate]);
     const activityTrend = activityTrendResult.rows.map(row => ({
-      date: row.date?.toISOString().split('T')[0],
+      date: formatDate(row.date),
       actionCount: parseInt(row.action_count) || 0,
       uniqueUsers: parseInt(row.unique_users) || 0
     })).reverse();

@@ -48,12 +48,13 @@ import {
   PaginatedResponse,
   toStudy
 } from '../../types/libreclinica-models';
+import { CreateStudyRequest, UpdateStudyRequest } from '../../types/study.dto';
 
-// Study metadata interface - uses raw database rows for local fallback
+// Study metadata interface — typed references to study configuration
 export interface StudyMetadata {
-  study: any;
-  events: any[];
-  crfs: any[];
+  study: Record<string, unknown>;
+  events: Record<string, unknown>[];
+  crfs: Record<string, unknown>[];
 }
 
 /**
@@ -362,6 +363,19 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         s.duration,
         s.selection,
         s.timing,
+        s.study_acronym,
+        s.protocol_version,
+        s.protocol_amendment_number,
+        s.therapeutic_area,
+        s.indication,
+        s.nct_number,
+        s.irb_number,
+        s.regulatory_authority,
+        s.fpfv_date,
+        s.lpfv_date,
+        s.lplv_date,
+        s.database_lock_date,
+        s.sdv_requirement,
         st.name as status_name,
         s.protocol_type as type_name,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as total_subjects,
@@ -459,6 +473,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         sgc.study_group_class_id,
         sgc.name,
         sgc.group_class_type_id,
+        sgc.custom_type_name,
         sgc.subject_assignment,
         sgc.status_id
       FROM study_group_class sgc
@@ -497,6 +512,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         studyGroupClassId: gc.study_group_class_id,
         name: gc.name,
         groupClassTypeId: gc.group_class_type_id,
+        customTypeName: gc.custom_type_name || undefined,
         subjectAssignment: gc.subject_assignment,
         groups: groupsResult.rows.map((g: any) => ({
           studyGroupId: g.study_group_id,
@@ -518,6 +534,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         s.facility_address,
         s.facility_city,
         s.facility_state,
+        s.facility_zip,
         s.facility_country,
         s.facility_recruitment_status,
         s.status_id,
@@ -538,6 +555,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
       facilityAddress: site.facility_address,
       facilityCity: site.facility_city,
       facilityState: site.facility_state,
+      facilityZip: site.facility_zip,
       facilityCountry: site.facility_country,
       facilityRecruitmentStatus: site.facility_recruitment_status,
       enrolledSubjects: parseInt(site.enrolled_subjects) || 0,
@@ -689,71 +707,7 @@ export const getStudySites = async (studyId: number): Promise<any[]> => {
  * - Design: purpose, allocation, masking, control, assignment, endpoint, interventions, duration, selection, timing
  */
 export const createStudy = async (
-  data: {
-    // Required
-    name: string;
-    uniqueIdentifier: string;
-    
-    // Identification
-    secondaryIdentifier?: string;
-    officialTitle?: string;
-    summary?: string;
-    
-    // Team
-    principalInvestigator?: string;
-    sponsor?: string;
-    collaborators?: string;
-    
-    // Classification
-    phase?: string;
-    protocolType?: string;
-    expectedTotalEnrollment?: number;
-    datePlannedStart?: string;
-    datePlannedEnd?: string;
-    parentStudyId?: number;
-    
-    // Facility
-    facilityName?: string;
-    facilityAddress?: string;
-    facilityCity?: string;
-    facilityState?: string;
-    facilityZip?: string;
-    facilityCountry?: string;
-    facilityRecruitmentStatus?: string;
-    facilityContactName?: string;
-    facilityContactDegree?: string;
-    facilityContactPhone?: string;
-    facilityContactEmail?: string;
-    
-    // Protocol
-    protocolDescription?: string;
-    protocolDateVerification?: string;
-    medlineIdentifier?: string;
-    url?: string;
-    urlDescription?: string;
-    resultsReference?: boolean;
-    conditions?: string;
-    keywords?: string;
-    interventions?: string;
-    
-    // Eligibility
-    eligibility?: string;
-    gender?: string;
-    ageMin?: string;
-    ageMax?: string;
-    healthyVolunteerAccepted?: boolean;
-    
-    // Study Design
-    purpose?: string;
-    allocation?: string;
-    masking?: string;
-    control?: string;
-    assignment?: string;
-    endpoint?: string;
-    duration?: string;
-    selection?: string;
-    timing?: string;
-  },
+  data: CreateStudyRequest,
   userId: number
 ): Promise<{ success: boolean; studyId?: number; message?: string }> => {
   logger.info('Creating study', { name: data.name, userId });
@@ -778,7 +732,6 @@ export const createStudy = async (
     const ocOid = `S_${data.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
     // Insert study with ALL database fields that exist in the LibreClinica schema
-    // Verified against study table schema (libreclinica-full-schema.sql lines 3477-3544)
     const insertQuery = `
       INSERT INTO study (
         parent_study_id, unique_identifier, secondary_identifier, name,
@@ -793,7 +746,11 @@ export const createStudy = async (
         medline_identifier, url, url_description, results_reference,
         conditions, keywords, eligibility, gender, age_min, age_max, healthy_volunteer_accepted,
         purpose, allocation, masking, control, assignment, endpoint, interventions, duration, selection, timing,
-        oc_oid
+        oc_oid,
+        study_acronym, protocol_version, protocol_amendment_number,
+        therapeutic_area, indication, nct_number, irb_number, regulatory_authority,
+        fpfv_date, lpfv_date, lplv_date, database_lock_date,
+        sdv_requirement
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, $12, NOW(),
         $13, $14, $15, $16, $17,
@@ -801,7 +758,11 @@ export const createStudy = async (
         $29, $30, $31, $32,
         $33, $34, $35, $36, $37, $38, $39,
         $40, $41, $42, $43, $44, $45, $46, $47, $48, $49,
-        $50
+        $50,
+        $51, $52, $53,
+        $54, $55, $56, $57, $58,
+        $59, $60, $61, $62,
+        $63
       )
       RETURNING study_id
     `;
@@ -820,7 +781,7 @@ export const createStudy = async (
       // Timeline
       data.datePlannedStart || null,                                  // $9  date_planned_start
       data.datePlannedEnd || null,                                    // $10 date_planned_end
-      data.expectedTotalEnrollment ?? null,                            // $11 expected_total_enrollment (use ?? to preserve 0)
+      data.expectedTotalEnrollment ?? null,                            // $11 expected_total_enrollment
       userId,                                                          // $12 owner_id
       
       // Classification
@@ -847,7 +808,7 @@ export const createStudy = async (
       data.medlineIdentifier || null,                                 // $29 medline_identifier
       data.url || null,                                                // $30 url
       data.urlDescription || null,                                    // $31 url_description
-      data.resultsReference ?? null,                                   // $32 results_reference (use ?? to preserve false)
+      data.resultsReference ?? null,                                   // $32 results_reference
       
       // Eligibility
       data.conditions || null,                                        // $33 conditions
@@ -856,7 +817,7 @@ export const createStudy = async (
       data.gender || null,                                             // $36 gender
       data.ageMin || null,                                             // $37 age_min
       data.ageMax || null,                                             // $38 age_max
-      data.healthyVolunteerAccepted ?? null,                           // $39 healthy_volunteer_accepted (use ?? to preserve false)
+      data.healthyVolunteerAccepted ?? null,                           // $39 healthy_volunteer_accepted
       
       // Study Design
       data.purpose || null,                                            // $40 purpose
@@ -871,7 +832,28 @@ export const createStudy = async (
       data.timing || null,                                            // $49 timing
       
       // OID
-      ocOid                                                           // $50 oc_oid
+      ocOid,                                                          // $50 oc_oid
+      
+      // New fields: Identification
+      data.studyAcronym || null,                                      // $51 study_acronym
+      data.protocolVersion || null,                                   // $52 protocol_version
+      data.protocolAmendmentNumber || null,                           // $53 protocol_amendment_number
+      
+      // New fields: Regulatory
+      data.therapeuticArea || null,                                    // $54 therapeutic_area
+      data.indication || null,                                        // $55 indication
+      data.nctNumber || null,                                         // $56 nct_number
+      data.irbNumber || null,                                         // $57 irb_number
+      data.regulatoryAuthority || null,                               // $58 regulatory_authority
+      
+      // New fields: Timeline milestones
+      data.fpfvDate || null,                                          // $59 fpfv_date
+      data.lpfvDate || null,                                          // $60 lpfv_date
+      data.lplvDate || null,                                          // $61 lplv_date
+      data.databaseLockDate || null,                                  // $62 database_lock_date
+      
+      // New fields: Operational
+      data.sdvRequirement || null                                     // $63 sdv_requirement
     ]);
 
     const studyId = insertResult.rows[0].study_id;
@@ -1079,14 +1061,15 @@ export const createStudy = async (
           // Insert study_group_class
           const groupClassResult = await client.query(`
             INSERT INTO study_group_class (
-              study_id, name, group_class_type_id, subject_assignment,
+              study_id, name, group_class_type_id, custom_type_name, subject_assignment,
               status_id, owner_id, date_created
-            ) VALUES ($1, $2, $3, $4, 1, $5, NOW())
+            ) VALUES ($1, $2, $3, $4, $5, 1, $6, NOW())
             RETURNING study_group_class_id
           `, [
             studyId,
             groupClass.name,
             groupClass.groupClassTypeId || 1,
+            groupClass.customTypeName || null,
             groupClass.subjectAssignment || 'optional',
             userId
           ]);
@@ -1157,25 +1140,26 @@ export const createStudy = async (
             INSERT INTO study (
               parent_study_id, unique_identifier, name, summary,
               principal_investigator, expected_total_enrollment,
-              facility_name, facility_address, facility_city, facility_state, facility_country,
+              facility_name, facility_address, facility_city, facility_state, facility_zip, facility_country,
               facility_recruitment_status,
               status_id, owner_id, date_created, oc_oid
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, NOW(), $14)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, $14, NOW(), $15)
           `, [
-            studyId,                                      // parent_study_id
-            site.uniqueIdentifier,                        // unique_identifier
-            site.name,                                    // name
-            site.summary || '',                           // summary
-            site.principalInvestigator || null,           // principal_investigator
-            site.expectedTotalEnrollment || 0,            // expected_total_enrollment
-            site.facilityName || null,                    // facility_name
-            site.facilityAddress || null,                 // facility_address
-            site.facilityCity || null,                    // facility_city
-            site.facilityState || null,                   // facility_state
-            site.facilityCountry || null,                 // facility_country
-            site.facilityRecruitmentStatus || 'Not yet recruiting', // facility_recruitment_status
-            userId,                                       // owner_id
-            siteOid                                       // oc_oid
+            studyId,                                      // $1  parent_study_id
+            site.uniqueIdentifier,                        // $2  unique_identifier
+            site.name,                                    // $3  name
+            site.summary || '',                           // $4  summary
+            site.principalInvestigator || null,           // $5  principal_investigator
+            site.expectedTotalEnrollment || 0,            // $6  expected_total_enrollment
+            site.facilityName || null,                    // $7  facility_name
+            site.facilityAddress || null,                 // $8  facility_address
+            site.facilityCity || null,                    // $9  facility_city
+            site.facilityState || null,                   // $10 facility_state
+            site.facilityZip || null,                     // $11 facility_zip
+            site.facilityCountry || null,                 // $12 facility_country
+            site.facilityRecruitmentStatus || 'Not yet recruiting', // $13 facility_recruitment_status
+            userId,                                       // $14 owner_id
+            siteOid                                       // $15 oc_oid
           ]);
           
           logger.info('Created study site', { parentStudyId: studyId, siteName: site.name });
@@ -1216,74 +1200,7 @@ export const createStudy = async (
  */
 export const updateStudy = async (
   studyId: number,
-  data: {
-    // Basic Info
-    name?: string;
-    officialTitle?: string;
-    secondaryIdentifier?: string;
-    summary?: string;
-    description?: string;
-    
-    // Team
-    principalInvestigator?: string;
-    sponsor?: string;
-    collaborators?: string;
-    
-    // Timeline
-    phase?: string;
-    protocolType?: string;
-    expectedTotalEnrollment?: number;
-    datePlannedStart?: string;
-    datePlannedEnd?: string;
-    
-    // Facility
-    facilityName?: string;
-    facilityAddress?: string;
-    facilityCity?: string;
-    facilityState?: string;
-    facilityZip?: string;
-    facilityCountry?: string;
-    facilityRecruitmentStatus?: string;
-    facilityContactName?: string;
-    facilityContactDegree?: string;
-    facilityContactPhone?: string;
-    facilityContactEmail?: string;
-    
-    // Protocol
-    protocolDescription?: string;
-    protocolDateVerification?: string;
-    medlineIdentifier?: string;
-    url?: string;
-    urlDescription?: string;
-    resultsReference?: boolean;
-    conditions?: string;
-    keywords?: string;
-    interventions?: string;
-    
-    // Eligibility
-    eligibility?: string;
-    gender?: string;
-    ageMin?: string;
-    ageMax?: string;
-    healthyVolunteerAccepted?: boolean;
-    
-    // Design
-    purpose?: string;
-    allocation?: string;
-    masking?: string;
-    control?: string;
-    assignment?: string;
-    endpoint?: string;
-    duration?: string;
-    selection?: string;
-    timing?: string;
-    
-    // Nested structures
-    eventDefinitions?: any[];
-    groupClasses?: any[];
-    sites?: any[];
-    studyParameters?: Record<string, any>;
-  },
+  data: UpdateStudyRequest,
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
   logger.info('Updating study with full data', { studyId, userId, fields: Object.keys(data) });
@@ -1352,7 +1269,25 @@ export const updateStudy = async (
       endpoint: 'endpoint',
       duration: 'duration',
       selection: 'selection',
-      timing: 'timing'
+      timing: 'timing',
+      // New fields: identification & operational
+      studyAcronym: 'study_acronym',
+      // Protocol versioning
+      protocolVersion: 'protocol_version',
+      protocolAmendmentNumber: 'protocol_amendment_number',
+      // Regulatory
+      therapeuticArea: 'therapeutic_area',
+      indication: 'indication',
+      nctNumber: 'nct_number',
+      irbNumber: 'irb_number',
+      regulatoryAuthority: 'regulatory_authority',
+      // Timeline milestones
+      fpfvDate: 'fpfv_date',
+      lpfvDate: 'lpfv_date',
+      lplvDate: 'lplv_date',
+      databaseLockDate: 'database_lock_date',
+      // Operational
+      sdvRequirement: 'sdv_requirement'
     };
 
     // Build update query dynamically for main study fields
@@ -1521,12 +1456,13 @@ export const updateStudy = async (
             // Update existing group class
             await client.query(`
               UPDATE study_group_class
-              SET name = $1, group_class_type_id = $2, subject_assignment = $3,
-                  date_updated = NOW(), update_id = $4
-              WHERE study_group_class_id = $5
+              SET name = $1, group_class_type_id = $2, custom_type_name = $3, subject_assignment = $4,
+                  date_updated = NOW(), update_id = $5
+              WHERE study_group_class_id = $6
             `, [
               groupClass.name,
               groupClass.groupClassTypeId || 1,
+              groupClass.customTypeName || null,
               groupClass.subjectAssignment || 'optional',
               userId,
               groupClass.studyGroupClassId
@@ -1575,14 +1511,15 @@ export const updateStudy = async (
             // Create new group class
             const gcResult = await client.query(`
               INSERT INTO study_group_class (
-                study_id, name, group_class_type_id, subject_assignment,
+                study_id, name, group_class_type_id, custom_type_name, subject_assignment,
                 status_id, owner_id, date_created
-              ) VALUES ($1, $2, $3, $4, 1, $5, NOW())
+              ) VALUES ($1, $2, $3, $4, $5, 1, $6, NOW())
               RETURNING study_group_class_id
             `, [
               studyId,
               groupClass.name,
               groupClass.groupClassTypeId || 1,
+              groupClass.customTypeName || null,
               groupClass.subjectAssignment || 'optional',
               userId
             ]);

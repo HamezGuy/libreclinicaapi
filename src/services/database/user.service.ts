@@ -591,6 +591,12 @@ export const updateUser = async (
         const userName = userNameResult.rows[0].user_name;
         const activeStudy = userNameResult.rows[0].active_study || 1;
 
+        // Validate study exists before role assignment
+        const studyCheck = await client.query(`SELECT study_id FROM study WHERE study_id = $1`, [activeStudy]);
+        if (studyCheck.rows.length === 0) {
+          logger.warn('Active study not found for role assignment, skipping', { userId, activeStudy });
+          // Don't fail the whole update — just skip role assignment
+        } else {
         // Update existing role or insert new one for the active study
         const existingRole = await client.query(
           `SELECT role_name FROM study_user_role WHERE user_name = $1 AND study_id = $2 AND status_id = 1`,
@@ -632,6 +638,7 @@ export const updateUser = async (
           // Non-fatal: feature access table may not exist yet on first deploy
           logger.warn('Could not apply feature defaults (non-fatal)', { error: featureError.message });
         }
+        } // end studyCheck else block
       }
     }
 
@@ -779,12 +786,21 @@ export const assignUserToStudy = async (
 
     const username = userResult.rows[0].user_name;
 
-    // Check if study is a site (has parent_study_id) to use appropriate role name
-    const studyQuery = `SELECT parent_study_id FROM study WHERE study_id = $1`;
+    // Validate study exists
+    const studyQuery = `SELECT study_id, parent_study_id FROM study WHERE study_id = $1`;
     const studyResult = await client.query(studyQuery, [studyId]);
     
+    if (studyResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        message: `Study with ID ${studyId} not found`
+      };
+    }
+    
+    // Check if study is a site (has parent_study_id) to use appropriate role name
     let finalRoleName = roleName;
-    if (studyResult.rows.length > 0 && studyResult.rows[0].parent_study_id) {
+    if (studyResult.rows[0].parent_study_id) {
       // This is a site - use site role names if appropriate
       const siteRoleName = SITE_ROLE_MAP[role.id];
       if (siteRoleName) {

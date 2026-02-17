@@ -136,21 +136,34 @@ export const initializeValidationRulesTable = async (): Promise<boolean> => {
     return true;
   }
 
-  // First check if table exists
   // Table is created by startup migrations (config/migrations.ts).
-  // Just check if it exists.
+  // Check if it exists and add any missing columns.
   try {
     const checkResult = await pool.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables WHERE table_name = 'validation_rules'
       )
     `);
-    if (checkResult.rows[0].exists) {
-      tableInitialized = true;
-      return true;
+    if (!checkResult.rows[0].exists) {
+      logger.warn('validation_rules table does not exist yet — run startup migrations');
+      return false;
     }
-    logger.warn('validation_rules table does not exist yet — run startup migrations');
-    return false;
+
+    // Ensure columns added in later migrations are present
+    const columnsToEnsure = [
+      { name: 'format_type', type: 'VARCHAR(50)' },
+      { name: 'operator', type: 'VARCHAR(20)' },
+      { name: 'compare_field_path', type: 'VARCHAR(255)' },
+      { name: 'custom_expression', type: 'TEXT' },
+    ];
+    for (const col of columnsToEnsure) {
+      try {
+        await pool.query(`ALTER TABLE validation_rules ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
+      } catch { /* column already exists */ }
+    }
+
+    tableInitialized = true;
+    return true;
   } catch (error: any) {
     logger.error('Failed to check validation_rules table:', error.message);
     return false;
@@ -282,7 +295,6 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
           r.study_id,
           re.value as expression,
           re.context as expression_context,
-          rs.target as target_oid,
           rs.study_event_definition_id,
           rs.crf_id,
           rs.crf_version_id,
@@ -310,7 +322,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         name: row.name || 'LibreClinica Rule',
         description: row.description || '',
         ruleType: mapActionTypeToRuleType(row.action_type) as ValidationRule['ruleType'],
-        fieldPath: row.target_oid || '',
+        fieldPath: row.oc_oid || '',
         severity: row.action_type === 'DISCREPANCY_NRS' ? 'warning' : 'error' as ValidationRule['severity'],
         errorMessage: row.action_message || 'Validation failed',
         warningMessage: row.action_type === 'DISCREPANCY_NRS' ? row.action_message : undefined,
@@ -1345,11 +1357,38 @@ async function createValidationQuery(params: {
       `, [itemDataId]);
       
       if (existingQuery.rows.length > 0) {
-        // Return existing query ID instead of creating duplicate
         const existingId = existingQuery.rows[0].discrepancy_note_id;
         logger.info('Existing open validation query found, skipping duplicate creation', { 
           existingQueryId: existingId, 
           fieldPath: params.fieldPath 
+        });
+        await client.query('COMMIT');
+        return existingId;
+      }
+    }
+
+    // Broader dedup: check by event_crf + rule name (handles cases where itemDataId is null)
+    if (!itemDataId && params.eventCrfId) {
+      const isWarning = params.severity === 'warning';
+      const expectedDesc = isWarning
+        ? `Validation Warning: ${params.ruleName}`
+        : `Validation Error: ${params.ruleName}`;
+      const existingByDesc = await client.query(`
+        SELECT dn.discrepancy_note_id
+        FROM discrepancy_note dn
+        INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
+        WHERE decm.event_crf_id = $1
+          AND dn.description = $2
+          AND dn.resolution_status_id IN (1, 2)
+          AND dn.parent_dn_id IS NULL
+        LIMIT 1
+      `, [params.eventCrfId, expectedDesc]);
+
+      if (existingByDesc.rows.length > 0) {
+        const existingId = existingByDesc.rows[0].discrepancy_note_id;
+        logger.info('Existing validation query found by description, skipping duplicate', {
+          existingQueryId: existingId,
+          fieldPath: params.fieldPath
         });
         await client.query('COMMIT');
         return existingId;
@@ -1439,23 +1478,34 @@ async function createValidationQuery(params: {
       `, [queryId, params.subjectId, params.fieldPath]);
     }
 
-    // Log audit event for query creation
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name,
-        new_value, reason_for_change, audit_log_event_type_id
-      ) VALUES (
-        CURRENT_TIMESTAMP, 'discrepancy_note', $1, $2, 'Validation Query Created',
-        $3, $4,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%created%' LIMIT 1)
-      )
-    `, [params.userId, queryId, description, `Rule: ${params.ruleName}, Field: ${params.fieldPath}`]);
+    // Log audit event for query creation (best-effort, don't fail the whole query)
+    try {
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id, entity_name,
+          new_value, reason_for_change, audit_log_event_type_id
+        ) VALUES (
+          CURRENT_TIMESTAMP, 'discrepancy_note', $1, $2, 'Validation Query Created',
+          $3, $4,
+          COALESCE(
+            (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%creat%' LIMIT 1),
+            1
+          )
+        )
+      `, [params.userId, queryId, description, `Rule: ${params.ruleName}, Field: ${params.fieldPath}`]);
+    } catch (auditError: any) {
+      // Audit logging should not prevent query creation
+      logger.warn('Audit log for validation query failed (non-blocking)', { 
+        queryId, error: auditError.message 
+      });
+    }
 
     await client.query('COMMIT');
 
     logger.info('Created validation query', { 
       queryId, 
       fieldPath: params.fieldPath,
+      severity: params.severity,
       itemDataId: itemDataId,
       eventCrfId: params.eventCrfId,
       assignedUserId
@@ -1464,7 +1514,13 @@ async function createValidationQuery(params: {
     return queryId;
   } catch (error: any) {
     await client.query('ROLLBACK');
-    logger.error('Error creating validation query:', error.message);
+    logger.error('Error creating validation query', { 
+      error: error.message, 
+      stack: error.stack?.substring(0, 300),
+      fieldPath: params.fieldPath,
+      studyId: params.studyId,
+      eventCrfId: params.eventCrfId
+    });
     return null;
   } finally {
     client.release();
@@ -1489,16 +1545,18 @@ async function createValidationQuery(params: {
  * @returns The user_id to assign queries to, or null if no workflow config exists
  */
 async function findWorkflowAssignee(
-  client: any,
+  _client: any,
   crfId?: number,
   eventCrfId?: number,
   studyId?: number
 ): Promise<number | null> {
+  // IMPORTANT: Use pool.query (separate connection) instead of the transaction client.
+  // If these queries fail, they must NOT abort the caller's open transaction.
   try {
     // If we don't have crfId but have eventCrfId, look it up
     let resolvedCrfId = crfId;
     if (!resolvedCrfId && eventCrfId) {
-      const ecResult = await client.query(`
+      const ecResult = await pool.query(`
         SELECT cv.crf_id FROM event_crf ec
         INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
         WHERE ec.event_crf_id = $1
@@ -1511,7 +1569,7 @@ async function findWorkflowAssignee(
     if (!resolvedCrfId) return null;
     
     // Check if the acc_form_workflow_config table exists before querying
-    const tableCheck = await client.query(`
+    const tableCheck = await pool.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables 
         WHERE table_name = 'acc_form_workflow_config'
@@ -1523,7 +1581,7 @@ async function findWorkflowAssignee(
     }
     
     // Look up workflow config for this CRF
-    const configResult = await client.query(`
+    const configResult = await pool.query(`
       SELECT query_route_to_users
       FROM acc_form_workflow_config
       WHERE crf_id = $1 
@@ -1548,7 +1606,7 @@ async function findWorkflowAssignee(
     if (routeUsernames.length === 0) return null;
 
     // Resolve the first username to a user_id
-    const userResult = await client.query(`
+    const userResult = await pool.query(`
       SELECT user_id, user_name FROM user_account
       WHERE user_name = ANY($1) AND enabled = true
     `, [routeUsernames]);
@@ -1582,28 +1640,31 @@ async function findWorkflowAssignee(
  * 4. The user who triggered the validation (fallback)
  */
 async function findDefaultAssignee(
-  client: any,
+  _client: any,
   studyId: number,
   subjectId?: number
 ): Promise<number | null> {
+  // IMPORTANT: Use pool.query (separate connection) instead of the transaction client.
+  // If these queries fail (e.g., SQL syntax error), they must NOT abort the caller's
+  // open transaction. Using pool.query isolates failures to their own connection.
   try {
-    // Try to find a coordinator or data manager for this study
-    // Note: study_user_role uses user_name (not user_id) as the link to user_account
-    const result = await client.query(`
-      SELECT DISTINCT ua.user_id
-      FROM user_account ua
-      INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
-      WHERE sur.study_id = $1
-        AND sur.status_id = 1
-        AND sur.role_name IN ('Study Coordinator', 'Clinical Research Coordinator', 'Data Manager', 'coordinator')
-      ORDER BY 
-        CASE 
-          WHEN sur.role_name = 'Study Coordinator' THEN 1
-          WHEN sur.role_name = 'Clinical Research Coordinator' THEN 2
-          WHEN sur.role_name = 'Data Manager' THEN 3
-          ELSE 4
-        END
-      LIMIT 1
+    const result = await pool.query(`
+      SELECT user_id FROM (
+        SELECT ua.user_id,
+          CASE 
+            WHEN sur.role_name = 'Study Coordinator' THEN 1
+            WHEN sur.role_name = 'Clinical Research Coordinator' THEN 2
+            WHEN sur.role_name = 'Data Manager' THEN 3
+            ELSE 4
+          END as role_priority
+        FROM user_account ua
+        INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
+        WHERE sur.study_id = $1
+          AND sur.status_id = 1
+          AND sur.role_name IN ('Study Coordinator', 'Clinical Research Coordinator', 'Data Manager', 'coordinator')
+        ORDER BY role_priority
+        LIMIT 1
+      ) ranked
     `, [studyId]);
     
     if (result.rows.length > 0) {
@@ -1611,7 +1672,7 @@ async function findDefaultAssignee(
     }
     
     // Fallback: Get any active user with access to this study
-    const fallbackResult = await client.query(`
+    const fallbackResult = await pool.query(`
       SELECT ua.user_id
       FROM user_account ua
       INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
@@ -1625,7 +1686,7 @@ async function findDefaultAssignee(
     
     return null;
   } catch (e: any) {
-    logger.warn('Could not find default assignee:', e.message);
+    logger.warn('Could not find default assignee', { error: e.message, studyId });
     return null;
   }
 }

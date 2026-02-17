@@ -1,6 +1,17 @@
-import { Pool, PoolClient, QueryResult } from 'pg';
+import { Pool, PoolClient, QueryResult, types } from 'pg';
 import { config } from './environment';
 import { logger } from './logger';
+
+// ════════════════════════════════════════════════════════════════════
+// PostgreSQL Type Parsers — ensure dates come back as ISO strings
+// ════════════════════════════════════════════════════════════════════
+// By default, pg returns DATE (1082) as a JavaScript Date object which
+// gets UTC-shifted on serialization, causing off-by-one-day bugs.
+// Override to return raw ISO strings (YYYY-MM-DD) for date-only columns.
+// TIMESTAMP (1114) and TIMESTAMPTZ (1184) are left as Date objects.
+
+// DATE type (OID 1082) — return as YYYY-MM-DD string
+types.setTypeParser(1082, (val: string) => val); // Keep as-is, already YYYY-MM-DD from Postgres
 
 class DatabaseConnection {
   public pool: Pool;

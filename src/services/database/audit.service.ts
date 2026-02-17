@@ -13,6 +13,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { AuditQuery, AuditLogEvent, PaginatedResponse, AuditExportRequest } from '../../types';
+import { formatDate, toISOTimestamp } from '../../utils/date.util';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -580,7 +581,7 @@ export const getAuditSummary = async (startDate: string, endDate: string, caller
     // Group by date
     const summary: any = {};
     for (const row of result.rows) {
-      const dateKey = row.date?.toISOString().split('T')[0];
+      const dateKey = formatDate(row.date);
       if (!summary[dateKey]) {
         summary[dateKey] = { date: dateKey, events: {}, total: 0 };
       }
@@ -687,7 +688,7 @@ export const getComplianceReport = async (request: {
       success: true,
       data: {
         reportPeriod: { startDate, endDate },
-        generatedAt: new Date().toISOString(),
+        generatedAt: toISOTimestamp(),
         summary: {
           totalEvents: parseInt(stats.total_events),
           uniqueUsers: parseInt(stats.unique_users),
@@ -1078,8 +1079,8 @@ export const exportAuditLogs = async (
   if (format === 'csv') {
     const csv = await exportAuditTrailCSV({
       studyId: params.studyId || 0,
-      startDate: params.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-      endDate: params.endDate || new Date().toISOString(),
+      startDate: params.startDate || toISOTimestamp(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
+      endDate: params.endDate || toISOTimestamp(),
       format: 'csv'
     }, callerUserId);
     return { success: true, data: csv, format: 'csv' };
@@ -1302,7 +1303,7 @@ export const getLoginStatistics = async (days: number = 30, callerUserId?: numbe
         logouts: parseInt(summary.logouts) || 0,
         uniqueUsers: parseInt(summary.unique_users) || 0,
         byDay: dailyResult.rows.map(row => ({
-          date: row.date?.toISOString().split('T')[0],
+          date: formatDate(row.date),
           success: parseInt(row.success) || 0,
           failed: parseInt(row.failed) || 0,
           logout: parseInt(row.logout) || 0

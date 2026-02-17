@@ -25,6 +25,7 @@ import { logger } from '../../config/logger';
 import axios from 'axios';
 import { config } from '../../config/environment';
 import { pool } from '../../config/database';
+import { formatDate } from '../../utils/date.util';
 
 // Types matching LibreClinica's ExportFormatBean
 export type ExportFormat = 'csv' | 'odm' | 'spss' | 'txt' | 'xlsx';
@@ -325,7 +326,7 @@ export const buildCsvExport = async (
     if (datasetConfig.showSubjectGender) csvRow.push(csvEscape(row.gender || ''));
     csvRow.push(
       csvEscape(row.event_name || ''),
-      csvEscape(row.visit_date ? new Date(row.visit_date).toISOString().split('T')[0] : ''),
+      csvEscape(row.visit_date ? formatDate(row.visit_date) : ''),
       csvEscape(row.is_unscheduled ? 'Yes' : 'No'),
       csvEscape(row.form_name || ''),
       csvEscape(row.form_status || ''),
