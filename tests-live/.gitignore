@@ -1,0 +1,8 @@
+node_modules/
+logs/
+state/
+screenshots/
+crash-test-screenshots/
+*.pem
+*.sql
+package-lock.json

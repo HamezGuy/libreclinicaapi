@@ -1,0 +1,33 @@
+{
+  "name": "edc-live-tests",
+  "version": "1.0.0",
+  "description": "Live server end-to-end test scripts for the EDC platform",
+  "private": true,
+  "scripts": {
+    "test": "ts-node scripts/run-all.ts",
+    "test:00": "ts-node scripts/00-register-organization.ts",
+    "test:01": "ts-node scripts/01-create-members.ts",
+    "test:02": "ts-node scripts/02-login-admin.ts",
+    "test:03": "ts-node scripts/03-create-base-ecrfs.ts",
+    "test:04": "ts-node scripts/04-fork-ecrfs-validation.ts",
+    "test:05": "ts-node scripts/05-fork-ecrfs-workflow.ts",
+    "test:06": "ts-node scripts/06-create-study.ts",
+    "test:07": "ts-node scripts/07-create-validation-rules.ts",
+    "test:08": "ts-node scripts/08-setup-workflows.ts",
+    "test:09": "ts-node scripts/09-create-patient.ts",
+    "test:10": "ts-node scripts/10-fill-forms-and-test.ts",
+    "test:11": "ts-node scripts/11-branching-ecrf-test.ts",
+    "test:12": "ts-node scripts/12-patient-visits-forms.ts"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^22.0.0",
+    "playwright": "^1.58.2",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.6.0"
+  }
+}
