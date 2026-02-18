@@ -584,7 +584,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
       studyParameters
     };
   } catch (error: any) {
-    logger.error('Get study details error', { error: error.message });
+    logger.error('Get study details error', { error: error.message, code: error.code, detail: error.detail });
     throw error;
   }
 };

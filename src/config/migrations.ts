@@ -46,6 +46,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'file_uploads', fn: createFileUploadsTable },
     { name: 'audit_user_api_log', fn: createAuditUserApiLogTable },
     { name: 'study_extended_columns', fn: createStudyExtendedColumns },
+    { name: 'study_group_class_extended', fn: createStudyGroupClassExtendedColumns },
     { name: 'event_crf_extended', fn: createEventCrfExtendedColumns },
   ];
 
@@ -1302,6 +1303,20 @@ async function createStudyExtendedColumns(pool: any): Promise<void> {
   }
 
   logger.info('Study extended columns verified');
+}
+
+// ============================================================================
+// Study Group Class Extended Columns
+// Adds custom_type_name for flexible group class types
+// ============================================================================
+async function createStudyGroupClassExtendedColumns(pool: any): Promise<void> {
+  try {
+    await pool.query(`ALTER TABLE study_group_class ADD COLUMN IF NOT EXISTS custom_type_name VARCHAR(255)`);
+  } catch (e: any) {
+    // Column may already exist — safe to ignore
+  }
+
+  logger.info('Study group class extended columns verified');
 }
 
 // ============================================================================

@@ -77,14 +77,17 @@ export interface ScheduleEventRequest {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface CreateUnscheduledVisitRequest {
-  studyId: number;
+  studyId?: number;
   studySubjectId: number;
+  studyEventDefinitionId?: number;
   name?: string;
   description?: string;
   startDate?: string;
   endDate?: string;
   estimatedStart?: string;
   estimatedEnd?: string;
+  location?: string;
+  reason?: string;
   crfIds?: number[];
 }
 

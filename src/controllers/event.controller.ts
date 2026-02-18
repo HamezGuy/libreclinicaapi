@@ -370,7 +370,8 @@ export const savePatientFormData = asyncHandler(async (req: Request, res: Respon
     user.userId
   );
 
-  res.json(result);
+  const statusCode = result.statusCode || (result.success ? 200 : 400);
+  res.status(statusCode).json(result);
 });
 
 /**
@@ -394,6 +395,19 @@ export const repairMissingSnapshots = asyncHandler(async (req: Request, res: Res
   const user = (req as any).user;
 
   const result = await eventService.repairMissingSnapshots(parseInt(subjectId), user.userId);
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Refresh ALL patient_event_form snapshots for a subject.
+ * Deletes existing snapshots and re-creates from current form metadata.
+ */
+export const refreshAllSnapshots = asyncHandler(async (req: Request, res: Response) => {
+  const { subjectId } = req.params;
+  const user = (req as any).user;
+
+  const result = await eventService.refreshAllSnapshots(parseInt(subjectId), user.userId);
 
   res.json({ success: true, data: result });
 });
@@ -425,6 +439,7 @@ export default {
   savePatientFormData,
   // Verification / repair
   verifyPatientFormIntegrity,
-  repairMissingSnapshots
+  repairMissingSnapshots,
+  refreshAllSnapshots
 };
 

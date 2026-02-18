@@ -11,6 +11,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { stripExtendedProps, parseExtendedProps } from '../../utils/extended-props';
 import {
   PDFGenerationOptions,
   PrintableForm,
@@ -176,14 +177,21 @@ export async function getFormDataForPrint(eventCrfId: number): Promise<Printable
             status = 'queried';
           }
 
+          // Parse extended properties from item description to get
+          // the correct field type and clean label (single source of truth)
+          const extProps = parseExtendedProps(f.description);
+          const cleanLabel = stripExtendedProps(f.description) || f.name;
+          const fieldType = extProps.type || f.response_type || f.data_type || 'text';
+          const fieldName = extProps.fieldName || f.name;
+
           const field: PrintableField = {
             fieldId: f.item_id,
-            name: f.name,
-            label: f.description || f.name,
-            type: f.response_type || f.data_type || 'text',
+            name: fieldName,
+            label: cleanLabel,
+            type: fieldType,
             value: f.value,
             displayValue,
-            unit: f.units,
+            unit: f.units || extProps.unit,
             options,
             required: f.required,
             status
@@ -314,14 +322,20 @@ export async function getBlankFormDataForPrint(crfVersionId: number): Promise<Pr
             }));
           }
 
+          // Parse extended properties for correct type and clean label
+          const extProps = parseExtendedProps(f.description);
+          const cleanLabel = stripExtendedProps(f.description) || f.name;
+          const fieldType = extProps.type || f.response_type || f.data_type || 'text';
+          const fieldName = extProps.fieldName || f.name;
+
           const field: PrintableField = {
             fieldId: f.item_id,
-            name: f.name,
-            label: f.description || f.name,
-            type: f.response_type || f.data_type || 'text',
+            name: fieldName,
+            label: cleanLabel,
+            type: fieldType,
             value: f.default_value || '',
             displayValue: f.default_value || '',
-            unit: f.units,
+            unit: f.units || extProps.unit,
             options,
             required: f.required
           };

@@ -115,7 +115,7 @@ const convertToApiError = (err: any): ApiError => {
       case 'ECONNREFUSED':
         return new ServiceUnavailableError('Database connection refused');
       default:
-        logger.error('Unhandled database error', { code: err.code, message: err.message });
+        logger.error('Unhandled database error', { code: err.code, message: err.message, detail: err.detail });
         return new InternalServerError('Database error');
     }
   }

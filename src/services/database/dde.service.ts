@@ -18,6 +18,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { stripExtendedProps } from '../../utils/extended-props';
 
 // ============================================================================
 // Types
@@ -466,7 +467,7 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
       comparisons.push({
         itemId: first.item_id,
         itemName: first.item_name,
-        itemDescription: first.description,
+        itemDescription: stripExtendedProps(first.description),
         firstValue: first.value,
         secondValue: secondValue,
         matches,

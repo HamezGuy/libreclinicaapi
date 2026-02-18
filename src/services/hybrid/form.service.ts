@@ -24,6 +24,8 @@ import { trackUserAction, trackDocumentAccess } from '../database/audit.service'
 import * as validationRulesService from '../database/validation-rules.service';
 import { encryptField, decryptField, isEncrypted } from '../../utils/encryption.util';
 import * as workflowService from '../database/workflow.service';
+import { stripExtendedProps, parseExtendedProps } from '../../utils/extended-props';
+import { resolveFieldType } from '../../utils/field-type.utils';
 
 /**
  * Save form data via SOAP (GxP compliant)
@@ -462,18 +464,9 @@ const saveFormDataDirect = async (
       // Map by technical fieldName from extended_properties
       // This is critical: the frontend uses fieldName as the form control key,
       // but item.name stores the display label (which is different)
-      if (item.description && item.description.includes('---EXTENDED_PROPS---')) {
-        try {
-          const propsJson = item.description.split('---EXTENDED_PROPS---')[1]?.trim();
-          if (propsJson) {
-            const extProps = JSON.parse(propsJson);
-            if (extProps.fieldName) {
-              itemMap.set(extProps.fieldName.toLowerCase(), item.item_id);
-            }
-          }
-        } catch (e) {
-          // Ignore parse errors — fall back to name-based matching
-        }
+      const extProps = parseExtendedProps(item.description);
+      if (extProps.fieldName) {
+        itemMap.set(extProps.fieldName.toLowerCase(), item.item_id);
       }
     }
 
@@ -810,20 +803,11 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     
     // Enrich each item with the technical fieldName from extended_properties
     for (const row of result.rows) {
-      if (row.item_description && row.item_description.includes('---EXTENDED_PROPS---')) {
-        try {
-          const propsJson = row.item_description.split('---EXTENDED_PROPS---')[1]?.trim();
-          if (propsJson) {
-            const extProps = JSON.parse(propsJson);
-            if (extProps.fieldName) {
-              row.field_name = extProps.fieldName; // Technical name used by frontend
-            }
-          }
-        } catch (e) {
-          // Ignore parse errors
-        }
+      const extProps = parseExtendedProps(row.item_description);
+      if (extProps.fieldName) {
+        row.field_name = extProps.fieldName;
       }
-      // Clean up — don't send the full description to the frontend
+      // Clean up — don't send the raw description to the frontend
       delete row.item_description;
     }
 
@@ -1112,15 +1096,8 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       let helpText = item.description || '';
       let extendedProps: any = {};
       
-      if (helpText.includes('---EXTENDED_PROPS---')) {
-        const parts = helpText.split('---EXTENDED_PROPS---');
-        helpText = parts[0].trim();
-        try {
-          extendedProps = JSON.parse(parts[1].trim());
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
+      extendedProps = parseExtendedProps(helpText);
+      helpText = stripExtendedProps(helpText);
       
       // Parse min/max from width_decimal if present
       let min = extendedProps.min;
@@ -1159,10 +1136,11 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       // 1. Extended props (preserves frontend types like 'yesno', 'textarea')
       // 2. Response type (LibreClinica's UI type)
       // 3. Data type code (fallback)
-      const fieldType = extendedProps.type 
-        || mapResponseTypeToFieldType(item.response_type) 
-        || item.data_type_code?.toLowerCase() 
-        || 'text';
+      // All paths run through resolveFieldType() — the single source of truth.
+      // Priority: extendedProps.type > response_type > data_type_code > 'text'
+      const fieldType = resolveFieldType(
+        extendedProps.type || item.response_type || item.data_type_code
+      );
       
       return {
         // Core identifiers
@@ -1711,38 +1689,45 @@ export const getFormById = async (crfId: number, callerUserId?: number): Promise
 /**
  * Map frontend field type to LibreClinica item_data_type_id
  */
+/**
+ * Map canonical field type → LibreClinica item_data_type_id.
+ * Input MUST already be a canonical type from resolveFieldType().
+ */
 const mapFieldTypeToDataType = (fieldType: string): number => {
   const typeMap: Record<string, number> = {
     'text': 5,      // ST - Character String
-    'textarea': 5,  // ST - Character String
-    'email': 5,     // ST - Character String
-    'phone': 5,     // ST - Character String
+    'textarea': 5,  // ST
+    'email': 5,     // ST
+    'phone': 5,     // ST
+    'address': 5,   // ST
+    'patient_name': 5, // ST
+    'patient_id': 5,   // ST
+    'ssn': 5,          // ST
+    'medical_record_number': 5, // ST
+    'medication': 5,   // ST
+    'diagnosis': 5,    // ST
+    'procedure': 5,    // ST
+    'lab_result': 5,   // ST
+    'static_text': 5,  // ST
     'number': 6,    // INT - Integer
-    'integer': 6,   // INT - Integer
     'decimal': 7,   // REAL - Floating
-    'float': 7,     // REAL - Floating
     'date': 9,      // DATE
     'datetime': 9,  // DATE (stored as ISO string)
     'time': 5,      // ST - stored as string
     'date_of_birth': 9, // DATE
-    'pdate': 10,    // PDATE - Partial date
     'checkbox': 1,  // BL - Boolean
     'radio': 5,     // ST - stored as string
-    'radiobutton': 5, // ST - stored as string (alias)
     'yesno': 5,     // ST - stored as string
     'select': 5,    // ST - stored as string
-    'single-select': 5, // ST - stored as string
-    'dropdown': 5,  // ST - stored as string
-    'multiselect': 5, // ST - stored as comma-separated string
-    'multi-select': 5, // ST - stored as comma-separated string
+    'combobox': 5,  // ST
     'file': 11,     // FILE
     'image': 11,    // FILE
     'signature': 11, // FILE
     'table': 5,     // ST - Table data stored as JSON string
     'calculation': 7, // REAL - calculations may be numeric
-    'barcode': 5,   // ST - barcode value is a string
-    'qrcode': 5,    // ST - QR code value is a string
-    // Clinical vitals
+    'age': 7, 'bsa': 7, 'egfr': 7, 'sum': 7, 'average': 7,
+    'barcode': 5,   // ST
+    'qrcode': 5,    // ST
     'height': 7,    // REAL
     'weight': 7,    // REAL
     'blood_pressure': 5, // ST - stored as "120/80"
@@ -1750,9 +1735,13 @@ const mapFieldTypeToDataType = (fieldType: string): number => {
     'heart_rate': 6,  // INT
     'respiration_rate': 6, // INT
     'oxygen_saturation': 7, // REAL
-    'bmi': 7         // REAL - calculated
+    'bmi': 7,        // REAL - calculated
+    'section_header': 5, // ST
+    'inline_group': 5,  // ST
+    'criteria_list': 5, // ST
+    'question_table': 5 // ST
   };
-  return typeMap[fieldType?.toLowerCase()] || 5; // Default to ST (string)
+  return typeMap[fieldType?.toLowerCase()] || 5;
 };
 
 /**
@@ -1886,12 +1875,14 @@ interface FormField {
 }
 
 /**
- * Serialize extended field properties to JSON for storage
+ * Serialize extended field properties to JSON for storage.
+ * IMPORTANT: field.type is normalized via resolveFieldType() so the DB
+ * always stores canonical types ('radio', not 'radiobutton').
  */
 const serializeExtendedProperties = (field: FormField): string => {
   const extended = {
-    // Field type (preserves types like 'yesno', 'textarea', 'radio' that map to LibreClinica types)
-    type: field.type,
+    // Always store the CANONICAL type so reads never encounter aliases
+    type: resolveFieldType(field.type),
     
     // Technical field name (lowercase_underscored identifier, distinct from the display label)
     // The DB item.name stores the display label; this preserves the technical ID for formulas, etc.
@@ -2006,109 +1997,41 @@ const serializeExtendedProperties = (field: FormField): string => {
  * 9 = group-calculation (calculation across repeating groups)
  * 10 = instant-calculation / barcode
  */
+/**
+ * Map canonical field type → LibreClinica response_type_id.
+ * Input MUST already be a canonical type from resolveFieldType().
+ *
+ * LibreClinica Response Types:
+ * 1=text, 2=textarea, 3=checkbox, 4=file, 5=radio,
+ * 6=single-select, 7=multi-select, 8=calculation,
+ * 9=group-calculation, 10=instant-calculation/barcode
+ */
 const mapFieldTypeToResponseType = (fieldType: string): number => {
   const typeMap: Record<string, number> = {
-    // Basic types (1-7)
-    'text': 1,
+    'text': 1, 'email': 1, 'phone': 1, 'address': 1,
+    'patient_name': 1, 'patient_id': 1, 'ssn': 1,
+    'medical_record_number': 1, 'medication': 1, 'diagnosis': 1,
+    'procedure': 1, 'lab_result': 1, 'static_text': 1,
+    'number': 1, 'decimal': 1, 'date': 1, 'datetime': 1, 'time': 1,
+    'date_of_birth': 1, 'height': 1, 'weight': 1, 'temperature': 1,
+    'heart_rate': 1, 'blood_pressure': 1, 'oxygen_saturation': 1,
+    'respiration_rate': 1, 'table': 1, 'inline_group': 1,
+    'criteria_list': 1, 'question_table': 1, 'section_header': 1,
+    'combobox': 6,
     'textarea': 2,
     'checkbox': 3,
-    'file': 4,
-    'image': 4,        // images also use file response type
-    'signature': 4,    // signatures also use file response type
-    'radio': 5,
-    'radiobutton': 5,  // alias for radio
-    'radio-button': 5, // alias for radio
-    'yesno': 5,        // yes/no is essentially a radio with two options
+    'file': 4, 'image': 4, 'signature': 4,
+    'radio': 5, 'yesno': 5,
     'select': 6,
-    'single-select': 6,
-    'dropdown': 6,
-    'multiselect': 3,  // multiselect is now treated as checkbox
-    'multi-select': 3, // multiselect is now treated as checkbox
-    
-    // Calculated types (8-9)
-    'calculation': 8,
-    'calculated': 8,
-    'bmi': 8,          // BMI is a calculated field
-    'bsa': 8,          // Body Surface Area
-    'egfr': 8,         // eGFR calculation
-    'age': 8,          // Age calculation
-    'group_calculation': 9,
-    'group-calculation': 9,
-    'sum': 9,          // Sum across repeating group
-    'average': 9,      // Average across group
-    
-    // Instant/Barcode (10)
-    'instant': 10,
-    'barcode': 10,
-    'qrcode': 10,
-    
-    // Clinical field aliases map to appropriate types
-    'integer': 1,
-    'decimal': 1,
-    'number': 1,
-    'date': 1,
-    'datetime': 1,
-    'time': 1,
-    'email': 1,
-    'phone': 1,
-    'height': 1,
-    'weight': 1,
-    'temperature': 1,
-    'heart_rate': 1,
-    'blood_pressure': 1,
-    'oxygen_saturation': 1,
-    'respiration_rate': 1,
-    
-    // Complex/structured types — stored as text response type, structure lives in extended_properties
-    'table': 1,
-    'inline_group': 1,
-    'criteria_list': 1,
-    'question_table': 1,
-    'section_header': 1,
-    'static_text': 1,
-    'date_of_birth': 1,
-    'patient_name': 1,
-    'patient_id': 1,
-    'address': 1,
-    'ssn': 1,
-    'medical_record_number': 1
+    'calculation': 8, 'bmi': 8, 'bsa': 8, 'egfr': 8, 'age': 8,
+    'sum': 9, 'average': 9,
+    'barcode': 10, 'qrcode': 10,
   };
   return typeMap[fieldType?.toLowerCase()] || 1;
 };
 
-/**
- * Map LibreClinica response_type name back to field type
- * Used when loading form metadata to determine the frontend field type
- */
-const mapResponseTypeToFieldType = (responseType: string | null | undefined): string | null => {
-  if (!responseType) return null;
-  
-  const normalizedType = responseType.toLowerCase();
-  
-  const typeMap: Record<string, string> = {
-    'text': 'text',
-    'textarea': 'textarea',
-    'checkbox': 'checkbox',
-    'file': 'file',
-    'radio': 'radio',
-    'radiobutton': 'radio',
-    'radio-button': 'radio',
-    'single-select': 'select',
-    'select': 'select',
-    'dropdown': 'select',
-    'multi-select': 'checkbox',
-    'multiselect': 'checkbox',
-    'calculation': 'calculation',
-    'group-calculation': 'calculation',
-    'instant-calculation': 'barcode',
-    'barcode': 'barcode',
-    'table': 'table',
-    'repeating': 'table',
-    'grid': 'table'
-  };
-  
-  return typeMap[normalizedType] || null;
-};
+// Type mapping functions removed — all callers now use resolveFieldType() from
+// '../../utils/field-type.utils' (single source of truth shared with frontend).
 
 /**
  * Create a new form template (CRF) with fields
@@ -2265,6 +2188,10 @@ export const createForm = async (
       // Create each field as an item with full metadata
       for (let i = 0; i < data.fields.length; i++) {
         const field = data.fields[i];
+        // Normalize field type ONCE via the single source of truth so every
+        // downstream function (mapFieldTypeToDataType, serializeExtendedProperties,
+        // mapFieldTypeToResponseType) always receives a canonical type.
+        field.type = resolveFieldType(field.type);
         // Generate unique item OID with random suffix to avoid collisions
         const itemRandom = Math.random().toString(36).substring(2, 6).toUpperCase();
         const itemOid = `I_${ocOid.substring(2, 12)}_${i}_${itemRandom}`;
@@ -2755,6 +2682,8 @@ export const updateForm = async (
       // Process each field
       for (let i = 0; i < data.fields.length; i++) {
         const field = data.fields[i];
+        // Normalize field type via the single source of truth before any save
+        field.type = resolveFieldType(field.type);
         const fieldName = field.label || field.name || `Field ${i + 1}`;
         
         // Match by item_id first (stable), then fall back to name (for legacy data)

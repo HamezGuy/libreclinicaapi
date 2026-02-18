@@ -52,22 +52,21 @@ const isDevelopment = process.env.NODE_ENV !== 'production';
  * General API rate limiter
  * Applies to all API endpoints
  * 
- * Default: 1000 requests per 15 minutes per IP (development: 10000)
+ * Default: 1000 requests per 15 minutes per IP (development: disabled)
  */
 export const apiRateLimiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes default
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || (isDevelopment ? '10000' : '1000')), // Higher limit for development
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || (isDevelopment ? '0' : '1000')), // 0 = unlimited in development
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false, // Disable `X-RateLimit-*` headers
   handler: rateLimitHandler,
   skip: (req) => {
-    // Skip rate limiting for health check, test mode, or localhost in development
-    if (isTestMode || req.path === '/health' || req.path === '/api/health') {
+    // Skip ALL rate limiting in development and test mode
+    if (isTestMode || isDevelopment) {
       return true;
     }
-    // In development, allow localhost more requests
-    if (isDevelopment && (req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1')) {
+    if (req.path === '/health' || req.path === '/api/health') {
       return true;
     }
     return false;
@@ -78,17 +77,17 @@ export const apiRateLimiter = rateLimit({
  * Authentication rate limiter for LOGIN only
  * Stricter limits for login endpoints to prevent brute force
  * 
- * Default: 10 login attempts per 15 minutes per IP
+ * Default: 10 login attempts per 15 minutes per IP (development: disabled)
  */
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '10'), // Limit each IP to 10 login attempts per windowMs
+  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || (isDevelopment ? '0' : '10')), // 0 = unlimited in development
   message: 'Too many login attempts. Please try again after 15 minutes.',
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting in test mode
-    if (isTestMode) return true;
+    // Skip ALL rate limiting in development and test mode
+    if (isTestMode || isDevelopment) return true;
     // Skip rate limiting for refresh token requests (they have their own limiter)
     if (req.path.includes('/refresh')) return true;
     return false;
@@ -119,11 +118,11 @@ export const authRateLimiter = rateLimit({
  */
 export const refreshRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.REFRESH_RATE_LIMIT_MAX || '60'), // Limit each IP to 60 refresh attempts
+  max: parseInt(process.env.REFRESH_RATE_LIMIT_MAX || (isDevelopment ? '0' : '60')),
   message: 'Too many refresh attempts. Please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => isTestMode,
+  skip: () => isTestMode || isDevelopment,
   handler: (req: Request, res: Response) => {
     const ip = req.ip;
 
@@ -160,15 +159,16 @@ export const passwordResetRateLimiter = rateLimit({
  * Limit write operations to LibreClinica
  * More generous for data entry workflows
  * 
- * Default: 50 requests per 15 minutes per IP
+ * Default: 50 requests per 15 minutes per IP (development: disabled)
  */
 export const soapRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 50, // Limit each IP to 50 SOAP operations per windowMs
+  max: isDevelopment ? 0 : 50, // 0 = unlimited in development
   message: 'Too many data operations. Please slow down.',
   standardHeaders: true,
   legacyHeaders: false,
-  handler: rateLimitHandler
+  handler: rateLimitHandler,
+  skip: () => isTestMode || isDevelopment
 });
 
 /**

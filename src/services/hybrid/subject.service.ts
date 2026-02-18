@@ -30,6 +30,7 @@ import {
 } from '../../types/libreclinica-models';
 import * as workflowService from '../database/workflow.service';
 import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp } from '../../utils/date.util';
+import { getFormMetadata } from './form.service';
 
 /**
  * Request type for creating a subject
@@ -79,64 +80,33 @@ export interface SubjectCreateRequest {
 }
 
 /**
- * Create a patient form snapshot during enrollment (inline helper).
- * Captures form structure with fields, validation rules, and options.
+ * Create a patient form snapshot during enrollment.
+ * Uses getFormMetadata() as the SINGLE SOURCE OF TRUTH so the snapshot stores
+ * the exact same parsed field DTOs that the /api/forms/:id/metadata endpoint
+ * returns — with type, fieldName, label, options, showWhen, etc. all parsed
+ * from the ---EXTENDED_PROPS--- embedded in item descriptions.
  */
 const createPatientFormSnapshotForEnrollment = async (
   client: any, studyEventId: number, eventCrfId: number,
   crfId: number, crfVersionId: number, studySubjectId: number,
   formName: string, ordinal: number, userId: number
 ): Promise<void> => {
-  const itemsQ = `
-    SELECT i.item_id, i.name, i.description, i.units, i.phi_status,
-      idt.name as data_type, idt.code as data_type_code,
-      igm.ordinal, ig.name as group_name,
-      ifm.required, ifm.default_value, ifm.left_item_text as label,
-      ifm.regexp as validation_pattern, ifm.regexp_error_msg as validation_message,
-      ifm.column_number,
-      rs.options_text, rs.options_values, rt.name as response_type,
-      s.label as section_name, s.ordinal as section_ordinal
-    FROM item i
-    INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
-    INNER JOIN item_group ig ON igm.item_group_id = ig.item_group_id
-    INNER JOIN item_data_type idt ON i.item_data_type_id = idt.item_data_type_id
-    LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
-    LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
-    LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
-    LEFT JOIN section s ON ifm.section_id = s.section_id
-    WHERE igm.crf_version_id = $1 AND (ifm.show_item IS DISTINCT FROM false)
-    ORDER BY COALESCE(s.ordinal, 0), COALESCE(ifm.ordinal, igm.ordinal)
-  `;
-  const items = await client.query(itemsQ, [crfVersionId]);
+  const metadata = await getFormMetadata(crfId);
+  const fields = metadata?.items || [];
 
-  const fields = items.rows.map((it: any) => {
-    const f: any = {
-      itemId: it.item_id, name: it.name,
-      label: it.label || it.description || it.name,
-      dataType: it.data_type_code || it.data_type,
-      units: it.units || null,
-      required: it.required || false,
-      defaultValue: it.default_value || '',
-      columnNumber: it.column_number || 1,
-      section: it.section_name || 'Default',
-      group: it.group_name || 'Ungrouped',
-      ordinal: it.ordinal
-    };
-    if (it.validation_pattern) {
-      f.validationPattern = it.validation_pattern;
-      f.validationMessage = it.validation_message || 'Invalid value';
-    }
-    if (it.options_text && it.options_values) {
-      const texts = it.options_text.split(',');
-      const vals = it.options_values.split(',');
-      f.responseType = it.response_type;
-      f.options = texts.map((t: string, i: number) => ({ label: t.trim(), value: (vals[i] || t).trim() }));
-    }
-    return f;
-  });
+  if (fields.length === 0) {
+    logger.warn('getFormMetadata returned no items for enrollment snapshot', { crfId, crfVersionId });
+  }
 
-  const structure = { crfId, crfVersionId, name: formName, snapshotDate: new Date().toISOString(), fieldCount: fields.length, fields };
-  
+  const structure = {
+    crfId,
+    crfVersionId,
+    name: formName,
+    snapshotDate: new Date().toISOString(),
+    fieldCount: fields.length,
+    fields
+  };
+
   await client.query(`
     INSERT INTO patient_event_form (
       study_event_id, event_crf_id, crf_id, crf_version_id,

@@ -156,5 +156,11 @@ router.post('/verify/subject/:subjectId/repair',
   controller.repairMissingSnapshots
 );
 
+// Refresh ALL snapshots (delete + re-create from current metadata)
+router.post('/verify/subject/:subjectId/refresh-snapshots',
+  requireRole('admin', 'data_manager'),
+  controller.refreshAllSnapshots
+);
+
 export default router;
 

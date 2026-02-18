@@ -932,14 +932,17 @@ export const eventSchemas = {
 
   // Create unscheduled visit for patient (CreateUnscheduledVisitRequest)
   createUnscheduled: Joi.object({
-    studyId: Joi.number().integer().positive().required(),
+    studyId: Joi.number().integer().positive().optional(),
     studySubjectId: Joi.number().integer().positive().required(),
+    studyEventDefinitionId: Joi.number().integer().positive().optional(),
     name: Joi.string().optional().max(255).allow(''),
     description: Joi.string().optional().max(2000).allow(''),
     startDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
     endDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
     estimatedStart: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
     estimatedEnd: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
+    location: Joi.string().optional().max(255).allow(''),
+    reason: Joi.string().optional().max(2000).allow(''),
     crfIds: Joi.array().items(Joi.number().integer().positive()).optional()
   }),
 

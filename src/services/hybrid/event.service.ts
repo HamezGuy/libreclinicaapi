@@ -27,6 +27,13 @@ export const getStudyEvents = async (studyId: number): Promise<any[]> => {
   logger.info('Getting study events', { studyId });
 
   try {
+    // Resolve to parent study — event definitions always belong to the parent, not sites
+    const parentCheck = await pool.query(
+      `SELECT COALESCE(parent_study_id, study_id) AS parent_study_id FROM study WHERE study_id = $1`,
+      [studyId]
+    );
+    const resolvedStudyId = parentCheck.rows.length > 0 ? parentCheck.rows[0].parent_study_id : studyId;
+
     const query = `
       SELECT 
         sed.study_event_definition_id,
@@ -51,7 +58,7 @@ export const getStudyEvents = async (studyId: number): Promise<any[]> => {
       ORDER BY sed.ordinal
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, [resolvedStudyId]);
     return result.rows;
   } catch (error: any) {
     logger.error('Get study events error', { error: error.message });
@@ -307,8 +314,14 @@ export const scheduleSubjectEvent = async (
   logger.info('Scheduling subject event', { data, userId });
 
   try {
-    // Get study ID from subject
-    const subjectQuery = `SELECT study_id, oc_oid as subject_oid FROM study_subject WHERE study_subject_id = $1`;
+    // Get study ID from subject, resolving to parent study (not site)
+    const subjectQuery = `
+      SELECT ss.study_id, ss.oc_oid as subject_oid,
+             COALESCE(s.parent_study_id, ss.study_id) AS parent_study_id
+      FROM study_subject ss
+      JOIN study s ON ss.study_id = s.study_id
+      WHERE ss.study_subject_id = $1
+    `;
     const subjectResult = await pool.query(subjectQuery, [data.studySubjectId]);
     
     if (subjectResult.rows.length === 0) {
@@ -318,7 +331,7 @@ export const scheduleSubjectEvent = async (
       };
     }
 
-    const studyId = subjectResult.rows[0].study_id;
+    const studyId = subjectResult.rows[0].parent_study_id;
 
     // Try SOAP service first for GxP-compliant event scheduling
     try {
@@ -540,19 +553,31 @@ export const createStudyEvent = async (
   try {
     await client.query('BEGIN');
 
+    // Resolve studyId to parent study (event definitions belong to the parent, not sites)
+    const studyCheck = await client.query(
+      `SELECT study_id, COALESCE(parent_study_id, study_id) AS parent_study_id FROM study WHERE study_id = $1`,
+      [data.studyId]
+    );
+    if (studyCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return { success: false, message: `Study ${data.studyId} not found` };
+    }
+    const resolvedStudyId = studyCheck.rows[0].parent_study_id;
+
     // Auto-calculate ordinal if not provided
     let ordinal = data.ordinal;
     if (!ordinal) {
       const maxOrdinalResult = await client.query(
         `SELECT COALESCE(MAX(ordinal), 0) + 1 as next_ordinal 
          FROM study_event_definition WHERE study_id = $1`,
-        [data.studyId]
+        [resolvedStudyId]
       );
       ordinal = maxOrdinalResult.rows[0]?.next_ordinal || 1;
     }
 
     // Generate OC OID
-    const ocOid = `SE_${data.studyId}_${data.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const ocOid = `SE_${resolvedStudyId}_${data.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
 
     // Insert study event definition with visit window fields
     const insertQuery = `
@@ -567,7 +592,7 @@ export const createStudyEvent = async (
     `;
 
     const insertResult = await client.query(insertQuery, [
-      data.studyId,
+      resolvedStudyId,
       data.name,
       data.description || '',
       ordinal,
@@ -705,7 +730,12 @@ export const updateStudyEvent = async (
       WHERE study_event_definition_id = $${paramIndex}
     `;
 
-    await client.query(updateQuery, params);
+    const updateResult = await client.query(updateQuery, params);
+    if (updateResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return { success: false, message: `Event definition ${eventDefinitionId} not found` };
+    }
 
     // Log audit event
     await client.query(`
@@ -765,11 +795,17 @@ export const deleteStudyEvent = async (
     }
 
     // Soft delete (set status to removed = 5)
-    await client.query(`
+    const delResult = await client.query(`
       UPDATE study_event_definition
       SET status_id = 5, date_updated = NOW(), update_id = $1
       WHERE study_event_definition_id = $2
     `, [userId, eventDefinitionId]);
+
+    if (delResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return { success: false, message: `Event definition ${eventDefinitionId} not found` };
+    }
 
     // Log audit event
     await client.query(`
@@ -921,6 +957,17 @@ export const assignCrfToEvent = async (
       };
     }
     const studyId = studyResult.rows[0].study_id;
+
+    // Validate CRF exists and is active
+    const crfCheck = await client.query(
+      `SELECT crf_id FROM crf WHERE crf_id = $1 AND status_id NOT IN (5, 7)`,
+      [data.crfId]
+    );
+    if (crfCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return { success: false, message: `CRF ${data.crfId} not found or is inactive` };
+    }
 
     // Get default version if not specified
     let defaultVersionId = data.crfVersionId;
@@ -1084,7 +1131,12 @@ export const updateEventCrf = async (
       WHERE event_definition_crf_id = $${paramIndex}
     `;
 
-    await client.query(updateQuery, params);
+    const updResult = await client.query(updateQuery, params);
+    if (updResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      return { success: false, message: `CRF assignment ${eventDefinitionCrfId} not found` };
+    }
 
     // Log audit event
     await client.query(`
@@ -1439,19 +1491,49 @@ export const createUnscheduledVisit = async (
   const visitName = data.name || 'Unscheduled Visit';
 
   try {
-    // Validate study exists
-    const studyCheck = await pool.query(`SELECT study_id FROM study WHERE study_id = $1`, [data.studyId]);
-    if (studyCheck.rows.length === 0) {
-      return { success: false, message: `Study ${data.studyId} not found` };
+    // Derive studyId from subject if not provided.
+    // IMPORTANT: subjects may be enrolled at a site (child study). Event definitions
+    // belong to the PARENT study, so we must always resolve to the parent.
+    let studyId = data.studyId;
+    if (!studyId) {
+      const subjectLookup = await pool.query(
+        `SELECT ss.study_id, COALESCE(s.parent_study_id, ss.study_id) AS parent_study_id
+         FROM study_subject ss
+         JOIN study s ON ss.study_id = s.study_id
+         WHERE ss.study_subject_id = $1`,
+        [data.studySubjectId]
+      );
+      if (subjectLookup.rows.length === 0) {
+        return { success: false, message: `Subject ${data.studySubjectId} not found` };
+      }
+      studyId = subjectLookup.rows[0].parent_study_id;
+    } else {
+      // Even when studyId is provided, resolve to parent if it's a site
+      const parentCheck = await pool.query(
+        `SELECT COALESCE(parent_study_id, study_id) AS parent_study_id FROM study WHERE study_id = $1`,
+        [studyId]
+      );
+      if (parentCheck.rows.length > 0) {
+        studyId = parentCheck.rows[0].parent_study_id;
+      }
     }
 
-    // Validate subject exists and belongs to study
+    // Validate study exists
+    const studyCheck = await pool.query(`SELECT study_id FROM study WHERE study_id = $1`, [studyId]);
+    if (studyCheck.rows.length === 0) {
+      return { success: false, message: `Study ${studyId} not found` };
+    }
+
+    // Validate subject belongs to this study (or one of its sites)
     const subjectCheck = await pool.query(
-      `SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1 AND study_id = $2`,
-      [data.studySubjectId, data.studyId]
+      `SELECT ss.study_subject_id FROM study_subject ss
+       JOIN study s ON ss.study_id = s.study_id
+       WHERE ss.study_subject_id = $1
+         AND (ss.study_id = $2 OR s.parent_study_id = $2)`,
+      [data.studySubjectId, studyId]
     );
     if (subjectCheck.rows.length === 0) {
-      return { success: false, message: `Subject ${data.studySubjectId} not found in study ${data.studyId}` };
+      return { success: false, message: `Subject ${data.studySubjectId} not found in study ${studyId}` };
     }
 
     // Ensure required status records exist (seed data)
@@ -1474,7 +1556,7 @@ export const createUnscheduledVisit = async (
     const existsResult = await pool.query(`
       SELECT study_event_definition_id FROM study_event_definition
       WHERE study_id = $1 AND name = $2 AND type = 'unscheduled' AND status_id = 1
-    `, [data.studyId, visitName]);
+    `, [studyId, visitName]);
 
     if (existsResult.rows.length > 0) {
       eventDefId = existsResult.rows[0].study_event_definition_id;
@@ -1486,16 +1568,16 @@ export const createUnscheduledVisit = async (
 
         const maxOrd = await client.query(
           `SELECT COALESCE(MAX(ordinal), 0) + 1 as next FROM study_event_definition WHERE study_id = $1`,
-          [data.studyId]
+          [studyId]
         );
-        const ocOid = `SE_${data.studyId}_UNSCHED_${Date.now()}`;
+        const ocOid = `SE_${studyId}_UNSCHED_${Date.now()}`;
         const insertDef = await client.query(`
           INSERT INTO study_event_definition (
             study_id, name, description, ordinal, type, repeating, category,
             status_id, owner_id, date_created, oc_oid
           ) VALUES ($1, $2, $3, $4, 'unscheduled', true, 'Unscheduled', 1, $5, NOW(), $6)
           RETURNING study_event_definition_id
-        `, [data.studyId, visitName, data.description || '', maxOrd.rows[0].next, userId, ocOid]);
+        `, [studyId, visitName, data.description || '', maxOrd.rows[0].next, userId, ocOid]);
         eventDefId = insertDef.rows[0].study_event_definition_id;
 
         // Assign selected CRFs to the definition
@@ -1517,7 +1599,7 @@ export const createUnscheduledVisit = async (
                 study_event_definition_id, study_id, crf_id, required_crf,
                 double_entry, hide_crf, ordinal, status_id, owner_id, date_created, default_version_id
               ) VALUES ($1, $2, $3, false, false, false, $4, 1, $5, NOW(), $6)
-            `, [eventDefId, data.studyId, crfId, i + 1, userId, defVersionId]);
+            `, [eventDefId, studyId, crfId, i + 1, userId, defVersionId]);
           }
         }
 
@@ -1590,9 +1672,9 @@ export const savePatientFormData = async (
   patientEventFormId: number,
   formData: Record<string, any>,
   userId: number
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: boolean; message?: string; statusCode?: number }> => {
   try {
-    await pool.query(`
+    const result = await pool.query(`
       UPDATE patient_event_form
       SET form_data = $1::jsonb,
           completion_status = CASE WHEN $1::jsonb = '{}'::jsonb THEN 'not_started' ELSE 'in_progress' END,
@@ -1600,6 +1682,10 @@ export const savePatientFormData = async (
           updated_by = $2
       WHERE patient_event_form_id = $3
     `, [JSON.stringify(formData), userId, patientEventFormId]);
+
+    if (result.rowCount === 0) {
+      return { success: false, message: `Patient form snapshot ${patientEventFormId} not found`, statusCode: 404 };
+    }
 
     return { success: true, message: 'Form data saved' };
   } catch (error: any) {
@@ -1650,7 +1736,12 @@ export const verifyPatientFormIntegrity = async (
       INNER JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN crf c ON edc.crf_id = c.crf_id
       LEFT JOIN crf_version cv ON edc.default_version_id = cv.crf_version_id
-      WHERE sed.study_id = (SELECT study_id FROM study_subject WHERE study_subject_id = $1)
+      WHERE sed.study_id = (
+              SELECT COALESCE(s.parent_study_id, ss.study_id)
+              FROM study_subject ss
+              JOIN study s ON ss.study_id = s.study_id
+              WHERE ss.study_subject_id = $1
+            )
         AND edc.status_id NOT IN (5, 7)
         AND c.status_id  NOT IN (5, 7)
       ORDER BY sed.ordinal, edc.ordinal
@@ -1825,10 +1916,20 @@ export const repairMissingSnapshots = async (
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      let ordinal = 1;
 
       for (const row of result.rows) {
+        // Get the next ordinal for this specific event (avoid collisions with existing snapshots)
+        const ordResult = await client.query(
+          `SELECT COALESCE(MAX(ordinal), 0) + 1 AS next_ordinal
+           FROM patient_event_form WHERE study_event_id = $1`,
+          [row.study_event_id]
+        );
+        const ordinal = ordResult.rows[0].next_ordinal;
+
+        // Use SAVEPOINT so one failed snapshot doesn't abort the entire transaction
+        const sp = `sp_repair_${row.event_crf_id}`;
         try {
+          await client.query(`SAVEPOINT ${sp}`);
           await createPatientFormSnapshot(
             client,
             row.study_event_id,
@@ -1837,11 +1938,13 @@ export const repairMissingSnapshots = async (
             row.crf_version_id,
             row.study_subject_id,
             row.crf_name,
-            ordinal++,
+            ordinal,
             userId
           );
+          await client.query(`RELEASE SAVEPOINT ${sp}`);
           repaired++;
         } catch (snapErr: any) {
+          await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
           errors.push(`Failed to create snapshot for event_crf ${row.event_crf_id}: ${snapErr.message}`);
         }
       }
@@ -1860,6 +1963,100 @@ export const repairMissingSnapshots = async (
     logger.error('Snapshot repair error', { error: error.message });
     throw error;
   }
+};
+
+/**
+ * Refresh ALL patient_event_form snapshots for a subject.
+ * Deletes every existing snapshot and re-creates them from the current
+ * getFormMetadata() output. This fixes snapshots that were created with
+ * older code that didn't properly process field types, names, or
+ * extended properties.
+ *
+ * Safe to call multiple times — idempotent.
+ */
+export const refreshAllSnapshots = async (
+  studySubjectId: number,
+  userId: number
+): Promise<{ refreshed: number; deleted: number; errors: string[] }> => {
+  logger.info('Refreshing ALL snapshots for subject', { studySubjectId });
+
+  const errors: string[] = [];
+  let deleted = 0;
+  let refreshed = 0;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Delete ALL existing patient_event_form records for this subject
+    const deleteResult = await client.query(
+      `DELETE FROM patient_event_form WHERE study_subject_id = $1 RETURNING patient_event_form_id`,
+      [studySubjectId]
+    );
+    deleted = deleteResult.rowCount || 0;
+    logger.info(`Deleted ${deleted} old snapshot(s) for subject ${studySubjectId}`);
+
+    // 2. Find ALL event_crf records for this subject (active only)
+    const ecQuery = `
+      SELECT
+        ec.event_crf_id,
+        ec.study_event_id,
+        ec.crf_version_id,
+        cv.crf_id,
+        c.name AS crf_name,
+        ec.study_subject_id
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      WHERE se.study_subject_id = $1
+        AND ec.status_id NOT IN (5, 7)
+      ORDER BY se.study_event_id, ec.event_crf_id
+    `;
+    const ecResult = await client.query(ecQuery, [studySubjectId]);
+
+    // 3. Re-create a fresh snapshot for every event_crf
+    let ordinalByEvent: Record<number, number> = {};
+    for (const row of ecResult.rows) {
+      // Track ordinal per event
+      if (!ordinalByEvent[row.study_event_id]) {
+        ordinalByEvent[row.study_event_id] = 1;
+      }
+      const ordinal = ordinalByEvent[row.study_event_id]++;
+
+      const sp = `sp_refresh_${row.event_crf_id}`;
+      try {
+        await client.query(`SAVEPOINT ${sp}`);
+        await createPatientFormSnapshot(
+          client,
+          row.study_event_id,
+          row.event_crf_id,
+          row.crf_id,
+          row.crf_version_id,
+          row.study_subject_id,
+          row.crf_name,
+          ordinal,
+          userId
+        );
+        await client.query(`RELEASE SAVEPOINT ${sp}`);
+        refreshed++;
+      } catch (snapErr: any) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+        errors.push(`Failed to create snapshot for event_crf ${row.event_crf_id} (${row.crf_name}): ${snapErr.message}`);
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (txErr: any) {
+    await client.query('ROLLBACK');
+    logger.error('Snapshot refresh transaction error', { error: txErr.message });
+    throw txErr;
+  } finally {
+    client.release();
+  }
+
+  logger.info('Snapshot refresh complete', { studySubjectId, deleted, refreshed, errors: errors.length });
+  return { refreshed, deleted, errors };
 };
 
 export default {
@@ -1887,6 +2084,7 @@ export default {
   savePatientFormData,
   // Verification / repair
   verifyPatientFormIntegrity,
-  repairMissingSnapshots
+  repairMissingSnapshots,
+  refreshAllSnapshots
 };
 
