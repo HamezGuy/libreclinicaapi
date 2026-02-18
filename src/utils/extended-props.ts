@@ -31,7 +31,13 @@ export function parseExtendedProps(description: string | null | undefined): Reco
   try {
     const json = description.split(DELIMITER)[1]?.trim();
     return json ? JSON.parse(json) : {};
-  } catch {
+  } catch (error: any) {
+    console.error(
+      '[CRITICAL] Failed to parse extended properties JSON from item description. ' +
+      'Table columns, skip logic, and field type metadata will be missing. ' +
+      'Raw JSON snippet:', description?.substring(description.indexOf(DELIMITER), description.indexOf(DELIMITER) + 200),
+      'Parse error:', error?.message
+    );
     return {};
   }
 }
