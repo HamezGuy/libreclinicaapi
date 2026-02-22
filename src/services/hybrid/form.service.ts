@@ -158,11 +158,10 @@ export const saveFormData = async (
     saveResult = await saveFormDataDirect(fullRequest, userId, username);
   }
 
-  // ===== POST-SAVE VALIDATION: Create queries for soft warnings =====
-  // This runs after ANY successful save (SOAP or direct DB).
-  // The saveFormDataDirect path also runs its own post-save check, but
-  // the SOAP path previously skipped this entirely — causing warning
-  // queries to never be created when SOAP was the save mechanism.
+  // ===== POST-SAVE VALIDATION: Create queries for soft warnings ONLY =====
+  // Errors were already caught in the pre-save pass. Only warnings (soft edits)
+  // should generate queries post-save. Using severityFilter: 'warning' prevents
+  // duplicate error queries if a race condition let an error slip through.
   if (saveResult.success && request.crfId && request.formData) {
     const savedEventCrfId = (saveResult as any).eventCrfId
       ?? (saveResult as any).data?.eventCrfId;
@@ -174,6 +173,7 @@ export const saveFormData = async (
           request.formData,
           {
             createQueries: true,
+            severityFilter: 'warning',
             studyId: request.studyId,
             subjectId: request.subjectId,
             eventCrfId: savedEventCrfId,
@@ -703,11 +703,9 @@ const saveFormDataDirect = async (
       logger.warn('Failed to auto-create workflow for form submission', { error: workflowError.message });
     }
 
-    // ===== POST-SAVE VALIDATION: Create queries for validation warnings =====
-    // Now that data is saved successfully, create queries (discrepancy notes) for
-    // validation failures. Hard edit errors were caught in pre-save and blocked.
-    // Only run post-save if there were warnings OR if we have an eventCrfId
-    // (enables more accurate field matching via itemDataMap).
+    // ===== POST-SAVE VALIDATION: Create queries for warnings ONLY =====
+    // Hard edit errors were already caught in the pre-save pass and blocked the save.
+    // Use severityFilter: 'warning' so only soft edits create queries post-save.
     let queriesCreated = 0;
     if (request.crfId && request.formData && eventCrfId) {
       try {
@@ -715,7 +713,8 @@ const saveFormDataDirect = async (
           request.crfId,
           request.formData,
           {
-            createQueries: true,  // NOW create queries for any validation failures
+            createQueries: true,
+            severityFilter: 'warning',
             studyId: request.studyId,
             subjectId: request.subjectId,
             eventCrfId: eventCrfId,
@@ -1751,6 +1750,7 @@ const mapFieldTypeToDataType = (fieldType: string): number => {
 interface FormField {
   // Core identifiers
   id?: string;
+  itemId?: number;
   name?: string;
   type: string;
   label: string;
@@ -2374,51 +2374,63 @@ export const createForm = async (
         
         // Check if field has showWhen conditions
         if (field.showWhen && Array.isArray(field.showWhen) && field.showWhen.length > 0) {
-          // Get the target item_form_metadata_id for this field
-          const targetIfmResult = await client.query(`
-            SELECT ifm.item_form_metadata_id
-            FROM item_form_metadata ifm
-            INNER JOIN item i ON ifm.item_id = i.item_id
-            WHERE ifm.crf_version_id = $1 AND i.name = $2
-            LIMIT 1
-          `, [crfVersionId, field.label || field.name]);
+          // Get the target item_form_metadata_id — try itemId first (stable), then name fallback.
+          const targetItemId = field.itemId || (field.id ? parseInt(String(field.id), 10) : NaN);
+          let targetIfmResult;
+          if (!isNaN(targetItemId)) {
+            targetIfmResult = await client.query(`
+              SELECT ifm.item_form_metadata_id
+              FROM item_form_metadata ifm
+              WHERE ifm.crf_version_id = $1 AND ifm.item_id = $2
+              LIMIT 1
+            `, [crfVersionId, targetItemId]);
+          }
+          if (!targetIfmResult?.rows?.length) {
+            targetIfmResult = await client.query(`
+              SELECT ifm.item_form_metadata_id
+              FROM item_form_metadata ifm
+              INNER JOIN item i ON ifm.item_id = i.item_id
+              WHERE ifm.crf_version_id = $1 AND (i.name = $2 OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2))
+              LIMIT 1
+            `, [crfVersionId, field.label || field.name]);
+          }
           
           if (targetIfmResult.rows.length > 0) {
             const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
             
             for (const condition of field.showWhen) {
-              // Find the control item's item_form_metadata_id
-              // condition.fieldId may be the label (stored as item.name) OR the auto-generated snake_case name
-              // Try exact match first, then try matching against all field labels/names
-              let controlIfmResult = await client.query(`
-                SELECT ifm.item_form_metadata_id, i.name
-                FROM item_form_metadata ifm
-                INNER JOIN item i ON ifm.item_id = i.item_id
-                WHERE ifm.crf_version_id = $1 AND i.name = $2
-                LIMIT 1
-              `, [crfVersionId, condition.fieldId]);
-              
-              // If no match, the fieldId might be a snake_case name - look up by matching against field labels
-              if (controlIfmResult.rows.length === 0) {
-                // Find the label from the fields array that matches this fieldId as a name
-                const matchingField = data.fields?.find(f => 
-                  (f.name === condition.fieldId) || 
-                  (f.label && f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') === condition.fieldId)
-                );
-                if (matchingField) {
-                  controlIfmResult = await client.query(`
-                    SELECT ifm.item_form_metadata_id, i.name
-                    FROM item_form_metadata ifm
-                    INNER JOIN item i ON ifm.item_id = i.item_id
-                    WHERE ifm.crf_version_id = $1 AND i.name = $2
-                    LIMIT 1
-                  `, [crfVersionId, matchingField.label || matchingField.name]);
-                }
+              // Find the control item — resolve from the template fields to get itemId.
+              const controlField = data.fields?.find((f: any) =>
+                f.name === condition.fieldId ||
+                f.label === condition.fieldId ||
+                f.id === condition.fieldId ||
+                (f.label && f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') === condition.fieldId)
+              );
+              const controlItemId = controlField?.itemId || (controlField?.id ? parseInt(String(controlField.id), 10) : NaN);
+
+              let controlIfmResult;
+              if (!isNaN(controlItemId)) {
+                controlIfmResult = await client.query(`
+                  SELECT ifm.item_form_metadata_id, i.name
+                  FROM item_form_metadata ifm
+                  INNER JOIN item i ON ifm.item_id = i.item_id
+                  WHERE ifm.crf_version_id = $1 AND ifm.item_id = $2
+                  LIMIT 1
+                `, [crfVersionId, controlItemId]);
+              }
+              if (!controlIfmResult?.rows?.length) {
+                controlIfmResult = await client.query(`
+                  SELECT ifm.item_form_metadata_id, i.name
+                  FROM item_form_metadata ifm
+                  INNER JOIN item i ON ifm.item_id = i.item_id
+                  WHERE ifm.crf_version_id = $1
+                    AND (i.name = $2 OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2))
+                  LIMIT 1
+                `, [crfVersionId, condition.fieldId]);
               }
               
-              const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
-              // Store the label (what item.name contains) for consistent round-tripping
-              const controlItemName = controlIfmResult.rows[0]?.name || condition.fieldId || '';
+              const controlIfmId = controlIfmResult?.rows[0]?.item_form_metadata_id || null;
+              const controlItemName = controlIfmResult?.rows[0]?.name || condition.fieldId || '';
               
               // Store operator metadata in message field as JSON so non-equals operators survive round-trip
               // SCD natively only supports equality, so we encode the operator in the message
@@ -2891,49 +2903,66 @@ export const updateForm = async (
         const field = data.fields[i];
         
         if (field.showWhen && Array.isArray(field.showWhen) && field.showWhen.length > 0) {
-          // Get the target item_form_metadata_id for this field
-          const targetIfmResult = await client.query(`
-            SELECT ifm.item_form_metadata_id
-            FROM item_form_metadata ifm
-            INNER JOIN item i ON ifm.item_id = i.item_id
-            WHERE ifm.crf_version_id = $1 AND i.name = $2
-            LIMIT 1
-          `, [crfVersionId, field.label || field.name]);
+          // Get the target item_form_metadata_id for this field.
+          // Try itemId first (stable), then fall back to name matching.
+          const targetItemId = field.itemId || (field.id ? parseInt(String(field.id), 10) : NaN);
+          let targetIfmResult;
+          if (!isNaN(targetItemId)) {
+            targetIfmResult = await client.query(`
+              SELECT ifm.item_form_metadata_id
+              FROM item_form_metadata ifm
+              WHERE ifm.crf_version_id = $1 AND ifm.item_id = $2
+              LIMIT 1
+            `, [crfVersionId, targetItemId]);
+          }
+          if (!targetIfmResult?.rows?.length) {
+            targetIfmResult = await client.query(`
+              SELECT ifm.item_form_metadata_id
+              FROM item_form_metadata ifm
+              INNER JOIN item i ON ifm.item_id = i.item_id
+              WHERE ifm.crf_version_id = $1 AND (i.name = $2 OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2))
+              LIMIT 1
+            `, [crfVersionId, field.label || field.name]);
+          }
           
           if (targetIfmResult.rows.length > 0) {
             const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
             
             for (const condition of field.showWhen) {
-              // Find the control item's item_form_metadata_id
-              // condition.fieldId may be the label (stored as item.name) OR the auto-generated snake_case name
-              let controlIfmResult = await client.query(`
-                SELECT ifm.item_form_metadata_id, i.name
-                FROM item_form_metadata ifm
-                INNER JOIN item i ON ifm.item_id = i.item_id
-                WHERE ifm.crf_version_id = $1 AND i.name = $2
-                LIMIT 1
-              `, [crfVersionId, condition.fieldId]);
-              
-              // If no match, the fieldId might be a snake_case name - look up by matching against field labels
-              if (controlIfmResult.rows.length === 0) {
-                const matchingField = data.fields?.find(f => 
-                  (f.name === condition.fieldId) || 
-                  (f.label && f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') === condition.fieldId)
-                );
-                if (matchingField) {
-                  controlIfmResult = await client.query(`
-                    SELECT ifm.item_form_metadata_id, i.name
-                    FROM item_form_metadata ifm
-                    INNER JOIN item i ON ifm.item_id = i.item_id
-                    WHERE ifm.crf_version_id = $1 AND i.name = $2
-                    LIMIT 1
-                  `, [crfVersionId, matchingField.label || matchingField.name]);
-                }
+              // Find the control item's item_form_metadata_id.
+              // condition.fieldId may be an itemId (numeric), a label, or a snake_case name.
+              // Try by itemId of the matching template field first.
+              const controlField = data.fields?.find((f: any) =>
+                f.name === condition.fieldId ||
+                f.label === condition.fieldId ||
+                f.id === condition.fieldId ||
+                (f.label && f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') === condition.fieldId)
+              );
+              const controlItemId = controlField?.itemId || (controlField?.id ? parseInt(String(controlField.id), 10) : NaN);
+
+              let controlIfmResult;
+              if (!isNaN(controlItemId)) {
+                controlIfmResult = await client.query(`
+                  SELECT ifm.item_form_metadata_id, i.name
+                  FROM item_form_metadata ifm
+                  INNER JOIN item i ON ifm.item_id = i.item_id
+                  WHERE ifm.crf_version_id = $1 AND ifm.item_id = $2
+                  LIMIT 1
+                `, [crfVersionId, controlItemId]);
+              }
+              if (!controlIfmResult?.rows?.length) {
+                controlIfmResult = await client.query(`
+                  SELECT ifm.item_form_metadata_id, i.name
+                  FROM item_form_metadata ifm
+                  INNER JOIN item i ON ifm.item_id = i.item_id
+                  WHERE ifm.crf_version_id = $1
+                    AND (i.name = $2 OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2))
+                  LIMIT 1
+                `, [crfVersionId, condition.fieldId]);
               }
               
-              const controlIfmId = controlIfmResult.rows[0]?.item_form_metadata_id || null;
-              // Store the label (what item.name contains) for consistent round-tripping
-              const controlItemName = controlIfmResult.rows[0]?.name || condition.fieldId || '';
+              const controlIfmId = controlIfmResult?.rows[0]?.item_form_metadata_id || null;
+              const controlItemName = controlIfmResult?.rows[0]?.name || condition.fieldId || '';
               
               // Store operator in message as JSON for non-equals operators
               const scdMessage = JSON.stringify({
@@ -4072,15 +4101,46 @@ export const updateFieldData = async (
       } as any;
     }
 
-    // Find the item_id for this field
-    const itemResult = await client.query(`
-      SELECT i.item_id, i.name
+    // Find the item_id for this field — try itemId (numeric), then OID, then
+    // display name, then technical fieldName from extended props, then
+    // spaces→underscores normalization.
+    let itemResult = await client.query(`
+      SELECT i.item_id, i.name, i.description
       FROM item i
       INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
       WHERE igm.crf_version_id = $1
-        AND (LOWER(i.name) = LOWER($2) OR LOWER(i.oc_oid) = LOWER($2))
+        AND (
+          i.item_id::text = $2
+          OR LOWER(i.name) = LOWER($2) 
+          OR LOWER(i.oc_oid) = LOWER($2)
+          OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2)
+        )
       LIMIT 1
     `, [eventCrf.crf_version_id, fieldName]);
+
+    // Fallback: match by technical fieldName stored in extended_props
+    if (itemResult.rows.length === 0) {
+      const allItems = await client.query(`
+        SELECT i.item_id, i.name, i.description
+        FROM item i
+        INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+        WHERE igm.crf_version_id = $1
+      `, [eventCrf.crf_version_id]);
+      for (const row of allItems.rows) {
+        if (row.description?.includes('---EXTENDED_PROPS---')) {
+          try {
+            const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
+            if (json) {
+              const ext = JSON.parse(json);
+              if (ext.fieldName && ext.fieldName.toLowerCase() === fieldName.toLowerCase()) {
+                itemResult = { rows: [row] } as any;
+                break;
+              }
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }
 
     if (itemResult.rows.length === 0) {
       return { success: false, message: `Field "${fieldName}" not found in form` };
@@ -4098,9 +4158,11 @@ export const updateFieldData = async (
     const itemDataId = existingResult.rows[0]?.item_data_id;
     const oldValue = existingResult.rows[0]?.value;
 
-    // Get all form data for cross-field validation
+    // Get all form data for cross-field validation.
+    // Key by technical fieldName (from extended props) AND display name so
+    // validation rules can match either way.
     const allDataResult = await client.query(`
-      SELECT i.name, id.value
+      SELECT i.item_id, i.name, i.description, id.value
       FROM item_data id
       INNER JOIN item i ON id.item_id = i.item_id
       WHERE id.event_crf_id = $1 AND id.deleted = false
@@ -4109,6 +4171,16 @@ export const updateFieldData = async (
     const allFormData: Record<string, any> = {};
     for (const row of allDataResult.rows) {
       allFormData[row.name] = row.value;
+      allFormData[`item_${row.item_id}`] = row.value;
+      if (row.description?.includes('---EXTENDED_PROPS---')) {
+        try {
+          const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
+          if (json) {
+            const ext = JSON.parse(json);
+            if (ext.fieldName) allFormData[ext.fieldName] = row.value;
+          }
+        } catch { /* ignore */ }
+      }
     }
     // Include the new value being validated
     allFormData[fieldName] = value;

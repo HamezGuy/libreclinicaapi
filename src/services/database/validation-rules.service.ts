@@ -16,6 +16,8 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { Parser as FormulaParser } from 'hot-formula-parser';
+import { resolveQueryAssignee } from './workflow-config.provider';
+import { parseExtendedProps } from '../../utils/extended-props';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -252,7 +254,11 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         END as rule_type,
         i.name as field_path,
         'error' as severity,
-        COALESCE(ifm.regexp_error_msg, 'Invalid format') as error_message,
+        CASE
+          WHEN ifm.regexp IS NOT NULL THEN COALESCE(ifm.regexp_error_msg, 'Invalid format')
+          WHEN ifm.required = true THEN 'This field is required'
+          ELSE 'Validation failed'
+        END as error_message,
         NULL as warning_message,
         true as active,
         NULL as min_value,
@@ -735,6 +741,9 @@ export const validateFormData = async (
     userId?: number;
     crfVersionId?: number;
     itemDataMap?: Record<string, number>;
+    /** When set, only rules matching this severity are evaluated.
+     *  Use 'warning' in post-save mode to avoid duplicate error queries. */
+    severityFilter?: 'error' | 'warning';
   }
 ): Promise<{
   valid: boolean;
@@ -764,11 +773,19 @@ export const validateFormData = async (
     }
   }
 
+  // Build itemId→formDataKey reverse map so validation can match rules to form
+  // data using itemId (the only stable identifier across display labels, technical
+  // names, and OIDs). Uses the same extended_properties parsing as the save flow.
+  const itemIdToFormKey = await buildItemIdToFormKeyMap(crfId, formData);
+
   for (const rule of rules) {
     if (!rule.active) continue;
 
-    // Match field value using multiple strategies
-    const value = getFieldValue(formData, rule, itemDataMap);
+    // Skip rules that don't match the severity filter (e.g. post-save only wants warnings)
+    if (options?.severityFilter && rule.severity !== options.severityFilter) continue;
+
+    // Match field value using itemId first (stable), then fall back to name matching
+    const value = getFieldValue(formData, rule, itemDataMap, itemIdToFormKey);
     
     // If the field is not found in form data (value === undefined), determine
     // whether this is a genuine naming mismatch (skip) or a required field
@@ -953,6 +970,70 @@ async function buildItemDataMap(eventCrfId: number): Promise<Record<string, numb
 }
 
 /**
+ * Build a reverse map: itemId → formData key.
+ *
+ * For each item in the CRF, determine which key in `formData` corresponds
+ * to it. Uses the exact same matching logic as the save flow in
+ * form.service.ts (technical fieldName from extended_props, item.name,
+ * item.oc_oid) so validation and save are always in agreement.
+ */
+async function buildItemIdToFormKeyMap(
+  crfId: number,
+  formData: Record<string, any>
+): Promise<Map<number, string>> {
+  const map = new Map<number, string>();
+  try {
+    const latestVersion = await pool.query(
+      `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 ORDER BY crf_version_id DESC LIMIT 1`,
+      [crfId]
+    );
+    if (latestVersion.rows.length === 0) return map;
+    const versionId = latestVersion.rows[0].crf_version_id;
+
+    const result = await pool.query(`
+      SELECT i.item_id, i.name, i.oc_oid, i.description
+      FROM item i
+      INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+      WHERE igm.crf_version_id = $1
+    `, [versionId]);
+
+    const formKeys = Object.keys(formData);
+    const lowerFormKeys = new Map<string, string>();
+    for (const k of formKeys) lowerFormKeys.set(k.toLowerCase(), k);
+
+    for (const row of result.rows) {
+      const itemId: number = row.item_id;
+
+      // Priority 1: technical fieldName from extended_properties (what the frontend sends)
+      const extProps = parseExtendedProps(row.description);
+      if (extProps.fieldName) {
+        const match = lowerFormKeys.get(extProps.fieldName.toLowerCase());
+        if (match) { map.set(itemId, match); continue; }
+      }
+
+      // Priority 2: OID (e.g., "I_GENER_ASSES")
+      if (row.oc_oid) {
+        const match = lowerFormKeys.get(row.oc_oid.toLowerCase());
+        if (match) { map.set(itemId, match); continue; }
+      }
+
+      // Priority 3: Display label (item.name, e.g., "Assessment Date")
+      if (row.name) {
+        const match = lowerFormKeys.get(row.name.toLowerCase());
+        if (match) { map.set(itemId, match); continue; }
+        // Also try spaces→underscores (e.g., "Assessment Date" → "assessment_date")
+        const normalized = row.name.replace(/[\s\-]+/g, '_').toLowerCase();
+        const normMatch = lowerFormKeys.get(normalized);
+        if (normMatch) { map.set(itemId, normMatch); continue; }
+      }
+    }
+  } catch (e: any) {
+    logger.warn('Could not build itemIdToFormKeyMap', { crfId, error: e.message });
+  }
+  return map;
+}
+
+/**
  * Get the field value from form data using multiple matching strategies
  * 
  * This handles various naming conventions:
@@ -965,8 +1046,18 @@ async function buildItemDataMap(eventCrfId: number): Promise<Record<string, numb
 function getFieldValue(
   formData: Record<string, any>, 
   rule: ValidationRule,
-  itemDataMap: Record<string, number>
+  itemDataMap: Record<string, number>,
+  itemIdToFormKey?: Map<number, string>
 ): any {
+  // 0. Match by itemId via reverse map (most reliable — uses the same DB-to-key
+  // mapping as the save flow, so the key is guaranteed to match the form data)
+  if (rule.itemId && itemIdToFormKey) {
+    const mappedKey = itemIdToFormKey.get(rule.itemId);
+    if (mappedKey && formData[mappedKey] !== undefined) {
+      return formData[mappedKey];
+    }
+  }
+
   // Guard against null/undefined fieldPath
   if (!rule.fieldPath) return undefined;
   
@@ -1005,8 +1096,18 @@ function getFieldValue(
       }
     }
   }
+
+  // 5. Normalize spaces/hyphens to underscores (e.g., "Assessment Date" -> "assessment_date")
+  if (fieldName) {
+    const normalized = fieldName.replace(/[\s\-]+/g, '_').toLowerCase();
+    for (const key of Object.keys(formData)) {
+      if (key.toLowerCase() === normalized) {
+        return formData[key];
+      }
+    }
+  }
   
-  // 5. Match by item_id if available in the rule
+  // 6. Match by item_id if available in the rule
   if (rule.itemId && itemDataMap[`item_${rule.itemId}`]) {
     // Find the field by looking up in itemDataMap
     for (const key of Object.keys(formData)) {
@@ -1016,7 +1117,7 @@ function getFieldValue(
     }
   }
   
-  // 6. Deep search in nested objects
+  // 7. Deep search in nested objects
   value = deepSearchValue(formData, fieldName || rule.fieldPath);
   if (value !== undefined) return value;
   
@@ -1069,6 +1170,9 @@ function getItemDataId(fieldPath: string, itemDataMap: Record<string, number>): 
   if (fieldName) {
     if (itemDataMap[fieldName]) return itemDataMap[fieldName];
     if (itemDataMap[fieldName.toLowerCase()]) return itemDataMap[fieldName.toLowerCase()];
+    // Spaces/hyphens to underscores (e.g., "Assessment Date" -> "assessment_date")
+    const normalized = fieldName.replace(/[\s\-]+/g, '_').toLowerCase();
+    if (itemDataMap[normalized]) return itemDataMap[normalized];
   }
   
   return undefined;
@@ -1367,8 +1471,9 @@ async function createValidationQuery(params: {
       }
     }
 
-    // Broader dedup: check by event_crf + rule name (handles cases where itemDataId is null)
-    if (!itemDataId && params.eventCrfId) {
+    // Broader dedup: check by event_crf + rule name OR event_crf + field path
+    // This catches duplicates even when itemDataId couldn't be resolved.
+    if (params.eventCrfId) {
       const isWarning = params.severity === 'warning';
       const expectedDesc = isWarning
         ? `Validation Warning: ${params.ruleName}`
@@ -1378,15 +1483,15 @@ async function createValidationQuery(params: {
         FROM discrepancy_note dn
         INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
         WHERE decm.event_crf_id = $1
-          AND dn.description = $2
+          AND (dn.description = $2 OR dn.detailed_notes LIKE $3)
           AND dn.resolution_status_id IN (1, 2)
           AND dn.parent_dn_id IS NULL
         LIMIT 1
-      `, [params.eventCrfId, expectedDesc]);
+      `, [params.eventCrfId, expectedDesc, `Field: ${params.fieldPath}%`]);
 
       if (existingByDesc.rows.length > 0) {
         const existingId = existingByDesc.rows[0].discrepancy_note_id;
-        logger.info('Existing validation query found by description, skipping duplicate', {
+        logger.info('Existing validation query found, skipping duplicate', {
           existingQueryId: existingId,
           fieldPath: params.fieldPath
         });
@@ -1396,20 +1501,14 @@ async function createValidationQuery(params: {
     }
     
     // ===== WORKFLOW-BASED QUERY ASSIGNMENT =====
-    // Priority:
-    // 1. Explicitly provided assignedUserId (from caller)
-    // 2. Form workflow config (acc_form_workflow_config.query_route_to_users)
-    // 3. Default assignee (coordinator/data manager for the study)
+    // Uses the shared workflow-config.provider for consistent routing.
+    // Priority: explicit caller ID → workflow config → default study role
     let assignedUserId = params.assignedUserId;
     
     if (!assignedUserId) {
-      // Look up form workflow config to find the designated query recipient
-      assignedUserId = await findWorkflowAssignee(client, params.crfId, params.eventCrfId, params.studyId);
-    }
-    
-    if (!assignedUserId) {
-      // Fallback to default study role-based assignment
-      assignedUserId = await findDefaultAssignee(client, params.studyId, params.subjectId);
+      assignedUserId = await resolveQueryAssignee(
+        params.crfId, params.studyId, params.eventCrfId, params.subjectId
+      );
     }
     
     const isWarning = params.severity === 'warning';
@@ -1527,169 +1626,9 @@ async function createValidationQuery(params: {
   }
 }
 
-/**
- * Find the workflow-assigned user for queries on a specific form.
- * 
- * Checks acc_form_workflow_config.query_route_to_users for the CRF.
- * This is configured in the Workflow Management UI and routes ALL queries
- * for a given form to specific user(s).
- * 
- * When a form has query_route_to_users configured, ALL validation queries
- * (both errors and warnings) are assigned to the first user in the list.
- * They will see these queries in their "My Assigned Queries" dashboard.
- * 
- * @param client - DB client (within transaction)
- * @param crfId - The CRF/form template ID (may be undefined)
- * @param eventCrfId - The form instance ID (used to look up crfId if not provided)
- * @param studyId - The study ID for study-specific workflow config
- * @returns The user_id to assign queries to, or null if no workflow config exists
- */
-async function findWorkflowAssignee(
-  _client: any,
-  crfId?: number,
-  eventCrfId?: number,
-  studyId?: number
-): Promise<number | null> {
-  // IMPORTANT: Use pool.query (separate connection) instead of the transaction client.
-  // If these queries fail, they must NOT abort the caller's open transaction.
-  try {
-    // If we don't have crfId but have eventCrfId, look it up
-    let resolvedCrfId = crfId;
-    if (!resolvedCrfId && eventCrfId) {
-      const ecResult = await pool.query(`
-        SELECT cv.crf_id FROM event_crf ec
-        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-        WHERE ec.event_crf_id = $1
-      `, [eventCrfId]);
-      if (ecResult.rows.length > 0) {
-        resolvedCrfId = ecResult.rows[0].crf_id;
-      }
-    }
-    
-    if (!resolvedCrfId) return null;
-    
-    // Check if the acc_form_workflow_config table exists before querying
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'acc_form_workflow_config'
-      ) as exists
-    `);
-    if (!tableCheck.rows[0].exists) {
-      logger.debug('acc_form_workflow_config table does not exist yet, skipping workflow assignment');
-      return null;
-    }
-    
-    // Look up workflow config for this CRF
-    const configResult = await pool.query(`
-      SELECT query_route_to_users
-      FROM acc_form_workflow_config
-      WHERE crf_id = $1 
-        AND (study_id = $2 OR study_id IS NULL)
-      ORDER BY study_id DESC NULLS LAST
-      LIMIT 1
-    `, [resolvedCrfId, studyId || null]);
-    
-    if (configResult.rows.length === 0) return null;
-    
-    let routeUsernames: string[] = [];
-    try {
-      const rawUsers = configResult.rows[0].query_route_to_users;
-      if (rawUsers) {
-        const parsed = JSON.parse(rawUsers);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          routeUsernames = parsed;
-        }
-      }
-    } catch { /* ignore parse errors */ }
-
-    if (routeUsernames.length === 0) return null;
-
-    // Resolve the first username to a user_id
-    const userResult = await pool.query(`
-      SELECT user_id, user_name FROM user_account
-      WHERE user_name = ANY($1) AND enabled = true
-    `, [routeUsernames]);
-    
-    if (userResult.rows.length > 0) {
-      logger.info('Workflow-assigned query to user', { 
-        crfId: resolvedCrfId, 
-        usernames: routeUsernames,
-        userId: userResult.rows[0].user_id 
-      });
-      return userResult.rows[0].user_id;
-    }
-    
-    logger.warn('Workflow route users not found as active users', { 
-      usernames: routeUsernames, crfId: resolvedCrfId 
-    });
-    return null;
-  } catch (e: any) {
-    logger.warn('Could not find workflow assignee:', e.message);
-    return null;
-  }
-}
-
-/**
- * Find a default user to assign validation queries to
- * 
- * Priority:
- * 1. Study coordinator assigned to the specific site
- * 2. Data manager for the study
- * 3. Any study user with coordinator role
- * 4. The user who triggered the validation (fallback)
- */
-async function findDefaultAssignee(
-  _client: any,
-  studyId: number,
-  subjectId?: number
-): Promise<number | null> {
-  // IMPORTANT: Use pool.query (separate connection) instead of the transaction client.
-  // If these queries fail (e.g., SQL syntax error), they must NOT abort the caller's
-  // open transaction. Using pool.query isolates failures to their own connection.
-  try {
-    const result = await pool.query(`
-      SELECT user_id FROM (
-        SELECT ua.user_id,
-          CASE 
-            WHEN sur.role_name = 'Study Coordinator' THEN 1
-            WHEN sur.role_name = 'Clinical Research Coordinator' THEN 2
-            WHEN sur.role_name = 'Data Manager' THEN 3
-            ELSE 4
-          END as role_priority
-        FROM user_account ua
-        INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
-        WHERE sur.study_id = $1
-          AND sur.status_id = 1
-          AND sur.role_name IN ('Study Coordinator', 'Clinical Research Coordinator', 'Data Manager', 'coordinator')
-        ORDER BY role_priority
-        LIMIT 1
-      ) ranked
-    `, [studyId]);
-    
-    if (result.rows.length > 0) {
-      return result.rows[0].user_id;
-    }
-    
-    // Fallback: Get any active user with access to this study
-    const fallbackResult = await pool.query(`
-      SELECT ua.user_id
-      FROM user_account ua
-      INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
-      WHERE sur.study_id = $1 AND sur.status_id = 1 AND ua.enabled = true
-      LIMIT 1
-    `, [studyId]);
-    
-    if (fallbackResult.rows.length > 0) {
-      return fallbackResult.rows[0].user_id;
-    }
-    
-    return null;
-  } catch (e: any) {
-    logger.warn('Could not find default assignee', { error: e.message, studyId });
-    return null;
-  }
-}
+// findWorkflowAssignee() and findDefaultAssignee() have been moved to
+// workflow-config.provider.ts as resolveQueryAssignee() and resolveDefaultAssignee().
+// All callers now import from the shared provider module.
 
 /**
  * Find item_data_id by event_crf_id and item identifier (itemId or fieldPath)
@@ -1713,7 +1652,7 @@ async function findItemDataId(
     }
   }
   
-  // Try by field name
+  // Try by field name / OID / normalized name
   if (fieldPath) {
     const fieldName = fieldPath.split('.').pop() || fieldPath;
     
@@ -1722,7 +1661,11 @@ async function findItemDataId(
       FROM item_data id
       INNER JOIN item i ON id.item_id = i.item_id
       WHERE id.event_crf_id = $1 
-        AND (LOWER(i.name) = LOWER($2) OR LOWER(i.oc_oid) = LOWER($2))
+        AND (
+          LOWER(i.name) = LOWER($2) 
+          OR LOWER(i.oc_oid) = LOWER($2)
+          OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2)
+        )
         AND id.deleted = false
       LIMIT 1
     `, [eventCrfId, fieldName]);
@@ -1759,6 +1702,21 @@ function applyRule(
     !/^\d[\d,.]*$/.test(value) && // Not a decimal number with commas (e.g., "1,234.56")
     !/^\d{4}-\d{2}-\d{2}/.test(value); // Not a date string
 
+  // Detect blood pressure composite values (e.g., "120/80")
+  const isBloodPressure = typeof value === 'string' && /^\d{2,3}\/\d{2,3}$/.test(value);
+
+  // Detect yes/no boolean string values
+  const isYesNo = typeof value === 'string' &&
+    ['yes', 'no', 'true', 'false'].includes(value.toLowerCase());
+
+  // Detect JSON-encoded values (table fields, repeating groups)
+  const isJsonValue = typeof value === 'string' &&
+    (value.startsWith('[') || value.startsWith('{'));
+
+  // Detect file upload IDs (comma-separated UUIDs or numeric IDs)
+  const isFileIds = typeof value === 'string' &&
+    /^[a-f0-9\-]{8,}(,[a-f0-9\-]{8,})*$/i.test(value);
+
   // Handle array values (in case value comes as actual array)
   if (Array.isArray(value)) {
     if (rule.ruleType === 'required') {
@@ -1768,6 +1726,16 @@ function applyRule(
     if (rule.ruleType === 'range' || rule.ruleType === 'format') {
       return { valid: true };
     }
+  }
+
+  // JSON-encoded values (tables, repeating groups) — only 'required' applies
+  if (isJsonValue && rule.ruleType !== 'required') {
+    return { valid: true };
+  }
+
+  // File upload IDs — only 'required' applies
+  if (isFileIds && rule.ruleType !== 'required') {
+    return { valid: true };
   }
 
   switch (rule.ruleType) {
@@ -1780,7 +1748,18 @@ function applyRule(
       // Comma-separated option values like "opt1,opt2" would produce NaN and falsely fail
       if (isMultiValue) return { valid: true };
       
-      // Check for date range validation
+      // Yes/No values are not numeric — range validation doesn't apply
+      if (isYesNo) return { valid: true };
+      
+      // Blood pressure composites: validate systolic and diastolic parts independently
+      if (isBloodPressure) {
+        const [sys, dia] = (value as string).split('/').map(Number);
+        if (rule.minValue !== undefined && (sys < rule.minValue || dia < rule.minValue)) return { valid: false };
+        if (rule.maxValue !== undefined && (sys > rule.maxValue || dia > rule.maxValue)) return { valid: false };
+        return { valid: true };
+      }
+      
+      // Check for date range validation (handles both YYYY-MM-DD and full ISO datetime)
       if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
         const dateValue = new Date(value);
         if (isNaN(dateValue.getTime())) return { valid: false };
@@ -1796,7 +1775,7 @@ function applyRule(
       }
       
       const numValue = Number(value);
-      if (isNaN(numValue)) return { valid: false };
+      if (isNaN(numValue)) return { valid: true };
       if (rule.minValue !== undefined && numValue < rule.minValue) return { valid: false };
       if (rule.maxValue !== undefined && numValue > rule.maxValue) return { valid: false };
       return { valid: true };
@@ -1812,6 +1791,24 @@ function applyRule(
       if (!resolvedPattern) return { valid: true };
       // Skip format/regex validation for multi-value (checkbox/multi-select) fields
       if (isMultiValue) return { valid: true };
+      // Yes/No values have a fixed format — regex patterns don't apply
+      if (isYesNo) return { valid: true };
+      // Blood pressure composites: the combined "120/80" string won't match numeric
+      // patterns designed for single values. Validate each component independently
+      // against the original pattern, or pass if the pattern is purely numeric.
+      if (isBloodPressure) {
+        const bpPattern = FORMAT_TYPE_REGISTRY['blood_pressure']?.pattern;
+        if (bpPattern) {
+          try { return { valid: new RegExp(bpPattern).test(String(value)) }; } catch { /* fall through */ }
+        }
+        // If the stored pattern is a simple numeric check, validate each part
+        const numericPatterns = ['^\\d+$', '^\\d*\\.?\\d+$', '^-?\\d+$', '^-?\\d+\\.\\d{2}$'];
+        if (numericPatterns.includes(resolvedPattern)) {
+          const parts = (value as string).split('/');
+          const partRegex = new RegExp(resolvedPattern);
+          return { valid: parts.every(p => partRegex.test(p.trim())) };
+        }
+      }
       // Check if this is actually an Excel formula stored as format type
       if (resolvedPattern.startsWith('=FORMULA:') || resolvedPattern.startsWith('=')) {
         const formula = resolvedPattern.startsWith('=FORMULA:') 
@@ -2109,30 +2106,51 @@ export const validateEventCrf = async (
 
     const eventCrf = eventCrfResult.rows[0];
 
-    // Get all item data for this event_crf
+    // Get all item data for this event_crf, including description for
+    // extended_props parsing so we can key formData by technical fieldName.
     const itemDataResult = await pool.query(`
       SELECT 
         id.item_data_id,
         id.item_id,
         id.value,
         i.name as field_name,
-        i.oc_oid as field_oid
+        i.oc_oid as field_oid,
+        i.description
       FROM item_data id
       INNER JOIN item i ON id.item_id = i.item_id
       WHERE id.event_crf_id = $1 AND id.deleted = false
     `, [eventCrfId]);
 
-    // Build form data object and item data map
+    // Build form data keyed by ALL identifiers so validation matching works
+    // regardless of whether rules reference display names, OIDs, or technical names.
     const formData: Record<string, any> = {};
     const itemDataMap: Record<string, number> = {};
 
     for (const row of itemDataResult.rows) {
+      // Display name
       formData[row.field_name] = row.value;
       itemDataMap[row.field_name] = row.item_data_id;
       itemDataMap[row.field_name.toLowerCase()] = row.item_data_id;
+      // OID
       if (row.field_oid) {
         formData[row.field_oid] = row.value;
         itemDataMap[row.field_oid] = row.item_data_id;
+      }
+      // item_id key
+      itemDataMap[`item_${row.item_id}`] = row.item_data_id;
+      // Technical fieldName from extended_props
+      if (row.description?.includes('---EXTENDED_PROPS---')) {
+        try {
+          const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
+          if (json) {
+            const ext = JSON.parse(json);
+            if (ext.fieldName) {
+              formData[ext.fieldName] = row.value;
+              itemDataMap[ext.fieldName] = row.item_data_id;
+              itemDataMap[ext.fieldName.toLowerCase()] = row.item_data_id;
+            }
+          }
+        } catch { /* ignore */ }
       }
     }
 

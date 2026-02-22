@@ -7,6 +7,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { WorkflowType, WorkflowPriority, WorkflowStatus } from '../../types/libreclinica-models';
+import { getFormWorkflowConfig } from './workflow-config.provider';
 
 /**
  * CRF Lifecycle phases (ordered).
@@ -65,24 +66,11 @@ export const getCrfLifecycleStatus = async (
     const isSigned = row.is_signed;
     const crfId = row.crf_id;
 
-    // 2. Load workflow config for this CRF
-    let requiresSDV = false;
-    let requiresSignature = false;
-    let requiresDDE = false;
-    try {
-      const cfgResult = await pool.query(`
-        SELECT requires_sdv, requires_signature, requires_dde
-        FROM acc_form_workflow_config
-        WHERE crf_id = $1
-        ORDER BY study_id DESC NULLS LAST
-        LIMIT 1
-      `, [crfId]);
-      if (cfgResult.rows.length > 0) {
-        requiresSDV = cfgResult.rows[0].requires_sdv;
-        requiresSignature = cfgResult.rows[0].requires_signature;
-        requiresDDE = cfgResult.rows[0].requires_dde;
-      }
-    } catch { /* table may not exist yet */ }
+    // 2. Load workflow config via shared provider
+    const wfConfig = await getFormWorkflowConfig(crfId);
+    const requiresSDV = wfConfig.requiresSDV;
+    const requiresSignature = wfConfig.requiresSignature;
+    const requiresDDE = wfConfig.requiresDDE;
 
     // 3. Count open queries
     let openQueryCount = 0;

@@ -313,12 +313,8 @@ export const createUser = async (
 
     const userId = insertResult.rows[0].user_id;
 
-    // Assign to default study (study_id=1) with the specified role if role is provided
+    // Assign to a study with the specified role if role is provided
     if (data.role) {
-      const studyId = data.studyId || 1; // Default to study 1
-      
-      // Map frontend role names to DB role names.
-      // The 6 canonical roles are stored directly. Legacy names are also accepted.
       const roleNameMap: Record<string, string> = {
         'admin': 'admin',
         'data_manager': 'data_manager',
@@ -326,7 +322,6 @@ export const createUser = async (
         'coordinator': 'coordinator',
         'monitor': 'monitor',
         'viewer': 'viewer',
-        // Legacy aliases
         'data_entry': 'coordinator',
         'ra': 'coordinator',
         'ra2': 'coordinator',
@@ -335,13 +330,32 @@ export const createUser = async (
       
       const lcRoleName = roleNameMap[data.role.toLowerCase()] || data.role;
 
-      await client.query(`
-        INSERT INTO study_user_role (
-          role_name, study_id, status_id, owner_id, date_created, user_name
-        ) VALUES ($1, $2, 1, $3, NOW(), $4)
-      `, [lcRoleName, studyId, creatorId, data.username]);
+      // Find a valid study to assign: explicit studyId, or any study accessible to the creator
+      let studyId = data.studyId || null;
+      if (!studyId) {
+        const creatorStudy = await client.query(
+          `SELECT study_id FROM study_user_role WHERE user_name = (SELECT user_name FROM user_account WHERE user_id = $1) AND status_id = 1 ORDER BY study_id LIMIT 1`,
+          [creatorId]
+        );
+        if (creatorStudy.rows.length > 0) {
+          studyId = creatorStudy.rows[0].study_id;
+        } else {
+          // Fallback: any active study
+          const anyStudy = await client.query(`SELECT study_id FROM study WHERE status_id = 1 ORDER BY study_id LIMIT 1`);
+          if (anyStudy.rows.length > 0) studyId = anyStudy.rows[0].study_id;
+        }
+      }
 
-      logger.info('User assigned to study', { userId, studyId, role: lcRoleName });
+      if (studyId) {
+        await client.query(`
+          INSERT INTO study_user_role (
+            role_name, study_id, status_id, owner_id, date_created, user_name
+          ) VALUES ($1, $2, 1, $3, NOW(), $4)
+        `, [lcRoleName, studyId, creatorId, data.username]);
+        logger.info('User assigned to study', { userId, studyId, role: lcRoleName });
+      } else {
+        logger.warn('No study available for role assignment — user created without study access', { userId });
+      }
 
       // Apply feature access defaults for the assigned role
       try {

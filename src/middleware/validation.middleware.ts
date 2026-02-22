@@ -728,7 +728,7 @@ export const querySchemas = {
     subjectId: Joi.number().integer().positive().optional(),
     status: Joi.string().valid('New', 'Updated', 'Resolution Proposed', 'Closed', 'Not Applicable').optional(),
     page: Joi.number().integer().min(1).default(1),
-    limit: Joi.number().integer().min(1).max(100).default(20)
+    limit: Joi.number().integer().min(1).max(1000).default(20)
   })
 };
 

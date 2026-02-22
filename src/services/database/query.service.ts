@@ -10,6 +10,7 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { ApiResponse, PaginatedResponse } from '../../types';
 import * as notificationService from './notification.service';
+import { resolveAllQueryAssignees } from './workflow-config.provider';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -315,78 +316,30 @@ export const createQuery = async (
       };
     }
 
-    // Resolve query assignment:
-    // 1. Use explicitly provided assignedUserId
-    // 2. Look up form workflow config (query_route_to_users) when entity is eventCrf or itemData
-    // 3. Fall back to null (unassigned)
+    // Resolve query assignment via shared workflow-config.provider.
+    // Priority: explicit assignedUserId → workflow config → null (unassigned)
     let resolvedAssignedUserId = data.assignedUserId || null;
     
     if (!resolvedAssignedUserId && (data.entityType === 'eventCrf' || data.entityType === 'itemData')) {
       try {
-        // Try to find workflow-assigned user from form workflow config
-        let lookupEntityId = data.entityId;
-        let crfIdForLookup: number | null = null;
+        let eventCrfIdForLookup: number | undefined;
         
         if (data.entityType === 'eventCrf') {
-          // entityId IS the event_crf_id - look up the crf_id
-          const ecResult = await client.query(`
-            SELECT cv.crf_id FROM event_crf ec
-            INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-            WHERE ec.event_crf_id = $1
-          `, [lookupEntityId]);
-          if (ecResult.rows.length > 0) crfIdForLookup = ecResult.rows[0].crf_id;
+          eventCrfIdForLookup = data.entityId;
         } else if (data.entityType === 'itemData') {
-          // entityId IS item_data_id - look up crf_id via event_crf
-          const idResult = await client.query(`
-            SELECT cv.crf_id FROM item_data id
-            INNER JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
-            INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-            WHERE id.item_data_id = $1
-          `, [lookupEntityId]);
-          if (idResult.rows.length > 0) crfIdForLookup = idResult.rows[0].crf_id;
+          const idResult = await client.query(
+            `SELECT event_crf_id FROM item_data WHERE item_data_id = $1`,
+            [data.entityId]
+          );
+          if (idResult.rows.length > 0) eventCrfIdForLookup = idResult.rows[0].event_crf_id;
         }
-        
-        if (crfIdForLookup) {
-          const configResult = await client.query(`
-            SELECT query_route_to_users FROM acc_form_workflow_config
-            WHERE crf_id = $1
-              AND (study_id = $2 OR study_id IS NULL)
-            ORDER BY study_id DESC NULLS LAST
-            LIMIT 1
-          `, [crfIdForLookup, data.studyId || null]);
-          
-          if (configResult.rows.length > 0) {
-            let routeUsernames: string[] = [];
-            try {
-              const rawUsers = configResult.rows[0].query_route_to_users;
-              if (rawUsers) {
-                const parsed = JSON.parse(rawUsers);
-                if (Array.isArray(parsed)) routeUsernames = parsed;
-              }
-            } catch { /* ignore parse errors */ }
 
-            if (routeUsernames.length > 0) {
-              // Resolve the first user as the primary assignee
-              const userResult = await client.query(`
-                SELECT user_id, user_name FROM user_account
-                WHERE user_name = ANY($1) AND enabled = true
-              `, [routeUsernames]);
-
-              if (userResult.rows.length > 0) {
-                resolvedAssignedUserId = userResult.rows[0].user_id;
-                // Store additional assignees for child note creation after insert
-                (data as any)._additionalAssigneeIds = userResult.rows
-                  .slice(1)
-                  .map((r: any) => r.user_id);
-                logger.info('Query auto-assigned via workflow config', { 
-                  crfId: crfIdForLookup, 
-                  usernames: routeUsernames,
-                  primaryUserId: resolvedAssignedUserId,
-                  additionalCount: (data as any)._additionalAssigneeIds?.length || 0
-                });
-              }
-            }
-          }
+        const assignees = await resolveAllQueryAssignees(
+          undefined, data.studyId, eventCrfIdForLookup
+        );
+        if (assignees.primaryUserId) {
+          resolvedAssignedUserId = assignees.primaryUserId;
+          (data as any)._additionalAssigneeIds = assignees.additionalUserIds;
         }
       } catch (e: any) {
         logger.warn('Could not resolve workflow assignee for query:', e.message);
@@ -1482,21 +1435,39 @@ export const getQueriesByField = async (eventCrfId: number, fieldName: string, c
   logger.info('Getting queries by field', { eventCrfId, fieldName });
 
   try {
-    // First, find the item_data_id for this field
+    // Find item_data_id matching by item.name, oc_oid, OR technical fieldName
+    // from extended props. The frontend may send any of these identifiers.
     const itemDataQuery = `
       SELECT id.item_data_id
       FROM item_data id
       INNER JOIN item i ON id.item_id = i.item_id
       WHERE id.event_crf_id = $1
-        AND (LOWER(i.name) = LOWER($2) OR LOWER(i.oc_oid) = LOWER($2))
         AND id.deleted = false
+        AND (
+          LOWER(i.name) = LOWER($2) 
+          OR LOWER(i.oc_oid) = LOWER($2)
+          OR i.item_id::text = $2
+          OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2)
+        )
       LIMIT 1
     `;
 
-    const itemDataResult = await pool.query(itemDataQuery, [eventCrfId, fieldName]);
+    let itemDataResult = await pool.query(itemDataQuery, [eventCrfId, fieldName]);
+    
+    // Fallback: check extended_props for technical fieldName
+    if (itemDataResult.rows.length === 0) {
+      const extPropsQuery = `
+        SELECT id.item_data_id
+        FROM item_data id
+        INNER JOIN item i ON id.item_id = i.item_id
+        WHERE id.event_crf_id = $1 AND id.deleted = false
+          AND i.description LIKE '%---EXTENDED_PROPS---%'
+          AND LOWER(i.description) LIKE LOWER($2)
+      `;
+      itemDataResult = await pool.query(extPropsQuery, [eventCrfId, `%"fieldName":"${fieldName}"%`]);
+    }
     
     if (itemDataResult.rows.length === 0) {
-      // Field not found - return empty array
       return [];
     }
 
@@ -1530,7 +1501,9 @@ export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?:
 
     const query = `
       SELECT 
+        i.item_id,
         i.name as field_name,
+        i.description,
         COUNT(dn.discrepancy_note_id) as query_count
       FROM item_data id
       INNER JOIN item i ON id.item_id = i.item_id
@@ -1541,14 +1514,30 @@ export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?:
         AND id.deleted = false
         AND dn.parent_dn_id IS NULL
         AND rs.name NOT IN ('Closed', 'Not Applicable')${orgFilter}
-      GROUP BY i.name
+      GROUP BY i.item_id, i.name, i.description
     `;
 
     const result = await pool.query(query, params);
     
+    // Return counts keyed by EVERY possible identifier so the frontend
+    // can match regardless of whether it uses fieldName, item.name, or itemId.
     const counts: Record<string, number> = {};
     for (const row of result.rows) {
-      counts[row.field_name] = parseInt(row.query_count);
+      const count = parseInt(row.query_count);
+      // Key by display name (item.name)
+      counts[row.field_name] = count;
+      // Key by itemId for reliable programmatic matching
+      counts[`item_${row.item_id}`] = count;
+      // Key by technical fieldName from extended props (what the frontend form controls use)
+      try {
+        if (row.description?.includes('---EXTENDED_PROPS---')) {
+          const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
+          if (json) {
+            const ext = JSON.parse(json);
+            if (ext.fieldName) counts[ext.fieldName] = count;
+          }
+        }
+      } catch { /* ignore parse errors */ }
     }
     
     return counts;
