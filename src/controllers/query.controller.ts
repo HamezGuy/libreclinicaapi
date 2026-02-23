@@ -412,6 +412,53 @@ export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Re
 // ═══════════════════════════════════════════════════════════════════
 
 /**
+ * Accept a proposed resolution (Monitor / CRO / PI / Admin only)
+ * POST /api/queries/:id/accept-resolution
+ */
+export const acceptResolution = asyncHandler(async (req: Request, res: Response) => {
+  const queryId = parseInt(req.params.id);
+  const caller = (req as any).user;
+  const { reason, meaning } = req.body;
+
+  const result = await queryService.acceptResolution(queryId, caller.userId, { reason, meaning });
+
+  if (!result.success) {
+    const statusCode = result.message?.includes('not found') ? 404
+      : result.message?.includes('not in') ? 409
+      : 400;
+    res.status(statusCode).json(result);
+    return;
+  }
+  res.json(result);
+});
+
+/**
+ * Reject a proposed resolution (Monitor / CRO / PI / Admin only)
+ * POST /api/queries/:id/reject-resolution
+ */
+export const rejectResolution = asyncHandler(async (req: Request, res: Response) => {
+  const queryId = parseInt(req.params.id);
+  const caller = (req as any).user;
+  const { reason } = req.body;
+
+  if (!reason?.trim()) {
+    res.status(400).json({ success: false, message: 'A reason is required when rejecting a resolution' });
+    return;
+  }
+
+  const result = await queryService.rejectResolution(queryId, caller.userId, { reason });
+
+  if (!result.success) {
+    const statusCode = result.message?.includes('not found') ? 404
+      : result.message?.includes('not in') ? 409
+      : 400;
+    res.status(statusCode).json(result);
+    return;
+  }
+  res.json(result);
+});
+
+/**
  * Reopen a closed query
  * PUT /api/queries/:id/reopen
  */
@@ -494,6 +541,8 @@ export default {
   respond, 
   updateStatus, 
   closeWithSignature,
+  acceptResolution,
+  rejectResolution,
   getAuditTrail,
   stats, 
   getQueryTypes, 

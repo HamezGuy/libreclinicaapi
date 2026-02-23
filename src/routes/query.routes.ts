@@ -79,6 +79,20 @@ router.post('/:id/close-with-signature',
   controller.closeWithSignature
 );
 
+// Accept a proposed resolution (Monitor / CRO / PI / Admin only)
+router.post('/:id/accept-resolution',
+  requireRole('monitor', 'admin', 'investigator'),
+  validate({ params: commonSchemas.idParam }),
+  controller.acceptResolution
+);
+
+// Reject a proposed resolution (Monitor / CRO / PI / Admin only)
+router.post('/:id/reject-resolution',
+  requireRole('monitor', 'admin', 'investigator'),
+  validate({ params: commonSchemas.idParam }),
+  controller.rejectResolution
+);
+
 // Reopen a closed query
 router.put('/:id/reopen',
   requireRole('monitor', 'data_manager', 'admin'),

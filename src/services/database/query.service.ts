@@ -1268,40 +1268,72 @@ export const getQueryThread = async (queryId: number, callerUserId?: number): Pr
   logger.info('Getting query thread', { queryId, callerUserId });
 
   try {
+    // The thread uses a recursive CTE to walk parent → children.
+    // We must exclude "routing copies" — child notes created automatically
+    // in createQuery() for additional assignees. They share the root query's
+    // description and are created within ~1 second of the root, so we filter
+    // them by checking: (level > 0) AND description == root.description AND
+    // created within 10 seconds of root. Real responses always differ in text.
+    //
+    // We also carry root_description and root_created through the CTE so the
+    // final SELECT can apply that filter cleanly.
     const query = `
       WITH RECURSIVE query_thread AS (
-        -- Get the parent query
+        -- Root query (level = 0)
         SELECT 
           dn.discrepancy_note_id,
           dn.parent_dn_id,
           dn.description,
           dn.detailed_notes,
           dn.date_created,
+          dn.resolution_status_id,
+          dn.owner_id,
           u.user_name as created_by,
-          u.first_name || ' ' || u.last_name as user_full_name,
-          0 as level
+          COALESCE(NULLIF(TRIM(u.first_name || ' ' || u.last_name), ''), u.user_name) as user_full_name,
+          0 as level,
+          dn.description as root_description,
+          dn.date_created as root_created
         FROM discrepancy_note dn
         LEFT JOIN user_account u ON dn.owner_id = u.user_id
         WHERE dn.discrepancy_note_id = $1
-        
+
         UNION ALL
-        
-        -- Get all responses
-        SELECT 
+
+        -- Responses and nested responses
+        SELECT
           dn.discrepancy_note_id,
           dn.parent_dn_id,
           dn.description,
           dn.detailed_notes,
           dn.date_created,
+          dn.resolution_status_id,
+          dn.owner_id,
           u.user_name as created_by,
-          u.first_name || ' ' || u.last_name as user_full_name,
-          qt.level + 1
+          COALESCE(NULLIF(TRIM(u.first_name || ' ' || u.last_name), ''), u.user_name) as user_full_name,
+          qt.level + 1,
+          qt.root_description,
+          qt.root_created
         FROM discrepancy_note dn
         INNER JOIN query_thread qt ON dn.parent_dn_id = qt.discrepancy_note_id
         LEFT JOIN user_account u ON dn.owner_id = u.user_id
       )
-      SELECT * FROM query_thread
-      ORDER BY date_created ASC
+      SELECT
+        discrepancy_note_id,
+        parent_dn_id,
+        description,
+        detailed_notes,
+        date_created,
+        resolution_status_id,
+        owner_id,
+        created_by,
+        user_full_name,
+        level
+      FROM query_thread
+      WHERE
+        level = 0  -- always include root
+        OR description != root_description  -- real response: different text
+        OR date_created > root_created + INTERVAL '30 seconds'  -- or created later (human-typed)
+      ORDER BY date_created ASC, level ASC
     `;
 
     const result = await pool.query(query, [queryId]);
@@ -1591,6 +1623,203 @@ export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?:
 };
 
 // ═══════════════════════════════════════════════════════════════════
+// RESOLUTION APPROVAL WORKFLOW
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Accept a proposed resolution.
+ *
+ * Intended for: Monitor, CRO, PI, or admin reviewing a "Resolution Proposed" query.
+ * - Adds an acceptance note to the thread
+ * - Sets status to 4 (Closed)
+ * - Notifies the proposer and all parties
+ *
+ * Requires query to be in status 3 (Resolution Proposed).
+ */
+export const acceptResolution = async (
+  queryId: number,
+  userId: number,
+  data: { reason?: string; meaning?: string }
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Accepting proposed resolution', { queryId, userId });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const qResult = await client.query(
+      `SELECT resolution_status_id, description, study_id, owner_id, assigned_user_id
+       FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+    if (qResult.rows.length === 0) {
+      return { success: false, message: 'Query not found' };
+    }
+    const q = qResult.rows[0];
+    if (q.resolution_status_id !== 3) {
+      return { success: false, message: 'Query is not in "Resolution Proposed" status. Only proposed resolutions can be accepted.' };
+    }
+
+    const reason = (data.reason || 'Resolution accepted').trim();
+    const meaning = data.meaning || 'I have reviewed the proposed resolution and confirm it is acceptable';
+
+    // Add acceptance note to thread
+    await client.query(`
+      INSERT INTO discrepancy_note (
+        parent_dn_id, description, detailed_notes,
+        discrepancy_note_type_id, resolution_status_id,
+        study_id, entity_type, owner_id, date_created
+      )
+      SELECT $1, $2, $3, 3, 4, study_id, entity_type, $4, NOW()
+      FROM discrepancy_note WHERE discrepancy_note_id = $1
+    `, [queryId, `[ACCEPTED] ${reason}`, meaning, userId]);
+
+    // Close the parent query
+    await client.query(
+      `UPDATE discrepancy_note SET resolution_status_id = 4 WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+
+    // Audit log
+    const userResult = await client.query(
+      `SELECT first_name, last_name, user_name FROM user_account WHERE user_id = $1`, [userId]
+    );
+    const userName = userResult.rows[0]
+      ? `${userResult.rows[0].first_name} ${userResult.rows[0].last_name}`.trim()
+      : 'Unknown';
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change, audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Resolution Accepted',
+        'Status: Resolution Proposed', $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%complete%' LIMIT 1)
+      )
+    `, [userId, queryId, `Status: Closed (Accepted by ${userName})`, reason]);
+
+    await client.query('COMMIT');
+
+    // Notify proposer and owner
+    try {
+      const toNotify = [...new Set([q.owner_id, q.assigned_user_id].filter(Boolean))];
+      for (const uid of toNotify) {
+        if (uid !== userId) {
+          await notificationService.notifyQueryClosed(uid, q.description, queryId, userName, q.study_id);
+        }
+      }
+    } catch { /* non-blocking */ }
+
+    return { success: true, message: 'Resolution accepted — query closed' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Accept resolution error', { error: error.message });
+    return { success: false, message: `Failed to accept resolution: ${error.message}` };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Reject a proposed resolution.
+ *
+ * Intended for: Monitor, CRO, PI, or admin reviewing a "Resolution Proposed" query.
+ * - Adds a rejection note to the thread
+ * - Sets status back to 1 (New) so the assignee must re-investigate
+ * - Notifies the proposer with the rejection reason
+ *
+ * Requires query to be in status 3 (Resolution Proposed).
+ */
+export const rejectResolution = async (
+  queryId: number,
+  userId: number,
+  data: { reason: string }
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Rejecting proposed resolution', { queryId, userId });
+
+  if (!data.reason?.trim()) {
+    return { success: false, message: 'A reason is required when rejecting a resolution' };
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const qResult = await client.query(
+      `SELECT resolution_status_id, description, study_id, owner_id, assigned_user_id
+       FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+    if (qResult.rows.length === 0) {
+      return { success: false, message: 'Query not found' };
+    }
+    const q = qResult.rows[0];
+    if (q.resolution_status_id !== 3) {
+      return { success: false, message: 'Query is not in "Resolution Proposed" status. Only proposed resolutions can be rejected.' };
+    }
+
+    const reason = data.reason.trim();
+
+    // Add rejection note to thread
+    await client.query(`
+      INSERT INTO discrepancy_note (
+        parent_dn_id, description, detailed_notes,
+        discrepancy_note_type_id, resolution_status_id,
+        study_id, entity_type, owner_id, date_created
+      )
+      SELECT $1, $2, $3, 3, 1, study_id, entity_type, $4, NOW()
+      FROM discrepancy_note WHERE discrepancy_note_id = $1
+    `, [queryId, `[REJECTED] ${reason}`, 'Resolution rejected — please re-investigate', userId]);
+
+    // Set status back to New (1)
+    await client.query(
+      `UPDATE discrepancy_note SET resolution_status_id = 1 WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+
+    // Audit log
+    const userResult = await client.query(
+      `SELECT first_name, last_name, user_name FROM user_account WHERE user_id = $1`, [userId]
+    );
+    const userName = userResult.rows[0]
+      ? `${userResult.rows[0].first_name} ${userResult.rows[0].last_name}`.trim()
+      : 'Unknown';
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change, audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Resolution Rejected',
+        'Status: Resolution Proposed', $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1)
+      )
+    `, [userId, queryId, `Status: New (Rejected by ${userName})`, reason]);
+
+    await client.query('COMMIT');
+
+    // Notify the person who proposed the resolution (owner and/or assigned user)
+    try {
+      const toNotify = [...new Set([q.owner_id, q.assigned_user_id].filter(Boolean))];
+      for (const uid of toNotify) {
+        if (uid !== userId) {
+          await notificationService.notifyResolutionRejected(uid, q.description, queryId, userName, reason, q.study_id);
+        }
+      }
+    } catch { /* non-blocking */ }
+
+    return { success: true, message: 'Resolution rejected — query returned to New status for re-investigation' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Reject resolution error', { error: error.message });
+    return { success: false, message: `Failed to reject resolution: ${error.message}` };
+  } finally {
+    client.release();
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // QUERY REOPEN
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1698,6 +1927,8 @@ export default {
   updateQueryStatus,
   closeQueryWithSignature,
   closeQueryWithSignatureVerified,
+  acceptResolution,
+  rejectResolution,
   getQueryAuditTrail,
   getQueryStats,
   getQueryTypes,

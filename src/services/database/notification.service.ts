@@ -223,6 +223,26 @@ export const notifyResolutionProposed = async (
   });
 };
 
+/** Notify the person who proposed resolution that it was rejected. */
+export const notifyResolutionRejected = async (
+  proposerUserId: number,
+  queryDescription: string,
+  queryId: number,
+  rejectedByName: string,
+  reason: string,
+  studyId?: number
+) => {
+  await createNotification({
+    userId: proposerUserId,
+    type: 'query_response',
+    title: `Resolution rejected by ${rejectedByName}`,
+    message: `${queryDescription.substring(0, 150)} — Reason: ${reason.substring(0, 100)}`,
+    entityType: 'discrepancy_note',
+    entityId: queryId,
+    studyId
+  });
+};
+
 /** Notify when a form needs SDV. */
 export const notifyFormSDVRequired = async (
   userIds: number[],
@@ -248,5 +268,6 @@ export default {
   notifyQueryResponse,
   notifyQueryClosed,
   notifyResolutionProposed,
+  notifyResolutionRejected,
   notifyFormSDVRequired
 };
