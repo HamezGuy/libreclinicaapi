@@ -282,9 +282,11 @@ export const createQuery = async (
   logger.info('Creating query', { data, userId });
 
   const client = await pool.connect();
+  let txStarted = false;
 
   try {
     await client.query('BEGIN');
+    txStarted = true;
 
     // Map queryType string to typeId
     const queryTypeMap: Record<string, number> = {
@@ -489,7 +491,11 @@ export const createQuery = async (
       message: 'Query created successfully'
     };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    if (txStarted) {
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in createQuery', { rbErr: rbErr.message })
+      );
+    }
     logger.error('Create query error', { error: error.message, data });
 
     return {
@@ -525,9 +531,11 @@ export const addQueryResponse = async (
   }
 
   const client = await pool.connect();
+  let txStarted = false;
 
   try {
     await client.query('BEGIN');
+    txStarted = true;
 
     // Get parent query details
     const parentResult = await client.query(
@@ -536,6 +544,7 @@ export const addQueryResponse = async (
     );
 
     if (parentResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       return { success: false, message: 'Parent query not found' };
     }
 
@@ -657,7 +666,11 @@ export const addQueryResponse = async (
 
     return { success: true, responseId, message: 'Response added successfully' };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    if (txStarted) {
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in addQueryResponse', { rbErr: rbErr.message })
+      );
+    }
     logger.error('Add query response error', { error: error.message });
     return { success: false, message: `Failed to add response: ${error.message}` };
   } finally {
@@ -683,9 +696,11 @@ export const updateQueryStatus = async (
   logger.info('Updating query status', { queryId, statusId, userId, options });
 
   const client = await pool.connect();
+  let txStarted = false;
 
   try {
     await client.query('BEGIN');
+    txStarted = true;
 
     // Get current status for audit
     const currentResult = await client.query(
@@ -755,7 +770,11 @@ export const updateQueryStatus = async (
       message: `Query ${actionName.toLowerCase()} successfully`
     };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    if (txStarted) {
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in updateQueryStatus', { rbErr: rbErr.message })
+      );
+    }
     logger.error('Update query status error', { error: error.message });
 
     return {
@@ -817,7 +836,9 @@ export const closeQueryWithSignature = async (
       meaning: data.meaning
     }, client, user);
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch((rbErr: any) =>
+      logger.warn('ROLLBACK failed in closeQueryWithSignature', { rbErr: rbErr.message })
+    );
     logger.error('Close query with signature error', { error: error.message });
 
     return {
@@ -935,7 +956,9 @@ export const closeQueryWithSignatureVerified = async (
     };
   } catch (error: any) {
     if (!existingClient) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in closeQueryWithSignatureVerified', { rbErr: rbErr.message })
+      );
     }
     logger.error('Close query with signature error', { error: error.message });
 
@@ -1177,7 +1200,9 @@ export const reassignQuery = async (
 
     return { success: true, message: 'Query reassigned successfully' };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch((rbErr: any) =>
+      logger.warn('ROLLBACK failed in reassignQuery', { rbErr: rbErr.message })
+    );
     logger.error('Reassign query error', { error: error.message });
     return { success: false, message: error.message };
   } finally {
@@ -1651,8 +1676,10 @@ export const acceptResolution = async (
   logger.info('Accepting proposed resolution', { queryId, userId });
 
   const client = await pool.connect();
+  let txStarted = false;
   try {
     await client.query('BEGIN');
+    txStarted = true;
 
     const qResult = await client.query(
       `SELECT resolution_status_id, description, study_id, owner_id, assigned_user_id
@@ -1660,10 +1687,12 @@ export const acceptResolution = async (
       [queryId]
     );
     if (qResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       return { success: false, message: 'Query not found' };
     }
     const q = qResult.rows[0];
     if (q.resolution_status_id !== 3) {
+      await client.query('ROLLBACK');
       return { success: false, message: 'Query is not in "Resolution Proposed" status. Only proposed resolutions can be accepted.' };
     }
 
@@ -1720,7 +1749,11 @@ export const acceptResolution = async (
 
     return { success: true, message: 'Resolution accepted — query closed' };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    if (txStarted) {
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in acceptResolution', { rbErr: rbErr.message })
+      );
+    }
     logger.error('Accept resolution error', { error: error.message });
     return { success: false, message: `Failed to accept resolution: ${error.message}` };
   } finally {
@@ -1750,8 +1783,10 @@ export const rejectResolution = async (
   }
 
   const client = await pool.connect();
+  let txStarted = false;
   try {
     await client.query('BEGIN');
+    txStarted = true;
 
     const qResult = await client.query(
       `SELECT resolution_status_id, description, study_id, owner_id, assigned_user_id
@@ -1759,10 +1794,12 @@ export const rejectResolution = async (
       [queryId]
     );
     if (qResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       return { success: false, message: 'Query not found' };
     }
     const q = qResult.rows[0];
     if (q.resolution_status_id !== 3) {
+      await client.query('ROLLBACK');
       return { success: false, message: 'Query is not in "Resolution Proposed" status. Only proposed resolutions can be rejected.' };
     }
 
@@ -1818,7 +1855,11 @@ export const rejectResolution = async (
 
     return { success: true, message: 'Resolution rejected — query returned to New status for re-investigation' };
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    if (txStarted) {
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in rejectResolution', { rbErr: rbErr.message })
+      );
+    }
     logger.error('Reject resolution error', { error: error.message });
     return { success: false, message: `Failed to reject resolution: ${error.message}` };
   } finally {

@@ -3,6 +3,7 @@ import { WorkflowController } from '../controllers/workflow.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import * as workflowService from '../services/database/workflow.service';
+import { pool } from '../config/database';
 
 const router = Router();
 const controller = new WorkflowController();
@@ -90,7 +91,6 @@ router.get('/crf-lifecycle/:eventCrfId', async (req: Request, res: Response) => 
 router.get('/crf-lifecycle-summary/:studyId', async (req: Request, res: Response) => {
   try {
     const studyId = parseInt(req.params.studyId);
-    const { pool } = require('../config/database');
     
     // Single batched query: get all event_crf records with patient + form info
     const ecResult = await pool.query(`

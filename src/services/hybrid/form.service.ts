@@ -481,7 +481,9 @@ const saveFormDataDirect = async (
                 audit_date, audit_table, user_id, entity_id,
                 old_value, new_value, audit_log_event_type_id,
                 event_crf_id, reason_for_change
-              ) VALUES (NOW(), 'item_data', $1, $2, $3, '', 1, $4, 'Value cleared')
+              ) VALUES (NOW(), 'item_data', $1, $2, $3, '',
+                (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+                $4, 'Value cleared')
             `, [userId, existingResult.rows[0].item_data_id, oldValue, eventCrfId]);
             
             savedCount++;
@@ -514,7 +516,9 @@ const saveFormDataDirect = async (
               audit_date, audit_table, user_id, entity_id,
               old_value, new_value, audit_log_event_type_id,
               event_crf_id, reason_for_change
-            ) VALUES (NOW(), 'item_data', $1, $2, $3, $4, 1, $5, $6)
+            ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
+              (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+              $5, $6)
           `, [userId, existingResult.rows[0].item_data_id, oldValue, stringValue, eventCrfId, request.reasonForChange || null]);
         }
       } else {
@@ -531,7 +535,9 @@ const saveFormDataDirect = async (
           INSERT INTO audit_log_event (
             audit_date, audit_table, user_id, entity_id,
             new_value, audit_log_event_type_id, event_crf_id
-          ) VALUES (NOW(), 'item_data', $1, $2, $3, 4, $4)
+          ) VALUES (NOW(), 'item_data', $1, $2, $3,
+            (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%creat%' LIMIT 1),
+            $4)
         `, [userId, insertResult.rows[0].item_data_id, stringValue, eventCrfId]);
       }
 
