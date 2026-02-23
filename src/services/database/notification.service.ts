@@ -185,6 +185,44 @@ export const notifyQueryResponse = async (
   });
 };
 
+/** Notify the query owner/assignees when a query is closed. */
+export const notifyQueryClosed = async (
+  recipientUserId: number,
+  queryDescription: string,
+  queryId: number,
+  closedByName: string,
+  studyId?: number
+) => {
+  await createNotification({
+    userId: recipientUserId,
+    type: 'query_closed',
+    title: `Query closed by ${closedByName}`,
+    message: queryDescription.substring(0, 200),
+    entityType: 'discrepancy_note',
+    entityId: queryId,
+    studyId
+  });
+};
+
+/** Notify the query owner when a resolution is proposed. */
+export const notifyResolutionProposed = async (
+  ownerUserId: number,
+  queryDescription: string,
+  queryId: number,
+  proposerName: string,
+  studyId?: number
+) => {
+  await createNotification({
+    userId: ownerUserId,
+    type: 'query_response',
+    title: `Resolution proposed by ${proposerName}`,
+    message: queryDescription.substring(0, 200),
+    entityType: 'discrepancy_note',
+    entityId: queryId,
+    studyId
+  });
+};
+
 /** Notify when a form needs SDV. */
 export const notifyFormSDVRequired = async (
   userIds: number[],
@@ -208,5 +246,7 @@ export default {
   markAllAsRead,
   notifyQueryAssigned,
   notifyQueryResponse,
+  notifyQueryClosed,
+  notifyResolutionProposed,
   notifyFormSDVRequired
 };

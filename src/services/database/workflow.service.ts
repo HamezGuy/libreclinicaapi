@@ -149,12 +149,14 @@ export const triggerSDVCompletedWorkflow = async (
 ): Promise<void> => {
   try {
     logger.info('SDV workflow completed', { eventCrfId, userId });
-    // Log the SDV completion event
     await pool.query(`
       INSERT INTO audit_log_event (
         audit_log_event_type_id, audit_date, audit_table,
         entity_id, entity_name, user_id, new_value
-      ) VALUES (1, NOW(), 'sdv_workflow', $1, 'sdv_completed', $2, $3)
+      ) VALUES (
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%complete%' LIMIT 1),
+        NOW(), 'sdv_workflow', $1, 'sdv_completed', $2, $3
+      )
     `, [eventCrfId, userId, JSON.stringify({ eventCrfId })]);
   } catch (error: any) {
     logger.error('Failed to trigger SDV workflow', { error: error.message });
@@ -163,10 +165,13 @@ export const triggerSDVCompletedWorkflow = async (
 
 /**
  * Trigger workflow for form submission
- * 
+ *
  * Called by form.service.ts after a form is successfully saved.
- * Logs the form submission event to the audit trail for workflow tracking.
- * 
+ * 1. Logs the form submission event to the audit trail.
+ * 2. Checks the form's workflow config (SDV / DDE / Signature requirements).
+ * 3. If any step is required, creates an acc_workflow_tasks task and dispatches
+ *    in-app notifications to the configured recipients.
+ *
  * @param eventCrfId - The event_crf_id (form instance ID)
  * @param studyId - The study ID
  * @param subjectId - The study_subject_id
@@ -182,13 +187,107 @@ export const triggerFormSubmittedWorkflow = async (
 ): Promise<void> => {
   try {
     logger.info('Form submission workflow triggered', { eventCrfId, studyId, subjectId, formName, userId });
-    // Log the form submission event to audit trail
+
+    // 1. Audit log entry for the submission
     await pool.query(`
       INSERT INTO audit_log_event (
         audit_log_event_type_id, audit_date, audit_table,
         entity_id, entity_name, user_id, new_value
-      ) VALUES (1, NOW(), 'form_workflow', $1, 'form_submitted', $2, $3)
+      ) VALUES (
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%complete%' LIMIT 1),
+        NOW(), 'form_workflow', $1, 'form_submitted', $2, $3
+      )
     `, [eventCrfId, userId, JSON.stringify({ eventCrfId, studyId, subjectId, formName })]);
+
+    // 2. Load workflow config for this form instance
+    const crfResult = await pool.query(`
+      SELECT cv.crf_id FROM event_crf ec
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      WHERE ec.event_crf_id = $1
+    `, [eventCrfId]);
+
+    if (crfResult.rows.length === 0) return;
+    const crfId = crfResult.rows[0].crf_id;
+
+    const wfConfig = await getFormWorkflowConfig(crfId, studyId);
+    const needsAction = wfConfig.requiresSDV || wfConfig.requiresDDE || wfConfig.requiresSignature;
+
+    if (!needsAction) return; // No workflow steps required — nothing to dispatch
+
+    // 3. Resolve who should receive the task
+    const { resolveAllQueryAssignees } = await import('./workflow-config.provider');
+    const assignees = await resolveAllQueryAssignees(crfId, studyId, eventCrfId);
+    const allAssigneeIds = [
+      ...(assignees.primaryUserId ? [assignees.primaryUserId] : []),
+      ...assignees.additionalUserIds
+    ];
+
+    if (allAssigneeIds.length === 0) {
+      logger.warn('triggerFormSubmittedWorkflow: no assignees resolved, skipping task creation', { eventCrfId, studyId });
+      return;
+    }
+
+    // 4. Determine task type and description
+    const taskType = wfConfig.requiresDDE ? 'dde'
+      : wfConfig.requiresSDV ? 'sdv'
+      : 'signature';
+
+    const taskTitle = wfConfig.requiresDDE
+      ? `DDE Required: ${formName}`
+      : wfConfig.requiresSDV
+      ? `SDV Required: ${formName}`
+      : `Signature Required: ${formName}`;
+
+    // 5. Check if acc_workflow_tasks exists before inserting
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables WHERE table_name = 'acc_workflow_tasks'
+      ) as exists
+    `);
+
+    if (tableCheck.rows[0].exists) {
+      await pool.query(`
+        INSERT INTO acc_workflow_tasks (
+          task_type, title, description, status, priority,
+          entity_type, entity_id, event_crf_id, study_id,
+          assigned_to_user_ids, created_by, metadata
+        ) VALUES ($1, $2, $3, 'pending', 'medium', 'event_crf', $4, $5, $6, $7, $8, $9)
+      `, [
+        taskType,
+        taskTitle,
+        `Form "${formName}" (eventCrfId=${eventCrfId}) submitted and requires ${taskType.toUpperCase()}.`,
+        eventCrfId,
+        eventCrfId,
+        studyId,
+        allAssigneeIds,
+        userId,
+        JSON.stringify({
+          crfId,
+          subjectId,
+          requiresSDV: wfConfig.requiresSDV,
+          requiresDDE: wfConfig.requiresDDE,
+          requiresSignature: wfConfig.requiresSignature,
+          triggeredBy: userId
+        })
+      ]);
+      logger.info('Workflow task created for form submission', { eventCrfId, taskType, assignees: allAssigneeIds });
+    }
+
+    // 6. Fire-and-forget: notify all assignees
+    const { notifyFormSDVRequired, notifyUsers } = await import('./notification.service');
+    if (wfConfig.requiresSDV) {
+      await notifyFormSDVRequired(allAssigneeIds, formName, eventCrfId, studyId, `subject-${subjectId}`);
+    } else {
+      const notifType = wfConfig.requiresDDE ? 'form_sdv_required' : 'form_signature_required';
+      const notifTitle = wfConfig.requiresDDE ? `DDE required: ${formName}` : `Signature required: ${formName}`;
+      await notifyUsers(
+        allAssigneeIds,
+        notifType,
+        notifTitle,
+        `Form "${formName}" for subject ${subjectId} requires your action.`,
+        { entityType: 'event_crf', entityId: eventCrfId, studyId }
+      );
+    }
   } catch (error: any) {
     logger.error('Failed to trigger form workflow', { error: error.message });
   }
@@ -206,12 +305,14 @@ export const triggerSubjectEnrolledWorkflow = async (
 ): Promise<void> => {
   try {
     logger.info('Subject enrollment workflow triggered', { studySubjectId, studyId, subjectLabel, userId });
-    // Log the enrollment event
     await pool.query(`
       INSERT INTO audit_log_event (
         audit_log_event_type_id, audit_date, audit_table,
         entity_id, entity_name, user_id, new_value
-      ) VALUES (1, NOW(), 'enrollment_workflow', $1, 'subject_enrolled', $2, $3)
+      ) VALUES (
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%creat%' LIMIT 1),
+        NOW(), 'enrollment_workflow', $1, 'subject_enrolled', $2, $3
+      )
     `, [studySubjectId, userId, JSON.stringify({ studySubjectId, studyId, subjectLabel })]);
   } catch (error: any) {
     logger.error('Failed to trigger enrollment workflow', { error: error.message });

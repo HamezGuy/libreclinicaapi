@@ -317,13 +317,16 @@ export const createQuery = async (
     }
 
     // Resolve query assignment via shared workflow-config.provider.
-    // Priority: explicit assignedUserId → workflow config → null (unassigned)
-    let resolvedAssignedUserId = data.assignedUserId || null;
-    
-    if (!resolvedAssignedUserId && (data.entityType === 'eventCrf' || data.entityType === 'itemData')) {
+    // Always resolve workflow-configured recipients first.
+    // If a manual assignedUserId is provided, it is ADDED as an additional recipient
+    // alongside the workflow-resolved ones — it does NOT replace them.
+    let resolvedAssignedUserId: number | null = null;
+    let workflowAdditionalIds: number[] = [];
+
+    if (data.entityType === 'eventCrf' || data.entityType === 'itemData') {
       try {
         let eventCrfIdForLookup: number | undefined;
-        
+
         if (data.entityType === 'eventCrf') {
           eventCrfIdForLookup = data.entityId;
         } else if (data.entityType === 'itemData') {
@@ -339,12 +342,26 @@ export const createQuery = async (
         );
         if (assignees.primaryUserId) {
           resolvedAssignedUserId = assignees.primaryUserId;
-          (data as any)._additionalAssigneeIds = assignees.additionalUserIds;
+          workflowAdditionalIds = assignees.additionalUserIds;
         }
       } catch (e: any) {
         logger.warn('Could not resolve workflow assignee for query:', e.message);
       }
     }
+
+    // If no workflow primary found, fall back to manual selection as primary
+    if (!resolvedAssignedUserId && data.assignedUserId) {
+      resolvedAssignedUserId = data.assignedUserId;
+    } else if (data.assignedUserId && data.assignedUserId !== resolvedAssignedUserId) {
+      // Manual selection is appended as additional recipient (deduped below)
+      workflowAdditionalIds = [...workflowAdditionalIds, data.assignedUserId];
+    }
+
+    // Deduplicate additional IDs and remove the primary so we don't double-notify
+    const uniqueAdditionalIds = [...new Set(workflowAdditionalIds)].filter(
+      id => id !== resolvedAssignedUserId
+    );
+    (data as any)._additionalAssigneeIds = uniqueAdditionalIds;
 
     // Insert discrepancy note (main record) with resolved assignment
     const insertNoteQuery = `
@@ -395,7 +412,7 @@ export const createQuery = async (
     }
 
     // Create child discrepancy notes for additional assignees (multi-user routing)
-    const additionalAssigneeIds: number[] = (data as any)._additionalAssigneeIds || [];
+    const additionalAssigneeIds: number[] = uniqueAdditionalIds;
     for (const additionalUserId of additionalAssigneeIds) {
       try {
         const childResult = await client.query(`
@@ -487,18 +504,25 @@ export const createQuery = async (
 /**
  * Add response to query
  * Creates a child discrepancy_note with parent_dn_id pointing to the parent query.
- * Optionally updates the parent status (e.g., to "Updated" when responding).
+ * Status update (newStatusId) is performed atomically in the same transaction so
+ * a second PUT /status call from the frontend is never required.
  */
 export const addQueryResponse = async (
   parentQueryId: number,
   data: {
     description: string;
     detailedNotes?: string;
-    newStatusId?: number;  // Optional: update parent status (2=Updated, 3=Resolution Proposed)
+    newStatusId?: number;  // Optional: 2=Updated, 3=Resolution Proposed, 4=Closed
   },
   userId: number
 ): Promise<{ success: boolean; responseId?: number; message?: string }> => {
   logger.info('Adding query response', { parentQueryId, userId });
+
+  // Guarantee a non-empty description — an empty description violates NOT NULL
+  const safeDescription = (data.description || '').trim();
+  if (!safeDescription) {
+    return { success: false, message: 'Response text is required' };
+  }
 
   const client = await pool.connect();
 
@@ -506,20 +530,21 @@ export const addQueryResponse = async (
     await client.query('BEGIN');
 
     // Get parent query details
-    const parentQuery = `
-      SELECT * FROM discrepancy_note WHERE discrepancy_note_id = $1
-    `;
-    const parentResult = await client.query(parentQuery, [parentQueryId]);
+    const parentResult = await client.query(
+      `SELECT * FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+      [parentQueryId]
+    );
 
     if (parentResult.rows.length === 0) {
-      return {
-        success: false,
-        message: 'Parent query not found'
-      };
+      return { success: false, message: 'Parent query not found' };
     }
 
     const parent = parentResult.rows[0];
     const oldStatusId = parent.resolution_status_id;
+
+    // Determine the new parent status atomically.
+    // Provided newStatusId takes precedence; default to Updated (2).
+    const newStatusId = data.newStatusId || 2;
 
     // Insert response as child discrepancy_note
     const insertQuery = `
@@ -535,9 +560,9 @@ export const addQueryResponse = async (
 
     const insertResult = await client.query(insertQuery, [
       parentQueryId,
-      data.description,
+      safeDescription,
       data.detailedNotes || '',
-      data.newStatusId || 2, // Default to Updated status for responses
+      newStatusId,
       parent.study_id,
       parent.entity_type,
       userId
@@ -545,8 +570,7 @@ export const addQueryResponse = async (
 
     const responseId = insertResult.rows[0].discrepancy_note_id;
 
-    // Update parent status if specified, or set to Updated (2) by default
-    const newStatusId = data.newStatusId || 2;
+    // Update parent status atomically within the same transaction
     if (newStatusId !== oldStatusId) {
       await client.query(`
         UPDATE discrepancy_note
@@ -556,6 +580,9 @@ export const addQueryResponse = async (
     }
 
     // Log audit event for the response
+    const statusNames: Record<number, string> = {
+      1: 'New', 2: 'Updated', 3: 'Resolution Proposed', 4: 'Closed', 5: 'Not Applicable'
+    };
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
@@ -564,59 +591,75 @@ export const addQueryResponse = async (
       ) VALUES (
         NOW(), 'discrepancy_note', $1, $2, 'Query Response',
         $3, $4, $5,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%updated%' LIMIT 1)
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1)
       )
     `, [
-      userId, 
-      parentQueryId, 
-      `Status: ${oldStatusId}`,
-      `Status: ${newStatusId}, Response: ${data.description.substring(0, 200)}`,
+      userId,
+      parentQueryId,
+      `Status: ${statusNames[oldStatusId] || oldStatusId}`,
+      `Status: ${statusNames[newStatusId] || newStatusId}, Response: ${safeDescription.substring(0, 200)}`,
       'Query response added'
     ]);
 
     await client.query('COMMIT');
 
-    logger.info('Query response added successfully', { responseId, parentQueryId });
+    logger.info('Query response added successfully', { responseId, parentQueryId, newStatusId });
 
-    // Notify the query owner that a response was added
+    // Resolve responder's display name for notifications
+    let responderName = 'A user';
+    try {
+      const responderResult = await pool.query(
+        `SELECT first_name, last_name FROM user_account WHERE user_id = $1`, [userId]
+      );
+      if (responderResult.rows[0]) {
+        responderName = `${responderResult.rows[0].first_name} ${responderResult.rows[0].last_name}`.trim();
+      }
+    } catch { /* ignore */ }
+
+    // Fire-and-forget: notify relevant parties based on the new status
     try {
       const ownerUserId = parent.owner_id;
-      if (ownerUserId && ownerUserId !== userId) {
-        // Look up responder name
-        const responderResult = await pool.query(
-          `SELECT first_name, last_name FROM user_account WHERE user_id = $1`, [userId]
-        );
-        const responderName = responderResult.rows[0]
-          ? `${responderResult.rows[0].first_name} ${responderResult.rows[0].last_name}`.trim()
-          : 'A user';
-        await notificationService.notifyQueryResponse(
-          ownerUserId, data.description || 'Response added', parentQueryId, responderName
-        );
-      }
-      // Also notify assigned user if different
       const assignedUserId = parent.assigned_user_id;
-      if (assignedUserId && assignedUserId !== userId && assignedUserId !== ownerUserId) {
-        await notificationService.notifyQueryResponse(
-          assignedUserId, data.description || 'Response added', parentQueryId, 'A user'
-        );
+
+      if (newStatusId === 4) {
+        // Closed — notify owner and assigned user (skip self)
+        const toNotify = [...new Set([ownerUserId, assignedUserId].filter(Boolean))];
+        for (const uid of toNotify) {
+          if (uid !== userId) {
+            await notificationService.notifyQueryClosed(
+              uid, safeDescription, parentQueryId, responderName, parent.study_id
+            );
+          }
+        }
+      } else if (newStatusId === 3) {
+        // Resolution proposed — notify owner
+        if (ownerUserId && ownerUserId !== userId) {
+          await notificationService.notifyResolutionProposed(
+            ownerUserId, safeDescription, parentQueryId, responderName, parent.study_id
+          );
+        }
+      } else {
+        // Updated — notify owner and assigned user of the response
+        if (ownerUserId && ownerUserId !== userId) {
+          await notificationService.notifyQueryResponse(
+            ownerUserId, safeDescription, parentQueryId, responderName
+          );
+        }
+        if (assignedUserId && assignedUserId !== userId && assignedUserId !== ownerUserId) {
+          await notificationService.notifyQueryResponse(
+            assignedUserId, safeDescription, parentQueryId, responderName
+          );
+        }
       }
     } catch (notifErr: any) {
       logger.warn('Failed to send query response notification', { error: notifErr.message });
     }
 
-    return {
-      success: true,
-      responseId,
-      message: 'Response added successfully'
-    };
+    return { success: true, responseId, message: 'Response added successfully' };
   } catch (error: any) {
     await client.query('ROLLBACK');
     logger.error('Add query response error', { error: error.message });
-
-    return {
-      success: false,
-      message: `Failed to add response: ${error.message}`
-    };
+    return { success: false, message: `Failed to add response: ${error.message}` };
   } finally {
     client.release();
   }
