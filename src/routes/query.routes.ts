@@ -44,8 +44,8 @@ router.get('/form/:eventCrfId/field-counts', controller.getFormFieldQueryCounts)
 
 // Single query operations (no signature required for reading)
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
-router.get('/:id/thread', controller.getThread);
-router.get('/:id/audit-trail', controller.getAuditTrail);
+router.get('/:id/thread', validate({ params: commonSchemas.idParam }), controller.getThread);
+router.get('/:id/audit-trail', validate({ params: commonSchemas.idParam }), controller.getAuditTrail);
 
 // Create and update operations (signature required per §11.50)
 router.post('/', 
@@ -66,7 +66,8 @@ router.put('/:id/status',
   controller.updateStatus
 );
 router.put('/:id/reassign', 
-  requireRole('data_manager', 'admin'), 
+  requireRole('data_manager', 'admin'),
+  validate({ params: commonSchemas.idParam }),
   requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.reassign
 );
@@ -81,6 +82,7 @@ router.post('/:id/close-with-signature',
 // Reopen a closed query
 router.put('/:id/reopen',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: commonSchemas.idParam }),
   requireSignatureFor('I authorize reopening this query'),
   controller.reopenQuery
 );

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { db } from '../config/database';
+import { pool } from '../config/database';
 import { logger } from '../config/logger';
 import { AuthRequest } from './auth.middleware';
 
@@ -86,51 +86,54 @@ export const requireRole = (...allowedRoles: string[]) => {
     }
     
     try {
-      // Check if user is a system admin by user_type
-      const adminCheckQuery = `
-        SELECT ut.user_type
-        FROM user_account ua
-        JOIN user_type ut ON ua.user_type_id = ut.user_type_id
-        WHERE ua.user_id = $1
-      `;
-      const adminResult = await db.query(adminCheckQuery, [authReq.user.userId]);
-      const userTypeFromDb = adminResult.rows[0]?.user_type?.toLowerCase() || '';
-      
-      // Get user roles from study_user_role (ALL roles across all studies)
-      const roleResult = await db.query(`
+      // Use JWT claims first — avoids 2 DB queries per request for common cases.
+      // The token carries userType and role set at login time.
+      const userTypeFromToken = (authReq.user.userType || '').toLowerCase();
+      const roleFromToken = (authReq.user.role || '').toLowerCase();
+
+      const isSystemAdmin =
+        userTypeFromToken.includes('admin') ||
+        userTypeFromToken === 'sysadmin';
+
+      // Fast path: admin from token can do anything without a DB round-trip
+      if (isSystemAdmin || roleFromToken === 'admin') {
+        next();
+        return;
+      }
+
+      // Fast path: check token role against allowed roles
+      const tokenRoleMatches = allowedRoles.some(allowed => roleMatches(roleFromToken, allowed));
+      if (tokenRoleMatches) {
+        next();
+        return;
+      }
+
+      // Slow path: fall back to DB for users whose study-level roles may differ
+      // from their token role (e.g. coordinators with monitor access on specific studies).
+      const roleResult = await pool.query(`
         SELECT DISTINCT role_name
         FROM study_user_role
         WHERE user_name = $1
           AND status_id = 1
       `, [authReq.user.userName]);
-      
-      const userRoles = roleResult.rows.map(r => r.role_name);
-      
-      // System admin types can do anything
-      const isSystemAdmin = 
-        userTypeFromDb.includes('admin') ||  // business_admin, tech-admin
-        userTypeFromDb === 'sysadmin' ||
-        authReq.user?.userType?.toLowerCase()?.includes('admin');
-      
-      // Check if user has at least one of the allowed roles
-      // Uses case-insensitive matching with role aliases
-      const hasPermission = 
-        isSystemAdmin ||
-        userRoles.some(r => r.toLowerCase() === 'admin') ||
-        allowedRoles.some(allowed => 
-          userRoles.some(userRole => roleMatches(userRole, allowed))
+
+      const userRoles = roleResult.rows.map((r: any) => r.role_name);
+
+      const hasPermission =
+        userRoles.some((r: string) => r.toLowerCase() === 'admin') ||
+        allowedRoles.some(allowed =>
+          userRoles.some((userRole: string) => roleMatches(userRole, allowed))
         );
-      
+
       if (!hasPermission) {
         logger.warn('Insufficient permissions', {
           userId: authReq.user.userId,
           userName: authReq.user.userName,
-          userType: userTypeFromDb,
+          roleFromToken,
           userRoles,
           requiredRoles: allowedRoles,
           path: req.path
         });
-        
         res.status(403).json({
           success: false,
           error: {
@@ -140,21 +143,13 @@ export const requireRole = (...allowedRoles: string[]) => {
         });
         return;
       }
-      
-      logger.debug('Authorization check passed', {
-        userId: authReq.user.userId,
-        userType: userTypeFromDb,
-        userRoles,
-        requiredRoles: allowedRoles
-      });
-      
+
       next();
     } catch (error) {
       logger.error('Authorization check error', {
         error: (error as Error).message,
         userId: authReq.user.userId
       });
-      
       res.status(500).json({
         success: false,
         error: {
@@ -199,7 +194,7 @@ export const requireStudyAccess = (studyIdParam: string = 'studyId') => {
       }
       
       // Check if user has access to this study
-      const result = await db.query(`
+      const result = await pool.query(`
         SELECT COUNT(*) as count
         FROM study_user_role
         WHERE user_name = $1

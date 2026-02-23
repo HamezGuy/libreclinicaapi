@@ -158,49 +158,8 @@ export const saveFormData = async (
     saveResult = await saveFormDataDirect(fullRequest, userId, username);
   }
 
-  // ===== POST-SAVE VALIDATION: Create queries for soft warnings ONLY =====
-  // Errors were already caught in the pre-save pass. Only warnings (soft edits)
-  // should generate queries post-save. Using severityFilter: 'warning' prevents
-  // duplicate error queries if a race condition let an error slip through.
-  if (saveResult.success && request.crfId && request.formData) {
-    const savedEventCrfId = (saveResult as any).eventCrfId
-      ?? (saveResult as any).data?.eventCrfId;
-
-    if (savedEventCrfId) {
-      try {
-        const postSaveValidation = await validationRulesService.validateFormData(
-          request.crfId,
-          request.formData,
-          {
-            createQueries: true,
-            severityFilter: 'warning',
-            studyId: request.studyId,
-            subjectId: request.subjectId,
-            eventCrfId: savedEventCrfId,
-            userId: userId
-          }
-        );
-        const queriesCreated = postSaveValidation.queriesCreated || 0;
-        if (queriesCreated > 0) {
-          logger.info('Post-save validation created queries for warnings', {
-            eventCrfId: savedEventCrfId,
-            crfId: request.crfId,
-            queriesCreated,
-            warningCount: postSaveValidation.warnings?.length || 0
-          });
-          // Attach queriesCreated to the save result so it's visible in the API response
-          (saveResult as any).queriesCreated = ((saveResult as any).queriesCreated || 0) + queriesCreated;
-        }
-      } catch (postValidationError: any) {
-        logger.warn('Post-save validation query creation failed (non-blocking)', {
-          error: postValidationError.message,
-          eventCrfId: savedEventCrfId,
-          crfId: request.crfId
-        });
-      }
-    }
-  }
-
+  // Post-save validation is handled inside saveFormDataDirect.
+  // Do NOT run it again here — that would create duplicate queries.
   return saveResult;
 };
 
@@ -474,39 +433,31 @@ const saveFormDataDirect = async (
     let savedCount = 0;
     let skippedCount = 0;
     const formData = request.formData || {};
-    
-    logger.info('Starting field save loop', { 
-      fieldCount: Object.keys(formData).length,
-      itemMapSize: itemMap.size,
-      sampleMapKeys: Array.from(itemMap.keys()).slice(0, 10)
-    });
+
+    // Pre-fetch all existing item_data rows for this event_crf in a single query
+    // to avoid one SELECT per field inside the loop (N+1 problem).
+    const existingItemDataResult = await client.query(`
+      SELECT item_id, item_data_id, value FROM item_data
+      WHERE event_crf_id = $1 AND deleted = false
+    `, [eventCrfId]);
+    const existingByItemId = new Map<number, { item_data_id: number; value: string }>();
+    for (const row of existingItemDataResult.rows) {
+      existingByItemId.set(row.item_id, { item_data_id: row.item_data_id, value: row.value });
+    }
 
     for (const [fieldName, value] of Object.entries(formData)) {
       // Find the item_id for this field - try multiple matching strategies
-      let itemId = itemMap.get(fieldName.toLowerCase());
-      
-      // Fallback: try matching by label (item.name stores the display label)
-      if (!itemId) {
-        // Try exact case
-        itemId = itemMap.get(fieldName);
-      }
-      
+      let itemId = itemMap.get(fieldName.toLowerCase()) ?? itemMap.get(fieldName);
+
       if (!itemId) {
         skippedCount++;
-        logger.warn('Field not found in CRF item map, skipping', { 
-          fieldName, 
-          fieldNameLower: fieldName.toLowerCase(),
-          availableKeys: Array.from(itemMap.keys()).filter(k => k.includes(fieldName.substring(0, 5).toLowerCase())).slice(0, 5)
-        });
+        logger.warn('Field not found in CRF item map, skipping', { fieldName });
         continue;
       }
 
-      // Check if item_data already exists (exclude soft-deleted records)
-      const existingResult = await client.query(`
-        SELECT item_data_id, value FROM item_data
-        WHERE event_crf_id = $1 AND item_id = $2 AND deleted = false
-        LIMIT 1
-      `, [eventCrfId, itemId]);
+      // Use the pre-fetched map instead of a per-field query
+      const existingRow = existingByItemId.get(itemId);
+      const existingResult = { rows: existingRow ? [existingRow] : [] };
 
       // Handle field clearing: when value is null/undefined/empty, 
       // clear existing data instead of skipping
@@ -589,20 +540,20 @@ const saveFormDataDirect = async (
 
     // 6. Update event_crf completion status based on how many fields are filled
     //    2 = initial_data_entry, 4 = complete
-    const totalItemsResult = await client.query(`
-      SELECT COUNT(DISTINCT i.item_id) as total
-      FROM item i
-      INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
-      WHERE igm.crf_version_id = $1
-    `, [resolvedVersionId]);
-    const filledItemsResult = await client.query(`
-      SELECT COUNT(*) as filled
-      FROM item_data
-      WHERE event_crf_id = $1 AND deleted = false AND value IS NOT NULL AND value != ''
-    `, [eventCrfId]);
+    // Combined into one query to avoid two separate round-trips.
+    const completionCountResult = await client.query(`
+      SELECT
+        (SELECT COUNT(DISTINCT i.item_id)
+         FROM item i
+         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+         WHERE igm.crf_version_id = $1) AS total,
+        (SELECT COUNT(*)
+         FROM item_data
+         WHERE event_crf_id = $2 AND deleted = false AND value IS NOT NULL AND value != '') AS filled
+    `, [resolvedVersionId, eventCrfId]);
 
-    const totalItems = parseInt(totalItemsResult.rows[0]?.total) || 0;
-    const filledItems = parseInt(filledItemsResult.rows[0]?.filled) || 0;
+    const totalItems = parseInt(completionCountResult.rows[0]?.total) || 0;
+    const filledItems = parseInt(completionCountResult.rows[0]?.filled) || 0;
     const isComplete = totalItems > 0 && filledItems >= totalItems;
     const completionStatusId = isComplete ? 4 : 2;
 
@@ -643,7 +594,7 @@ const saveFormDataDirect = async (
             date_updated = NOW(),
             updated_by = $4
         WHERE event_crf_id = $5
-      `, [JSON.stringify(formData), savedCount, savedCount >= (parseInt(totalItemsResult.rows[0]?.total) || 999), userId, eventCrfId]);
+      `, [JSON.stringify(formData), savedCount, savedCount >= (totalItems || 999), userId, eventCrfId]);
       logger.debug('Updated patient_event_form.form_data', { eventCrfId, fieldCount: Object.keys(formData).length });
     } catch (snapUpdateError: any) {
       // Non-blocking - item_data is the primary store
@@ -694,7 +645,10 @@ const saveFormDataDirect = async (
             INSERT INTO audit_log_event (
               audit_log_event_type_id, audit_date, audit_table,
               entity_id, entity_name, user_id, new_value
-            ) VALUES (1, NOW(), 'form_workflow', $1, 'form_edited', $2, $3)
+            ) VALUES (
+              (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+              NOW(), 'form_workflow', $1, 'form_edited', $2, $3
+            )
           `, [eventCrfId, userId, JSON.stringify({ eventCrfId, studyId: request.studyId, subjectId, formName })]);
           logger.info('Logged form_edited event (duplicate form_submitted suppressed)', { eventCrfId });
         }
@@ -914,6 +868,9 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
     `;
     const versionResult = await pool.query(versionQuery, [crfId]);
     const versionId = versionResult.rows[0]?.crf_version_id;
+    if (!versionId) {
+      throw new Error(`No CRF version found for crf_id=${crfId}. Cannot load form metadata.`);
+    }
 
     // Get sections
     const sectionsQuery = `

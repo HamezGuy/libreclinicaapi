@@ -426,21 +426,28 @@ export const getAllWorkflows = async (filters: WorkflowFilter): Promise<{ data: 
         LIMIT $${paramIdx++} OFFSET $${paramIdx++}
       `, [...params, limit, offset]);
 
-      // Resolve assigned user names
-      const workflows = await Promise.all(result.rows.map(async (row: any) => {
-        let assignedTo: string[] = [];
-        if (row.assigned_to_user_ids?.length) {
-          const userResult = await pool.query(
-            `SELECT user_name FROM user_account WHERE user_id = ANY($1)`,
-            [row.assigned_to_user_ids]
-          );
-          assignedTo = userResult.rows.map((u: any) => u.user_name);
+      // Collect all unique user IDs across all workflow rows and batch-fetch in one query
+      const allUserIds = new Set<number>();
+      for (const row of result.rows) {
+        if (Array.isArray(row.assigned_to_user_ids)) {
+          row.assigned_to_user_ids.forEach((id: number) => allUserIds.add(id));
         }
-        return {
-          ...row,
-          assignedTo,
-          metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {})
-        };
+      }
+      const userNameMap = new Map<number, string>();
+      if (allUserIds.size > 0) {
+        const userResult = await pool.query(
+          `SELECT user_id, user_name FROM user_account WHERE user_id = ANY($1)`,
+          [Array.from(allUserIds)]
+        );
+        for (const u of userResult.rows) {
+          userNameMap.set(u.user_id, u.user_name);
+        }
+      }
+
+      const workflows = result.rows.map((row: any) => ({
+        ...row,
+        assignedTo: (row.assigned_to_user_ids || []).map((id: number) => userNameMap.get(id) ?? String(id)),
+        metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {})
       }));
 
       return { data: workflows };

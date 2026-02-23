@@ -100,8 +100,7 @@ const ENABLE_ECONSENT = process.env.ENABLE_ECONSENT !== 'false';
 const ENABLE_EPRO = process.env.ENABLE_EPRO !== 'false';
 const ENABLE_RTSM = process.env.ENABLE_RTSM !== 'false';
 
-// Conditionally import routes only when enabled
-let emailRoutes: any, transferRoutes: any, consentRoutes: any, eproRoutes: any, rtsmRoutes: any;
+// Routes are conditionally required below when features are enabled
 
 const app = express();
 
@@ -162,7 +161,7 @@ if (config.server.env !== 'production') {
         callback(null, true);
       } else {
         logger.warn('CORS blocked request', { origin, allowedOrigins });
-        callback(null, true);
+        callback(new Error(`CORS policy: origin '${origin}' is not allowed`));
       }
     },
     credentials: true,
