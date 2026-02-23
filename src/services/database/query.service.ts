@@ -11,6 +11,12 @@ import { logger } from '../../config/logger';
 import { ApiResponse, PaginatedResponse } from '../../types';
 import * as notificationService from './notification.service';
 import { resolveAllQueryAssignees } from './workflow-config.provider';
+import {
+  NotFoundError,
+  ConflictError,
+  BadRequestError,
+  ForbiddenError,
+} from '../../middleware/errorHandler.middleware';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -278,7 +284,7 @@ export const createQuery = async (
     assignedUserId?: number; // User to assign the query to
   },
   userId: number
-): Promise<{ success: boolean; queryId?: number; message?: string }> => {
+): Promise<{ success: true; queryId: number; message: string }> => {
   logger.info('Creating query', { data, userId });
 
   const client = await pool.connect();
@@ -312,10 +318,7 @@ export const createQuery = async (
 
     const mapping = mappingConfig[data.entityType];
     if (!mapping) {
-      return {
-        success: false,
-        message: 'Invalid entity type. Must be: itemData, eventCrf, studySubject, or studyEvent'
-      };
+      throw new BadRequestError('Invalid entity type. Must be: itemData, eventCrf, studySubject, or studyEvent');
     }
 
     // Resolve query assignment via shared workflow-config.provider.
@@ -485,11 +488,7 @@ export const createQuery = async (
       logger.warn('Failed to send query assignment notifications', { error: notifErr.message });
     }
 
-    return {
-      success: true,
-      queryId,
-      message: 'Query created successfully'
-    };
+    return { success: true, queryId, message: 'Query created successfully' };
   } catch (error: any) {
     if (txStarted) {
       await client.query('ROLLBACK').catch((rbErr: any) =>
@@ -497,11 +496,7 @@ export const createQuery = async (
       );
     }
     logger.error('Create query error', { error: error.message, data });
-
-    return {
-      success: false,
-      message: `Failed to create query: ${error.message}`
-    };
+    throw error; // propagate — asyncHandler → errorHandler converts it to HTTP response
   } finally {
     client.release();
   }
@@ -521,13 +516,13 @@ export const addQueryResponse = async (
     newStatusId?: number;  // Optional: 2=Updated, 3=Resolution Proposed, 4=Closed
   },
   userId: number
-): Promise<{ success: boolean; responseId?: number; message?: string }> => {
+): Promise<{ success: true; responseId: number; message: string }> => {
   logger.info('Adding query response', { parentQueryId, userId });
 
   // Guarantee a non-empty description — an empty description violates NOT NULL
   const safeDescription = (data.description || '').trim();
   if (!safeDescription) {
-    return { success: false, message: 'Response text is required' };
+    throw new BadRequestError('Response text is required');
   }
 
   const client = await pool.connect();
@@ -545,7 +540,7 @@ export const addQueryResponse = async (
 
     if (parentResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Parent query not found' };
+      throw new NotFoundError('Query not found');
     }
 
     const parent = parentResult.rows[0];
@@ -672,7 +667,7 @@ export const addQueryResponse = async (
       );
     }
     logger.error('Add query response error', { error: error.message });
-    return { success: false, message: `Failed to add response: ${error.message}` };
+    throw error;
   } finally {
     client.release();
   }
@@ -692,7 +687,7 @@ export const updateQueryStatus = async (
     reason?: string;
     signature?: boolean;  // Whether this is a signed action (e.g., closing a query)
   }
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Updating query status', { queryId, statusId, userId, options });
 
   const client = await pool.connect();
@@ -765,10 +760,7 @@ export const updateQueryStatus = async (
 
     logger.info('Query status updated successfully', { queryId, oldStatusId, newStatusId: statusId });
 
-    return {
-      success: true,
-      message: `Query ${actionName.toLowerCase()} successfully`
-    };
+    return { success: true, message: `Query ${actionName.toLowerCase()} successfully` };
   } catch (error: any) {
     if (txStarted) {
       await client.query('ROLLBACK').catch((rbErr: any) =>
@@ -776,11 +768,7 @@ export const updateQueryStatus = async (
       );
     }
     logger.error('Update query status error', { error: error.message });
-
-    return {
-      success: false,
-      message: `Failed to update status: ${error.message}`
-    };
+    throw error;
   } finally {
     client.release();
   }
@@ -798,7 +786,7 @@ export const closeQueryWithSignature = async (
     reason: string;
     meaning?: string;  // Signature meaning (e.g., "I have reviewed this data")
   }
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Closing query with signature', { queryId, userId });
 
   const client = await pool.connect();
@@ -824,10 +812,7 @@ export const closeQueryWithSignature = async (
 
     if (passwordHash !== user.passwd) {
       logger.warn('Invalid password for query signature', { queryId, userId });
-      return {
-        success: false,
-        message: 'Invalid password. Electronic signature verification failed.'
-      };
+      throw new ForbiddenError('Invalid password. Electronic signature verification failed.');
     }
 
     // Password verified - delegate to the verified function
@@ -840,11 +825,7 @@ export const closeQueryWithSignature = async (
       logger.warn('ROLLBACK failed in closeQueryWithSignature', { rbErr: rbErr.message })
     );
     logger.error('Close query with signature error', { error: error.message });
-
-    return {
-      success: false,
-      message: `Failed to close query: ${error.message}`
-    };
+    throw error;
   } finally {
     client.release();
   }
@@ -864,7 +845,7 @@ export const closeQueryWithSignatureVerified = async (
   },
   existingClient?: any,
   existingUser?: any
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Closing query with verified signature', { queryId, userId });
 
   const client = existingClient || await pool.connect();
@@ -961,11 +942,7 @@ export const closeQueryWithSignatureVerified = async (
       );
     }
     logger.error('Close query with signature error', { error: error.message });
-
-    return {
-      success: false,
-      message: `Failed to close query: ${error.message}`
-    };
+    throw error;
   } finally {
     if (needsRelease) {
       client.release();
@@ -1158,7 +1135,7 @@ export const reassignQuery = async (
   queryId: number,
   assignedUserId: number,
   userId: number
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Reassigning query', { queryId, assignedUserId, userId });
 
   const client = await pool.connect();
@@ -1204,7 +1181,7 @@ export const reassignQuery = async (
       logger.warn('ROLLBACK failed in reassignQuery', { rbErr: rbErr.message })
     );
     logger.error('Reassign query error', { error: error.message });
-    return { success: false, message: error.message };
+    throw error;
   } finally {
     client.release();
   }
@@ -1672,7 +1649,7 @@ export const acceptResolution = async (
   queryId: number,
   userId: number,
   data: { reason?: string; meaning?: string }
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Accepting proposed resolution', { queryId, userId });
 
   const client = await pool.connect();
@@ -1688,12 +1665,12 @@ export const acceptResolution = async (
     );
     if (qResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Query not found' };
+      throw new NotFoundError('Query not found');
     }
     const q = qResult.rows[0];
     if (q.resolution_status_id !== 3) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Query is not in "Resolution Proposed" status. Only proposed resolutions can be accepted.' };
+      throw new ConflictError('Query is not in "Resolution Proposed" status. Only proposed resolutions can be accepted.');
     }
 
     const reason = (data.reason || 'Resolution accepted').trim();
@@ -1755,7 +1732,7 @@ export const acceptResolution = async (
       );
     }
     logger.error('Accept resolution error', { error: error.message });
-    return { success: false, message: `Failed to accept resolution: ${error.message}` };
+    throw error;
   } finally {
     client.release();
   }
@@ -1775,11 +1752,11 @@ export const rejectResolution = async (
   queryId: number,
   userId: number,
   data: { reason: string }
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Rejecting proposed resolution', { queryId, userId });
 
   if (!data.reason?.trim()) {
-    return { success: false, message: 'A reason is required when rejecting a resolution' };
+    throw new BadRequestError('A reason is required when rejecting a resolution');
   }
 
   const client = await pool.connect();
@@ -1795,12 +1772,12 @@ export const rejectResolution = async (
     );
     if (qResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Query not found' };
+      throw new NotFoundError('Query not found');
     }
     const q = qResult.rows[0];
     if (q.resolution_status_id !== 3) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Query is not in "Resolution Proposed" status. Only proposed resolutions can be rejected.' };
+      throw new ConflictError('Query is not in "Resolution Proposed" status. Only proposed resolutions can be rejected.');
     }
 
     const reason = data.reason.trim();
@@ -1861,7 +1838,7 @@ export const rejectResolution = async (
       );
     }
     logger.error('Reject resolution error', { error: error.message });
-    return { success: false, message: `Failed to reject resolution: ${error.message}` };
+    throw error;
   } finally {
     client.release();
   }
@@ -1878,7 +1855,7 @@ export const reopenQuery = async (
   queryId: number,
   userId: number,
   reason: string
-): Promise<{ success: boolean; message?: string }> => {
+): Promise<{ success: true; message: string }> => {
   logger.info('Reopening query', { queryId, userId, reason });
   return updateQueryStatus(queryId, 1, userId, { reason: reason || 'Query reopened' });
 };

@@ -1,551 +1,238 @@
 /**
  * Query Controller
+ *
+ * Thin handlers: validate input, call the service, respond.
+ * All errors thrown by services bubble up through asyncHandler → errorHandler.
+ * No more manual { success: false } pattern here.
  */
 
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../middleware/errorHandler.middleware';
 import * as queryService from '../services/database/query.service';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const userId  = (req: Request) => (req as any).user.userId  as number;
+const userRole = (req: Request) => (req as any).user.role   as string | undefined;
+const intParam = (req: Request, name: string) => parseInt(req.params[name]);
+
+async function assertCanEdit(req: Request, queryId: number): Promise<void> {
+  const check = await queryService.canEditQuery(queryId, userId(req), userRole(req));
+  if (!check.allowed) throw new ForbiddenError(check.message);
+}
+
+// ─── Read endpoints ────────────────────────────────────────────────────────────
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, subjectId, status, page, limit } = req.query;
-  const caller = (req as any).user;
-
-  const result = await queryService.getQueries({
-    studyId: studyId ? parseInt(studyId as string) : undefined,
-    subjectId: subjectId ? parseInt(subjectId as string) : undefined,
-    status: status as string,
-    page: parseInt(page as string) || 1,
-    limit: parseInt(limit as string) || 20
-  }, caller?.userId);
-
+  const result = await queryService.getQueries(
+    {
+      studyId:   studyId   ? parseInt(studyId   as string) : undefined,
+      subjectId: subjectId ? parseInt(subjectId as string) : undefined,
+      status:    status as string,
+      page:      parseInt(page  as string) || 1,
+      limit:     parseInt(limit as string) || 20,
+    },
+    userId(req)
+  );
   res.json(result);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const caller = (req as any).user;
-
-  const result = await queryService.getQueryById(parseInt(id), caller?.userId);
-
-  if (!result) {
-    res.status(404).json({ success: false, message: 'Query not found' });
-    return;
-  }
-
+  const result = await queryService.getQueryById(intParam(req, 'id'), userId(req));
+  if (!result) throw new NotFoundError('Query not found');
   res.json({ success: true, data: result });
 });
 
-export const create = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
-
-  const result = await queryService.createQuery(req.body, user.userId);
-
-  // Return proper HTTP status codes
-  let statusCode = 201;
-  if (!result.success) {
-    if (result.message?.includes('not found')) {
-      statusCode = 404;
-    } else if (result.message?.includes('required') || result.message?.includes('invalid')) {
-      statusCode = 400;
-    } else {
-      statusCode = 500; // Server error for database issues
-    }
-  }
-
-  res.status(statusCode).json(result);
-});
-
-export const respond = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
-  const { id } = req.params;
-  const { response, description, detailedNotes, newStatusId } = req.body;
-
-  // Validate that we have a response/description
-  if (!response && !description) {
-    res.status(400).json({ success: false, message: 'Response text is required' });
-    return;
-  }
-
-  // Permission check: only assigned user, owner, or elevated roles can respond
-  const editCheck = await queryService.canEditQuery(parseInt(id), user.userId, user.role);
-  if (!editCheck.allowed) {
-    res.status(403).json({ success: false, message: editCheck.message });
-    return;
-  }
-
-  const result = await queryService.addQueryResponse(
-    parseInt(id), 
-    {
-      description: response || description,
-      detailedNotes,
-      newStatusId
-    }, 
-    user.userId
-  );
-
-  // Return proper HTTP status codes
-  let statusCode = 200;
-  if (!result.success) {
-    if (result.message?.includes('not found')) {
-      statusCode = 404;
-    } else {
-      statusCode = 500; // Server error for database issues
-    }
-  }
-
-  res.status(statusCode).json(result);
-});
-
-export const updateStatus = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
-  const { id } = req.params;
-  const { statusId, reason } = req.body;
-
-  // Validate statusId
-  if (statusId === undefined || statusId === null) {
-    res.status(400).json({ success: false, message: 'statusId is required' });
-    return;
-  }
-
-  // Permission check: only assigned user, owner, or elevated roles can update status
-  const editCheck = await queryService.canEditQuery(parseInt(id), user.userId, user.role);
-  if (!editCheck.allowed) {
-    res.status(403).json({ success: false, message: editCheck.message });
-    return;
-  }
-
-  const result = await queryService.updateQueryStatus(
-    parseInt(id), 
-    statusId, 
-    user.userId,
-    { reason }
-  );
-
-  // Return proper HTTP status codes
-  let statusCode = 200;
-  if (!result.success) {
-    if (result.message?.includes('not found')) {
-      statusCode = 404;
-    } else {
-      statusCode = 500; // Server error for database issues
-    }
-  }
-
-  res.status(statusCode).json(result);
-});
-
-/**
- * Close query with electronic signature (password verification)
- * 21 CFR Part 11 compliant
- * 
- * Note: The requireSignatureFor middleware verifies the password and sets
- * req.signatureVerified = true, then deletes the password from the body.
- * We check signatureVerified to avoid double-verification issues.
- */
-export const closeWithSignature = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
-  const signatureVerified = (req as any).signatureVerified;
-  const { id } = req.params;
-  const { password, reason, meaning } = req.body;
-
-  // Check if signature was verified by middleware OR password is provided
-  if (!signatureVerified && !password) {
-    res.status(400).json({ success: false, message: 'Password is required for electronic signature' });
-    return;
-  }
-
-  if (!reason) {
-    res.status(400).json({ success: false, message: 'Reason is required for closing a query' });
-    return;
-  }
-
-  // Permission check: only assigned user, owner, or elevated roles can close
-  const editCheck = await queryService.canEditQuery(parseInt(id), user.userId, user.role);
-  if (!editCheck.allowed) {
-    res.status(403).json({ success: false, message: editCheck.message });
-    return;
-  }
-
-  // If signature already verified by middleware, close without re-verifying password
-  if (signatureVerified) {
-    const result = await queryService.closeQueryWithSignatureVerified(
-      parseInt(id),
-      user.userId,
-      { reason, meaning }
-    );
-
-    let statusCode = result.success ? 200 : (result.message?.includes('not found') ? 404 : 500);
-    res.status(statusCode).json(result);
-    return;
-  }
-
-  // Fallback: verify password in service (shouldn't normally reach here with middleware)
-  const result = await queryService.closeQueryWithSignature(
-    parseInt(id),
-    user.userId,
-    { password, reason, meaning }
-  );
-
-  // Return 401 ONLY for password/authentication failures, not for other errors
-  // This prevents the frontend interceptor from logging the user out on server errors
-  let statusCode = 200;
-  if (!result.success) {
-    if (result.message?.includes('Invalid password') || result.message?.includes('signature verification failed')) {
-      statusCode = 401; // Authentication failure
-    } else if (result.message?.includes('not found')) {
-      statusCode = 404; // Not found
-    } else {
-      statusCode = 500; // Server error for database issues etc.
-    }
-  }
-
-  res.status(statusCode).json(result);
-});
-
-/**
- * Get query audit trail
- */
 export const getAuditTrail = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const caller = (req as any).user;
-
-  const result = await queryService.getQueryAuditTrail(parseInt(id), caller?.userId);
-
-  res.json({ success: true, data: result });
+  const data = await queryService.getQueryAuditTrail(intParam(req, 'id'), userId(req));
+  res.json({ success: true, data });
 });
 
 export const stats = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
-  const caller = (req as any).user;
-
-  if (!studyId) {
-    res.status(400).json({ success: false, message: 'studyId is required' });
-    return;
-  }
-
-  const result = await queryService.getQueryStats(parseInt(studyId as string), caller?.userId);
-
-  res.json({ success: true, data: result });
+  if (!studyId) throw new BadRequestError('studyId is required');
+  const data = await queryService.getQueryStats(parseInt(studyId as string), userId(req));
+  res.json({ success: true, data });
 });
 
-/**
- * Get query types
- */
-export const getQueryTypes = asyncHandler(async (req: Request, res: Response) => {
-  const result = await queryService.getQueryTypes();
-  res.json({ success: true, data: result });
+export const getQueryTypes = asyncHandler(async (_req: Request, res: Response) => {
+  res.json({ success: true, data: await queryService.getQueryTypes() });
 });
 
-/**
- * Get resolution statuses
- */
-export const getResolutionStatuses = asyncHandler(async (req: Request, res: Response) => {
-  const result = await queryService.getResolutionStatuses();
-  res.json({ success: true, data: result });
+export const getResolutionStatuses = asyncHandler(async (_req: Request, res: Response) => {
+  res.json({ success: true, data: await queryService.getResolutionStatuses() });
 });
 
-/**
- * Get queries for a specific form
- */
 export const getFormQueries = asyncHandler(async (req: Request, res: Response) => {
-  const { eventCrfId } = req.params;
-  const caller = (req as any).user;
-
-  const result = await queryService.getFormQueries(parseInt(eventCrfId), caller?.userId);
-
-  res.json({ success: true, data: result });
+  const data = await queryService.getFormQueries(intParam(req, 'eventCrfId'), userId(req));
+  res.json({ success: true, data });
 });
 
-/**
- * Reassign query
- */
-export const reassign = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
-  const { id } = req.params;
-  const { assignedUserId } = req.body;
+export const getFieldQueries = asyncHandler(async (req: Request, res: Response) => {
+  const data = await queryService.getFieldQueries(intParam(req, 'itemDataId'), userId(req));
+  res.json({ success: true, data });
+});
 
-  if (!assignedUserId) {
-    res.status(400).json({ success: false, message: 'assignedUserId is required' });
-    return;
-  }
-
-  const result = await queryService.reassignQuery(
-    parseInt(id),
-    assignedUserId,
-    user.userId
+export const getQueriesByField = asyncHandler(async (req: Request, res: Response) => {
+  const data = await queryService.getQueriesByField(
+    intParam(req, 'eventCrfId'), req.params.fieldName, userId(req)
   );
-
-  // Return proper HTTP status codes
-  let statusCode = 200;
-  if (!result.success) {
-    if (result.message?.includes('not found')) {
-      statusCode = 404;
-    } else {
-      statusCode = 500; // Server error for database issues
-    }
-  }
-
-  res.status(statusCode).json(result);
+  res.json({ success: true, data });
 });
 
-/**
- * Get query count by status
- */
+export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Response) => {
+  const data = await queryService.getFormFieldQueryCounts(intParam(req, 'eventCrfId'), userId(req));
+  res.json({ success: true, data });
+});
+
 export const countByStatus = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
-  const caller = (req as any).user;
-
-  if (!studyId) {
-    res.status(400).json({ success: false, message: 'studyId is required' });
-    return;
-  }
-
-  const result = await queryService.getQueryCountByStatus(parseInt(studyId as string), caller?.userId);
-
-  res.json({ success: true, data: result });
+  if (!studyId) throw new BadRequestError('studyId is required');
+  const data = await queryService.getQueryCountByStatus(parseInt(studyId as string), userId(req));
+  res.json({ success: true, data });
 });
 
-/**
- * Get query count by type
- */
 export const countByType = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
-  const caller = (req as any).user;
-
-  if (!studyId) {
-    res.status(400).json({ success: false, message: 'studyId is required' });
-    return;
-  }
-
-  const result = await queryService.getQueryCountByType(parseInt(studyId as string), caller?.userId);
-
-  res.json({ success: true, data: result });
+  if (!studyId) throw new BadRequestError('studyId is required');
+  const data = await queryService.getQueryCountByType(parseInt(studyId as string), userId(req));
+  res.json({ success: true, data });
 });
 
-/**
- * Get query thread (conversation)
- */
 export const getThread = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const caller = (req as any).user;
-
-  const result = await queryService.getQueryThread(parseInt(id), caller?.userId);
-
-  res.json({ success: true, data: result });
+  const data = await queryService.getQueryThread(intParam(req, 'id'), userId(req));
+  res.json({ success: true, data });
 });
 
-/**
- * Get overdue queries
- */
 export const getOverdue = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, days } = req.query;
-  const caller = (req as any).user;
-
-  if (!studyId) {
-    res.status(400).json({ success: false, message: 'studyId is required' });
-    return;
-  }
-
-  const result = await queryService.getOverdueQueries(
+  if (!studyId) throw new BadRequestError('studyId is required');
+  const data = await queryService.getOverdueQueries(
     parseInt(studyId as string),
     parseInt(days as string) || 7,
-    caller?.userId
+    userId(req)
   );
-
-  res.json({ success: true, data: result });
+  res.json({ success: true, data });
 });
 
-/**
- * Get my assigned queries
- */
 export const getMyAssigned = asyncHandler(async (req: Request, res: Response) => {
-  const user = (req as any).user;
   const { studyId } = req.query;
-
-  const result = await queryService.getMyAssignedQueries(
-    user.userId,
+  const data = await queryService.getMyAssignedQueries(
+    userId(req),
     studyId ? parseInt(studyId as string) : undefined
   );
+  res.json({ success: true, data });
+});
 
-  res.json({ success: true, data: result });
+// ─── Write endpoints ──────────────────────────────────────────────────────────
+
+export const create = asyncHandler(async (req: Request, res: Response) => {
+  const { queryId, message } = await queryService.createQuery(req.body, userId(req));
+  res.status(201).json({ success: true, queryId, message });
+});
+
+export const respond = asyncHandler(async (req: Request, res: Response) => {
+  const { response, description, detailedNotes, newStatusId } = req.body;
+  const qId = intParam(req, 'id');
+
+  await assertCanEdit(req, qId);
+
+  const { responseId, message } = await queryService.addQueryResponse(
+    qId,
+    { description: response || description, detailedNotes, newStatusId },
+    userId(req)
+  );
+  res.json({ success: true, responseId, message });
+});
+
+export const updateStatus = asyncHandler(async (req: Request, res: Response) => {
+  const qId = intParam(req, 'id');
+  const { statusId, reason } = req.body;
+
+  await assertCanEdit(req, qId);
+  const { message } = await queryService.updateQueryStatus(qId, statusId, userId(req), { reason });
+  res.json({ success: true, message });
+});
+
+export const reassign = asyncHandler(async (req: Request, res: Response) => {
+  const qId = intParam(req, 'id');
+  const { assignedUserId } = req.body;
+  const { message } = await queryService.reassignQuery(qId, assignedUserId, userId(req));
+  res.json({ success: true, message });
 });
 
 /**
- * Get queries for a specific field (item_data)
+ * Close with electronic signature — 21 CFR Part 11 compliant.
+ * Password verification done by requireSignatureFor middleware; the middleware
+ * sets req.signatureVerified = true and removes the raw password from req.body.
  */
-export const getFieldQueries = asyncHandler(async (req: Request, res: Response) => {
-  const { itemDataId } = req.params;
-  const caller = (req as any).user;
+export const closeWithSignature = asyncHandler(async (req: Request, res: Response) => {
+  const signatureVerified = (req as any).signatureVerified as boolean;
+  const qId = intParam(req, 'id');
+  const { password, reason, meaning } = req.body;
 
-  const result = await queryService.getFieldQueries(parseInt(itemDataId), caller?.userId);
-
-  res.json({ success: true, data: result });
-});
-
-/**
- * Get queries for a field by event_crf_id and field name
- */
-export const getQueriesByField = asyncHandler(async (req: Request, res: Response) => {
-  const { eventCrfId, fieldName } = req.params;
-  const caller = (req as any).user;
-
-  const result = await queryService.getQueriesByField(parseInt(eventCrfId), fieldName, caller?.userId);
-
-  res.json({ success: true, data: result });
-});
-
-/**
- * Get open query count for all fields in a form
- * Used for efficient rendering of field-level query indicators
- */
-export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Response) => {
-  const { eventCrfId } = req.params;
-  const caller = (req as any).user;
-
-  const result = await queryService.getFormFieldQueryCounts(parseInt(eventCrfId), caller?.userId);
-
-  res.json({ success: true, data: result });
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// REOPEN + BULK OPERATIONS
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Accept a proposed resolution (Monitor / CRO / PI / Admin only)
- * POST /api/queries/:id/accept-resolution
- */
-export const acceptResolution = asyncHandler(async (req: Request, res: Response) => {
-  const queryId = parseInt(req.params.id);
-  const caller = (req as any).user;
-  const { reason, meaning } = req.body;
-
-  const result = await queryService.acceptResolution(queryId, caller.userId, { reason, meaning });
-
-  if (!result.success) {
-    const statusCode = result.message?.includes('not found') ? 404
-      : result.message?.includes('not in') ? 409
-      : 400;
-    res.status(statusCode).json(result);
-    return;
+  if (!signatureVerified && !password) {
+    throw new BadRequestError('Password is required for electronic signature');
   }
-  res.json(result);
-});
-
-/**
- * Reject a proposed resolution (Monitor / CRO / PI / Admin only)
- * POST /api/queries/:id/reject-resolution
- */
-export const rejectResolution = asyncHandler(async (req: Request, res: Response) => {
-  const queryId = parseInt(req.params.id);
-  const caller = (req as any).user;
-  const { reason } = req.body;
-
   if (!reason?.trim()) {
-    res.status(400).json({ success: false, message: 'A reason is required when rejecting a resolution' });
-    return;
+    throw new BadRequestError('Reason is required for closing a query');
   }
 
-  const result = await queryService.rejectResolution(queryId, caller.userId, { reason });
+  await assertCanEdit(req, qId);
 
-  if (!result.success) {
-    const statusCode = result.message?.includes('not found') ? 404
-      : result.message?.includes('not in') ? 409
-      : 400;
-    res.status(statusCode).json(result);
-    return;
-  }
-  res.json(result);
+  const result = signatureVerified
+    ? await queryService.closeQueryWithSignatureVerified(qId, userId(req), { reason, meaning })
+    : await queryService.closeQueryWithSignature(qId, userId(req), { password, reason, meaning });
+
+  res.json({ success: true, message: result.message });
 });
 
-/**
- * Reopen a closed query
- * PUT /api/queries/:id/reopen
- */
-export const reopenQuery = asyncHandler(async (req: Request, res: Response) => {
-  const queryId = parseInt(req.params.id);
-  const caller = (req as any).user;
+export const acceptResolution = asyncHandler(async (req: Request, res: Response) => {
+  const { reason, meaning } = req.body;
+  const { message } = await queryService.acceptResolution(intParam(req, 'id'), userId(req), { reason, meaning });
+  res.json({ success: true, message });
+});
+
+export const rejectResolution = asyncHandler(async (req: Request, res: Response) => {
   const { reason } = req.body;
-
-  // Permission check: only assigned user, owner, or elevated roles can reopen
-  const editCheck = await queryService.canEditQuery(queryId, caller.userId, caller.role);
-  if (!editCheck.allowed) {
-    res.status(403).json({ success: false, message: editCheck.message });
-    return;
-  }
-
-  const result = await queryService.reopenQuery(queryId, caller.userId, reason || 'Reopened');
-
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
-  }
-  res.json(result);
+  const { message } = await queryService.rejectResolution(intParam(req, 'id'), userId(req), { reason });
+  res.json({ success: true, message });
 });
 
-/**
- * Bulk update status for multiple queries
- * POST /api/queries/bulk/status
- */
-export const bulkUpdateStatus = asyncHandler(async (req: Request, res: Response) => {
-  const caller = (req as any).user;
-  const { queryIds, statusId, reason } = req.body;
+export const reopenQuery = asyncHandler(async (req: Request, res: Response) => {
+  const qId = intParam(req, 'id');
+  await assertCanEdit(req, qId);
+  const { message } = await queryService.reopenQuery(qId, userId(req), req.body.reason || 'Reopened');
+  res.json({ success: true, message });
+});
 
-  const result = await queryService.bulkUpdateStatus(queryIds, statusId, caller.userId, reason);
-  // Return flat shape — don't double-wrap the result object
+// ─── Bulk operations ──────────────────────────────────────────────────────────
+
+export const bulkUpdateStatus = asyncHandler(async (req: Request, res: Response) => {
+  const { queryIds, statusId, reason } = req.body;
+  const result = await queryService.bulkUpdateStatus(queryIds, statusId, userId(req), reason);
   res.json({ success: result.success, updated: result.updated, failed: result.failed, errors: result.errors });
 });
 
-/**
- * Bulk close queries
- * POST /api/queries/bulk/close
- */
 export const bulkClose = asyncHandler(async (req: Request, res: Response) => {
-  const caller = (req as any).user;
   const { queryIds, reason } = req.body;
-
-  const result = await queryService.bulkCloseQueries(queryIds, caller.userId, reason || 'Bulk closed');
+  const result = await queryService.bulkCloseQueries(queryIds, userId(req), reason || 'Bulk closed');
   res.json({ success: result.success, closed: result.closed, failed: result.failed, errors: result.errors });
 });
 
-/**
- * Bulk reassign queries
- * POST /api/queries/bulk/reassign
- */
 export const bulkReassign = asyncHandler(async (req: Request, res: Response) => {
-  const caller = (req as any).user;
   const { queryIds, assignToUserId, reason } = req.body;
-
-  const result = await queryService.bulkReassignQueries(queryIds, assignToUserId, caller.userId, reason);
+  const result = await queryService.bulkReassignQueries(queryIds, assignToUserId, userId(req), reason);
   res.json({ success: result.success, reassigned: result.reassigned, failed: result.failed, errors: result.errors });
 });
 
-export default { 
-  list, 
-  get, 
-  create, 
-  respond, 
-  updateStatus, 
-  closeWithSignature,
-  acceptResolution,
-  rejectResolution,
-  getAuditTrail,
-  stats, 
-  getQueryTypes, 
-  getResolutionStatuses, 
-  getFormQueries,
-  getFieldQueries,
-  getQueriesByField,
-  getFormFieldQueryCounts,
-  reassign, 
-  countByStatus, 
-  countByType, 
-  getThread, 
-  getOverdue, 
-  getMyAssigned,
-  reopenQuery,
-  bulkUpdateStatus,
-  bulkClose,
-  bulkReassign
+export default {
+  list, get, create, respond, updateStatus, closeWithSignature,
+  acceptResolution, rejectResolution,
+  getAuditTrail, stats, getQueryTypes, getResolutionStatuses,
+  getFormQueries, getFieldQueries, getQueriesByField, getFormFieldQueryCounts,
+  reassign, countByStatus, countByType, getThread, getOverdue, getMyAssigned,
+  reopenQuery, bulkUpdateStatus, bulkClose, bulkReassign
 };
-
