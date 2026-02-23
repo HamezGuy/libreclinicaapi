@@ -67,7 +67,7 @@ router.put('/:id/status',
 );
 router.put('/:id/reassign', 
   requireRole('data_manager', 'admin'),
-  validate({ params: commonSchemas.idParam }),
+  validate({ params: commonSchemas.idParam, body: querySchemas.reassign }),
   requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.reassign
 );
@@ -82,21 +82,21 @@ router.post('/:id/close-with-signature',
 // Accept a proposed resolution (Monitor / CRO / PI / Admin only)
 router.post('/:id/accept-resolution',
   requireRole('monitor', 'admin', 'investigator'),
-  validate({ params: commonSchemas.idParam }),
+  validate({ params: commonSchemas.idParam, body: querySchemas.acceptResolution }),
   controller.acceptResolution
 );
 
 // Reject a proposed resolution (Monitor / CRO / PI / Admin only)
 router.post('/:id/reject-resolution',
   requireRole('monitor', 'admin', 'investigator'),
-  validate({ params: commonSchemas.idParam }),
+  validate({ params: commonSchemas.idParam, body: querySchemas.rejectResolution }),
   controller.rejectResolution
 );
 
 // Reopen a closed query
 router.put('/:id/reopen',
   requireRole('monitor', 'data_manager', 'admin'),
-  validate({ params: commonSchemas.idParam }),
+  validate({ params: commonSchemas.idParam, body: querySchemas.reopen }),
   requireSignatureFor('I authorize reopening this query'),
   controller.reopenQuery
 );
@@ -108,6 +108,7 @@ router.put('/:id/reopen',
 // Bulk update status (e.g., mass close)
 router.post('/bulk/status',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ body: querySchemas.bulkStatus }),
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.bulkUpdateStatus
 );
@@ -115,6 +116,7 @@ router.post('/bulk/status',
 // Bulk close queries
 router.post('/bulk/close',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ body: querySchemas.bulkClose }),
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.bulkClose
 );
@@ -122,6 +124,7 @@ router.post('/bulk/close',
 // Bulk reassign queries
 router.post('/bulk/reassign',
   requireRole('data_manager', 'admin'),
+  validate({ body: querySchemas.bulkReassign }),
   requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.bulkReassign
 );

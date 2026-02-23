@@ -1277,63 +1277,70 @@ export const getQueryThread = async (queryId: number, callerUserId?: number): Pr
     //
     // We also carry root_description and root_created through the CTE so the
     // final SELECT can apply that filter cleanly.
+    // Build the conversation thread with routing-copy exclusion.
+    // Routing copies are child notes auto-created in createQuery() for additional
+    // assignees — they have the SAME description as the root and are created within
+    // ~1 second.  We wrap the CTE in a subquery so the outer WHERE can safely
+    // reference the computed columns without alias-resolution issues.
     const query = `
-      WITH RECURSIVE query_thread AS (
-        -- Root query (level = 0)
-        SELECT 
-          dn.discrepancy_note_id,
-          dn.parent_dn_id,
-          dn.description,
-          dn.detailed_notes,
-          dn.date_created,
-          dn.resolution_status_id,
-          dn.owner_id,
-          u.user_name as created_by,
-          COALESCE(NULLIF(TRIM(u.first_name || ' ' || u.last_name), ''), u.user_name) as user_full_name,
-          0 as level,
-          dn.description as root_description,
-          dn.date_created as root_created
-        FROM discrepancy_note dn
-        LEFT JOIN user_account u ON dn.owner_id = u.user_id
-        WHERE dn.discrepancy_note_id = $1
-
-        UNION ALL
-
-        -- Responses and nested responses
-        SELECT
-          dn.discrepancy_note_id,
-          dn.parent_dn_id,
-          dn.description,
-          dn.detailed_notes,
-          dn.date_created,
-          dn.resolution_status_id,
-          dn.owner_id,
-          u.user_name as created_by,
-          COALESCE(NULLIF(TRIM(u.first_name || ' ' || u.last_name), ''), u.user_name) as user_full_name,
-          qt.level + 1,
-          qt.root_description,
-          qt.root_created
-        FROM discrepancy_note dn
-        INNER JOIN query_thread qt ON dn.parent_dn_id = qt.discrepancy_note_id
-        LEFT JOIN user_account u ON dn.owner_id = u.user_id
-      )
       SELECT
-        discrepancy_note_id,
-        parent_dn_id,
-        description,
-        detailed_notes,
-        date_created,
-        resolution_status_id,
-        owner_id,
-        created_by,
-        user_full_name,
-        level
-      FROM query_thread
+        t.discrepancy_note_id,
+        t.parent_dn_id,
+        t.description,
+        t.detailed_notes,
+        t.date_created,
+        t.resolution_status_id,
+        t.owner_id,
+        t.created_by,
+        t.user_full_name,
+        t.thread_level
+      FROM (
+        WITH RECURSIVE query_thread AS (
+          -- Root query (thread_level = 0)
+          SELECT
+            dn.discrepancy_note_id,
+            dn.parent_dn_id,
+            dn.description,
+            dn.detailed_notes,
+            dn.date_created,
+            dn.resolution_status_id,
+            dn.owner_id,
+            u.user_name AS created_by,
+            COALESCE(NULLIF(TRIM(u.first_name || ' ' || u.last_name), ''), u.user_name) AS user_full_name,
+            0 AS thread_level,
+            dn.description AS root_description,
+            dn.date_created AS root_created
+          FROM discrepancy_note dn
+          LEFT JOIN user_account u ON dn.owner_id = u.user_id
+          WHERE dn.discrepancy_note_id = $1
+
+          UNION ALL
+
+          -- Responses and nested responses
+          SELECT
+            dn.discrepancy_note_id,
+            dn.parent_dn_id,
+            dn.description,
+            dn.detailed_notes,
+            dn.date_created,
+            dn.resolution_status_id,
+            dn.owner_id,
+            u.user_name AS created_by,
+            COALESCE(NULLIF(TRIM(u.first_name || ' ' || u.last_name), ''), u.user_name) AS user_full_name,
+            qt.thread_level + 1,
+            qt.root_description,
+            qt.root_created
+          FROM discrepancy_note dn
+          INNER JOIN query_thread qt ON dn.parent_dn_id = qt.discrepancy_note_id
+          LEFT JOIN user_account u ON dn.owner_id = u.user_id
+        )
+        SELECT * FROM query_thread
+      ) t
       WHERE
-        level = 0  -- always include root
-        OR description != root_description  -- real response: different text
-        OR date_created > root_created + INTERVAL '30 seconds'  -- or created later (human-typed)
-      ORDER BY date_created ASC, level ASC
+        t.thread_level = 0                                              -- always include root
+        OR t.description != t.root_description                         -- real response: different text
+        OR t.date_created > t.root_created + INTERVAL '30 seconds'    -- or created much later (human-typed)
+      ORDER BY t.date_created ASC, t.thread_level ASC
     `;
 
     const result = await pool.query(query, [queryId]);

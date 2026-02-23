@@ -491,13 +491,9 @@ export const bulkUpdateStatus = asyncHandler(async (req: Request, res: Response)
   const caller = (req as any).user;
   const { queryIds, statusId, reason } = req.body;
 
-  if (!queryIds?.length || !statusId) {
-    res.status(400).json({ success: false, message: 'queryIds array and statusId are required' });
-    return;
-  }
-
   const result = await queryService.bulkUpdateStatus(queryIds, statusId, caller.userId, reason);
-  res.json({ success: result.success, data: result });
+  // Return flat shape — don't double-wrap the result object
+  res.json({ success: result.success, updated: result.updated, failed: result.failed, errors: result.errors });
 });
 
 /**
@@ -508,13 +504,8 @@ export const bulkClose = asyncHandler(async (req: Request, res: Response) => {
   const caller = (req as any).user;
   const { queryIds, reason } = req.body;
 
-  if (!queryIds?.length) {
-    res.status(400).json({ success: false, message: 'queryIds array is required' });
-    return;
-  }
-
   const result = await queryService.bulkCloseQueries(queryIds, caller.userId, reason || 'Bulk closed');
-  res.json({ success: result.success, data: result });
+  res.json({ success: result.success, closed: result.closed, failed: result.failed, errors: result.errors });
 });
 
 /**
@@ -525,13 +516,8 @@ export const bulkReassign = asyncHandler(async (req: Request, res: Response) => 
   const caller = (req as any).user;
   const { queryIds, assignToUserId, reason } = req.body;
 
-  if (!queryIds?.length || !assignToUserId) {
-    res.status(400).json({ success: false, message: 'queryIds array and assignToUserId are required' });
-    return;
-  }
-
   const result = await queryService.bulkReassignQueries(queryIds, assignToUserId, caller.userId, reason);
-  res.json({ success: result.success, data: result });
+  res.json({ success: result.success, reassigned: result.reassigned, failed: result.failed, errors: result.errors });
 });
 
 export default { 

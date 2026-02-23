@@ -679,27 +679,45 @@ export const studySchemas = {
 
 /**
  * Query/Discrepancy Note Schemas
+ *
+ * Status IDs (resolution_status table):
+ *   1 = New, 2 = Updated, 3 = Resolution Proposed, 4 = Closed, 5 = Not Applicable
+ *
+ * Entity types accepted by the service layer:
+ *   'itemData' | 'eventCrf' | 'studySubject' | 'studyEvent'
  */
 export const querySchemas = {
   create: Joi.object({
+    // Entity linking fields (service determines which mapping table to use)
+    entityType: Joi.string()
+      .valid('itemData', 'eventCrf', 'studySubject', 'studyEvent')
+      .optional()
+      .messages({ 'any.only': 'entityType must be one of: itemData, eventCrf, studySubject, studyEvent' }),
+    entityId: Joi.number().integer().positive().optional(),
+    // Legacy / convenience fields for entity linking
     crfId: Joi.number().integer().positive().optional(),
     crfVersionId: Joi.number().integer().positive().optional(),
     eventCrfId: Joi.number().integer().positive().optional(),
     itemId: Joi.number().integer().positive().optional(),
     itemDataId: Joi.number().integer().positive().optional(),
+    // Required fields
     description: Joi.string().required().min(10).max(1000)
       .messages({
         'string.min': 'Query description must be at least 10 characters',
         'string.max': 'Query description must not exceed 1000 characters'
       }),
-    detailedNotes: Joi.string().optional().max(2000),
-    queryType: Joi.string().valid('Query', 'Failed Validation Check', 'Annotation', 'Reason for Change').required(),
+    detailedNotes: Joi.string().optional().allow('').max(2000),
+    queryType: Joi.string()
+      .valid('Query', 'Failed Validation Check', 'Annotation', 'Reason for Change')
+      .required()
+      .messages({ 'any.only': 'queryType must be one of: Query, Failed Validation Check, Annotation, Reason for Change' }),
     studyId: Joi.number().integer().positive().required(),
     subjectId: Joi.number().integer().positive().optional(),
     assignedUserId: Joi.number().integer().positive().optional()
   }),
 
   respond: Joi.object({
+    // Either 'description' or 'response' must be present (both map to the same field)
     description: Joi.string().min(10).max(1000)
       .messages({
         'string.min': 'Response must be at least 10 characters',
@@ -710,17 +728,50 @@ export const querySchemas = {
         'string.min': 'Response must be at least 10 characters',
         'string.max': 'Response must not exceed 1000 characters'
       }),
-    detailedNotes: Joi.string().optional().max(2000),
-    newStatusId: Joi.number().integer().min(1).max(5).optional()
+    detailedNotes: Joi.string().optional().allow('').max(2000),
+    // Valid response status transitions: 2=Updated, 3=Resolution Proposed, 4=Closed
+    newStatusId: Joi.number().integer().valid(2, 3, 4).optional()
+      .messages({ 'any.only': 'newStatusId for a response must be 2 (Updated), 3 (Resolution Proposed), or 4 (Closed)' }),
+    correctedValue: Joi.string().optional().allow('').max(500),
+    correctionReason: Joi.string().optional().allow('').max(500)
   }).or('description', 'response'),
 
   updateStatus: Joi.object({
-    statusId: Joi.number().integer().min(1).max(10).required()
+    // Only valid resolution_status_id values: 1=New, 2=Updated, 3=Resolution Proposed, 4=Closed, 5=Not Applicable
+    statusId: Joi.number().integer().valid(1, 2, 3, 4, 5).required()
+      .messages({ 'any.only': 'statusId must be one of: 1 (New), 2 (Updated), 3 (Resolution Proposed), 4 (Closed), 5 (Not Applicable)' }),
+    reason: Joi.string().optional().allow('').max(500)
+  }),
+
+  acceptResolution: Joi.object({
+    reason: Joi.string().optional().allow('').max(500),
+    meaning: Joi.string().optional().allow('').max(500)
+  }),
+
+  rejectResolution: Joi.object({
+    reason: Joi.string().required().min(10).max(500)
+      .messages({
+        'string.min': 'Rejection reason must be at least 10 characters',
+        'string.empty': 'A reason is required when rejecting a resolution'
+      })
   }),
 
   close: Joi.object({
     queryId: Joi.number().integer().positive().required(),
     resolution: Joi.string().required().max(500)
+  }),
+
+  closeWithSignature: Joi.object({
+    password: Joi.string().optional(),
+    reason: Joi.string().required().min(10).max(500)
+      .messages({
+        'string.min': 'Close reason must be at least 10 characters',
+        'string.empty': 'A reason is required for closing a query'
+      }),
+    meaning: Joi.string().optional().allow('').max(500),
+    signatureUsername: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().allow('').max(500)
   }),
 
   list: Joi.object({
@@ -729,6 +780,32 @@ export const querySchemas = {
     status: Joi.string().valid('New', 'Updated', 'Resolution Proposed', 'Closed', 'Not Applicable').optional(),
     page: Joi.number().integer().min(1).default(1),
     limit: Joi.number().integer().min(1).max(1000).default(20)
+  }),
+
+  reopen: Joi.object({
+    reason: Joi.string().optional().allow('').max(500)
+  }),
+
+  reassign: Joi.object({
+    assignedUserId: Joi.number().integer().positive().required()
+      .messages({ 'number.base': 'assignedUserId must be a valid user ID' })
+  }),
+
+  bulkStatus: Joi.object({
+    queryIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+    statusId: Joi.number().integer().valid(1, 2, 3, 4, 5).required(),
+    reason: Joi.string().optional().allow('').max(500)
+  }),
+
+  bulkClose: Joi.object({
+    queryIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+    reason: Joi.string().optional().allow('').max(500)
+  }),
+
+  bulkReassign: Joi.object({
+    queryIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+    assignToUserId: Joi.number().integer().positive().required(),
+    reason: Joi.string().optional().allow('').max(500)
   })
 };
 
