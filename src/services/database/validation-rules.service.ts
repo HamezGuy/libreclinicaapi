@@ -58,6 +58,11 @@ export interface ValidationRule {
   operator?: string;
   compareFieldPath?: string;
   customExpression?: string;
+  /** Blood pressure per-component validation limits (stored in bp_systolic_min/max, bp_diastolic_min/max) */
+  bpSystolicMin?: number;
+  bpSystolicMax?: number;
+  bpDiastolicMin?: number;
+  bpDiastolicMax?: number;
   dateCreated: Date;
   dateUpdated?: Date;
   createdBy: number;
@@ -82,6 +87,11 @@ export interface CreateValidationRuleRequest {
   operator?: string;
   compareFieldPath?: string;
   customExpression?: string;
+  /** Blood pressure per-component range limits (stored in bp_systolic_min/max, bp_diastolic_min/max) */
+  bpSystolicMin?: number;
+  bpSystolicMax?: number;
+  bpDiastolicMin?: number;
+  bpDiastolicMax?: number;
 }
 
 /**
@@ -215,9 +225,14 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         vr.min_value,
         vr.max_value,
         vr.pattern,
+        vr.format_type,
         vr.operator,
         vr.compare_field_path,
         vr.custom_expression,
+        vr.bp_systolic_min,
+        vr.bp_systolic_max,
+        vr.bp_diastolic_min,
+        vr.bp_diastolic_max,
         vr.date_created,
         vr.date_updated,
         vr.owner_id as created_by,
@@ -549,8 +564,13 @@ export const createRule = async (
         crf_id, crf_version_id, item_id, name, description, rule_type,
         field_path, severity, error_message, warning_message, active,
         min_value, max_value, pattern, format_type, operator, compare_field_path,
-        custom_expression, date_created, owner_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15, $16, $17, CURRENT_TIMESTAMP, $18)
+        custom_expression,
+        bp_systolic_min, bp_systolic_max, bp_diastolic_min, bp_diastolic_max,
+        date_created, owner_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true,
+                $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21,
+                CURRENT_TIMESTAMP, $22)
       RETURNING validation_rule_id
     `;
 
@@ -568,13 +588,18 @@ export const createRule = async (
       rule.severity || 'error',
       rule.errorMessage,
       rule.warningMessage || null,
-      rule.minValue || null,
-      rule.maxValue || null,
+      rule.minValue ?? null,
+      rule.maxValue ?? null,
       rule.pattern || null,
       rule.formatType || null,
       rule.operator || null,
       rule.compareFieldPath || null,
       rule.customExpression || null,
+      // Blood pressure per-component limits (db columns: bp_systolic_min/max, bp_diastolic_min/max)
+      rule.bpSystolicMin ?? null,
+      rule.bpSystolicMax ?? null,
+      rule.bpDiastolicMin ?? null,
+      rule.bpDiastolicMax ?? null,
       userId
     ]);
 
@@ -636,9 +661,13 @@ export const updateRule = async (
         operator = $12,
         compare_field_path = $13,
         custom_expression = $14,
+        bp_systolic_min = $15,
+        bp_systolic_max = $16,
+        bp_diastolic_min = $17,
+        bp_diastolic_max = $18,
         date_updated = CURRENT_TIMESTAMP,
-        update_id = $15
-      WHERE validation_rule_id = $16
+        update_id = $19
+      WHERE validation_rule_id = $20
     `;
 
     await client.query(updateQuery, [
@@ -656,6 +685,10 @@ export const updateRule = async (
       updates.operator ?? null,
       updates.compareFieldPath ?? null,
       updates.customExpression ?? null,
+      updates.bpSystolicMin ?? null,
+      updates.bpSystolicMax ?? null,
+      updates.bpDiastolicMin ?? null,
+      updates.bpDiastolicMax ?? null,
       userId,
       ruleId
     ]);
@@ -1471,8 +1504,9 @@ async function createValidationQuery(params: {
       }
     }
 
-    // Broader dedup: check by event_crf + rule name OR event_crf + field path
-    // This catches duplicates even when itemDataId couldn't be resolved.
+    // Broader dedup: check by event_crf + rule name OR event_crf + field path.
+    // Uses name-based resolution_status lookup (consistent with narrower dedup above)
+    // instead of fragile hardcoded status IDs.
     if (params.eventCrfId) {
       const isWarning = params.severity === 'warning';
       const expectedDesc = isWarning
@@ -1482,9 +1516,10 @@ async function createValidationQuery(params: {
         SELECT dn.discrepancy_note_id
         FROM discrepancy_note dn
         INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
+        INNER JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
         WHERE decm.event_crf_id = $1
           AND (dn.description = $2 OR dn.detailed_notes LIKE $3)
-          AND dn.resolution_status_id IN (1, 2)
+          AND rs.name NOT IN ('Closed', 'Not Applicable')
           AND dn.parent_dn_id IS NULL
         LIMIT 1
       `, [params.eventCrfId, expectedDesc, `Field: ${params.fieldPath}%`]);
@@ -1685,7 +1720,7 @@ function applyRule(
   rule: ValidationRule,
   value: any,
   allData: Record<string, any>
-): { valid: boolean } {
+): { valid: boolean; message?: string } {
   // Handle null/undefined values
   if (value === null || value === undefined || value === '') {
     if (rule.ruleType === 'required') {
@@ -1751,11 +1786,17 @@ function applyRule(
       // Yes/No values are not numeric — range validation doesn't apply
       if (isYesNo) return { valid: true };
       
-      // Blood pressure composites: validate systolic and diastolic parts independently
+      // Blood pressure composites: validate systolic and diastolic parts independently.
+      // The rule can carry per-component limits via bpSystolicMin/Max and bpDiastolicMin/Max.
+      // If those are not set, fall back to clinical defaults (systolic: 60-250, diastolic: 30-150).
       if (isBloodPressure) {
         const [sys, dia] = (value as string).split('/').map(Number);
-        if (rule.minValue !== undefined && (sys < rule.minValue || dia < rule.minValue)) return { valid: false };
-        if (rule.maxValue !== undefined && (sys > rule.maxValue || dia > rule.maxValue)) return { valid: false };
+        const sysMin = rule.bpSystolicMin ?? rule.minValue ?? 60;
+        const sysMax = rule.bpSystolicMax ?? rule.maxValue ?? 250;
+        const diaMin = rule.bpDiastolicMin ?? 30;
+        const diaMax = rule.bpDiastolicMax ?? 150;
+        if (sys < sysMin || sys > sysMax) return { valid: false, message: `Systolic (${sys}) must be between ${sysMin} and ${sysMax} mmHg` };
+        if (dia < diaMin || dia > diaMax) return { valid: false, message: `Diastolic (${dia}) must be between ${diaMin} and ${diaMax} mmHg` };
         return { valid: true };
       }
       
@@ -2018,6 +2059,11 @@ function mapDbRowToRule(row: any): ValidationRule {
     operator: row.operator,
     compareFieldPath: row.compare_field_path,
     customExpression: row.custom_expression,
+    // Blood pressure per-component limits
+    bpSystolicMin: row.bp_systolic_min != null ? Number(row.bp_systolic_min) : undefined,
+    bpSystolicMax: row.bp_systolic_max != null ? Number(row.bp_systolic_max) : undefined,
+    bpDiastolicMin: row.bp_diastolic_min != null ? Number(row.bp_diastolic_min) : undefined,
+    bpDiastolicMax: row.bp_diastolic_max != null ? Number(row.bp_diastolic_max) : undefined,
     dateCreated: row.date_created,
     dateUpdated: row.date_updated,
     createdBy: row.created_by || row.owner_id,

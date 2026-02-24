@@ -465,7 +465,8 @@ const createSubjectDirect = async (
             // Create event_crf records for all CRFs assigned to this phase
             // This implements the COPY FORM TEMPLATES (eCRFs) requirement
             const crfAssignments = await client.query(`
-              SELECT edc.crf_id, edc.default_version_id, c.name as crf_name
+              SELECT edc.crf_id, edc.default_version_id, c.name as crf_name,
+                     edc.ordinal as edc_ordinal
               FROM event_definition_crf edc
               INNER JOIN crf c ON edc.crf_id = c.crf_id
               WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
@@ -491,9 +492,12 @@ const createSubjectDirect = async (
                   if (versionResult.rows.length > 0) {
                     crfVersionId = versionResult.rows[0].crf_version_id;
                   } else {
-                    logger.warn(`⚠️ Form "${crfAssign.crf_name}" has no available versions`, {
-                      crfId: crfAssign.crf_id
-                    });
+                    // Throw rather than silently skip — a CRF with no versions is a data integrity
+                    // error that must be resolved before patients can be enrolled.
+                    throw new Error(
+                      `Form "${crfAssign.crf_name}" (CRF ID: ${crfAssign.crf_id}) has no active versions. ` +
+                      `Create a version for this form before enrolling patients.`
+                    );
                   }
                 }
                 
@@ -511,12 +515,17 @@ const createSubjectDirect = async (
                   phaseFormsCreated++;
                   totalFormsCreated++;
                   
-                  // Create patient_event_form snapshot (frozen copy of form structure)
+                  // Create patient_event_form snapshot (frozen copy of form structure at enrollment).
+                  // Uses edc.ordinal (the template-defined display order) for the snapshot ordinal,
+                  // not phaseFormsCreated (which would be wrong if a prior form fails mid-loop).
+                  // NOTE: getFormMetadata() inside createPatientFormSnapshotForEnrollment uses pool.query
+                  // (outside this transaction) — this is intentional: the CRF was committed in a prior
+                  // transaction and is visible to other connections.
                   try {
                     await createPatientFormSnapshotForEnrollment(
                       client, studyEventId, eventCrfId,
                       crfAssign.crf_id, crfVersionId, studySubjectId,
-                      crfAssign.crf_name, phaseFormsCreated, userId
+                      crfAssign.crf_name, crfAssign.edc_ordinal ?? phaseFormsCreated, userId
                     );
                   } catch (snapErr: any) {
                     logger.warn('Form snapshot warning (non-blocking)', { error: snapErr.message });
@@ -530,11 +539,15 @@ const createSubjectDirect = async (
                   });
                 }
               } catch (crfError: any) {
-                logger.warn('❌ Failed to create event_crf', {
+                // Re-throw so the outer transaction rolls back — partial enrollment
+                // is worse than failed enrollment because it leaves the patient
+                // with incomplete visit/form assignments.
+                logger.error('❌ Failed to create event_crf — rolling back enrollment', {
                   crfId: crfAssign.crf_id,
                   crfName: crfAssign.crf_name,
                   error: crfError.message
                 });
+                throw crfError;
               }
             }
             

@@ -17,16 +17,16 @@ import { ApiResponse } from '../types';
 export const getRulesForCrf = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { crfId } = req.params;
+    const parsedCrfId = parseInt(crfId, 10);
+    if (isNaN(parsedCrfId) || parsedCrfId <= 0) {
+      res.status(400).json({ success: false, message: 'crfId must be a positive integer' });
+      return;
+    }
     const caller = (req as any).user;
 
-    const rules = await validationRulesService.getRulesForCrf(parseInt(crfId), caller?.userId);
+    const rules = await validationRulesService.getRulesForCrf(parsedCrfId, caller?.userId);
 
-    const response: ApiResponse = {
-      success: true,
-      data: rules
-    };
-
-    res.json(response);
+    res.json({ success: true, data: rules, message: `${rules.length} rule(s) found` });
   } catch (error) {
     logger.error('Get CRF validation rules error:', error);
     next(error);
@@ -39,16 +39,16 @@ export const getRulesForCrf = async (req: Request, res: Response, next: NextFunc
 export const getRulesForStudy = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { studyId } = req.params;
+    const parsedStudyId = parseInt(studyId, 10);
+    if (isNaN(parsedStudyId) || parsedStudyId <= 0) {
+      res.status(400).json({ success: false, message: 'studyId must be a positive integer' });
+      return;
+    }
     const caller = (req as any).user;
 
-    const rules = await validationRulesService.getRulesForStudy(parseInt(studyId), caller?.userId);
+    const rules = await validationRulesService.getRulesForStudy(parsedStudyId, caller?.userId);
 
-    const response: ApiResponse = {
-      success: true,
-      data: rules
-    };
-
-    res.json(response);
+    res.json({ success: true, data: rules });
   } catch (error) {
     logger.error('Get study validation rules error:', error);
     next(error);

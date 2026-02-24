@@ -15,10 +15,12 @@
  */
 
 import { Router } from 'express';
+import Joi from 'joi';
 import * as controller from '../controllers/validation-rules.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireSignatureFor } from '../middleware/part11.middleware';
+import { validate, validationRuleSchemas } from '../middleware/validation.middleware';
 
 const router = Router();
 
@@ -27,78 +29,92 @@ router.use(authMiddleware);
 
 // ============================================
 // FORM INSTANCE (EVENT_CRF) VALIDATION ROUTES
-// These apply validation rules to form copies on patients
 // ============================================
 
-// Get validation rules for a form instance (event_crf)
-// Used when loading a form to apply rules to ALL copies
-router.get('/event-crf/:eventCrfId/rules', controller.getRulesForEventCrf);
+const eventCrfIdParam = Joi.object({ eventCrfId: Joi.number().integer().positive().required() });
+const crfIdParam = Joi.object({ crfId: Joi.number().integer().positive().required() });
+const ruleIdParam = Joi.object({ ruleId: Joi.number().integer().positive().required() });
 
-// Validate a form instance (event_crf) - validates all data in the form
-// Optionally creates queries for validation failures
-router.post('/event-crf/:eventCrfId/validate', controller.validateEventCrf);
+router.get('/event-crf/:eventCrfId/rules',
+  validate({ params: eventCrfIdParam }),
+  controller.getRulesForEventCrf
+);
 
-// Validate a single field change - for real-time validation on field blur/change
-// This is the primary endpoint for triggering validation on CRUD operations
-router.post('/validate-field', controller.validateFieldChange);
+router.post('/event-crf/:eventCrfId/validate',
+  validate({ params: eventCrfIdParam, body: validationRuleSchemas.validateForm }),
+  controller.validateEventCrf
+);
+
+// Validate a single field change (real-time, on field blur)
+router.post('/validate-field',
+  validate({ body: validationRuleSchemas.validateField }),
+  controller.validateFieldChange
+);
 
 // ============================================
 // TEMPLATE-LEVEL VALIDATION ROUTES
-// These manage validation rules on CRF templates
 // ============================================
 
-// Get validation rules for a CRF template
-router.get('/crf/:crfId', controller.getRulesForCrf);
+router.get('/crf/:crfId', validate({ params: crfIdParam }), controller.getRulesForCrf);
+router.get('/study/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), controller.getRulesForStudy);
 
-// Get validation rules for a study (all CRFs)
-router.get('/study/:studyId', controller.getRulesForStudy);
-
-// Get a single rule
-router.get('/:ruleId', controller.getRule);
-
-// Create a new rule (admin/coordinator only + signature)
-router.post('/', 
-  requireRole('admin', 'data_manager'), 
-  requireSignatureFor('I authorize creation of this validation rule'),
-  controller.createRule
-);
-
-// Update a rule (signature required)
-router.put('/:ruleId', 
-  requireRole('admin', 'data_manager'), 
-  requireSignatureFor('I authorize modification of this validation rule'),
-  controller.updateRule
-);
-
-// Toggle rule active state (signature required)
-router.patch('/:ruleId/toggle', 
-  requireRole('admin', 'data_manager'), 
-  requireSignatureFor('I authorize toggling this validation rule'),
-  controller.toggleRule
-);
-
-// Delete a rule (admin only + signature)
-router.delete('/:ruleId', 
-  requireRole('admin'), 
-  requireSignatureFor('I authorize deletion of this validation rule'),
-  controller.deleteRule
-);
-
-// Validate form data against rules (for templates - no form instance context)
-router.post('/validate/:crfId', controller.validateData);
-
-// Test a rule (no signature - read-only operation)
-router.post('/test', controller.testRule);
-
-// Serve the shared format type definitions so the frontend can stay in sync
+// /format-types MUST be registered before /:ruleId — Express matches routes in order and
+// /:ruleId would shadow any static path segment like /format-types.
 router.get('/format-types', (_req, res) => {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const formatTypes = require('../../config/format-types.json');
     res.json({ success: true, data: formatTypes });
   } catch {
     res.status(500).json({ success: false, message: 'Failed to load format types' });
   }
 });
+
+router.get('/:ruleId', validate({ params: ruleIdParam }), controller.getRule);
+
+// Create a new rule
+router.post('/',
+  requireRole('admin', 'data_manager'),
+  requireSignatureFor('I authorize creation of this validation rule'),
+  validate({ body: validationRuleSchemas.create }),
+  controller.createRule
+);
+
+// Update a rule
+router.put('/:ruleId',
+  requireRole('admin', 'data_manager'),
+  requireSignatureFor('I authorize modification of this validation rule'),
+  validate({ params: ruleIdParam, body: validationRuleSchemas.update }),
+  controller.updateRule
+);
+
+// Toggle rule active state
+router.patch('/:ruleId/toggle',
+  requireRole('admin', 'data_manager'),
+  requireSignatureFor('I authorize toggling this validation rule'),
+  validate({ params: ruleIdParam }),
+  controller.toggleRule
+);
+
+// Delete a rule
+router.delete('/:ruleId',
+  requireRole('admin'),
+  requireSignatureFor('I authorize deletion of this validation rule'),
+  validate({ params: ruleIdParam }),
+  controller.deleteRule
+);
+
+// Validate form data against CRF rules (template-level, no form instance)
+router.post('/validate/:crfId',
+  validate({ params: crfIdParam, body: validationRuleSchemas.validateForm }),
+  controller.validateData
+);
+
+// Test a rule against a value (read-only)
+router.post('/test',
+  validate({ body: validationRuleSchemas.testRule }),
+  controller.testRule
+);
 
 export default router;
 

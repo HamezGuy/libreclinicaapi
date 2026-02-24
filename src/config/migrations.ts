@@ -48,6 +48,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'study_extended_columns', fn: createStudyExtendedColumns },
     { name: 'study_group_class_extended', fn: createStudyGroupClassExtendedColumns },
     { name: 'event_crf_extended', fn: createEventCrfExtendedColumns },
+    { name: 'patient_event_form_unique_constraint', fn: addPatientEventFormUniqueConstraint },
   ];
 
   let successCount = 0;
@@ -1159,6 +1160,11 @@ async function createValidationRulesTable(pool: any): Promise<void> {
       operator VARCHAR(20),
       compare_field_path VARCHAR(255),
       custom_expression TEXT,
+      -- Blood pressure per-component validation limits
+      bp_systolic_min NUMERIC,
+      bp_systolic_max NUMERIC,
+      bp_diastolic_min NUMERIC,
+      bp_diastolic_max NUMERIC,
       date_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       date_updated TIMESTAMP,
       owner_id INTEGER,
@@ -1175,6 +1181,11 @@ async function createValidationRulesTable(pool: any): Promise<void> {
     { name: 'operator', type: 'VARCHAR(20)' },
     { name: 'compare_field_path', type: 'VARCHAR(255)' },
     { name: 'custom_expression', type: 'TEXT' },
+    // Blood pressure per-component limits — added in a later migration, backfilled here
+    { name: 'bp_systolic_min', type: 'NUMERIC' },
+    { name: 'bp_systolic_max', type: 'NUMERIC' },
+    { name: 'bp_diastolic_min', type: 'NUMERIC' },
+    { name: 'bp_diastolic_max', type: 'NUMERIC' },
   ];
   for (const col of columnsToAdd) {
     try {
@@ -1363,4 +1374,22 @@ async function createEventCrfExtendedColumns(pool: any): Promise<void> {
   }
 
   logger.info('Event CRF extended columns verified');
+}
+
+// ============================================================================
+// Patient Event Form — unique constraint on event_crf_id (needed for UPSERT)
+// ============================================================================
+async function addPatientEventFormUniqueConstraint(pool: any): Promise<void> {
+  try {
+    // Add unique index idempotently — CREATE UNIQUE INDEX IF NOT EXISTS is safe
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pef_event_crf_unique
+      ON patient_event_form (event_crf_id)
+      WHERE event_crf_id IS NOT NULL
+    `);
+    logger.info('patient_event_form unique index on event_crf_id verified');
+  } catch (e: any) {
+    // Index or table may not exist yet — non-fatal
+    logger.warn('patient_event_form unique index migration warning:', e.message);
+  }
 }

@@ -32,20 +32,31 @@ export const saveData = asyncHandler(async (req: Request, res: Response) => {
 
 export const getData = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const parsedId = parseInt(eventCrfId, 10);
+  if (isNaN(parsedId) || parsedId <= 0) {
+    res.status(400).json({ success: false, message: 'eventCrfId must be a positive integer' });
+    return;
+  }
   const user = (req as any).user;
 
-  const result = await formService.getFormData(parseInt(eventCrfId));
+  const result = await formService.getFormData(parsedId);
 
-  // Track form view
+  // result is { data: rows[], lockStatus: {} } — return 404 only if nothing came back at all
+  if (!result) {
+    res.status(404).json({ success: false, message: 'Form data not found' });
+    return;
+  }
+
+  // Track form view (non-blocking)
   if (user?.userId) {
-    await trackDocumentAccess(
+    trackDocumentAccess(
       user.userId,
       user.username || user.userName,
       'event_crf',
-      parseInt(eventCrfId),
+      parsedId,
       undefined,
       'view'
-    );
+    ).catch(() => {}); // fire-and-forget, do not fail the response
   }
 
   res.json({ success: true, data: result });
@@ -53,25 +64,30 @@ export const getData = asyncHandler(async (req: Request, res: Response) => {
 
 export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
   const { crfId } = req.params;
+  const parsedId = parseInt(crfId, 10);
+  if (isNaN(parsedId) || parsedId <= 0) {
+    res.status(400).json({ success: false, message: 'crfId must be a positive integer' });
+    return;
+  }
   const user = (req as any).user;
 
-  const result = await formService.getFormMetadata(parseInt(crfId));
+  const result = await formService.getFormMetadata(parsedId);
 
   if (!result) {
     res.status(404).json({ success: false, message: 'Form not found' });
     return;
   }
 
-  // Track document access (21 CFR Part 11)
+  // Track document access (21 CFR Part 11) — non-blocking
   if (user?.userId) {
-    await trackDocumentAccess(
+    trackDocumentAccess(
       user.userId,
       user.username || user.userName,
       'crf',
-      parseInt(crfId),
+      parsedId,
       result.crf?.name,
       'view'
-    );
+    ).catch(() => {});
   }
 
   res.json({ success: true, data: result });
@@ -79,11 +95,16 @@ export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
 
 export const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const parsedId = parseInt(eventCrfId, 10);
+  if (isNaN(parsedId) || parsedId <= 0) {
+    res.status(400).json({ success: false, message: 'eventCrfId must be a positive integer' });
+    return;
+  }
 
-  const result = await formService.getFormStatus(parseInt(eventCrfId));
+  const result = await formService.getFormStatus(parsedId);
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'Form not found' });
+    res.status(404).json({ success: false, message: 'Form instance not found' });
     return;
   }
 
@@ -397,34 +418,48 @@ export const fork = asyncHandler(async (req: Request, res: Response) => {
  */
 export const updateField = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const parsedId = parseInt(eventCrfId, 10);
+  if (isNaN(parsedId) || parsedId <= 0) {
+    res.status(400).json({ success: false, message: 'eventCrfId must be a positive integer' });
+    return;
+  }
   const { fieldName, value, createQueries } = req.body;
   const user = (req as any).user;
 
-  if (!fieldName) {
-    res.status(400).json({ success: false, message: 'fieldName is required' });
+  // fieldName is validated by Joi middleware — but double-check here for safety
+  if (!fieldName || typeof fieldName !== 'string') {
+    res.status(400).json({ success: false, message: 'fieldName must be a non-empty string' });
     return;
   }
 
   const result = await formService.updateFieldData(
-    parseInt(eventCrfId),
+    parsedId,
     fieldName,
     value,
     user.userId,
     { validateOnly: false, createQueries: createQueries === true }
   );
 
+  // Return appropriate HTTP status based on error type
+  let status = 200;
+  if (!result.success) {
+    if (result.message?.includes('not found')) status = 404;
+    else if (result.errors?.includes('RECORD_LOCKED')) status = 403;
+    else status = 400;
+  }
+
   if (result.success) {
-    await trackUserAction({
+    trackUserAction({
       userId: user.userId,
       username: user.username || user.userName,
       action: 'FIELD_UPDATED',
       entityType: 'item_data',
       entityId: result.data?.itemDataId,
-      details: `Updated field "${fieldName}" in form ${eventCrfId}`
-    });
+      details: `Updated field "${fieldName}" in form ${parsedId}`
+    }).catch(() => {});
   }
 
-  res.status(result.success ? 200 : 400).json(result);
+  res.status(status).json(result);
 });
 
 /**
@@ -440,16 +475,22 @@ export const updateField = asyncHandler(async (req: Request, res: Response) => {
  */
 export const validateField = asyncHandler(async (req: Request, res: Response) => {
   const { eventCrfId } = req.params;
+  const parsedId = parseInt(eventCrfId, 10);
+  if (isNaN(parsedId) || parsedId <= 0) {
+    res.status(400).json({ success: false, message: 'eventCrfId must be a positive integer' });
+    return;
+  }
   const { fieldName, value, createQueries } = req.body;
   const user = (req as any).user;
 
-  if (!fieldName) {
-    res.status(400).json({ success: false, message: 'fieldName is required' });
+  // fieldName validated by Joi middleware; double-guard here
+  if (!fieldName || typeof fieldName !== 'string') {
+    res.status(400).json({ success: false, message: 'fieldName must be a non-empty string' });
     return;
   }
 
   const result = await formService.updateFieldData(
-    parseInt(eventCrfId),
+    parsedId,
     fieldName,
     value,
     user.userId,

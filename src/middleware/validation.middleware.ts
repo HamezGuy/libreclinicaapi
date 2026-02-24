@@ -300,6 +300,11 @@ export const formSchemas = {
     version: Joi.string().optional().max(30).allow(''),
     status: Joi.string().optional().valid('draft', 'published', 'archived'),
     fields: Joi.array().items(Joi.object().unknown(true)).optional(),
+    sections: Joi.array().items(Joi.object({
+      id: Joi.string().optional(),
+      name: Joi.string().required().max(255),
+      ordinal: Joi.number().integer().min(0).optional(),
+    }).unknown(true)).optional(),
     editChecks: Joi.array().items(Joi.object().unknown(true)).optional(),
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
@@ -344,7 +349,166 @@ export const formSchemas = {
 
   listForms: Joi.object({
     studyId: Joi.number().integer().positive().required()
-  })
+  }),
+
+  // PUT /api/forms/:id — update an existing form/CRF template
+  update: Joi.object({
+    name: Joi.string().optional().min(1).max(255),
+    description: Joi.string().optional().max(10000).allow(''),
+    studyId: Joi.number().integer().positive().optional(),
+    category: Joi.string().optional().max(64).allow(''),
+    version: Joi.string().optional().max(30).allow(''),
+    status: Joi.string().optional().valid('draft', 'published', 'archived'),
+    fields: Joi.array().items(Joi.object().unknown(true)).optional(),
+    sections: Joi.array().items(Joi.object({
+      id: Joi.string().optional(),
+      name: Joi.string().required().max(255),
+      ordinal: Joi.number().integer().min(0).optional()
+    })).optional(),
+    editChecks: Joi.array().items(Joi.object().unknown(true)).optional(),
+    // 21 CFR Part 11
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500),
+  }),
+
+  // PUT /api/forms/workflow-config/:crfId
+  workflowConfig: Joi.object({
+    requiresSDV: Joi.boolean().optional(),
+    requiresSignature: Joi.boolean().optional(),
+    requiresDDE: Joi.boolean().optional(),
+    queryRouteToUsers: Joi.array().items(Joi.number().integer().positive()).optional(),
+    sdvPercentage: Joi.number().min(0).max(100).optional(),
+    sdvType: Joi.string().valid('full', 'partial', 'none').optional(),
+    autoLockOnComplete: Joi.boolean().optional(),
+  }),
+
+  // PATCH /api/forms/field/:eventCrfId — single-field update
+  fieldPatch: Joi.object({
+    fieldName: Joi.string().required().max(255),
+    value: Joi.any().required(),
+    itemId: Joi.number().integer().positive().optional(),
+    reasonForChange: Joi.string().optional().max(500).allow(''),
+  }),
+
+  // POST /api/forms/validate-field/:eventCrfId
+  validateField: Joi.object({
+    fieldName: Joi.string().required().max(255),
+    value: Joi.any().required(),
+    itemId: Joi.number().integer().positive().optional(),
+    allFormData: Joi.object().optional(),
+  }),
+};
+
+// ============================================================================
+// Validation Rules Schemas
+// ============================================================================
+export const validationRuleSchemas = {
+  // Common ShowWhen / branching condition shape
+  showWhenCondition: Joi.object({
+    fieldId: Joi.string().required().max(255),
+    operator: Joi.string().required().max(64),
+    value: Joi.any().optional(),
+    value2: Joi.any().optional(),
+    logicalOperator: Joi.string().valid('AND', 'OR').optional()
+  }),
+
+  // POST /api/validation-rules/  — create a validation rule
+  create: Joi.object({
+    crfId: Joi.number().integer().positive().required(),
+    itemId: Joi.number().integer().positive().optional(),
+    fieldPath: Joi.string().required().max(255),
+    ruleType: Joi.string().valid(
+      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula'
+    ).required(),
+    severity: Joi.string().valid('error', 'warning').required(),
+    errorMessage: Joi.string().required().max(1000),
+    // warningMessage: alias used by the validation-rules-config UI component
+    warningMessage: Joi.string().optional().max(1000).allow(''),
+    name: Joi.string().optional().max(255).allow(''),
+    description: Joi.string().optional().max(2000).allow(''),
+    active: Joi.boolean().optional().default(true),
+    // Range rule
+    minValue: Joi.number().optional(),
+    maxValue: Joi.number().optional(),
+    // Format rule
+    pattern: Joi.string().optional().max(2000).allow(''),
+    formatType: Joi.string().optional().max(100).allow(''),
+    // Consistency / cross-form rule
+    operator: Joi.string().optional().max(64).allow(''),
+    compareFieldPath: Joi.string().optional().max(255).allow(''),
+    // Formula rule
+    customExpression: Joi.string().optional().max(5000).allow(''),
+    // Blood pressure per-component limits
+    bpSystolicMin: Joi.number().optional(),
+    bpSystolicMax: Joi.number().optional(),
+    bpDiastolicMin: Joi.number().optional(),
+    bpDiastolicMax: Joi.number().optional(),
+    // Signature
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500),
+    // Extra fields the UI may send (accepted, not required)
+    crfVersionId: Joi.number().integer().positive().optional(),
+    itemOid: Joi.string().optional().max(255).allow(''),
+  }),
+
+  // PUT /api/validation-rules/:ruleId — update a rule (all fields optional)
+  update: Joi.object({
+    fieldPath: Joi.string().optional().max(255),
+    ruleType: Joi.string().valid(
+      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula'
+    ).optional(),
+    severity: Joi.string().valid('error', 'warning').optional(),
+    errorMessage: Joi.string().optional().max(1000),
+    name: Joi.string().optional().max(255).allow(''),
+    description: Joi.string().optional().max(2000).allow(''),
+    active: Joi.boolean().optional(),
+    minValue: Joi.number().optional().allow(null),
+    maxValue: Joi.number().optional().allow(null),
+    pattern: Joi.string().optional().max(2000).allow('', null),
+    formatType: Joi.string().optional().max(100).allow('', null),
+    operator: Joi.string().optional().max(64).allow('', null),
+    compareFieldPath: Joi.string().optional().max(255).allow('', null),
+    customExpression: Joi.string().optional().max(5000).allow('', null),
+    bpSystolicMin: Joi.number().optional().allow(null),
+    bpSystolicMax: Joi.number().optional().allow(null),
+    bpDiastolicMin: Joi.number().optional().allow(null),
+    bpDiastolicMax: Joi.number().optional().allow(null),
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500),
+  }),
+
+  // POST /api/validation-rules/validate/:crfId — validate all fields for a CRF
+  validateForm: Joi.object({
+    formData: Joi.object().required(),
+    eventCrfId: Joi.number().integer().positive().optional(),
+    studySubjectId: Joi.number().integer().positive().optional(),
+    createQueries: Joi.boolean().optional().default(false),
+  }),
+
+  // POST /api/validation-rules/test — test a rule against a value
+  testRule: Joi.object({
+    ruleId: Joi.number().integer().positive().optional(),
+    rule: Joi.object().optional(),
+    value: Joi.any().required(),
+    allFormData: Joi.object().optional(),
+  }),
+
+  // POST /api/validation-rules/validate-field
+  validateField: Joi.object({
+    crfId: Joi.number().integer().positive().required(),
+    fieldPath: Joi.string().required().max(255),
+    value: Joi.any().required(),
+    itemId: Joi.number().integer().positive().optional(),
+    allFormData: Joi.object().optional(),
+    eventCrfId: Joi.number().integer().positive().optional(),
+    createQueries: Joi.boolean().optional().default(false),
+  }),
 };
 
 // ============================================================================

@@ -389,15 +389,17 @@ const saveFormDataDirect = async (
     }
 
     // 4. Resolve the actual crf_version_id to query items against.
-    // If we reused an existing event_crf (strategies A-C), its version may differ
-    // from the latest active version. Use the version attached to the event_crf.
-    let resolvedVersionId = crfVersionId;
-    if (request.eventCrfId && eventCrfId === request.eventCrfId) {
+    // ALWAYS use the version attached to the resolved event_crf, not the latest active version.
+    // An existing event_crf may have been created with an older CRF version; using the wrong
+    // version means we query the wrong items and fail to match all field names.
+    let resolvedVersionId = crfVersionId; // default: latest active version (used for new event_crfs)
+    if (eventCrfId) {
       const ecVersionResult = await client.query(
         `SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1`, [eventCrfId]
       );
       if (ecVersionResult.rows.length > 0 && ecVersionResult.rows[0].crf_version_id) {
         resolvedVersionId = ecVersionResult.rows[0].crf_version_id;
+        logger.debug('Resolved crf_version_id from event_crf', { eventCrfId, resolvedVersionId });
       }
     }
 
@@ -446,8 +448,22 @@ const saveFormDataDirect = async (
     }
 
     for (const [fieldName, value] of Object.entries(formData)) {
-      // Find the item_id for this field - try multiple matching strategies
+      // Find the item_id for this field - try multiple matching strategies:
+      // 1. Exact key as sent by frontend
+      // 2. Lowercase variant
+      // 3. Strip Angular deduplication suffix (e.g. "pain_level_abc123" → "pain_level")
       let itemId = itemMap.get(fieldName.toLowerCase()) ?? itemMap.get(fieldName);
+
+      if (!itemId) {
+        // Strip Angular deduplication suffix: the frontend appends exactly 6 random base-36
+        // chars (Math.random().toString(36).substr(2, 6)) when two fields share the same name.
+        // Using exactly {6} avoids truncating legitimate field names that end with short words
+        // like _type (4), _date (4), _level (5), _site (4).
+        const stripped = fieldName.replace(/_[a-z0-9]{6}$/, '');
+        if (stripped !== fieldName) {
+          itemId = itemMap.get(stripped.toLowerCase()) ?? itemMap.get(stripped);
+        }
+      }
 
       if (!itemId) {
         skippedCount++;
@@ -591,20 +607,46 @@ const saveFormDataDirect = async (
     });
 
     // 6b. Also persist form data to patient_event_form.form_data (JSONB snapshot).
-    // This provides a secondary data source and keeps the snapshot in sync.
+    // Uses INSERT ... ON CONFLICT so new event_crf rows (Strategy D) also get a snapshot row.
     try {
+      // Build a canonical key→value map using item.name (DB canonical name) as key
+      // so the fallback read path in getFormData() resolves correctly regardless of
+      // whether the frontend sent deduplicated keys.
+      const canonicalFormData: Record<string, any> = {};
+      for (const [fieldName, value] of Object.entries(formData)) {
+        // Strip exactly-6-char base-36 dedup suffix (see saveFormDataDirect item lookup)
+        const canonical = fieldName.replace(/_[a-z0-9]{6}$/, '');
+        canonicalFormData[canonical] = value;
+      }
+
       await pool.query(`
-        UPDATE patient_event_form
-        SET form_data = $1::jsonb,
-            completion_status = CASE WHEN $2 = 0 THEN 'not_started' WHEN $3 THEN 'complete' ELSE 'in_progress' END,
-            date_updated = NOW(),
-            updated_by = $4
-        WHERE event_crf_id = $5
-      `, [JSON.stringify(formData), savedCount, savedCount >= (totalItems || 999), userId, eventCrfId]);
-      logger.debug('Updated patient_event_form.form_data', { eventCrfId, fieldCount: Object.keys(formData).length });
+        INSERT INTO patient_event_form (
+          study_event_id, event_crf_id, crf_id, crf_version_id,
+          study_subject_id, form_name, form_structure, form_data,
+          completion_status, ordinal, created_by, date_created, date_updated, updated_by
+        )
+        SELECT
+          $1, $2, cv.crf_id, $3,
+          ec.study_subject_id,
+          c.name, '{"snapshotDate":"' || NOW()::text || '"}'::jsonb, $4::jsonb,
+          CASE WHEN $5 = 0 THEN 'not_started' WHEN $6 THEN 'complete' ELSE 'in_progress' END,
+          1, $7, NOW(), NOW(), $7
+        FROM event_crf ec
+        JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        JOIN crf c ON cv.crf_id = c.crf_id
+        WHERE ec.event_crf_id = $2
+        ON CONFLICT (event_crf_id) WHERE event_crf_id IS NOT NULL DO UPDATE
+          SET form_data     = EXCLUDED.form_data,
+              completion_status = EXCLUDED.completion_status,
+              date_updated  = NOW(),
+              updated_by    = $7
+      `, [studyEventId, eventCrfId, resolvedVersionId,
+          JSON.stringify(canonicalFormData),
+          savedCount, savedCount >= (totalItems || 999), userId]);
+      logger.debug('Upserted patient_event_form.form_data', { eventCrfId, fieldCount: Object.keys(canonicalFormData).length });
     } catch (snapUpdateError: any) {
       // Non-blocking - item_data is the primary store
-      logger.warn('Failed to update patient_event_form.form_data (non-blocking)', { error: snapUpdateError.message });
+      logger.warn('Failed to upsert patient_event_form.form_data (non-blocking)', { error: snapUpdateError.message });
     }
 
     // 7. AUTO-TRIGGER WORKFLOW — deduplicated
@@ -933,6 +975,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         rs.options_values,
         rt.name as response_type,
         -- Section info
+        s.section_id as section_id,
         s.label as section_name
       FROM item i
       INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
@@ -1144,6 +1187,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         ordinal: item.ordinal,
         order: item.ordinal,
         section: item.section_name,
+        section_id: item.section_id,
         group_name: item.group_name,
         width: extendedProps.width || 'full',
         columnPosition: item.column_number || extendedProps.columnPosition || 1,
@@ -1766,7 +1810,6 @@ interface FormField {
   width?: 'full' | 'half' | 'third' | 'quarter';
   columnPosition?: 'left' | 'right' | 'center';
   order?: number;
-  section?: string;
   groupId?: string;
   
   // Calculated Fields
@@ -1835,6 +1878,10 @@ interface FormField {
   
   // Column number (layout)
   columnNumber?: number;
+
+  // Section assignment — can be a client UUID (from form builder) or a section display name.
+  // formLinks is already declared above alongside linkedFormId/linkedFormName.
+  section?: string;
 }
 
 /**
@@ -1871,6 +1918,9 @@ const serializeExtendedProperties = (field: FormField): string => {
     width: field.width,
     columnPosition: field.columnPosition,
     groupId: field.groupId,
+    // Client-side section identifier — preserved for round-trip so the UI can
+    // rebuild section panels when the form is reloaded.
+    section: field.section,
     
     // Calculated
     calculationFormula: field.calculationFormula,
@@ -1906,8 +1956,13 @@ const serializeExtendedProperties = (field: FormField): string => {
     // Readonly
     readonly: field.readonly || field.isReadonly,
     
-    // Table field properties
-    tableColumns: field.tableColumns,
+    // Table field properties — ensure every column has a stable key before serializing
+    tableColumns: field.tableColumns?.map((col: any) => ({
+      ...col,
+      // key is the stable storage identifier (set at column creation time).
+      // If missing (legacy columns), derive it from name or a truncated id.
+      key: col.key || col.name || (col.id ? String(col.id).substring(0, 32) : `col_${Math.random().toString(36).substr(2, 8)}`)
+    })),
     tableRows: field.tableRows,
     tableSettings: field.tableSettings,
     
@@ -2113,21 +2168,62 @@ export const createForm = async (
 
     // Create fields if provided
     if (data.fields && data.fields.length > 0) {
-      // Create a default section for the form
-      const sectionResult = await client.query(`
-        INSERT INTO section (
-          crf_version_id, status_id, label, title, ordinal, owner_id, date_created
-        ) VALUES (
-          $1, 1, $2, $3, 1, $4, NOW()
-        )
-        RETURNING section_id
-      `, [
-        crfVersionId,
-        data.category || 'Form Fields',
-        data.name,
-        userId
-      ]);
-      const sectionId = sectionResult.rows[0].section_id;
+      // ──────────────────────────────────────────────────────────────────────
+      // SECTION CREATION
+      // If the frontend sent a sections[] array, create one DB section per
+      // entry and build a Map<clientSectionId, dbSectionId> for field assignment.
+      // If no sections array, fall back to one default section for all fields.
+      // ──────────────────────────────────────────────────────────────────────
+      const sectionIdMap = new Map<string, number>(); // clientId OR label → DB section_id
+      const incomingSections: Array<{ id: string; name: string }> = (data as any).sections || [];
+
+      if (incomingSections.length > 0) {
+        for (let si = 0; si < incomingSections.length; si++) {
+          const sec = incomingSections[si];
+          const secResult = await client.query(`
+            INSERT INTO section (
+              crf_version_id, status_id, label, title, ordinal, owner_id, date_created
+            ) VALUES (
+              $1, 1, $2, $3, $4, $5, NOW()
+            )
+            RETURNING section_id
+          `, [crfVersionId, sec.name || `Section ${si + 1}`, sec.name || data.name, si + 1, userId]);
+          const dbId = secResult.rows[0].section_id;
+          // Register by both client UUID and by display name so either format resolves
+          if (sec.id) sectionIdMap.set(sec.id, dbId);
+          if (sec.name) sectionIdMap.set(sec.name, dbId);
+          if (sec.name) sectionIdMap.set(sec.name.toLowerCase(), dbId);
+        }
+      }
+
+      // Always ensure at least a default section exists (for fields with no section assignment)
+      let defaultSectionId: number;
+      if (sectionIdMap.size === 0) {
+        const sectionResult = await client.query(`
+          INSERT INTO section (
+            crf_version_id, status_id, label, title, ordinal, owner_id, date_created
+          ) VALUES (
+            $1, 1, $2, $3, 1, $4, NOW()
+          )
+          RETURNING section_id
+        `, [
+          crfVersionId,
+          data.category || 'Form Fields',
+          data.name,
+          userId
+        ]);
+        defaultSectionId = sectionResult.rows[0].section_id;
+      } else {
+        defaultSectionId = sectionIdMap.values().next().value!;
+      }
+
+      const resolveSectionId = (fieldSectionRef?: string): number => {
+        if (!fieldSectionRef) return defaultSectionId;
+        // Try exact match (UUID or name), then lowercase name
+        return sectionIdMap.get(fieldSectionRef)
+          ?? sectionIdMap.get(fieldSectionRef.toLowerCase())
+          ?? defaultSectionId;
+      };
 
       // Create a default item group for the form with unique OID
       const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -2155,6 +2251,32 @@ export const createForm = async (
         // downstream function (mapFieldTypeToDataType, serializeExtendedProperties,
         // mapFieldTypeToResponseType) always receives a canonical type.
         field.type = resolveFieldType(field.type);
+
+        // Validate table fields have at least one column defined.
+        // Only block save for brand-new table fields (no id yet).
+        // Existing saved table fields may not carry columns in all API payloads.
+        const isNewField = !field.id && !field.itemId;
+        if (field.type === 'table' && isNewField) {
+          if (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0) {
+            throw new Error(
+              `Table field "${field.label || field.name || `field #${i + 1}`}" must have at least one column defined. ` +
+              `Please add columns in the form builder before saving.`
+            );
+          }
+        } else if (field.type === 'table' && (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0)) {
+          logger.warn('Saving existing table field without tableColumns — columns will be preserved from stored extended props', {
+            fieldName: field.label || field.name
+          });
+        }
+
+        // Validate inline_group / blood_pressure fields have inlineFields.
+        // Only block for brand-new fields.
+        if ((field.type === 'inline_group' || field.type === 'blood_pressure') && isNewField &&
+            (!Array.isArray(field.inlineFields) || field.inlineFields.length === 0)) {
+          throw new Error(
+            `Inline group field "${field.label || field.name || `field #${i + 1}`}" must have at least one sub-field defined.`
+          );
+        }
         // Generate unique item OID with random suffix to avoid collisions
         const itemRandom = Math.random().toString(36).substring(2, 6).toUpperCase();
         const itemOid = `I_${ocOid.substring(2, 12)}_${i}_${itemRandom}`;
@@ -2306,7 +2428,7 @@ export const createForm = async (
         `, [
           itemId,
           crfVersionId,
-          sectionId,
+          resolveSectionId(field.section),
           responseSetId,
           field.order || (i + 1),
           field.placeholder || '',
@@ -2579,29 +2701,98 @@ export const updateForm = async (
 
       const crfVersionId = versionResult.rows[0].crf_version_id;
 
-      // Get existing section or create one
-      let sectionResult = await client.query(`
-        SELECT section_id FROM section
-        WHERE crf_version_id = $1
-        ORDER BY ordinal
-        LIMIT 1
+      // ──────────────────────────────────────────────────────────────────────
+      // SECTION SYNC for updateForm
+      // Sync incoming sections[] to DB sections for this crf_version.
+      // Build a clientSectionId → dbSectionId map for field assignment.
+      // ──────────────────────────────────────────────────────────────────────
+      const sectionIdMap = new Map<string, number>(); // clientId OR label → DB section_id
+      const incomingSections: Array<{ id: string; name: string }> = (data as any).sections || [];
+
+      // Load existing DB sections for this version
+      const existingSecResult = await client.query(`
+        SELECT section_id, label, ordinal FROM section WHERE crf_version_id = $1 ORDER BY ordinal
       `, [crfVersionId]);
 
-      let sectionId: number;
-      if (sectionResult.rows.length === 0) {
-        // Create section
-        const newSectionResult = await client.query(`
-          INSERT INTO section (
-            crf_version_id, status_id, label, title, ordinal, owner_id, date_created
-          ) VALUES (
-            $1, 1, $2, $3, 1, $4, NOW()
-          )
-          RETURNING section_id
-        `, [crfVersionId, data.category || 'Form Fields', data.name || 'Form', userId]);
-        sectionId = newSectionResult.rows[0].section_id;
-      } else {
-        sectionId = sectionResult.rows[0].section_id;
+      if (incomingSections.length > 0) {
+        // Build dual-key lookup: by label (for existing data) and by section_id (future-proof)
+        const existingSecByLabel = new Map(existingSecResult.rows.map((r: any) => [r.label, r.section_id]));
+        const existingSecByLabelLower = new Map(existingSecResult.rows.map((r: any) => [r.label?.toLowerCase(), r.section_id]));
+        const existingSecIds = existingSecResult.rows.map((r: any) => r.section_id);
+        const usedDbSectionIds = new Set<number>();
+
+        for (let si = 0; si < incomingSections.length; si++) {
+          const sec = incomingSections[si];
+          // Match by label (exact) or by label (case-insensitive) — renames create new sections
+          const existingDbId = existingSecByLabel.get(sec.name)
+            ?? existingSecByLabelLower.get(sec.name?.toLowerCase());
+          if (existingDbId) {
+            // Register by both client id and name for resolveSectionId()
+            if (sec.id) sectionIdMap.set(sec.id, existingDbId);
+            if (sec.name) sectionIdMap.set(sec.name, existingDbId);
+            if (sec.name) sectionIdMap.set(sec.name.toLowerCase(), existingDbId);
+            usedDbSectionIds.add(existingDbId);
+            // Update ordinal if it changed
+            await client.query(
+              `UPDATE section SET ordinal = $1 WHERE section_id = $2`,
+              [si + 1, existingDbId]
+            );
+          } else {
+            const newSecResult = await client.query(`
+              INSERT INTO section (
+                crf_version_id, status_id, label, title, ordinal, owner_id, date_created
+              ) VALUES ($1, 1, $2, $3, $4, $5, NOW())
+              RETURNING section_id
+            `, [crfVersionId, sec.name || `Section ${si + 1}`, sec.name || 'Form', si + 1, userId]);
+            const newDbId = newSecResult.rows[0].section_id;
+            if (sec.id) sectionIdMap.set(sec.id, newDbId);
+            if (sec.name) sectionIdMap.set(sec.name, newDbId);
+            if (sec.name) sectionIdMap.set(sec.name.toLowerCase(), newDbId);
+            usedDbSectionIds.add(newDbId);
+          }
+        }
+        // Reassign items from removed sections to the first remaining section before deleting
+        const fallbackSectionId: number | undefined = usedDbSectionIds.values().next().value;
+        if (fallbackSectionId === undefined) {
+          throw new Error('Cannot reassign orphaned items: no used sections remain after sync');
+        }
+        for (const oldSecId of existingSecIds) {
+          if (!usedDbSectionIds.has(oldSecId)) {
+            await client.query(
+              `UPDATE item_form_metadata SET section_id = $1 WHERE section_id = $2 AND crf_version_id = $3`,
+              [fallbackSectionId, oldSecId, crfVersionId]
+            );
+            await client.query(`DELETE FROM section WHERE section_id = $1`, [oldSecId]);
+          }
+        }
       }
+
+      // Ensure at least one section exists
+      let defaultSectionId: number;
+      if (sectionIdMap.size === 0) {
+        if (existingSecResult.rows.length > 0) {
+          defaultSectionId = existingSecResult.rows[0].section_id;
+        } else {
+          const newSectionResult = await client.query(`
+            INSERT INTO section (
+              crf_version_id, status_id, label, title, ordinal, owner_id, date_created
+            ) VALUES (
+              $1, 1, $2, $3, 1, $4, NOW()
+            )
+            RETURNING section_id
+          `, [crfVersionId, data.category || 'Form Fields', data.name || 'Form', userId]);
+          defaultSectionId = newSectionResult.rows[0].section_id;
+        }
+      } else {
+        defaultSectionId = sectionIdMap.values().next().value!;
+      }
+
+      const resolveSectionId = (fieldSectionRef?: string): number => {
+        if (!fieldSectionRef) return defaultSectionId;
+        return sectionIdMap.get(fieldSectionRef)
+          ?? sectionIdMap.get(fieldSectionRef.toLowerCase())
+          ?? defaultSectionId;
+      };
 
       // Get existing item group or create one
       let itemGroupResult = await client.query(`
@@ -2634,13 +2825,15 @@ export const updateForm = async (
 
       // Get existing items for this form — keyed by item_id for stable matching
       // (name-based matching breaks when users rename field labels)
+      // Include ALL items (even soft-deleted ones) so re-adding a field doesn't create
+      // a duplicate item row — if a field was deleted and re-added we can un-hide it.
       const existingItemsResult = await client.query(`
-        SELECT i.item_id, i.name, i.oc_oid
+        SELECT i.item_id, i.name, i.oc_oid,
+               ifm.show_item
         FROM item i
         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
         LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
         WHERE igm.crf_version_id = $1
-          AND (ifm.show_item IS DISTINCT FROM false)
       `, [crfVersionId]);
 
       // Primary lookup by item_id (stable), fallback by name (for brand-new fields)
@@ -2660,9 +2853,33 @@ export const updateForm = async (
         // Normalize field type via the single source of truth before any save
         field.type = resolveFieldType(field.type);
         const fieldName = field.label || field.name || `Field ${i + 1}`;
-        
-        // Match by item_id first (stable), then fall back to name (for legacy data)
+
+        // Validate table/inline_group fields — only block for genuinely new fields.
+        // Existing fields loaded from the DB may not carry tableColumns/inlineFields
+        // in all API payloads; their columns are preserved from stored extended props.
         const fieldItemId = field.id ? parseInt(String(field.id), 10) : NaN;
+        const isNewField = isNaN(fieldItemId) && !field.itemId;
+
+        if (field.type === 'table' && isNewField) {
+          if (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0) {
+            throw new Error(
+              `Table field "${fieldName}" must have at least one column defined. ` +
+              `Please add columns in the form builder before saving.`
+            );
+          }
+        } else if (field.type === 'table' && (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0)) {
+          logger.warn('Updating existing table field without tableColumns — preserved from stored props', { fieldName });
+        }
+
+        if ((field.type === 'inline_group' || field.type === 'blood_pressure') && isNewField &&
+            (!Array.isArray(field.inlineFields) || field.inlineFields.length === 0)) {
+          throw new Error(
+            `Inline group field "${fieldName}" must have at least one sub-field defined.`
+          );
+        }
+
+        // Match by item_id first (stable), then fall back to name (for legacy data)
+        // fieldItemId is already defined above (for isNewField check) — reuse it
         let existingItem = !isNaN(fieldItemId) ? existingItemsById.get(fieldItemId) : undefined;
         if (!existingItem) {
           existingItem = existingItemsByName.get(fieldName);
@@ -2807,8 +3024,8 @@ export const updateForm = async (
             UPDATE item_form_metadata
             SET response_set_id = $1, ordinal = $2, left_item_text = $3, required = $4,
                 default_value = $5, regexp = $6, regexp_error_msg = $7, show_item = $8, width_decimal = $9,
-                column_number = $10
-            WHERE item_id = $11 AND crf_version_id = $12
+                column_number = $10, section_id = $11
+            WHERE item_id = $12 AND crf_version_id = $13
           `, [
             responseSetId, field.order || (i + 1), field.placeholder || '',
             field.required || field.isRequired || false,
@@ -2817,6 +3034,7 @@ export const updateForm = async (
             field.hidden !== true && field.isHidden !== true,
             widthDecimal,
             columnNumber,
+            resolveSectionId(field.section),
             itemId, crfVersionId
           ]);
         } else {
@@ -2827,7 +3045,7 @@ export const updateForm = async (
               column_number
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           `, [
-            itemId, crfVersionId, sectionId, responseSetId, field.order || (i + 1),
+            itemId, crfVersionId, resolveSectionId(field.section), responseSetId, field.order || (i + 1),
             field.placeholder || '', field.required || field.isRequired || false,
             field.defaultValue !== undefined ? String(field.defaultValue) : null,
             regexpPattern, regexpErrorMsg,

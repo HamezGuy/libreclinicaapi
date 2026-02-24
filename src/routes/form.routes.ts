@@ -147,6 +147,7 @@ router.get('/workflow-config/:crfId', async (req: Request, res: Response) => {
 // PUT /api/forms/workflow-config/:crfId - Save workflow config for a form
 router.put('/workflow-config/:crfId',
   requireRole('admin', 'data_manager'),
+  validate({ body: formSchemas.workflowConfig }),
   async (req: Request, res: Response) => {
     try {
       const crfId = parseInt(req.params.crfId);
@@ -178,13 +179,14 @@ router.put('/workflow-config/:crfId',
 );
 
 // Form templates (CRFs) - read operations (no signature required)
+// IMPORTANT: More-specific routes (with path suffixes like /metadata, /versions) MUST be
+// registered before the generic /:id route so Express matches them first.
 router.get('/', controller.list);
 router.get('/by-study', controller.getByStudy);
+// /data and /status routes are registered later but also benefit from specificity order
+router.get('/:crfId/metadata', controller.getMetadata);          // Must be before /:id
+router.get('/:id/versions', validate({ params: commonSchemas.idParam }), controller.getVersions); // Must be before /:id
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
-router.get('/:crfId/metadata', controller.getMetadata);
-
-// Version history (no signature required - read only)
-router.get('/:id/versions', validate({ params: commonSchemas.idParam }), controller.getVersions);
 
 // Form templates (CRFs) - write operations (signature required per §11.50)
 router.post('/', 
@@ -195,7 +197,7 @@ router.post('/',
 );
 router.put('/:id', 
   requireRole('admin', 'data_manager'), 
-  validate({ params: commonSchemas.idParam }), 
+  validate({ params: commonSchemas.idParam, body: formSchemas.update }), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.update
 );
@@ -257,12 +259,14 @@ router.get('/status/:eventCrfId', controller.getStatus);
 // 3. Updates the field data if validation passes (or if validateOnly=false)
 router.patch('/field/:eventCrfId', 
   requireRole('data_manager', 'coordinator', 'investigator'),
+  validate({ body: formSchemas.fieldPatch }),
   controller.updateField
 );
 
 // Validate only (no data update) - for real-time validation feedback
 router.post('/validate-field/:eventCrfId',
   requireRole('data_manager', 'coordinator', 'investigator'),
+  validate({ body: formSchemas.validateField }),
   controller.validateField
 );
 
