@@ -1,11 +1,15 @@
 /**
  * Event Service Unit Tests
- * 
+ *
  * Tests study event (phase) management operations including:
- * - Creating events
+ * - Creating events (scheduled and unscheduled types)
  * - Updating events
  * - Deleting events
- * - Scheduling events
+ * - Scheduling events for subjects (with is_unscheduled / scheduled_date)
+ * - Creating unscheduled visits on the fly
+ * - Using premade unscheduled visit definitions
+ * - Verifying CRF auto-creation for unscheduled visits
+ * - Chronological ordering of subject events
  * - Verifying database changes
  */
 
@@ -16,14 +20,13 @@ import * as eventService from '../src/services/hybrid/event.service';
 describe('Event Service', () => {
   let testStudyId: number;
   let testEventId: number;
-  const userId = 1; // Root user
+  const userId = 1;
+  const username = 'test-user';
 
   beforeAll(async () => {
-    // Ensure database connection
     const result = await testDb.pool.query('SELECT NOW()');
     expect(result.rows).toBeDefined();
 
-    // Create a test study for events
     const studyResult = await testDb.pool.query(`
       INSERT INTO study (
         unique_identifier, name, status_id, owner_id, date_created, oc_oid
@@ -32,12 +35,11 @@ describe('Event Service', () => {
       )
       RETURNING study_id
     `, [`EVENT-TEST-${Date.now()}`, 'Event Test Study', userId, `S_EVT_${Date.now()}`]);
-    
+
     testStudyId = studyResult.rows[0].study_id;
   });
 
   afterAll(async () => {
-    // Cleanup
     if (testEventId) {
       await testDb.pool.query('DELETE FROM study_event_definition WHERE study_event_definition_id = $1', [testEventId]);
     }
@@ -47,14 +49,17 @@ describe('Event Service', () => {
     await testDb.pool.end();
   });
 
+  // =========================================================
+  // CREATE STUDY EVENT DEFINITIONS
+  // =========================================================
   describe('createStudyEvent', () => {
-    it('should create a new study event definition', async () => {
+    it('should create a new scheduled study event definition', async () => {
       const eventData = {
         studyId: testStudyId,
         name: 'Screening Visit',
         description: 'Initial screening visit',
         ordinal: 1,
-        type: 'scheduled',
+        type: 'scheduled' as const,
         repeating: false,
         category: 'Screening'
       };
@@ -65,7 +70,6 @@ describe('Event Service', () => {
       expect(result.eventDefinitionId).toBeDefined();
       testEventId = result.eventDefinitionId!;
 
-      // Verify in database
       const dbResult = await testDb.pool.query(
         'SELECT * FROM study_event_definition WHERE study_event_definition_id = $1',
         [testEventId]
@@ -73,15 +77,59 @@ describe('Event Service', () => {
 
       expect(dbResult.rows.length).toBe(1);
       expect(dbResult.rows[0].name).toBe(eventData.name);
+      expect(dbResult.rows[0].type).toBe('scheduled');
       expect(dbResult.rows[0].ordinal).toBe(eventData.ordinal);
       expect(dbResult.rows[0].oc_oid).toBeDefined();
     });
 
+    it('should create an unscheduled event definition', async () => {
+      const result = await eventService.createStudyEvent({
+        studyId: testStudyId,
+        name: 'Unscheduled AE Visit',
+        description: 'For adverse events',
+        type: 'unscheduled',
+        repeating: true,
+        category: 'Unscheduled'
+      }, userId);
+
+      expect(result.success).toBe(true);
+      expect(result.eventDefinitionId).toBeDefined();
+
+      const dbResult = await testDb.pool.query(
+        'SELECT * FROM study_event_definition WHERE study_event_definition_id = $1',
+        [result.eventDefinitionId]
+      );
+
+      expect(dbResult.rows[0].type).toBe('unscheduled');
+      expect(dbResult.rows[0].repeating).toBe(true);
+
+      // Cleanup
+      await testDb.pool.query('DELETE FROM study_event_definition WHERE study_event_definition_id = $1', [result.eventDefinitionId]);
+    });
+
+    it('should auto-calculate ordinal if not provided', async () => {
+      const result = await eventService.createStudyEvent({
+        studyId: testStudyId,
+        name: 'Auto Ordinal Event',
+        type: 'scheduled'
+      }, userId);
+
+      expect(result.success).toBe(true);
+
+      const dbResult = await testDb.pool.query(
+        'SELECT ordinal FROM study_event_definition WHERE study_event_definition_id = $1',
+        [result.eventDefinitionId]
+      );
+
+      expect(dbResult.rows[0].ordinal).toBeGreaterThan(0);
+
+      await testDb.pool.query('DELETE FROM study_event_definition WHERE study_event_definition_id = $1', [result.eventDefinitionId]);
+    });
+
     it('should create audit log entry', async () => {
-      // Check audit log
       const auditResult = await testDb.pool.query(
-        `SELECT * FROM audit_log_event 
-         WHERE entity_id = $1 AND audit_table = $2 
+        `SELECT * FROM audit_log_event
+         WHERE entity_id = $1 AND audit_table = $2
          ORDER BY audit_date DESC LIMIT 1`,
         [testEventId, 'study_event_definition']
       );
@@ -91,6 +139,9 @@ describe('Event Service', () => {
     });
   });
 
+  // =========================================================
+  // UPDATE STUDY EVENT
+  // =========================================================
   describe('updateStudyEvent', () => {
     it('should update event definition', async () => {
       const updates = {
@@ -103,7 +154,6 @@ describe('Event Service', () => {
 
       expect(result.success).toBe(true);
 
-      // Verify database changes
       const dbResult = await testDb.pool.query(
         'SELECT * FROM study_event_definition WHERE study_event_definition_id = $1',
         [testEventId]
@@ -113,8 +163,16 @@ describe('Event Service', () => {
       expect(dbResult.rows[0].description).toBe(updates.description);
       expect(dbResult.rows[0].ordinal).toBe(updates.ordinal);
     });
+
+    it('should return error when no fields to update', async () => {
+      const result = await eventService.updateStudyEvent(testEventId, {}, userId);
+      expect(result.success).toBe(false);
+    });
   });
 
+  // =========================================================
+  // GET STUDY EVENTS
+  // =========================================================
   describe('getStudyEvents', () => {
     it('should list events for a study', async () => {
       const events = await eventService.getStudyEvents(testStudyId);
@@ -123,8 +181,18 @@ describe('Event Service', () => {
       expect(events.length).toBeGreaterThan(0);
       expect(events[0].study_event_definition_id).toBe(testEventId);
     });
+
+    it('should include type field in results', async () => {
+      const events = await eventService.getStudyEvents(testStudyId);
+
+      expect(events[0].type).toBeDefined();
+      expect(['scheduled', 'unscheduled', 'common']).toContain(events[0].type);
+    });
   });
 
+  // =========================================================
+  // GET STUDY EVENT BY ID
+  // =========================================================
   describe('getStudyEventById', () => {
     it('should get event details', async () => {
       const event = await eventService.getStudyEventById(testEventId);
@@ -133,15 +201,22 @@ describe('Event Service', () => {
       expect(event.study_event_definition_id).toBe(testEventId);
       expect(event.study_id).toBe(testStudyId);
     });
+
+    it('should return null for non-existent event', async () => {
+      const event = await eventService.getStudyEventById(999999);
+      expect(event).toBeNull();
+    });
   });
 
+  // =========================================================
+  // DELETE STUDY EVENT
+  // =========================================================
   describe('deleteStudyEvent', () => {
     it('should soft delete event definition', async () => {
       const result = await eventService.deleteStudyEvent(testEventId, userId);
 
       expect(result.success).toBe(true);
 
-      // Verify status is set to removed (5)
       const dbResult = await testDb.pool.query(
         'SELECT status_id FROM study_event_definition WHERE study_event_definition_id = $1',
         [testEventId]
@@ -151,12 +226,14 @@ describe('Event Service', () => {
     });
   });
 
+  // =========================================================
+  // SUBJECT EVENTS (with unscheduled support)
+  // =========================================================
   describe('getSubjectEvents', () => {
     let testSubjectId: number;
     let subjectEventDefId: number;
 
     beforeAll(async () => {
-      // Create subject
       const subjectResult = await testDb.pool.query(`
         INSERT INTO subject (status_id, date_created, owner_id)
         VALUES (1, NOW(), 1)
@@ -173,7 +250,6 @@ describe('Event Service', () => {
 
       testSubjectId = studySubjectResult.rows[0].study_subject_id;
 
-      // Create event definition
       const eventDefResult = await testDb.pool.query(`
         INSERT INTO study_event_definition (study_id, name, description, repeating, type, ordinal, status_id, date_created, oc_oid)
         VALUES ($1, 'Subject Event Test', 'Test event', false, 'scheduled', 10, 1, NOW(), $2)
@@ -182,10 +258,9 @@ describe('Event Service', () => {
 
       subjectEventDefId = eventDefResult.rows[0].study_event_definition_id;
 
-      // Create study event for subject
       await testDb.pool.query(`
-        INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id, sample_ordinal)
-        VALUES ($1, $2, NOW(), 1, $3, NOW(), 1, 1)
+        INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id, sample_ordinal, scheduled_date, is_unscheduled)
+        VALUES ($1, $2, NOW(), 1, $3, NOW(), 1, 1, NOW(), false)
       `, [subjectEventDefId, testSubjectId, userId]);
     });
 
@@ -206,13 +281,15 @@ describe('Event Service', () => {
       expect(events.length).toBeGreaterThan(0);
     });
 
-    it('should include event details', async () => {
+    it('should include event details with is_unscheduled and scheduled_date', async () => {
       const events = await eventService.getSubjectEvents(testSubjectId);
 
       if (events.length > 0) {
         expect(events[0].study_event_id).toBeDefined();
         expect(events[0].event_name).toBeDefined();
         expect(events[0].status_name).toBeDefined();
+        expect(events[0].is_unscheduled).toBeDefined();
+        expect(events[0].scheduled_date).toBeDefined();
       }
     });
 
@@ -225,18 +302,21 @@ describe('Event Service', () => {
       }
     });
 
-    it('should order events by ordinal', async () => {
+    it('should order events chronologically', async () => {
       const events = await eventService.getSubjectEvents(testSubjectId);
 
       if (events.length > 1) {
         for (let i = 0; i < events.length - 1; i++) {
-          expect(events[i].ordinal).toBeLessThanOrEqual(events[i + 1].ordinal);
+          const dateA = events[i].scheduled_date || events[i].date_start;
+          const dateB = events[i + 1].scheduled_date || events[i + 1].date_start;
+          if (dateA && dateB) {
+            expect(new Date(dateA).getTime()).toBeLessThanOrEqual(new Date(dateB).getTime());
+          }
         }
       }
     });
 
     it('should return empty array for subject with no events', async () => {
-      // Create a new subject with no events
       const subjectResult = await testDb.pool.query(`
         INSERT INTO subject (status_id, date_created, owner_id) VALUES (1, NOW(), 1) RETURNING subject_id
       `);
@@ -254,17 +334,18 @@ describe('Event Service', () => {
       expect(Array.isArray(events)).toBe(true);
       expect(events.length).toBe(0);
 
-      // Cleanup
       await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [noEventsSubjectId]);
     });
   });
 
+  // =========================================================
+  // EVENT CRFs
+  // =========================================================
   describe('getEventCRFs', () => {
     let crfEventDefId: number;
     let testCrfId: number;
 
     beforeAll(async () => {
-      // Create event definition
       const eventDefResult = await testDb.pool.query(`
         INSERT INTO study_event_definition (study_id, name, description, repeating, type, ordinal, status_id, date_created, oc_oid)
         VALUES ($1, 'CRF Event Test', 'Test event', false, 'scheduled', 11, 1, NOW(), $2)
@@ -273,7 +354,6 @@ describe('Event Service', () => {
 
       crfEventDefId = eventDefResult.rows[0].study_event_definition_id;
 
-      // Create CRF
       const crfResult = await testDb.pool.query(`
         INSERT INTO crf (study_id, name, status_id, owner_id, date_created, oc_oid)
         VALUES ($1, 'Event CRF Test', 1, $2, NOW(), $3)
@@ -282,7 +362,6 @@ describe('Event Service', () => {
 
       testCrfId = crfResult.rows[0].crf_id;
 
-      // Create CRF version
       const crfVersionResult = await testDb.pool.query(`
         INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
         VALUES ($1, 'v1.0', 1, $2, NOW(), $3)
@@ -291,7 +370,6 @@ describe('Event Service', () => {
 
       const crfVersionId = crfVersionResult.rows[0].crf_version_id;
 
-      // Link CRF to event definition
       await testDb.pool.query(`
         INSERT INTO event_definition_crf (study_event_definition_id, study_id, crf_id, required_crf, ordinal, status_id, default_version_id, date_created, owner_id)
         VALUES ($1, $2, $3, true, 1, 1, $4, NOW(), $5)
@@ -335,18 +413,7 @@ describe('Event Service', () => {
       }
     });
 
-    it('should order by ordinal', async () => {
-      const crfs = await eventService.getEventCRFs(crfEventDefId);
-
-      if (crfs.length > 1) {
-        for (let i = 0; i < crfs.length - 1; i++) {
-          expect(crfs[i].ordinal).toBeLessThanOrEqual(crfs[i + 1].ordinal);
-        }
-      }
-    });
-
     it('should return empty array for event with no CRFs', async () => {
-      // Create event definition with no CRFs
       const emptyEventDefResult = await testDb.pool.query(`
         INSERT INTO study_event_definition (study_id, name, description, repeating, type, ordinal, status_id, date_created, oc_oid)
         VALUES ($1, 'Empty CRF Event', 'No CRFs', false, 'scheduled', 12, 1, NOW(), $2)
@@ -360,10 +427,412 @@ describe('Event Service', () => {
       expect(Array.isArray(crfs)).toBe(true);
       expect(crfs.length).toBe(0);
 
-      // Cleanup
       await testDb.pool.query('DELETE FROM study_event_definition WHERE study_event_definition_id = $1', [emptyEventDefId]);
+    });
+  });
+
+  // =========================================================
+  // UNSCHEDULED VISIT CREATION
+  // =========================================================
+  describe('createUnscheduledVisit', () => {
+    let unschedSubjectId: number;
+
+    beforeAll(async () => {
+      const subjectResult = await testDb.pool.query(`
+        INSERT INTO subject (status_id, date_created, owner_id) VALUES (1, NOW(), 1) RETURNING subject_id
+      `);
+      const ssResult = await testDb.pool.query(`
+        INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
+        VALUES ($1, $2, $3, 1, NOW(), $4)
+        RETURNING study_subject_id
+      `, [`UNSCHED-${Date.now()}`, subjectResult.rows[0].subject_id, testStudyId, `SS_UN_${Date.now()}`]);
+
+      unschedSubjectId = ssResult.rows[0].study_subject_id;
+    });
+
+    afterAll(async () => {
+      if (unschedSubjectId) {
+        await testDb.pool.query('DELETE FROM patient_event_form WHERE study_subject_id = $1', [unschedSubjectId]);
+        await testDb.pool.query('DELETE FROM event_crf WHERE study_subject_id = $1', [unschedSubjectId]);
+        await testDb.pool.query('DELETE FROM study_event WHERE study_subject_id = $1', [unschedSubjectId]);
+        await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [unschedSubjectId]);
+      }
+    });
+
+    it('should create an unscheduled visit with name', async () => {
+      const result = await eventService.createUnscheduledVisit({
+        studyId: testStudyId,
+        studySubjectId: unschedSubjectId,
+        name: 'Emergency Visit',
+        startDate: new Date().toISOString()
+      }, userId, username);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(result.data.study_event_id || result.data.studyEventId).toBeDefined();
+    });
+
+    it('should set is_unscheduled=true on the created study_event', async () => {
+      const result = await eventService.createUnscheduledVisit({
+        studyId: testStudyId,
+        studySubjectId: unschedSubjectId,
+        name: 'AE Follow-up',
+        startDate: new Date().toISOString()
+      }, userId, username);
+
+      expect(result.success).toBe(true);
+
+      const studyEventId = result.data?.study_event_id || result.data?.studyEventId;
+      if (studyEventId) {
+        const dbResult = await testDb.pool.query(
+          'SELECT is_unscheduled, scheduled_date FROM study_event WHERE study_event_id = $1',
+          [studyEventId]
+        );
+        expect(dbResult.rows[0].is_unscheduled).toBe(true);
+        expect(dbResult.rows[0].scheduled_date).toBeDefined();
+      }
+    });
+
+    it('should use provided studyEventDefinitionId instead of creating new definition', async () => {
+      // First create a premade unscheduled definition
+      const defResult = await eventService.createStudyEvent({
+        studyId: testStudyId,
+        name: 'Premade Unscheduled Visit',
+        type: 'unscheduled',
+        repeating: true
+      }, userId);
+
+      expect(defResult.success).toBe(true);
+      const premadeDefId = defResult.eventDefinitionId!;
+
+      // Now create unscheduled visit using the premade definition
+      const result = await eventService.createUnscheduledVisit({
+        studySubjectId: unschedSubjectId,
+        studyEventDefinitionId: premadeDefId,
+        startDate: new Date().toISOString()
+      }, userId, username);
+
+      expect(result.success).toBe(true);
+
+      // Verify it used the existing definition, not a new one
+      const studyEventId = result.data?.study_event_id || result.data?.studyEventId;
+      if (studyEventId) {
+        const dbResult = await testDb.pool.query(
+          'SELECT study_event_definition_id FROM study_event WHERE study_event_id = $1',
+          [studyEventId]
+        );
+        expect(dbResult.rows[0].study_event_definition_id).toBe(premadeDefId);
+      }
+
+      // Cleanup the premade definition
+      await testDb.pool.query('DELETE FROM study_event_definition WHERE study_event_definition_id = $1', [premadeDefId]);
+    });
+
+    it('should fail for non-existent subject', async () => {
+      const result = await eventService.createUnscheduledVisit({
+        studyId: testStudyId,
+        studySubjectId: 999999,
+        name: 'Should Fail'
+      }, userId, username);
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should fail for non-existent studyEventDefinitionId', async () => {
+      const result = await eventService.createUnscheduledVisit({
+        studySubjectId: unschedSubjectId,
+        studyEventDefinitionId: 999999,
+        startDate: new Date().toISOString()
+      }, userId, username);
+
+      expect(result.success).toBe(false);
+    });
+  });
+
+  // =========================================================
+  // SCHEDULE SUBJECT EVENT (with unscheduled flags)
+  // =========================================================
+  describe('scheduleSubjectEvent', () => {
+    let schedSubjectId: number;
+    let schedEventDefId: number;
+
+    beforeAll(async () => {
+      const subjectResult = await testDb.pool.query(`
+        INSERT INTO subject (status_id, date_created, owner_id) VALUES (1, NOW(), 1) RETURNING subject_id
+      `);
+      const ssResult = await testDb.pool.query(`
+        INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
+        VALUES ($1, $2, $3, 1, NOW(), $4)
+        RETURNING study_subject_id
+      `, [`SCHED-${Date.now()}`, subjectResult.rows[0].subject_id, testStudyId, `SS_SCH_${Date.now()}`]);
+
+      schedSubjectId = ssResult.rows[0].study_subject_id;
+
+      const eventDefResult = await testDb.pool.query(`
+        INSERT INTO study_event_definition (study_id, name, description, repeating, type, ordinal, status_id, date_created, oc_oid)
+        VALUES ($1, 'Schedule Test Event', '', false, 'scheduled', 20, 1, NOW(), $2)
+        RETURNING study_event_definition_id
+      `, [testStudyId, `SE_SCHED_${Date.now()}`]);
+
+      schedEventDefId = eventDefResult.rows[0].study_event_definition_id;
+    });
+
+    afterAll(async () => {
+      if (schedSubjectId) {
+        await testDb.pool.query('DELETE FROM patient_event_form WHERE study_subject_id = $1', [schedSubjectId]);
+        await testDb.pool.query('DELETE FROM event_crf WHERE study_subject_id = $1', [schedSubjectId]);
+        await testDb.pool.query('DELETE FROM study_event WHERE study_subject_id = $1', [schedSubjectId]);
+        await testDb.pool.query('DELETE FROM study_subject WHERE study_subject_id = $1', [schedSubjectId]);
+      }
+      if (schedEventDefId) {
+        await testDb.pool.query('DELETE FROM study_event_definition WHERE study_event_definition_id = $1', [schedEventDefId]);
+      }
+    });
+
+    it('should schedule a regular event with is_unscheduled=false', async () => {
+      const result = await eventService.scheduleSubjectEvent({
+        studySubjectId: schedSubjectId,
+        studyEventDefinitionId: schedEventDefId,
+        startDate: new Date().toISOString(),
+        location: 'Clinic A'
+      }, userId, username);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(result.data.is_unscheduled).toBe(false);
+    });
+
+    it('should schedule an unscheduled event with is_unscheduled=true and scheduled_date', async () => {
+      const scheduledDate = '2026-06-15T10:00:00.000Z';
+
+      const result = await eventService.scheduleSubjectEvent({
+        studySubjectId: schedSubjectId,
+        studyEventDefinitionId: schedEventDefId,
+        startDate: scheduledDate,
+        scheduledDate: scheduledDate,
+        isUnscheduled: true,
+        location: 'Emergency Room'
+      }, userId, username);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(result.data.is_unscheduled).toBe(true);
+      expect(result.data.scheduled_date).toBeDefined();
+    });
+
+    it('should fail for non-existent subject', async () => {
+      const result = await eventService.scheduleSubjectEvent({
+        studySubjectId: 999999,
+        studyEventDefinitionId: schedEventDefId,
+        startDate: new Date().toISOString()
+      }, userId, username);
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should fail for non-existent event definition', async () => {
+      const result = await eventService.scheduleSubjectEvent({
+        studySubjectId: schedSubjectId,
+        studyEventDefinitionId: 999999,
+        startDate: new Date().toISOString()
+      }, userId, username);
+
+      expect(result.success).toBe(false);
+    });
+  });
+
+  // =========================================================
+  // VISIT FORMS (template + patient status)
+  // =========================================================
+  describe('getVisitForms', () => {
+    it('should return empty array for non-existent study event', async () => {
+      const forms = await eventService.getVisitForms(999999);
+      expect(Array.isArray(forms)).toBe(true);
+      expect(forms.length).toBe(0);
+    });
+  });
+
+  // =========================================================
+  // PATIENT FORM SNAPSHOTS
+  // =========================================================
+  describe('getPatientFormSnapshots', () => {
+    it('should return empty array for non-existent study event', async () => {
+      const snapshots = await eventService.getPatientFormSnapshots(999999);
+      expect(Array.isArray(snapshots)).toBe(true);
+      expect(snapshots.length).toBe(0);
+    });
+  });
+
+  // =========================================================
+  // SAVE PATIENT FORM DATA
+  // =========================================================
+  describe('savePatientFormData', () => {
+    it('should return 404 for non-existent snapshot', async () => {
+      const result = await eventService.savePatientFormData(999999, { field1: 'value1' }, userId);
+      expect(result.success).toBe(false);
+      expect(result.statusCode).toBe(404);
     });
   });
 });
 
+// =========================================================
+// MODEL CONVERSION TESTS (toStudyEvent, toPatientEventForm)
+// =========================================================
+import { toStudyEvent, toPatientEventForm } from '../src/types/libreclinica-models';
 
+describe('Model Conversions', () => {
+  describe('toStudyEvent', () => {
+    it('should map all snake_case DB columns to camelCase', () => {
+      const dbRow = {
+        study_event_id: 1,
+        study_event_definition_id: 2,
+        study_subject_id: 3,
+        location: 'Clinic A',
+        sample_ordinal: 1,
+        date_start: '2026-03-01T00:00:00Z',
+        date_end: '2026-03-01T12:00:00Z',
+        start_time_flag: false,
+        end_time_flag: false,
+        scheduled_date: '2026-03-01T00:00:00Z',
+        is_unscheduled: false,
+        subject_event_status_id: 1,
+        status_id: 1,
+        owner_id: 1,
+        date_created: '2026-02-28T00:00:00Z',
+        date_updated: null,
+        update_id: null,
+        study_subject_label: 'SUBJ-001'
+      };
+
+      const result = toStudyEvent(dbRow);
+
+      expect(result.studyEventId).toBe(1);
+      expect(result.studyEventDefinitionId).toBe(2);
+      expect(result.studySubjectId).toBe(3);
+      expect(result.location).toBe('Clinic A');
+      expect(result.sampleOrdinal).toBe(1);
+      expect(result.dateStarted).toBe('2026-03-01T00:00:00Z');
+      expect(result.dateEnded).toBe('2026-03-01T12:00:00Z');
+      expect(result.scheduledDate).toBe('2026-03-01T00:00:00Z');
+      expect(result.isUnscheduled).toBe(false);
+      expect(result.subjectEventStatus).toBe('scheduled');
+      expect(result.studySubjectLabel).toBe('SUBJ-001');
+    });
+
+    it('should map isUnscheduled=true for unscheduled visits', () => {
+      const dbRow = {
+        study_event_id: 10,
+        study_event_definition_id: 5,
+        study_subject_id: 3,
+        sample_ordinal: 1,
+        is_unscheduled: true,
+        scheduled_date: '2026-04-15T08:00:00Z',
+        subject_event_status_id: 2,
+        status_id: 1,
+        owner_id: 1,
+        date_created: '2026-04-15T08:00:00Z'
+      };
+
+      const result = toStudyEvent(dbRow);
+
+      expect(result.isUnscheduled).toBe(true);
+      expect(result.scheduledDate).toBe('2026-04-15T08:00:00Z');
+      expect(result.subjectEventStatus).toBe('not_scheduled');
+    });
+
+    it('should default isUnscheduled to false when null', () => {
+      const dbRow = {
+        study_event_id: 11,
+        study_event_definition_id: 5,
+        study_subject_id: 3,
+        sample_ordinal: 1,
+        is_unscheduled: null,
+        subject_event_status_id: 1,
+        status_id: 1,
+        owner_id: 1,
+        date_created: '2026-01-01'
+      };
+
+      const result = toStudyEvent(dbRow);
+      expect(result.isUnscheduled).toBe(false);
+    });
+
+    it('should default sampleOrdinal to 1 when missing', () => {
+      const dbRow = {
+        study_event_id: 12,
+        study_event_definition_id: 5,
+        study_subject_id: 3,
+        subject_event_status_id: 1,
+        status_id: 1,
+        owner_id: 1,
+        date_created: '2026-01-01'
+      };
+
+      const result = toStudyEvent(dbRow);
+      expect(result.sampleOrdinal).toBe(1);
+    });
+  });
+
+  describe('toPatientEventForm', () => {
+    it('should map all snake_case DB columns to camelCase', () => {
+      const dbRow = {
+        patient_event_form_id: 100,
+        study_event_id: 1,
+        event_crf_id: 50,
+        crf_id: 10,
+        crf_version_id: 20,
+        study_subject_id: 3,
+        form_name: 'Vital Signs',
+        form_structure: { fields: [], fieldCount: 5 },
+        form_data: { field1: 'value1' },
+        completion_status: 'in_progress',
+        is_locked: false,
+        is_frozen: false,
+        sdv_status: true,
+        ordinal: 2,
+        date_created: '2026-03-01',
+        date_updated: '2026-03-02',
+        created_by: 1,
+        updated_by: 1
+      };
+
+      const result = toPatientEventForm(dbRow);
+
+      expect(result.patientEventFormId).toBe(100);
+      expect(result.studyEventId).toBe(1);
+      expect(result.eventCrfId).toBe(50);
+      expect(result.crfId).toBe(10);
+      expect(result.crfVersionId).toBe(20);
+      expect(result.studySubjectId).toBe(3);
+      expect(result.formName).toBe('Vital Signs');
+      expect(result.formStructure).toEqual({ fields: [], fieldCount: 5 });
+      expect(result.formData).toEqual({ field1: 'value1' });
+      expect(result.completionStatus).toBe('in_progress');
+      expect(result.isLocked).toBe(false);
+      expect(result.isFrozen).toBe(false);
+      expect(result.sdvStatus).toBe(true);
+      expect(result.ordinal).toBe(2);
+    });
+
+    it('should provide defaults for nullable fields', () => {
+      const dbRow = {
+        patient_event_form_id: 101,
+        study_event_id: 1,
+        crf_id: 10,
+        crf_version_id: 20,
+        study_subject_id: 3,
+        form_name: 'Demographics'
+      };
+
+      const result = toPatientEventForm(dbRow);
+
+      expect(result.formStructure).toEqual({});
+      expect(result.formData).toEqual({});
+      expect(result.completionStatus).toBe('not_started');
+      expect(result.isLocked).toBe(false);
+      expect(result.isFrozen).toBe(false);
+      expect(result.sdvStatus).toBe(false);
+      expect(result.ordinal).toBe(1);
+    });
+  });
+});

@@ -200,6 +200,10 @@ export interface SubjectConsentCreate {
   
   // Staff who obtained consent
   consentedBy: number;
+
+  // Scanned physical consent
+  scannedConsentFileIds?: string[];
+  isScannedConsent?: boolean;
 }
 
 // ============================================================================

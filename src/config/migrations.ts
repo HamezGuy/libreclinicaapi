@@ -280,6 +280,16 @@ async function createConsentTables(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_subject_consent_subject ON acc_subject_consent(study_subject_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_subject_consent_status ON acc_subject_consent(consent_status)`);
 
+  // Add scanned consent columns if not present
+  for (const col of [
+    { name: 'scanned_consent_file_ids', type: 'JSONB' },
+    { name: 'is_scanned_consent', type: 'BOOLEAN DEFAULT FALSE' },
+  ]) {
+    await pool.query(`
+      ALTER TABLE acc_subject_consent ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}
+    `).catch(() => {});
+  }
+
   logger.info('eConsent tables verified');
 }
 
@@ -1248,12 +1258,25 @@ async function createFileUploadsTable(pool: any): Promise<void> {
       crf_version_id INTEGER,
       item_id INTEGER,
       crf_version_media_id INTEGER,
+      event_crf_id INTEGER,
+      study_subject_id INTEGER,
+      consent_id INTEGER,
       uploaded_by INTEGER NOT NULL DEFAULT 1,
       uploaded_at TIMESTAMP NOT NULL DEFAULT NOW(),
       deleted_at TIMESTAMP,
       deleted_by INTEGER
     )
   `);
+  // Add columns if table already exists without them
+  for (const col of [
+    { name: 'event_crf_id', type: 'INTEGER' },
+    { name: 'study_subject_id', type: 'INTEGER' },
+    { name: 'consent_id', type: 'INTEGER' },
+  ]) {
+    await pool.query(`
+      ALTER TABLE file_uploads ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}
+    `).catch(() => {});
+  }
   logger.info('File uploads table verified');
 }
 

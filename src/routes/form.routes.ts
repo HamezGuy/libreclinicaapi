@@ -13,6 +13,7 @@ import * as controller from '../controllers/form.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { pool } from '../config/database';
+import Joi from 'joi';
 import { validate, formSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
 import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
@@ -268,6 +269,23 @@ router.post('/validate-field/:eventCrfId',
   requireRole('data_manager', 'coordinator', 'investigator'),
   validate({ body: formSchemas.validateField }),
   controller.validateField
+);
+
+// Mark a form instance as data-entry complete (prerequisite for data lock)
+// POST /api/forms/:eventCrfId/complete
+router.post('/:eventCrfId/complete',
+  requireRole('data_manager', 'coordinator', 'investigator', 'admin'),
+  validate({
+    params: Joi.object({ eventCrfId: Joi.number().integer().positive().required() }),
+    body: Joi.object({
+      password: Joi.string().optional(),
+      signatureUsername: Joi.string().optional(),
+      signaturePassword: Joi.string().optional(),
+      signatureMeaning: Joi.string().optional()
+    })
+  }),
+  requireSignatureFor('I confirm this form\'s data entry is complete and accurate'),
+  controller.markComplete
 );
 
 export default router;

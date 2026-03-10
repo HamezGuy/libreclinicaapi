@@ -864,6 +864,9 @@ export const querySchemas = {
     eventCrfId: Joi.number().integer().positive().optional(),
     itemId: Joi.number().integer().positive().optional(),
     itemDataId: Joi.number().integer().positive().optional(),
+    fieldName: Joi.string().optional().allow('').max(255),
+    fieldPath: Joi.string().optional().allow('').max(255),
+    columnName: Joi.string().optional().allow('').max(255),
     // Required fields
     description: Joi.string().required().min(10).max(1000)
       .messages({
@@ -1248,6 +1251,115 @@ export const commonSchemas = {
     limit: Joi.number().integer().min(1).max(100).default(20),
     sortBy: Joi.string().optional(),
     sortOrder: Joi.string().valid('asc', 'desc').default('asc')
+  })
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// DATA LOCK SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+// Signature fields used by requireSignatureFor / requireSignature middleware.
+// Must be included in every body schema that precedes those middleware handlers,
+// otherwise Joi's stripUnknown will remove them before the middleware reads them.
+const signatureFields = {
+  password: Joi.string().optional(),
+  signatureUsername: Joi.string().optional(),
+  signaturePassword: Joi.string().optional(),
+  signatureMeaning: Joi.string().optional()
+};
+
+export const dataLockSchemas = {
+  // POST /api/data-locks — lock a single form
+  lock: Joi.object({
+    eventCrfId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'eventCrfId is required' }),
+    reason: Joi.string().optional(),
+    ...signatureFields
+  }),
+
+  // POST /api/data-locks/subject/:studySubjectId
+  lockSubject: Joi.object({
+    reason: Joi.string().trim().min(1).required()
+      .messages({ 'any.required': 'reason is required', 'string.empty': 'reason cannot be empty' }),
+    skipValidation: Joi.boolean().default(false),
+    ...signatureFields
+  }),
+
+  // POST /api/data-locks/event/:studyEventId
+  lockEvent: Joi.object({
+    reason: Joi.string().trim().min(1).required()
+      .messages({ 'any.required': 'reason is required' }),
+    skipValidation: Joi.boolean().default(false),
+    ...signatureFields
+  }),
+
+  // DELETE body for unlock operations (subject/event level)
+  unlockBody: Joi.object({
+    reason: Joi.string().trim().min(1).required()
+      .messages({ 'any.required': 'reason is required for unlock operations' }),
+    ...signatureFields
+  }),
+
+  // POST /api/data-locks/freeze/:eventCrfId
+  freeze: Joi.object({
+    ...signatureFields
+  }),
+
+  // DELETE /api/data-locks/freeze/:eventCrfId
+  unfreeze: Joi.object({
+    reason: Joi.string().trim().min(1).required()
+      .messages({ 'any.required': 'Reason is required for unfreezing' }),
+    ...signatureFields
+  }),
+
+  // POST /api/data-locks/unlock-requests
+  createUnlockRequest: Joi.object({
+    eventCrfId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'eventCrfId is required' }),
+    studySubjectId: Joi.number().integer().positive().optional(),
+    studyId: Joi.number().integer().positive().optional(),
+    reason: Joi.string().trim().min(1).required()
+      .messages({ 'any.required': 'reason is required' }),
+    priority: Joi.string().valid('low', 'medium', 'high', 'urgent').default('medium')
+  }),
+
+  // PUT /api/data-locks/unlock-requests/:requestId/review
+  reviewUnlockRequest: Joi.object({
+    action: Joi.string().valid('approve', 'reject').required()
+      .messages({ 'any.required': 'action is required', 'any.only': 'action must be "approve" or "reject"' }),
+    reviewNotes: Joi.string().allow('').default(''),
+    ...signatureFields
+  }),
+
+  // Batch operations body
+  batchIds: Joi.object({
+    eventCrfIds: Joi.array().items(Joi.number().integer().positive()).min(1).required()
+      .messages({ 'any.required': 'eventCrfIds array is required', 'array.min': 'at least one eventCrfId is required' }),
+    ...signatureFields
+  }),
+
+  // POST /api/data-locks/study/:studyId — lock study dataset
+  lockStudy: Joi.object({
+    reason: Joi.string().trim().min(1).required()
+      .messages({ 'any.required': 'reason is required' }),
+    ...signatureFields
+  }),
+
+  // Param schemas
+  eventCrfIdParam: Joi.object({
+    eventCrfId: Joi.number().integer().positive().required()
+  }),
+
+  studySubjectIdParam: Joi.object({
+    studySubjectId: Joi.number().integer().positive().required()
+  }),
+
+  studyEventIdParam: Joi.object({
+    studyEventId: Joi.number().integer().positive().required()
+  }),
+
+  requestIdParam: Joi.object({
+    requestId: Joi.number().integer().positive().required()
   })
 };
 

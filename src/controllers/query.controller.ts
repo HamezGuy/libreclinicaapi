@@ -134,17 +134,19 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const respond = asyncHandler(async (req: Request, res: Response) => {
-  const { response, description, detailedNotes, newStatusId } = req.body;
+  const { response, description, detailedNotes, newStatusId,
+          correctedValue, correctionReason } = req.body;
   const qId = intParam(req, 'id');
 
   await assertCanEdit(req, qId);
 
-  const { responseId, message } = await queryService.addQueryResponse(
+  const result = await queryService.addQueryResponse(
     qId,
-    { description: response || description, detailedNotes, newStatusId },
+    { description: response || description, detailedNotes, newStatusId,
+      correctedValue, correctionReason },
     userId(req)
   );
-  res.json({ success: true, responseId, message });
+  res.json({ success: true, ...result });
 });
 
 export const updateStatus = asyncHandler(async (req: Request, res: Response) => {

@@ -8,17 +8,18 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as dataLocksService from '../services/database/data-locks.service';
-import { pool } from '../config/database';
+import * as unlockRequestsService from '../services/database/unlock-requests.service';
 
 // ═══════════════════════════════════════════════════════════════════
 // LIST & QUERY ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const { studyId, page, limit } = req.query;
+  const { studyId, subjectId, page, limit } = req.query;
 
   const result = await dataLocksService.getLockedRecords({
     studyId: studyId ? parseInt(studyId as string) : undefined,
+    subjectId: subjectId ? parseInt(subjectId as string) : undefined,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 20
   });
@@ -36,12 +37,6 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
  */
 export const checkSubjectEligibility = asyncHandler(async (req: Request, res: Response) => {
   const { studySubjectId } = req.params;
-
-  if (!studySubjectId) {
-    res.status(400).json({ success: false, message: 'studySubjectId is required' });
-    return;
-  }
-
   const eligibility = await dataLocksService.checkSubjectLockEligibility(parseInt(studySubjectId));
 
   res.json({
@@ -56,12 +51,6 @@ export const checkSubjectEligibility = asyncHandler(async (req: Request, res: Re
  */
 export const checkEventEligibility = asyncHandler(async (req: Request, res: Response) => {
   const { studyEventId } = req.params;
-
-  if (!studyEventId) {
-    res.status(400).json({ success: false, message: 'studyEventId is required' });
-    return;
-  }
-
   const eligibility = await dataLocksService.checkEventLockEligibility(parseInt(studyEventId));
 
   res.json({
@@ -80,16 +69,11 @@ export const checkEventEligibility = asyncHandler(async (req: Request, res: Resp
  */
 export const lock = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { eventCrfId } = req.body;
+  const { eventCrfId, reason } = req.body;
 
-  if (!eventCrfId) {
-    res.status(400).json({ success: false, message: 'eventCrfId is required' });
-    return;
-  }
+  const result = await dataLocksService.lockRecord(eventCrfId, user.userId, reason);
 
-  const result = await dataLocksService.lockRecord(eventCrfId, user.userId);
-
-  res.status(result.success ? 201 : 400).json(result);
+  res.status(result.success ? 200 : 400).json(result);
 });
 
 /**
@@ -99,8 +83,9 @@ export const lock = asyncHandler(async (req: Request, res: Response) => {
 export const unlock = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { eventCrfId } = req.params;
+  const { reason } = req.body;
 
-  const result = await dataLocksService.unlockRecord(parseInt(eventCrfId), user.userId);
+  const result = await dataLocksService.unlockRecord(parseInt(eventCrfId), user.userId, reason);
 
   res.json(result);
 });
@@ -118,27 +103,11 @@ export const lockSubject = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { studySubjectId } = req.params;
   const { reason, skipValidation } = req.body;
-
-  if (!studySubjectId) {
-    res.status(400).json({ success: false, message: 'studySubjectId is required' });
-    return;
-  }
-
-  if (!reason) {
-    res.status(400).json({ success: false, message: 'reason is required' });
-    return;
-  }
-
-  // Only admins can skip validation
   const canSkipValidation = skipValidation && user.role === 'admin';
 
   const result = await dataLocksService.lockSubjectData(
-    parseInt(studySubjectId),
-    user.userId,
-    reason,
-    canSkipValidation
+    parseInt(studySubjectId), user.userId, reason, canSkipValidation
   );
-
   res.status(result.success ? 200 : 400).json(result);
 });
 
@@ -152,22 +121,9 @@ export const unlockSubject = asyncHandler(async (req: Request, res: Response) =>
   const { studySubjectId } = req.params;
   const { reason } = req.body;
 
-  if (!studySubjectId) {
-    res.status(400).json({ success: false, message: 'studySubjectId is required' });
-    return;
-  }
-
-  if (!reason) {
-    res.status(400).json({ success: false, message: 'reason is required for unlocking' });
-    return;
-  }
-
   const result = await dataLocksService.unlockSubjectData(
-    parseInt(studySubjectId),
-    user.userId,
-    reason
+    parseInt(studySubjectId), user.userId, reason
   );
-
   res.json(result);
 });
 
@@ -184,26 +140,11 @@ export const lockEvent = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { studyEventId } = req.params;
   const { reason, skipValidation } = req.body;
-
-  if (!studyEventId) {
-    res.status(400).json({ success: false, message: 'studyEventId is required' });
-    return;
-  }
-
-  if (!reason) {
-    res.status(400).json({ success: false, message: 'reason is required' });
-    return;
-  }
-
   const canSkipValidation = skipValidation && user.role === 'admin';
 
   const result = await dataLocksService.lockEventData(
-    parseInt(studyEventId),
-    user.userId,
-    reason,
-    canSkipValidation
+    parseInt(studyEventId), user.userId, reason, canSkipValidation
   );
-
   res.status(result.success ? 200 : 400).json(result);
 });
 
@@ -217,40 +158,10 @@ export const unlockEvent = asyncHandler(async (req: Request, res: Response) => {
   const { studyEventId } = req.params;
   const { reason } = req.body;
 
-  if (!studyEventId) {
-    res.status(400).json({ success: false, message: 'studyEventId is required' });
-    return;
-  }
-
-  if (!reason) {
-    res.status(400).json({ success: false, message: 'reason is required for unlocking' });
-    return;
-  }
-
-  // Unlock all forms in this event
-  try {
-    const eventCrfResult = await pool.query(
-      `SELECT event_crf_id FROM event_crf WHERE study_event_id = $1 AND status_id = 6`,
-      [parseInt(studyEventId)]
-    );
-
-    let unlocked = 0;
-    for (const row of eventCrfResult.rows) {
-      const result = await dataLocksService.unlockRecord(row.event_crf_id, user.userId);
-      if (result.success) unlocked++;
-    }
-
-    // Audit
-    await pool.query(`
-      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
-      VALUES (NOW(), 'study_event', $1, $2, 'Event Data Unlocked', $3,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
-    `, [user.userId, parseInt(studyEventId), reason]);
-
-    res.json({ success: true, message: `Unlocked ${unlocked} forms for event`, data: { unlocked } });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+  const result = await dataLocksService.unlockEventData(
+    parseInt(studyEventId), user.userId, reason
+  );
+  res.json(result);
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -370,6 +281,155 @@ export const batchSDV = asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: result.success, data: result });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// UNLOCK REQUEST WORKFLOW
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * List unlock requests
+ * GET /api/data-locks/unlock-requests
+ */
+export const listUnlockRequests = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, status, page, limit } = req.query;
+  const user = (req as any).user;
+
+  const filters: any = {
+    page: parseInt(page as string) || 1,
+    limit: parseInt(limit as string) || 20
+  };
+  if (studyId) filters.studyId = parseInt(studyId as string);
+  if (status)  filters.status  = status as string;
+
+  // Non-admins can only see their own requests
+  const elevatedRoles = ['admin', 'data_manager', 'monitor'];
+  if (!elevatedRoles.includes(user.role?.toLowerCase())) {
+    filters.requestedById = user.userId;
+  }
+
+  const result = await unlockRequestsService.getUnlockRequests(filters);
+  res.json(result);
+});
+
+/**
+ * Create an unlock request
+ * POST /api/data-locks/unlock-requests
+ */
+export const createUnlockRequest = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { eventCrfId, studySubjectId, studyId, reason, priority } = req.body;
+
+  const result = await unlockRequestsService.createUnlockRequest(
+    { eventCrfId, studySubjectId, studyId, reason, priority },
+    user.userId
+  );
+  res.status(result.success ? 201 : 400).json(result);
+});
+
+/**
+ * Review (approve or reject) an unlock request
+ * PUT /api/data-locks/unlock-requests/:requestId/review
+ */
+export const reviewUnlockRequest = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const requestId = parseInt(req.params.requestId);
+  const { action, reviewNotes } = req.body;
+
+  const result = await unlockRequestsService.reviewUnlockRequest(
+    requestId, action, reviewNotes || '', user.userId
+  );
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * Cancel a pending unlock request
+ * DELETE /api/data-locks/unlock-requests/:requestId
+ */
+export const cancelUnlockRequest = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const requestId = parseInt(req.params.requestId);
+
+  const result = await unlockRequestsService.cancelUnlockRequest(
+    requestId, user.userId, user.role
+  );
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// DATA SANITATION
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/data-locks/sanitation/:studyId
+ * Study-wide data quality snapshot used on the Data Sanitation tab.
+ */
+export const getSanitationReport = asyncHandler(async (req: Request, res: Response) => {
+  const studyId = parseInt(req.params.studyId);
+  if (isNaN(studyId) || studyId <= 0) {
+    res.status(400).json({ success: false, message: 'studyId must be a positive integer' });
+    return;
+  }
+
+  const report = await dataLocksService.getStudySanitationReport(studyId);
+  res.json({ success: true, data: report });
+});
+
+/**
+ * GET /api/data-locks/sanitation/:studyId/subjects
+ * Per-subject breakdown for the sanitation panel table.
+ */
+export const getSanitationSubjects = asyncHandler(async (req: Request, res: Response) => {
+  const studyId = parseInt(req.params.studyId);
+  const page  = parseInt(req.query.page  as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 50;
+
+  if (isNaN(studyId) || studyId <= 0) {
+    res.status(400).json({ success: false, message: 'studyId must be a positive integer' });
+    return;
+  }
+
+  const result = await dataLocksService.getSanitationSubjects(studyId, page, limit);
+  res.json(result);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// STUDY-LEVEL LOCK
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/data-locks/study/:studyId/status
+ */
+export const getStudyLockStatus = asyncHandler(async (req: Request, res: Response) => {
+  const studyId = parseInt(req.params.studyId);
+  const status = await dataLocksService.getStudyLockStatus(studyId);
+  res.json({ success: true, data: status });
+});
+
+/**
+ * POST /api/data-locks/study/:studyId
+ * Lock the entire study dataset (admin + investigator dual e-sig enforced at route level).
+ */
+export const lockStudy = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const studyId = parseInt(req.params.studyId);
+  const { reason } = req.body;
+
+  const result = await dataLocksService.lockStudy(studyId, user.userId, reason);
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * DELETE /api/data-locks/study/:studyId
+ * Unlock the study dataset (admin only).
+ */
+export const unlockStudy = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const studyId = parseInt(req.params.studyId);
+  const { reason } = req.body;
+
+  const result = await dataLocksService.unlockStudy(studyId, user.userId, reason);
+  res.status(result.success ? 200 : 400).json(result);
+});
+
 export default { 
   list, 
   lock, 
@@ -385,5 +445,14 @@ export default {
   batchFreeze,
   batchLock,
   batchUnlock,
-  batchSDV
+  batchSDV,
+  listUnlockRequests,
+  createUnlockRequest,
+  reviewUnlockRequest,
+  cancelUnlockRequest,
+  getSanitationReport,
+  getSanitationSubjects,
+  getStudyLockStatus,
+  lockStudy,
+  unlockStudy
 };

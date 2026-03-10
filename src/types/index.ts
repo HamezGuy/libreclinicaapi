@@ -1,18 +1,28 @@
 /**
  * TypeScript Type Definitions
- * 
- * Comprehensive type definitions for LibreClinica API
- * - Database entity types (from LibreClinica Java beans)
- * - API request/response types
- * - SOAP message types
- * - Business logic types
- * - Wound Scanner types
- * 
- * NOTE: Core models are now defined in libreclinica-models.ts
- * and match the actual LibreClinica Java bean structure.
+ *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  SINGLE SOURCE OF TRUTH                                            ║
+ * ║                                                                    ║
+ * ║  Canonical (camelCase) models:  ./libreclinica-models.ts           ║
+ * ║  Event/visit DTOs:              ./event.dto.ts                     ║
+ * ║  Study DTOs:                    ./study.dto.ts                     ║
+ * ║                                                                    ║
+ * ║  ALL new code MUST import from the canonical files above.          ║
+ * ║  Do NOT add new interfaces to this file.                           ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ * This file re-exports the canonical models and also contains LEGACY
+ * snake_case database-row interfaces (marked @deprecated). The legacy
+ * interfaces exist for backward compatibility with older code that
+ * directly maps database rows. They should be migrated to use the
+ * canonical camelCase models + toXxx() converter functions.
+ *
+ * RULE: Never define an interface here with the same name as one in
+ * libreclinica-models.ts — that shadows the canonical export.
  */
 
-// Re-export all LibreClinica core models
+// Re-export all LibreClinica core models (CANONICAL — single source of truth)
 export * from './libreclinica-models';
 
 // Re-export Wound Scanner types
@@ -20,12 +30,22 @@ export * from './wound.types';
 
 /**
  * ============================================================================
- * USER & AUTHENTICATION TYPES
+ * LEGACY TYPES — TARGET FOR REMOVAL
  * ============================================================================
- * 
- * NOTE: Use UserAccount from libreclinica-models.ts for new code.
- * These snake_case versions are for direct database row mapping.
+ *
+ * Everything below this line is DEPRECATED. These snake_case interfaces
+ * exist only for backward compatibility with older code that directly maps
+ * database rows. New code MUST use the canonical camelCase models from
+ * libreclinica-models.ts with their toXxx() converter functions.
+ *
+ * Migration path:
+ *   Old: import { StudySubjectDB } from '../../types';
+ *   New: import { StudySubject, toStudySubject } from '../../types/libreclinica-models';
+ *
+ * @deprecated All interfaces below are scheduled for removal.
  */
+
+// ─── USER & AUTHENTICATION (legacy) ─────────────────────────────────────────
 
 /**
  * @deprecated Use UserAccount from libreclinica-models.ts with toUserAccount() converter
@@ -142,13 +162,19 @@ export interface StudyDB {
 
 export interface StudyMetadataDB {
   study: StudyDB;
-  events: StudyEventDefinition[];
+  events: StudyEventDefinitionDB_Legacy[];
   crfs: CRFDB[];
   subjects?: StudySubjectDB[];
   enrollmentStats?: EnrollmentStats;
 }
 
-export interface StudyEventDefinition {
+/**
+ * @deprecated Use StudyEventDefinition from libreclinica-models.ts (camelCase).
+ * This snake_case version is for direct database row mapping only.
+ * RENAMED from StudyEventDefinition to avoid shadowing the canonical export.
+ * TARGET: Remove in next major refactor.
+ */
+export interface StudyEventDefinitionDB_Legacy {
   study_event_definition_id: number;
   study_id: number;
   name: string;
@@ -259,6 +285,8 @@ export interface StudyEventDB {
   start_time_flag: boolean;
   end_time_flag: boolean;
   reference_visit_id?: number;
+  scheduled_date?: Date;
+  is_unscheduled?: boolean;
 }
 
 /**
@@ -777,26 +805,16 @@ export interface ODMItemData {
  * ============================================================================
  * API RESPONSE TYPES
  * ============================================================================
+ *
+ * CANONICAL DEFINITIONS: ApiResponse and PaginatedResponse are defined in
+ * libreclinica-models.ts and re-exported via `export * from './libreclinica-models'`
+ * above. Do NOT redefine them here — that shadows the canonical versions.
+ *
+ * If you need the extended version with `errors` and `warnings` fields, use:
+ *   import { ApiResponse } from './libreclinica-models';
+ * The canonical ApiResponse already supports `errors?: any[]` if needed — add
+ * the field there, not here.
  */
-
-export interface ApiResponse<T = any> {
-  success: boolean;
-  data?: T;
-  message?: string;
-  errors?: any[];
-  warnings?: any[];
-}
-
-export interface PaginatedResponse<T = any> {
-  success: boolean;
-  data: T[];
-  pagination: {
-    page: number;
-    limit: number;
-    total: number;
-    totalPages: number;
-  };
-}
 
 export interface HealthCheckResponse {
   status: 'healthy' | 'unhealthy';

@@ -126,65 +126,13 @@ export const createSubject = async (
 ): Promise<ApiResponse<any>> => {
   logger.info('Creating subject (hybrid)', { request, userId, soapEnabled: config.libreclinica.soapEnabled });
 
-  // If SOAP is disabled, use direct database creation
-  if (!config.libreclinica.soapEnabled) {
-    return createSubjectDirect(request, userId, username);
-  }
-
-  // First, check if subject already exists using SOAP (GxP compliant)
-  try {
-    const studyOid = `S_${request.studyId}`;
-    const subjectExists = await subjectSoap.isSubjectExists(
-      studyOid,
-      request.studySubjectId,
-      userId,
-      username
-    );
-    
-    if (subjectExists) {
-      logger.warn('Subject already exists (SOAP check)', { label: request.studySubjectId });
-      return {
-        success: false,
-        message: `Subject with label '${request.studySubjectId}' already exists in this study`
-      };
-    }
-    logger.info('Subject does not exist, proceeding with creation');
-  } catch (checkError: any) {
-    logger.warn('SOAP subject existence check failed, proceeding with creation', { error: checkError.message });
-  }
-
-  // Use SOAP service for GxP-compliant creation
-  const result = await subjectSoap.createSubject(request, userId, username);
-
-  if (!result.success) {
-    // Fallback to direct database if SOAP fails
-    logger.warn('SOAP creation failed, attempting direct database creation');
-    return createSubjectDirect(request, userId, username);
-  }
-
-  // Verify creation in database
-  try {
-    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for DB sync
-
-    const verifyQuery = `
-      SELECT study_subject_id
-      FROM study_subject
-      WHERE label = $1 AND study_id = $2
-    `;
-
-    const verifyResult = await pool.query(verifyQuery, [request.studySubjectId, request.studyId]);
-
-    if (verifyResult.rows.length > 0) {
-      result.data = {
-        ...result.data,
-        studySubjectId: verifyResult.rows[0].study_subject_id
-      } as any;
-    }
-  } catch (error: any) {
-    logger.warn('Subject verification warning', { error: error.message });
-  }
-
-  return result;
+  // Always use direct database creation for reliability.
+  // The SOAP path through LibreClinica's Java web service can leave the
+  // study_subject row in an inconsistent state (created via SOAP but not
+  // visible to direct DB queries, or cleaned up by a background sync).
+  // Direct DB creation ensures the row, events, and event_crfs all exist
+  // in the same transaction and are immediately queryable.
+  return createSubjectDirect(request, userId, username);
 };
 
 /**
@@ -415,11 +363,13 @@ const createSubjectDirect = async (
     const enrollmentDate = request.enrollmentDate || todayIso();
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
-    // Get all study event definitions for this study
+    // Get all scheduled/common event definitions for this study.
+    // Unscheduled event definitions are NOT auto-scheduled during enrollment —
+    // they are only used when a user manually adds an unscheduled visit later.
     const eventDefsResult = await client.query(`
       SELECT study_event_definition_id, name, ordinal, type, repeating
       FROM study_event_definition
-      WHERE study_id = $1 AND status_id = 1
+      WHERE study_id = $1 AND status_id = 1 AND type != 'unscheduled'
       ORDER BY ordinal
     `, [request.studyId]);
     
@@ -432,30 +382,76 @@ const createSubjectDirect = async (
       });
       
       for (const eventDef of eventDefsResult.rows) {
+        const spName = `phase_${eventDef.study_event_definition_id}`;
         try {
+          // Wrap each phase in a SAVEPOINT so a failure in one phase
+          // (e.g. missing CRF version, FK violation) doesn't abort the
+          // entire transaction and cause the subject + earlier phases
+          // to be rolled back.
+          await client.query(`SAVEPOINT ${spName}`);
+
           // Calculate start date based on ordinal (each phase starts 7 days after previous)
           const daysOffset = (eventDef.ordinal - 1) * 7;
           const eventStartDate = new Date(enrollmentDate);
           eventStartDate.setDate(eventStartDate.getDate() + daysOffset);
           
-          const eventResult = await client.query(`
-            INSERT INTO study_event (
-              study_event_definition_id, study_subject_id, location,
-              sample_ordinal, date_start, date_end,
-              owner_id, status_id, subject_event_status_id, date_created
-            ) VALUES (
-              $1, $2, $3, 1, $4, $4, $5, 1, 
-              (SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1),
-              NOW()
-            )
-            RETURNING study_event_id
-          `, [
-            eventDef.study_event_definition_id,
-            studySubjectId,
-            request.scheduleEvent?.location || '',
-            formatIsoDate(eventStartDate),
-            userId
-          ]);
+          // Resolve subject_event_status_id before the INSERT to avoid
+          // a subquery failure inside the INSERT poisoning the transaction.
+          const sesResult = await client.query(
+            `SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1`
+          );
+          const sesId = sesResult.rows[0]?.subject_event_status_id ?? 1;
+
+          // Try full schema first; fall back to minimal schema if extra columns
+          // (scheduled_date, is_unscheduled) don't exist in the production DB.
+          let eventResult;
+          await client.query(`SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
+          try {
+            eventResult = await client.query(`
+              INSERT INTO study_event (
+                study_event_definition_id, study_subject_id, location,
+                sample_ordinal, date_start, date_end,
+                owner_id, status_id, subject_event_status_id, date_created,
+                scheduled_date, is_unscheduled
+              ) VALUES (
+                $1, $2, $3, 1, $4, $4, $5, 1, $6,
+                NOW(), $4, false
+              )
+              RETURNING study_event_id
+            `, [
+              eventDef.study_event_definition_id,
+              studySubjectId,
+              request.scheduleEvent?.location || '',
+              formatIsoDate(eventStartDate),
+              userId,
+              sesId
+            ]);
+            await client.query(`RELEASE SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
+          } catch (insertErr: any) {
+            await client.query(`ROLLBACK TO SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
+            if (insertErr.message?.includes('scheduled_date') || insertErr.message?.includes('is_unscheduled')) {
+              logger.info('Using minimal study_event schema (no scheduled_date/is_unscheduled)');
+              eventResult = await client.query(`
+                INSERT INTO study_event (
+                  study_event_definition_id, study_subject_id, location,
+                  sample_ordinal, date_start, date_end,
+                  owner_id, status_id, subject_event_status_id, date_created
+                ) VALUES (
+                  $1, $2, $3, 1, $4, $4, $5, 1, $6, NOW()
+                )
+                RETURNING study_event_id
+              `, [
+                eventDef.study_event_definition_id,
+                studySubjectId,
+                request.scheduleEvent?.location || '',
+                formatIsoDate(eventStartDate),
+                userId,
+                sesId
+              ]);
+            } else {
+              throw insertErr;
+            }
+          }
           
           if (eventResult.rows[0]?.study_event_id) {
             const studyEventId = eventResult.rows[0].study_event_id;
@@ -463,7 +459,6 @@ const createSubjectDirect = async (
             let phaseFormsCreated = 0;
             
             // Create event_crf records for all CRFs assigned to this phase
-            // This implements the COPY FORM TEMPLATES (eCRFs) requirement
             const crfAssignments = await client.query(`
               SELECT edc.crf_id, edc.default_version_id, c.name as crf_name,
                      edc.ordinal as edc_ordinal
@@ -480,75 +475,51 @@ const createSubjectDirect = async (
             }
             
             for (const crfAssign of crfAssignments.rows) {
-              try {
-                // Get the CRF version to use
-                let crfVersionId = crfAssign.default_version_id;
-                if (!crfVersionId) {
-                  const versionResult = await client.query(`
-                    SELECT crf_version_id FROM crf_version 
-                    WHERE crf_id = $1 AND status_id = 1 
-                    ORDER BY crf_version_id DESC LIMIT 1
-                  `, [crfAssign.crf_id]);
-                  if (versionResult.rows.length > 0) {
-                    crfVersionId = versionResult.rows[0].crf_version_id;
-                  } else {
-                    // Throw rather than silently skip — a CRF with no versions is a data integrity
-                    // error that must be resolved before patients can be enrolled.
-                    throw new Error(
-                      `Form "${crfAssign.crf_name}" (CRF ID: ${crfAssign.crf_id}) has no active versions. ` +
-                      `Create a version for this form before enrolling patients.`
-                    );
-                  }
+              let crfVersionId = crfAssign.default_version_id;
+              if (!crfVersionId) {
+                const versionResult = await client.query(`
+                  SELECT crf_version_id FROM crf_version 
+                  WHERE crf_id = $1 AND status_id = 1 
+                  ORDER BY crf_version_id DESC LIMIT 1
+                `, [crfAssign.crf_id]);
+                if (versionResult.rows.length > 0) {
+                  crfVersionId = versionResult.rows[0].crf_version_id;
+                } else {
+                  logger.warn(`Form "${crfAssign.crf_name}" (CRF ${crfAssign.crf_id}) has no active versions — skipping`);
+                  continue;
                 }
-                
-                if (crfVersionId) {
-                  // Create event_crf - the editable copy of the template for this patient
-                  const ecResult = await client.query(`
-                    INSERT INTO event_crf (
-                      study_event_id, crf_version_id, study_subject_id,
-                      completion_status_id, status_id, owner_id, date_created
-                    ) VALUES ($1, $2, $3, 1, 1, $4, NOW())
-                    RETURNING event_crf_id
-                  `, [studyEventId, crfVersionId, studySubjectId, userId]);
-                  
-                  const eventCrfId = ecResult.rows[0].event_crf_id;
-                  phaseFormsCreated++;
-                  totalFormsCreated++;
-                  
-                  // Create patient_event_form snapshot (frozen copy of form structure at enrollment).
-                  // Uses edc.ordinal (the template-defined display order) for the snapshot ordinal,
-                  // not phaseFormsCreated (which would be wrong if a prior form fails mid-loop).
-                  // NOTE: getFormMetadata() inside createPatientFormSnapshotForEnrollment uses pool.query
-                  // (outside this transaction) — this is intentional: the CRF was committed in a prior
-                  // transaction and is visible to other connections.
-                  try {
-                    await createPatientFormSnapshotForEnrollment(
-                      client, studyEventId, eventCrfId,
-                      crfAssign.crf_id, crfVersionId, studySubjectId,
-                      crfAssign.crf_name, crfAssign.edc_ordinal ?? phaseFormsCreated, userId
-                    );
-                  } catch (snapErr: any) {
-                    logger.warn('Form snapshot warning (non-blocking)', { error: snapErr.message });
-                  }
-                  
-                  logger.debug('📋 Created event_crf + snapshot for patient phase', {
-                    studyEventId, eventCrfId,
-                    crfId: crfAssign.crf_id,
-                    crfName: crfAssign.crf_name,
-                    studySubjectId
-                  });
-                }
-              } catch (crfError: any) {
-                // Re-throw so the outer transaction rolls back — partial enrollment
-                // is worse than failed enrollment because it leaves the patient
-                // with incomplete visit/form assignments.
-                logger.error('❌ Failed to create event_crf — rolling back enrollment', {
-                  crfId: crfAssign.crf_id,
-                  crfName: crfAssign.crf_name,
-                  error: crfError.message
-                });
-                throw crfError;
               }
+              
+              // Create event_crf - the editable copy of the template for this patient
+              const ecResult = await client.query(`
+                INSERT INTO event_crf (
+                  study_event_id, crf_version_id, study_subject_id,
+                  completion_status_id, status_id, owner_id, date_created
+                ) VALUES ($1, $2, $3, 1, 1, $4, NOW())
+                RETURNING event_crf_id
+              `, [studyEventId, crfVersionId, studySubjectId, userId]);
+              
+              const eventCrfId = ecResult.rows[0].event_crf_id;
+              phaseFormsCreated++;
+              totalFormsCreated++;
+              
+              // Create patient_event_form snapshot (frozen copy of form structure at enrollment)
+              try {
+                await createPatientFormSnapshotForEnrollment(
+                  client, studyEventId, eventCrfId,
+                  crfAssign.crf_id, crfVersionId, studySubjectId,
+                  crfAssign.crf_name, crfAssign.edc_ordinal ?? phaseFormsCreated, userId
+                );
+              } catch (snapErr: any) {
+                logger.warn('Form snapshot warning (non-blocking)', { error: snapErr.message });
+              }
+              
+              logger.debug('📋 Created event_crf + snapshot for patient phase', {
+                studyEventId, eventCrfId,
+                crfId: crfAssign.crf_id,
+                crfName: crfAssign.crf_name,
+                studySubjectId
+              });
             }
             
             phaseDetails.push({
@@ -557,8 +528,12 @@ const createSubjectDirect = async (
               formsCreated: phaseFormsCreated
             });
           }
+
+          await client.query(`RELEASE SAVEPOINT ${spName}`);
         } catch (eventError: any) {
-          logger.warn('❌ Failed to schedule phase', { 
+          // Roll back only THIS phase — earlier phases and the subject record survive
+          await client.query(`ROLLBACK TO SAVEPOINT ${spName}`);
+          logger.warn('❌ Failed to schedule phase (rolled back phase only)', { 
             eventDefId: eventDef.study_event_definition_id, 
             phaseName: eventDef.name,
             error: eventError.message 
@@ -753,9 +728,12 @@ export const getSubjectList = async (
     }
 
     // Fallback to database
+    // Include subjects enrolled in child studies (sites) where parent_study_id matches
     logger.info('📋 Using database fallback for subject list');
     
-    const conditions: string[] = ['ss.study_id = $1'];
+    const conditions: string[] = [
+      '(ss.study_id = $1 OR ss.study_id IN (SELECT study_id FROM study WHERE parent_study_id = $1))'
+    ];
     const params: any[] = [studyId];
     let paramIndex = 2;
 
@@ -868,6 +846,8 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
       SELECT 
         se.*,
         sed.name as event_name,
+        sed.type as event_type,
+        sed.ordinal as event_ordinal,
         sed.repeating,
         sest.name as status_name,
         u.user_name as created_by,
@@ -888,7 +868,10 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
       INNER JOIN subject_event_status sest ON se.subject_event_status_id = sest.subject_event_status_id
       LEFT JOIN user_account u ON se.owner_id = u.user_id
       WHERE se.study_subject_id = $1
-      ORDER BY sed.ordinal, se.sample_ordinal
+      ORDER BY
+        COALESCE(se.scheduled_date, se.date_start, se.date_created) ASC,
+        sed.ordinal ASC,
+        se.sample_ordinal ASC
     `;
 
     const eventsResult = await pool.query(eventsQuery, [subjectId]);
@@ -937,6 +920,10 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
         sampleOrdinal: e.sample_ordinal || 1,
         dateStarted: e.date_start,
         dateEnded: e.date_end,
+        scheduledDate: e.scheduled_date,
+        isUnscheduled: e.is_unscheduled || false,
+        type: e.event_type || 'scheduled',
+        name: e.event_name,
         subjectEventStatus: e.status_name || 'scheduled',
         statusId: e.status_id,
         ownerId: e.owner_id,

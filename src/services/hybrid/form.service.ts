@@ -588,7 +588,23 @@ const saveFormDataDirect = async (
       WHERE event_crf_id = $3
     `, [completionStatusId, userId, eventCrfId]);
 
-    // Also update the study_event status to 'data_entry_started' (3)
+    // Advance study_event status based on form completion:
+    //   - At minimum, mark as 'data_entry_started' (3) when any form has data
+    //   - Auto-advance to 'completed' (4) when ALL active forms are complete
+    if (isComplete) {
+      await client.query(`
+        UPDATE study_event
+        SET subject_event_status_id = 4, date_updated = NOW()
+        WHERE study_event_id = $1
+          AND subject_event_status_id < 4
+          AND NOT EXISTS (
+            SELECT 1 FROM event_crf ec
+            WHERE ec.study_event_id = $1
+              AND ec.completion_status_id < 4
+              AND ec.status_id NOT IN (5, 7)
+          )
+      `, [studyEventId]);
+    }
     await client.query(`
       UPDATE study_event
       SET subject_event_status_id = GREATEST(subject_event_status_id, 3),
@@ -4498,6 +4514,118 @@ export const updateFieldData = async (
   }
 };
 
+/**
+ * Mark an eCRF instance as data-entry complete.
+ *
+ * Sets completion_status_id = 4 (complete) and status_id = 2 (data complete).
+ * This is a prerequisite for freezing and locking the form.
+ *
+ * Rules:
+ *   - Form must exist and not already be locked (status_id = 6)
+ *   - Form must not be frozen (frozen = true); frozen implies it is already
+ *     in the lock pipeline and marking complete is redundant
+ *   - All required items must have at least one item_data row
+ *
+ * 21 CFR Part 11 §11.10(e) — the completion action is written to the audit trail.
+ */
+export const markFormComplete = async (
+  eventCrfId: number,
+  userId: number
+): Promise<{ success: boolean; message: string }> => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Load current state
+    const ecResult = await client.query(`
+      SELECT ec.event_crf_id, ec.status_id, ec.completion_status_id,
+             COALESCE(ec.frozen, false) AS frozen,
+             cv.crf_id
+      FROM event_crf ec
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      WHERE ec.event_crf_id = $1
+    `, [eventCrfId]);
+
+    if (ecResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form instance not found' };
+    }
+
+    const ec = ecResult.rows[0];
+
+    if (ec.status_id === 6) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is already locked and cannot be modified' };
+    }
+    if (ec.frozen) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is frozen — it is already in the lock pipeline' };
+    }
+    if (ec.completion_status_id >= 4 && ec.status_id === 2) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form is already marked as complete' };
+    }
+
+    // 2. Check required fields have data
+    // item_form_metadata.required is the authoritative required flag in LibreClinica schema
+    const missingResult = await client.query(`
+      SELECT COUNT(*) AS missing_count
+      FROM item_form_metadata ifm
+      INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
+      WHERE cv.crf_id = $1
+        AND ifm.required = true
+        AND NOT EXISTS (
+          SELECT 1 FROM item_data id
+          WHERE id.item_id = ifm.item_id
+            AND id.event_crf_id = $2
+            AND id.value IS NOT NULL
+            AND TRIM(id.value) <> ''
+        )
+    `, [ec.crf_id, eventCrfId]);
+
+    const missingCount = parseInt(missingResult.rows[0]?.missing_count || '0');
+    if (missingCount > 0) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        message: `${missingCount} required field${missingCount > 1 ? 's are' : ' is'} missing data. All required fields must be filled before marking complete.`
+      };
+    }
+
+    // 3. Mark complete
+    await client.query(`
+      UPDATE event_crf
+      SET completion_status_id = 4,
+          status_id = 2,
+          date_updated = NOW(),
+          update_id = $1
+      WHERE event_crf_id = $2
+    `, [userId, eventCrfId]);
+
+    // 4. Audit trail
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        new_value, audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'event_crf', $1, $2, 'Form Marked Complete',
+        'completion_status_id=4, status_id=2',
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1)
+      )
+    `, [userId, eventCrfId]);
+
+    await client.query('COMMIT');
+    logger.info('Form marked complete', { eventCrfId, userId });
+    return { success: true, message: 'Form marked as complete and is now eligible for data lock' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('markFormComplete error', { eventCrfId, error: error.message });
+    return { success: false, message: error.message };
+  } finally {
+    client.release();
+  }
+};
+
 export default {
   saveFormData,
   getFormData,
@@ -4520,6 +4648,7 @@ export default {
   forkForm,
   // Field-level operations
   updateFieldData,
+  markFormComplete,
   // Reference data
   getNullValueTypes,
   getMeasurementUnits

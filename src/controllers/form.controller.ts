@@ -511,6 +511,38 @@ export const getMeasurementUnits = asyncHandler(async (req: Request, res: Respon
   res.json({ success: true, data });
 });
 
+/**
+ * Mark a form instance as data-entry complete.
+ * POST /api/forms/:eventCrfId/complete
+ *
+ * Sets completion_status_id=4 and status_id=2 (data complete).
+ * This is a prerequisite for freezing and locking the form.
+ */
+export const markComplete = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const eventCrfId = parseInt(req.params.eventCrfId, 10);
+
+  if (isNaN(eventCrfId) || eventCrfId <= 0) {
+    res.status(400).json({ success: false, message: 'eventCrfId must be a positive integer' });
+    return;
+  }
+
+  const result = await formService.markFormComplete(eventCrfId, user.userId);
+
+  if (result.success) {
+    await trackUserAction({
+      userId: user.userId,
+      username: user.username,
+      action: 'FORM_COMPLETED',
+      entityType: 'event_crf',
+      entityId: eventCrfId,
+      details: 'Form marked as data-entry complete'
+    });
+  }
+
+  res.status(result.success ? 200 : 400).json(result);
+});
+
 export default { 
   saveData, getData, getMetadata, getStatus, 
   list, get, getByStudy, 
@@ -521,6 +553,8 @@ export default {
   getVersions, createVersion, fork,
   // Field-level operations with validation
   updateField, validateField,
+  // Mark form complete (prerequisite for data lock)
+  markComplete,
   // Reference data
   getNullValueTypes, getMeasurementUnits
 };

@@ -1,10 +1,19 @@
 /**
- * LibreClinica Core Models
- * 
- * These TypeScript interfaces match the actual LibreClinica Java Bean classes.
- * All frontend and API code should use these models for consistency.
- * 
- * Source: LibreClinica\core\src\main\java\org\akaza\openclinica\bean\
+ * LibreClinica Core Models — SINGLE SOURCE OF TRUTH (Backend)
+ *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  This file is the CANONICAL definition for all domain models.      ║
+ * ║  All new code MUST import interfaces from here.                    ║
+ * ║  Do NOT define duplicate interfaces in services, controllers,      ║
+ * ║  or types/index.ts.                                                ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ * These TypeScript interfaces match the actual LibreClinica Java Bean classes
+ * and PostgreSQL table schemas. Each interface has a corresponding toXxx()
+ * converter function that maps snake_case database rows to camelCase objects.
+ *
+ * Frontend mirror: ElectronicDataCaptureReal/src/app/models/libreclinica.models.ts
+ * Source:          LibreClinica/core/src/main/java/org/akaza/openclinica/bean/
  */
 
 // =============================================================================
@@ -548,6 +557,10 @@ export interface StudyEvent {
   dateUpdated?: Date | string;
   updateId?: number;
   
+  // Unscheduled visit fields (added by migration 20260214)
+  scheduledDate?: Date | string;
+  isUnscheduled?: boolean;
+  
   // Computed/Joined fields (not in DB)
   studyEventDefinition?: StudyEventDefinition;
   eventCRFs?: EventCRF[];
@@ -774,6 +787,57 @@ export interface EventCRF {
   stage?: DataEntryStage;
   studySubject?: StudySubject;
   studyEvent?: StudyEvent;
+}
+
+/**
+ * Patient Event Form — matches patient_event_form table (created by migration 20260218).
+ * Stores a frozen JSONB snapshot of a form's structure + the patient's entered data.
+ */
+export interface PatientEventForm {
+  patientEventFormId: number;
+  studyEventId: number;
+  eventCrfId?: number;
+  crfId: number;
+  crfVersionId: number;
+  studySubjectId: number;
+  formName: string;
+  formStructure: Record<string, any>;
+  formData: Record<string, any>;
+  completionStatus: string;
+  isLocked: boolean;
+  isFrozen: boolean;
+  sdvStatus: boolean;
+  ordinal: number;
+  dateCreated?: Date | string;
+  dateUpdated?: Date | string;
+  createdBy?: number;
+  updatedBy?: number;
+}
+
+/**
+ * Convert database row to PatientEventForm
+ */
+export function toPatientEventForm(row: any): PatientEventForm {
+  return {
+    patientEventFormId: row.patient_event_form_id,
+    studyEventId: row.study_event_id,
+    eventCrfId: row.event_crf_id,
+    crfId: row.crf_id,
+    crfVersionId: row.crf_version_id,
+    studySubjectId: row.study_subject_id,
+    formName: row.form_name,
+    formStructure: row.form_structure || {},
+    formData: row.form_data || {},
+    completionStatus: row.completion_status || 'not_started',
+    isLocked: row.is_locked || false,
+    isFrozen: row.is_frozen || false,
+    sdvStatus: row.sdv_status || false,
+    ordinal: row.ordinal || 1,
+    dateCreated: row.date_created,
+    dateUpdated: row.date_updated,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by
+  };
 }
 
 /**
@@ -1154,7 +1218,8 @@ export interface ApiResponse<T = any> {
   success: boolean;
   data?: T;
   message?: string;
-  errors?: string[];
+  errors?: any[];
+  warnings?: any[];
 }
 
 // =============================================================================
@@ -1269,6 +1334,8 @@ export function toStudyEvent(row: any): StudyEvent {
     dateEnded: row.date_end,
     startTimeFlag: row.start_time_flag,
     endTimeFlag: row.end_time_flag,
+    scheduledDate: row.scheduled_date,
+    isUnscheduled: row.is_unscheduled || false,
     subjectEventStatus: SUBJECT_EVENT_STATUS_MAP[row.subject_event_status_id] || 'scheduled',
     statusId: row.status_id,
     ownerId: row.owner_id,

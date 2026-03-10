@@ -75,6 +75,7 @@ router.put('/:id/reassign',
 // Close with electronic signature (21 CFR Part 11 compliant)
 router.post('/:id/close-with-signature', 
   requireRole('monitor', 'data_manager', 'admin', 'investigator'), 
+  validate({ params: commonSchemas.idParam, body: querySchemas.closeWithSignature }),
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.closeWithSignature
 );

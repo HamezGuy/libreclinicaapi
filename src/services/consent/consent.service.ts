@@ -339,13 +339,16 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
         witness_name, witness_relationship, witness_signature_data, witness_signed_at,
         lar_name, lar_relationship, lar_signature_data, lar_signed_at, lar_reason,
         presented_at, time_spent_reading, pages_viewed, acknowledgments_checked,
-        questions_asked, consented_by, date_created, date_updated
+        questions_asked, consented_by,
+        scanned_consent_file_ids, is_scanned_consent,
+        date_created, date_updated
       ) VALUES (
         $1, $2, $3, 'consented',
         $4, $5, CURRENT_TIMESTAMP, $6, $7,
         $8, $9, $10, CASE WHEN $8 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
         $11, $12, $13, CASE WHEN $11 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END, $14,
         CURRENT_TIMESTAMP, $15, $16, $17, $18, $19,
+        $20, $21,
         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING consent_id
@@ -370,12 +373,28 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
       JSON.stringify(consent.pagesViewed),
       JSON.stringify(consent.acknowledgementsChecked),
       consent.questionsAsked || null,
-      consent.consentedBy
+      consent.consentedBy,
+      consent.scannedConsentFileIds ? JSON.stringify(consent.scannedConsentFileIds) : null,
+      consent.isScannedConsent || false
     ]);
 
     const consentId = result.rows[0].consent_id;
 
+    // Link scanned consent files to this consent record
+    if (consent.scannedConsentFileIds && consent.scannedConsentFileIds.length > 0) {
+      for (const fileId of consent.scannedConsentFileIds) {
+        await client.query(`
+          UPDATE file_uploads 
+          SET consent_id = $1, study_subject_id = $2
+          WHERE file_id = $3
+        `, [consentId, consent.studySubjectId, fileId]);
+      }
+    }
+
     // Log audit event
+    const auditReason = consent.isScannedConsent 
+      ? 'Subject provided informed consent (scanned physical document)'
+      : 'Subject provided informed consent';
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
@@ -384,9 +403,9 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
         CURRENT_TIMESTAMP, 'acc_subject_consent', $1, $2, 'Subject Consent',
         NULL, 'consented',
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Created' LIMIT 1),
-        'Subject provided informed consent'
+        $3
       )
-    `, [consent.consentedBy, consent.studySubjectId]);
+    `, [consent.consentedBy, consent.studySubjectId, auditReason]);
 
     await client.query('COMMIT');
 

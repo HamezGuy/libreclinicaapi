@@ -141,12 +141,14 @@ router.post('/', authMiddleware, upload.single('file'), async (req: Request, res
       }
       
       // Also insert into file_uploads table for tracking
+      const { eventCrfId, studySubjectId, consentId } = req.body;
       await client.query(`
         INSERT INTO file_uploads (
           file_id, original_name, stored_name, file_path, mime_type,
           file_size, checksum, crf_version_id, item_id, crf_version_media_id,
+          event_crf_id, study_subject_id, consent_id,
           uploaded_by, uploaded_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
         ON CONFLICT (file_id) DO NOTHING
       `, [
         fileId,
@@ -159,6 +161,9 @@ router.post('/', authMiddleware, upload.single('file'), async (req: Request, res
         crfVersionId || null,
         itemId || null,
         crfVersionMediaId,
+        eventCrfId || null,
+        studySubjectId || null,
+        consentId || null,
         (req as any).user?.userId || 1
       ]);
       
@@ -206,7 +211,7 @@ router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Req
       return res.status(400).json({ success: false, message: 'No files uploaded' });
     }
 
-    const { crfVersionId, itemId } = req.body;
+    const { crfVersionId, itemId, eventCrfId, studySubjectId, consentId } = req.body;
     const uploadedFiles: UploadedFileResponse[] = [];
     
     const client = await pool.connect();
@@ -221,7 +226,6 @@ router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Req
         let crfVersionMediaId: number | null = null;
         
         if (crfVersionId) {
-          // Insert into LibreClinica's crf_version_media table
           const mediaResult = await client.query(`
             INSERT INTO crf_version_media (
               crf_version_id, name, path
@@ -239,8 +243,9 @@ router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Req
           INSERT INTO file_uploads (
             file_id, original_name, stored_name, file_path, mime_type,
             file_size, checksum, crf_version_id, item_id, crf_version_media_id,
+            event_crf_id, study_subject_id, consent_id,
             uploaded_by, uploaded_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
           ON CONFLICT (file_id) DO NOTHING
         `, [
           fileId,
@@ -253,6 +258,9 @@ router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Req
           crfVersionId || null,
           itemId || null,
           crfVersionMediaId,
+          eventCrfId || null,
+          studySubjectId || null,
+          consentId || null,
           (req as any).user?.userId || 1
         ]);
         
@@ -469,6 +477,77 @@ router.get('/crf-version/:crfVersionId', authMiddleware, async (req: Request, re
     
   } catch (error: any) {
     logger.error('Get CRF files error', { error: error.message });
+    res.status(500).json({ success: false, message: 'Failed to get files' });
+  }
+});
+
+/**
+ * Get files for a form instance (event_crf)
+ * GET /api/files/event-crf/:eventCrfId
+ */
+router.get('/event-crf/:eventCrfId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { eventCrfId } = req.params;
+    
+    const result = await pool.query(`
+      SELECT file_id, original_name, mime_type, file_size, uploaded_at,
+             crf_version_media_id, item_id
+      FROM file_uploads
+      WHERE event_crf_id = $1
+      ORDER BY uploaded_at DESC
+    `, [eventCrfId]);
+    
+    const files: UploadedFileResponse[] = result.rows.map(file => ({
+      id: file.file_id,
+      name: file.original_name,
+      size: file.file_size,
+      type: file.mime_type,
+      url: `/api/files/${file.file_id}/download`,
+      uploadedAt: file.uploaded_at,
+      crfVersionMediaId: file.crf_version_media_id,
+      itemId: file.item_id,
+      thumbnailUrl: file.mime_type?.startsWith('image/') ? `/api/files/${file.file_id}/thumbnail` : undefined
+    }));
+    
+    res.json({ success: true, data: files });
+    
+  } catch (error: any) {
+    logger.error('Get event CRF files error', { error: error.message });
+    res.status(500).json({ success: false, message: 'Failed to get files' });
+  }
+});
+
+/**
+ * Get files for a consent record
+ * GET /api/files/consent/:consentId
+ */
+router.get('/consent/:consentId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { consentId } = req.params;
+    
+    const result = await pool.query(`
+      SELECT file_id, original_name, mime_type, file_size, uploaded_at,
+             crf_version_media_id, item_id
+      FROM file_uploads
+      WHERE consent_id = $1
+      ORDER BY uploaded_at DESC
+    `, [consentId]);
+    
+    const files: UploadedFileResponse[] = result.rows.map(file => ({
+      id: file.file_id,
+      name: file.original_name,
+      size: file.file_size,
+      type: file.mime_type,
+      url: `/api/files/${file.file_id}/download`,
+      uploadedAt: file.uploaded_at,
+      crfVersionMediaId: file.crf_version_media_id,
+      thumbnailUrl: file.mime_type?.startsWith('image/') ? `/api/files/${file.file_id}/thumbnail` : undefined
+    }));
+    
+    res.json({ success: true, data: files });
+    
+  } catch (error: any) {
+    logger.error('Get consent files error', { error: error.message });
     res.status(500).json({ success: false, message: 'Failed to get files' });
   }
 });

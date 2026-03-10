@@ -256,9 +256,85 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
 
     const responsesResult = await pool.query(responsesQuery, [queryId]);
 
+    // Fetch linked item_data for field-level queries so the frontend
+    // can display the current value and offer data correction.
+    let linkedItemData: any = null;
+    let linkedEventCrf: any = null;
+    let canCorrectValue = false;
+
+    try {
+      const linkedDataQuery = `
+        SELECT
+          dim.item_data_id,
+          id.item_id,
+          id.value AS current_value,
+          id.event_crf_id,
+          i.name AS field_name,
+          i.oc_oid AS field_oid,
+          dim.column_name,
+          c.name AS form_name,
+          cv.name AS form_version
+        FROM dn_item_data_map dim
+        INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+        INNER JOIN item i ON id.item_id = i.item_id
+        LEFT JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+        LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        LEFT JOIN crf c ON cv.crf_id = c.crf_id
+        WHERE dim.discrepancy_note_id = $1
+        LIMIT 1
+      `;
+      const linkedResult = await pool.query(linkedDataQuery, [queryId]);
+
+      if (linkedResult.rows.length > 0) {
+        const r = linkedResult.rows[0];
+        linkedItemData = {
+          itemDataId: r.item_data_id,
+          itemId: r.item_id,
+          eventCrfId: r.event_crf_id,
+          fieldName: r.field_name,
+          fieldOid: r.field_oid,
+          columnName: r.column_name,
+          currentValue: r.current_value,
+          formName: r.form_name,
+          formVersion: r.form_version
+        };
+        linkedEventCrf = {
+          eventCrfId: r.event_crf_id,
+          formName: r.form_name,
+          formVersion: r.form_version
+        };
+        canCorrectValue = true;
+      } else {
+        // Check event_crf-level linkage (no field-level correction possible)
+        const ecrfLink = await pool.query(
+          `SELECT decm.event_crf_id, decm.column_name,
+                  c.name AS form_name, cv.name AS form_version
+           FROM dn_event_crf_map decm
+           LEFT JOIN event_crf ec ON decm.event_crf_id = ec.event_crf_id
+           LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+           LEFT JOIN crf c ON cv.crf_id = c.crf_id
+           WHERE decm.discrepancy_note_id = $1 LIMIT 1`,
+          [queryId]
+        );
+        if (ecrfLink.rows.length > 0) {
+          linkedEventCrf = {
+            eventCrfId: ecrfLink.rows[0].event_crf_id,
+            columnName: ecrfLink.rows[0].column_name,
+            formName: ecrfLink.rows[0].form_name,
+            formVersion: ecrfLink.rows[0].form_version
+          };
+        }
+      }
+    } catch (linkedErr: any) {
+      logger.warn('Failed to fetch linked item data for query', { queryId, error: linkedErr.message });
+    }
+
     return {
       ...parent,
-      responses: responsesResult.rows
+      responses: responsesResult.rows,
+      linkedItemData,
+      linkedEventCrf,
+      canCorrectValue
     };
   } catch (error: any) {
     logger.error('Get query by ID error', { error: error.message });
@@ -335,11 +411,17 @@ export const createQuery = async (
         if (data.entityType === 'eventCrf') {
           eventCrfIdForLookup = data.entityId;
         } else if (data.entityType === 'itemData') {
-          const idResult = await client.query(
-            `SELECT event_crf_id FROM item_data WHERE item_data_id = $1`,
-            [data.entityId]
-          );
-          if (idResult.rows.length > 0) eventCrfIdForLookup = idResult.rows[0].event_crf_id;
+          // The frontend may send item.item_id as entityId; use eventCrfId directly if available
+          const ecId = (data as any).eventCrfId;
+          if (ecId) {
+            eventCrfIdForLookup = ecId;
+          } else {
+            const idResult = await client.query(
+              `SELECT event_crf_id FROM item_data WHERE item_data_id = $1`,
+              [data.entityId]
+            );
+            if (idResult.rows.length > 0) eventCrfIdForLookup = idResult.rows[0].event_crf_id;
+          }
         }
 
         const assignees = await resolveAllQueryAssignees(
@@ -392,18 +474,100 @@ export const createQuery = async (
 
     const queryId = noteResult.rows[0].discrepancy_note_id;
 
-    // Insert into the primary mapping table for the entity type
-    // LibreClinica mapping tables (dn_item_data_map, dn_event_crf_map, etc.) 
-    // do NOT have a study_subject_id column - use dn_study_subject_map separately
-    const insertMapQuery = `
-      INSERT INTO ${mapping.table} (
-        discrepancy_note_id, ${mapping.idColumn}
-      ) VALUES ($1, $2)
-    `;
-    await client.query(insertMapQuery, [queryId, data.entityId]);
+    // Resolve the correct entity ID for the mapping table.
+    // For itemData queries the frontend sends item.item_id (field definition PK).
+    // dn_item_data_map.item_data_id requires the actual item_data row PK.
+    let resolvedEntityId = data.entityId;
+
+    if (data.entityType === 'itemData') {
+      if ((data as any).itemDataId) {
+        resolvedEntityId = (data as any).itemDataId;
+      } else {
+        const eventCrfId = (data as any).eventCrfId;
+        let itemId = (data as any).itemId || data.entityId;
+        const fieldName = (data as any).fieldName;
+
+        if (!eventCrfId) {
+          throw new BadRequestError(
+            'Cannot create field-level query: eventCrfId is required to resolve the data row. ' +
+            'Please save the form before creating a query on this field.'
+          );
+        }
+
+        // If itemId is not provided but fieldName is, resolve itemId from the
+        // field name by joining through event_crf → crf_version → item.
+        // The match is case-insensitive and handles underscore/space differences
+        // because the item.name stores labels like "Heart Rate" while the frontend
+        // uses fieldName like "heart_rate".
+        if (!itemId && fieldName) {
+          const normalizedName = fieldName.toLowerCase();
+          // Try matching by item name, OID, or fieldName embedded in description.
+          // The form save service stores fieldName inside ---EXTENDED_PROPS--- in
+          // item.description and resolves it via extProps.fieldName.toLowerCase().
+          const itemLookup = await client.query(`
+            SELECT i.item_id
+            FROM item i
+            INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+            INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
+            INNER JOIN event_crf ec ON cv.crf_version_id = ec.crf_version_id
+            WHERE ec.event_crf_id = $1
+              AND (
+                LOWER(i.name) = $2
+                OR LOWER(i.oc_oid) = $2
+                OR LOWER(REPLACE(i.name, ' ', '_')) = $2
+                OR LOWER(REPLACE(i.name, ' ', '')) = REPLACE($2, '_', '')
+                OR i.description ILIKE '%"fieldName":"' || $2 || '"%'
+              )
+            LIMIT 1
+          `, [eventCrfId, normalizedName]);
+          if (itemLookup.rows.length > 0) {
+            itemId = itemLookup.rows[0].item_id;
+            logger.info('Resolved itemId from fieldName', { fieldName, itemId, eventCrfId });
+          }
+        }
+
+        if (!itemId) {
+          throw new BadRequestError(
+            'Cannot create field-level query: itemId or fieldName is required to identify the field.'
+          );
+        }
+
+        const itemDataLookup = await client.query(`
+          SELECT item_data_id FROM item_data
+          WHERE event_crf_id = $1 AND item_id = $2 AND deleted = false
+          ORDER BY item_data_id DESC LIMIT 1
+        `, [eventCrfId, itemId]);
+
+        if (itemDataLookup.rows.length === 0) {
+          throw new BadRequestError(
+            'Cannot create field-level query: this field has no saved data yet. ' +
+            'Please save the form first, then create the query.'
+          );
+        }
+
+        resolvedEntityId = itemDataLookup.rows[0].item_data_id;
+        logger.info('Resolved item_data_id from eventCrfId + itemId', {
+          eventCrfId, itemId, resolvedItemDataId: resolvedEntityId
+        });
+      }
+    }
+
+    // Insert into the mapping table with the validated entity ID
+    const fieldPath = (data as any).fieldName || (data as any).fieldPath || (data as any).columnName;
+    if (fieldPath && (mapping.table === 'dn_event_crf_map' || mapping.table === 'dn_item_data_map')) {
+      await client.query(`
+        INSERT INTO ${mapping.table} (discrepancy_note_id, ${mapping.idColumn}, column_name)
+        VALUES ($1, $2, $3)
+      `, [queryId, resolvedEntityId, fieldPath]);
+    } else {
+      await client.query(`
+        INSERT INTO ${mapping.table} (discrepancy_note_id, ${mapping.idColumn})
+        VALUES ($1, $2)
+      `, [queryId, resolvedEntityId]);
+    }
 
     // Also create a dn_study_subject_map entry if we have a subjectId
-    // and the primary mapping table is NOT already dn_study_subject_map
+    // and the primary mapping was NOT already dn_study_subject_map
     if (studySubjectId && mapping.table !== 'dn_study_subject_map') {
       try {
         await client.query(`
@@ -440,12 +604,11 @@ export const createQuery = async (
           queryId  // Link to parent query
         ]);
         
-        // Map child note to the same entity
         const childNoteId = childResult.rows[0].discrepancy_note_id;
         await client.query(`
           INSERT INTO ${mapping.table} (discrepancy_note_id, ${mapping.idColumn})
           VALUES ($1, $2)
-        `, [childNoteId, data.entityId]);
+        `, [childNoteId, resolvedEntityId]);
 
         logger.info('Created child query for additional assignee', { 
           parentQueryId: queryId, childNoteId, additionalUserId 
@@ -513,10 +676,12 @@ export const addQueryResponse = async (
   data: {
     description: string;
     detailedNotes?: string;
-    newStatusId?: number;  // Optional: 2=Updated, 3=Resolution Proposed, 4=Closed
+    newStatusId?: number;
+    correctedValue?: string;
+    correctionReason?: string;
   },
   userId: number
-): Promise<{ success: true; responseId: number; message: string }> => {
+): Promise<{ success: true; responseId: number; message: string; correctionApplied?: boolean }> => {
   logger.info('Adding query response', { parentQueryId, userId });
 
   // Guarantee a non-empty description — an empty description violates NOT NULL
@@ -605,9 +770,99 @@ export const addQueryResponse = async (
       'Query response added'
     ]);
 
+    // ── DATA CORRECTION: update the linked item_data value if provided ──
+    let correctionApplied = false;
+
+    if (data.correctedValue !== undefined && data.correctedValue !== null && data.correctedValue !== '') {
+      try {
+        const linkedData = await client.query(`
+          SELECT dim.item_data_id, id.value AS old_value, id.event_crf_id, i.name AS field_name
+          FROM dn_item_data_map dim
+          INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+          INNER JOIN item i ON id.item_id = i.item_id
+          WHERE dim.discrepancy_note_id = $1
+          LIMIT 1
+        `, [parentQueryId]);
+
+        if (linkedData.rows.length > 0) {
+          const { item_data_id, old_value, event_crf_id, field_name } = linkedData.rows[0];
+
+          // Check lock/freeze status — query-driven corrections are ALLOWED on
+          // locked/frozen forms (EDC standard) but we log an explicit audit entry
+          let lockNote = '';
+          if (event_crf_id) {
+            const lockCheck = await client.query(
+              `SELECT status_id, COALESCE(frozen, false) AS frozen FROM event_crf WHERE event_crf_id = $1`,
+              [event_crf_id]
+            );
+            if (lockCheck.rows.length > 0) {
+              if (lockCheck.rows[0].status_id === 6) lockNote = ' [LOCKED RECORD — query correction override]';
+              else if (lockCheck.rows[0].frozen) lockNote = ' [FROZEN RECORD — query correction override]';
+            }
+          }
+
+          // 1. Update the actual item_data value
+          await client.query(`
+            UPDATE item_data SET value = $1, date_updated = NOW(), update_id = $2
+            WHERE item_data_id = $3
+          `, [data.correctedValue, userId, item_data_id]);
+
+          // 2. Write audit trail for the data correction
+          const correctionReason = (data.correctionReason || 'Query resolution data correction') + lockNote;
+          await client.query(`
+            INSERT INTO audit_log_event (
+              audit_date, audit_table, user_id, entity_id,
+              old_value, new_value, audit_log_event_type_id,
+              event_crf_id, reason_for_change
+            ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
+              (SELECT audit_log_event_type_id FROM audit_log_event_type
+               WHERE name ILIKE '%updated%' LIMIT 1),
+              $5, $6)
+          `, [
+            userId, item_data_id, old_value, data.correctedValue,
+            event_crf_id, correctionReason
+          ]);
+
+          // 3. Sync corrected value into patient_event_form JSONB snapshot
+          if (event_crf_id && field_name) {
+            try {
+              await client.query(`
+                UPDATE patient_event_form
+                SET form_data = jsonb_set(
+                      COALESCE(form_data, '{}'::jsonb),
+                      $1::text[], to_jsonb($2::text)
+                    ),
+                    date_updated = NOW()
+                WHERE event_crf_id = $3
+              `, [[field_name], data.correctedValue, event_crf_id]);
+            } catch (snapErr: any) {
+              logger.warn('Failed to sync correction to patient_event_form (non-blocking)', {
+                error: snapErr.message, event_crf_id, field_name
+              });
+            }
+          }
+
+          correctionApplied = true;
+          logger.info('Data correction applied via query resolution', {
+            queryId: parentQueryId, item_data_id, field_name,
+            oldValue: old_value, newValue: data.correctedValue
+          });
+        } else {
+          logger.warn('correctedValue provided but no linked item_data found for query', {
+            queryId: parentQueryId
+          });
+        }
+      } catch (correctionErr: any) {
+        logger.error('Data correction failed — rolling back', { error: correctionErr.message });
+        throw correctionErr;
+      }
+    }
+
     await client.query('COMMIT');
 
-    logger.info('Query response added successfully', { responseId, parentQueryId, newStatusId });
+    logger.info('Query response added successfully', {
+      responseId, parentQueryId, newStatusId, correctionApplied
+    });
 
     // Resolve responder's display name for notifications
     let responderName = 'A user';
@@ -659,7 +914,13 @@ export const addQueryResponse = async (
       logger.warn('Failed to send query response notification', { error: notifErr.message });
     }
 
-    return { success: true, responseId, message: 'Response added successfully' };
+    return {
+      success: true, responseId,
+      message: correctionApplied
+        ? 'Response added and data correction applied'
+        : 'Response added successfully',
+      correctionApplied
+    };
   } catch (error: any) {
     if (txStarted) {
       await client.query('ROLLBACK').catch((rbErr: any) =>
@@ -704,7 +965,7 @@ export const updateQueryStatus = async (
     );
 
     if (currentResult.rows.length === 0) {
-      throw new Error('Query not found');
+      throw new NotFoundError('Query not found');
     }
 
     const oldStatusId = currentResult.rows[0].resolution_status_id;
@@ -1150,7 +1411,7 @@ export const reassignQuery = async (
     );
 
     if (currentQuery.rows.length === 0) {
-      throw new Error('Query not found');
+      throw new NotFoundError('Query not found');
     }
 
     const oldAssignedUserId = currentQuery.rows[0].assigned_user_id;
@@ -1866,6 +2127,8 @@ export const reopenQuery = async (
 
 /**
  * Bulk update status for multiple queries.
+ * Each query is updated independently so a single failure doesn't block the rest.
+ * All failures are collected and reported in the return value.
  */
 export const bulkUpdateStatus = async (
   queryIds: number[],
@@ -1879,12 +2142,12 @@ export const bulkUpdateStatus = async (
   const errors: string[] = [];
 
   for (const qid of queryIds) {
-    const result = await updateQueryStatus(qid, statusId, userId, { reason });
-    if (result.success) {
+    try {
+      await updateQueryStatus(qid, statusId, userId, { reason });
       updated++;
-    } else {
+    } catch (e: any) {
       failed++;
-      errors.push(`Query ${qid}: ${result.message}`);
+      errors.push(`Query ${qid}: ${e.message}`);
     }
   }
 
@@ -1893,24 +2156,28 @@ export const bulkUpdateStatus = async (
 
 /**
  * Bulk close queries with a shared reason.
+ * Each query is closed independently so a single failure doesn't block the rest.
  */
 export const bulkCloseQueries = async (
   queryIds: number[],
   userId: number,
   reason: string
 ): Promise<{ success: boolean; closed: number; failed: number; errors: string[] }> => {
+  if (!reason || reason.trim().length === 0) {
+    return { success: false, closed: 0, failed: queryIds.length, errors: ['Reason is required to bulk close queries'] };
+  }
   logger.info('Bulk closing queries', { count: queryIds.length, userId });
   let closed = 0;
   let failed = 0;
   const errors: string[] = [];
 
   for (const qid of queryIds) {
-    const result = await updateQueryStatus(qid, 4, userId, { reason, signature: false });
-    if (result.success) {
+    try {
+      await updateQueryStatus(qid, 4, userId, { reason, signature: false });
       closed++;
-    } else {
+    } catch (e: any) {
       failed++;
-      errors.push(`Query ${qid}: ${result.message}`);
+      errors.push(`Query ${qid}: ${e.message}`);
     }
   }
 
@@ -1919,6 +2186,7 @@ export const bulkCloseQueries = async (
 
 /**
  * Bulk reassign queries to a new user.
+ * Each query is reassigned independently so a single failure doesn't block the rest.
  */
 export const bulkReassignQueries = async (
   queryIds: number[],
@@ -1932,12 +2200,12 @@ export const bulkReassignQueries = async (
   const errors: string[] = [];
 
   for (const qid of queryIds) {
-    const result = await reassignQuery(qid, newAssignedUserId, userId);
-    if (result.success) {
+    try {
+      await reassignQuery(qid, newAssignedUserId, userId);
       reassigned++;
-    } else {
+    } catch (e: any) {
       failed++;
-      errors.push(`Query ${qid}: ${result.message}`);
+      errors.push(`Query ${qid}: ${e.message}`);
     }
   }
 

@@ -16,6 +16,7 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { validate, dataLockSchemas, commonSchemas } from '../middleware/validation.middleware';
 import * as dataLocksController from '../controllers/data-locks.controller';
 
 const router = express.Router();
@@ -36,12 +37,14 @@ router.get('/', dataLocksController.list);
 // GET /api/data-locks/eligibility/subject/:studySubjectId
 router.get('/eligibility/subject/:studySubjectId', 
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: dataLockSchemas.studySubjectIdParam }),
   dataLocksController.checkSubjectEligibility
 );
 
 // GET /api/data-locks/eligibility/event/:studyEventId
 router.get('/eligibility/event/:studyEventId',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: dataLockSchemas.studyEventIdParam }),
   dataLocksController.checkEventEligibility
 );
 
@@ -52,6 +55,7 @@ router.get('/eligibility/event/:studyEventId',
 // POST /api/data-locks - Lock a single form (eventCrfId)
 router.post('/', 
   requireRole('monitor', 'data_manager', 'admin'), 
+  validate({ body: dataLockSchemas.lock }),
   requireSignatureFor(SignatureMeanings.FORM_LOCK),
   dataLocksController.lock
 );
@@ -59,6 +63,7 @@ router.post('/',
 // DELETE /api/data-locks/:eventCrfId - Unlock a single form
 router.delete('/:eventCrfId', 
   requireRole('admin'), 
+  validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unlockBody }),
   requireSignatureFor('I authorize unlocking this form for editing'),
   dataLocksController.unlock
 );
@@ -70,6 +75,7 @@ router.delete('/:eventCrfId',
 // POST /api/data-locks/subject/:studySubjectId - Lock all subject data
 router.post('/subject/:studySubjectId',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.lockSubject }),
   requireSignatureFor('I confirm that all data has been reviewed and is ready for locking'),
   dataLocksController.lockSubject
 );
@@ -77,6 +83,7 @@ router.post('/subject/:studySubjectId',
 // DELETE /api/data-locks/subject/:studySubjectId - Unlock all subject data
 router.delete('/subject/:studySubjectId',
   requireRole('admin'),
+  validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.unlockBody }),
   requireSignatureFor('I authorize unlocking this subject data for editing'),
   dataLocksController.unlockSubject
 );
@@ -88,6 +95,7 @@ router.delete('/subject/:studySubjectId',
 // POST /api/data-locks/event/:studyEventId - Lock all event data
 router.post('/event/:studyEventId',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.lockEvent }),
   requireSignatureFor('I confirm that all data for this visit has been reviewed and is ready for locking'),
   dataLocksController.lockEvent
 );
@@ -95,6 +103,7 @@ router.post('/event/:studyEventId',
 // DELETE /api/data-locks/event/:studyEventId - Unlock all event data
 router.delete('/event/:studyEventId',
   requireRole('admin'),
+  validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.unlockBody }),
   requireSignatureFor('I authorize unlocking this visit data for editing'),
   dataLocksController.unlockEvent
 );
@@ -106,6 +115,7 @@ router.delete('/event/:studyEventId',
 // POST /api/data-locks/freeze/:eventCrfId - Freeze a single form
 router.post('/freeze/:eventCrfId',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.freeze }),
   requireSignatureFor('I confirm this form data is ready to be frozen'),
   dataLocksController.freeze
 );
@@ -113,6 +123,7 @@ router.post('/freeze/:eventCrfId',
 // DELETE /api/data-locks/freeze/:eventCrfId - Unfreeze a single form
 router.delete('/freeze/:eventCrfId',
   requireRole('data_manager', 'admin'),
+  validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
   requireSignatureFor('I authorize unfreezing this form for editing'),
   dataLocksController.unfreeze
 );
@@ -120,6 +131,7 @@ router.delete('/freeze/:eventCrfId',
 // POST /api/data-locks/batch/freeze - Batch freeze multiple CRFs
 router.post('/batch/freeze',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ body: dataLockSchemas.batchIds }),
   requireSignatureFor('I confirm these forms are ready to be frozen'),
   dataLocksController.batchFreeze
 );
@@ -131,6 +143,7 @@ router.post('/batch/freeze',
 // POST /api/data-locks/batch/lock - Batch lock multiple CRFs
 router.post('/batch/lock',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ body: dataLockSchemas.batchIds }),
   requireSignatureFor(SignatureMeanings.FORM_LOCK),
   dataLocksController.batchLock
 );
@@ -138,6 +151,7 @@ router.post('/batch/lock',
 // POST /api/data-locks/batch/unlock - Batch unlock multiple CRFs
 router.post('/batch/unlock',
   requireRole('admin'),
+  validate({ body: dataLockSchemas.batchIds }),
   requireSignatureFor('I authorize unlocking these forms for editing'),
   dataLocksController.batchUnlock
 );
@@ -145,8 +159,83 @@ router.post('/batch/unlock',
 // POST /api/data-locks/batch/sdv - Batch mark multiple CRFs as SDV verified
 router.post('/batch/sdv',
   requireRole('monitor', 'data_manager', 'admin'),
+  validate({ body: dataLockSchemas.batchIds }),
   requireSignatureFor('I confirm source data verification of these forms'),
   dataLocksController.batchSDV
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// UNLOCK REQUEST WORKFLOW
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /api/data-locks/unlock-requests - List requests (admin/DM see all; others see own)
+router.get('/unlock-requests',
+  dataLocksController.listUnlockRequests
+);
+
+// POST /api/data-locks/unlock-requests - Submit an unlock request
+router.post('/unlock-requests',
+  validate({ body: dataLockSchemas.createUnlockRequest }),
+  dataLocksController.createUnlockRequest
+);
+
+// PUT /api/data-locks/unlock-requests/:requestId/review - Approve or reject (admin/DM + e-sig)
+router.put('/unlock-requests/:requestId/review',
+  requireRole('admin', 'data_manager'),
+  validate({ params: dataLockSchemas.requestIdParam, body: dataLockSchemas.reviewUnlockRequest }),
+  requireSignatureFor('I authorize this unlock request decision'),
+  dataLocksController.reviewUnlockRequest
+);
+
+// DELETE /api/data-locks/unlock-requests/:requestId - Cancel a pending request
+router.delete('/unlock-requests/:requestId',
+  validate({ params: dataLockSchemas.requestIdParam }),
+  dataLocksController.cancelUnlockRequest
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// DATA SANITATION (Pre-lock quality review)
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /api/data-locks/sanitation/:studyId - Study-wide data quality snapshot
+router.get('/sanitation/:studyId',
+  requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: commonSchemas.studyIdParam }),
+  dataLocksController.getSanitationReport
+);
+
+// GET /api/data-locks/sanitation/:studyId/subjects - Per-subject breakdown
+router.get('/sanitation/:studyId/subjects',
+  requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: commonSchemas.studyIdParam }),
+  dataLocksController.getSanitationSubjects
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// STUDY-LEVEL LOCK
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /api/data-locks/study/:studyId/status - Get study lock status
+router.get('/study/:studyId/status',
+  requireRole('monitor', 'data_manager', 'admin', 'investigator'),
+  validate({ params: commonSchemas.studyIdParam }),
+  dataLocksController.getStudyLockStatus
+);
+
+// POST /api/data-locks/study/:studyId - Lock the entire study dataset (dual sig)
+router.post('/study/:studyId',
+  requireRole('admin', 'investigator'),
+  validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.lockStudy }),
+  requireSignatureFor('I authorize the final lock of this study dataset'),
+  dataLocksController.lockStudy
+);
+
+// DELETE /api/data-locks/study/:studyId - Unlock the study dataset (admin only)
+router.delete('/study/:studyId',
+  requireRole('admin'),
+  validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.unlockBody }),
+  requireSignatureFor('I authorize unlocking this study dataset'),
+  dataLocksController.unlockStudy
 );
 
 export default router;

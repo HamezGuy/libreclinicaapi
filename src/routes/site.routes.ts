@@ -143,15 +143,16 @@ router.post('/', requireRole('admin', 'data_manager'), asyncHandler(async (req: 
   }
 
   const uniqueId = `${siteNumber || siteName.replace(/\s+/g, '_').substring(0, 20)}_${Date.now()}`;
+  const ocOid = `S_${uniqueId}`.substring(0, 40);
 
   const result = await pool.query(`
     INSERT INTO study (parent_study_id, unique_identifier, secondary_identifier, name, summary, principal_investigator,
       facility_name, facility_address, facility_city, facility_state, facility_zip, facility_country,
-      expected_total_enrollment, type_id, status_id, owner_id, date_created)
-    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, type_id, 1, $14, NOW()
+      expected_total_enrollment, type_id, status_id, owner_id, date_created, oc_oid)
+    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, type_id, 1, $14, NOW(), $15
     FROM study WHERE study_id = $1
     RETURNING study_id
-  `, [parentStudyId, uniqueId, siteNumber, siteName, description, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, user.userId]);
+  `, [parentStudyId, uniqueId, siteNumber, siteName, description, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, user.userId, ocOid]);
 
   if (result.rows.length === 0) {
     res.status(400).json({ success: false, message: 'Parent study not found' });

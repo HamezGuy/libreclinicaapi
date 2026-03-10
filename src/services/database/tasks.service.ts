@@ -400,6 +400,12 @@ export async function getTaskSummary(filters: TaskFilters): Promise<{ success: b
 // Queries where user is assigned_user_id OR owner_id
 
 async function getQueryTasks(userId: number | undefined, studyId: number | undefined, limit: number, orgUserIds: number[] | null = null): Promise<Task[]> {
+  // Get the user's accessible study IDs to filter out legacy/foreign queries
+  let userStudyIds: number[] = [];
+  if (userId) {
+    userStudyIds = await getUserStudyIds(userId);
+  }
+
   let query = `
     SELECT 
       dn.discrepancy_note_id,
@@ -448,6 +454,11 @@ async function getQueryTasks(userId: number | undefined, studyId: number | undef
   if (studyId) {
     query += ` AND dn.study_id = $${paramIdx}`;
     params.push(studyId);
+    paramIdx++;
+  } else if (userStudyIds.length > 0) {
+    // Only show queries from the user's accessible studies (excludes legacy/foreign queries)
+    query += ` AND (dn.study_id = ANY($${paramIdx}::int[]) OR dn.study_id IS NULL)`;
+    params.push(userStudyIds);
     paramIdx++;
   }
   
