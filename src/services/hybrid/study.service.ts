@@ -537,6 +537,10 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         s.facility_zip,
         s.facility_country,
         s.facility_recruitment_status,
+        s.facility_contact_name,
+        s.facility_contact_degree,
+        s.facility_contact_phone,
+        s.facility_contact_email,
         s.status_id,
         (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects
       FROM study s
@@ -558,6 +562,10 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
       facilityZip: site.facility_zip,
       facilityCountry: site.facility_country,
       facilityRecruitmentStatus: site.facility_recruitment_status,
+      facilityContactName: site.facility_contact_name,
+      facilityContactDegree: site.facility_contact_degree,
+      facilityContactPhone: site.facility_contact_phone,
+      facilityContactEmail: site.facility_contact_email,
       enrolledSubjects: parseInt(site.enrolled_subjects) || 0,
       isActive: site.status_id === 1
     }));
@@ -1135,15 +1143,16 @@ export const createStudy = async (
           // Generate OC OID for site
           const siteOid = `S_${site.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
           
-          // Insert site as child study
+          // Insert site as child study (including contact fields)
           await client.query(`
             INSERT INTO study (
               parent_study_id, unique_identifier, name, summary,
               principal_investigator, expected_total_enrollment,
               facility_name, facility_address, facility_city, facility_state, facility_zip, facility_country,
               facility_recruitment_status,
+              facility_contact_name, facility_contact_degree, facility_contact_phone, facility_contact_email,
               status_id, owner_id, date_created, oc_oid
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, $14, NOW(), $15)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 1, $18, NOW(), $19)
           `, [
             studyId,                                      // $1  parent_study_id
             site.uniqueIdentifier,                        // $2  unique_identifier
@@ -1158,8 +1167,12 @@ export const createStudy = async (
             site.facilityZip || null,                     // $11 facility_zip
             site.facilityCountry || null,                 // $12 facility_country
             site.facilityRecruitmentStatus || 'Not yet recruiting', // $13 facility_recruitment_status
-            userId,                                       // $14 owner_id
-            siteOid                                       // $15 oc_oid
+            site.facilityContactName || null,             // $14 facility_contact_name
+            site.facilityContactDegree || null,           // $15 facility_contact_degree
+            site.facilityContactPhone || null,            // $16 facility_contact_phone
+            site.facilityContactEmail || null,            // $17 facility_contact_email
+            userId,                                       // $18 owner_id
+            siteOid                                       // $19 oc_oid
           ]);
           
           logger.info('Created study site', { parentStudyId: studyId, siteName: site.name });
@@ -1568,14 +1581,16 @@ export const updateStudy = async (
           await client.query('SAVEPOINT update_site');
           
           if (site.studyId) {
-            // Update existing site
+            // Update existing site (including contact fields)
             await client.query(`
               UPDATE study
               SET name = $1, principal_investigator = $2, expected_total_enrollment = $3,
                   facility_name = $4, facility_address = $5, facility_city = $6, facility_state = $7,
                   facility_country = $8, facility_recruitment_status = $9,
-                  date_updated = NOW(), update_id = $10
-              WHERE study_id = $11 AND parent_study_id = $12
+                  facility_contact_name = $10, facility_contact_degree = $11,
+                  facility_contact_phone = $12, facility_contact_email = $13,
+                  date_updated = NOW(), update_id = $14
+              WHERE study_id = $15 AND parent_study_id = $16
             `, [
               site.name,
               site.principalInvestigator || null,
@@ -1586,6 +1601,10 @@ export const updateStudy = async (
               site.facilityState || null,
               site.facilityCountry || null,
               site.facilityRecruitmentStatus || 'Not yet recruiting',
+              site.facilityContactName || null,
+              site.facilityContactDegree || null,
+              site.facilityContactPhone || null,
+              site.facilityContactEmail || null,
               userId,
               site.studyId,
               studyId

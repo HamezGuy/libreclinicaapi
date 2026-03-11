@@ -165,6 +165,8 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
         s.facility_zip,
         s.facility_country,
         s.facility_recruitment_status,
+        s.facility_contact_name,
+        s.facility_contact_degree,
         s.facility_contact_email,
         s.facility_contact_phone,
         st.name as status_name,
@@ -204,7 +206,13 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
       facilityZip: site.facility_zip || '',
       facilityCountry: site.facility_country || '',
       facilityRecruitmentStatus: site.facility_recruitment_status || '',
+      facilityContactName: site.facility_contact_name || '',
+      facilityContactDegree: site.facility_contact_degree || '',
+      facilityContactEmail: site.facility_contact_email || '',
+      facilityContactPhone: site.facility_contact_phone || '',
       contact: {
+        name: site.facility_contact_name || '',
+        degree: site.facility_contact_degree || '',
         email: site.facility_contact_email || '',
         phone: site.facility_contact_phone || ''
       },
