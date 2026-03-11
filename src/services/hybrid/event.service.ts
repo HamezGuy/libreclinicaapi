@@ -113,8 +113,7 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
         sed.ordinal,
         sed.type as event_type,
         se.subject_event_status_id,
-        se.subject_event_status_id as status_id,
-        ses.name as status_name,
+        ses.name as db_status_name,
         se.date_start,
         se.date_end,
         se.sample_ordinal,
@@ -122,7 +121,9 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
         se.scheduled_date,
         COALESCE(se.is_unscheduled, false) as is_unscheduled,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7)) as crf_count,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_crf_count
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_crf_count,
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_crf_count,
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id = 6) as locked_crf_count
       FROM study_event se
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN subject_event_status ses ON se.subject_event_status_id = ses.subject_event_status_id
@@ -134,7 +135,27 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
     `;
 
     const result = await pool.query(query, [studySubjectId]);
-    return result.rows;
+
+    // Compute actual status from form counts (not from stale subject_event_status)
+    return result.rows.map((row: any) => {
+      const total = parseInt(row.crf_count) || 0;
+      const completed = parseInt(row.completed_crf_count) || 0;
+      const started = parseInt(row.started_crf_count) || 0;
+      const locked = parseInt(row.locked_crf_count) || 0;
+
+      let status: string;
+      if (total > 0 && locked >= total) {
+        status = 'locked';
+      } else if (total > 0 && completed >= total) {
+        status = 'completed';
+      } else if (started > 0) {
+        status = 'data_entry_started';
+      } else {
+        status = 'scheduled';
+      }
+
+      return { ...row, status, status_name: status };
+    });
   } catch (error: any) {
     logger.error('Get subject events error', { error: error.message });
     throw error;
