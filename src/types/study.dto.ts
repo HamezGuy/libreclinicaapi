@@ -259,6 +259,11 @@ export interface SiteInput {
   facilityZip?: string;
   facilityCountry?: string;
   facilityRecruitmentStatus?: string;
+  facilityContactName?: string;
+  facilityContactDegree?: string;
+  facilityContactPhone?: string;
+  facilityContactEmail?: string;
+  isActive?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
