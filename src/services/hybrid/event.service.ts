@@ -121,7 +121,7 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
         se.scheduled_date,
         COALESCE(se.is_unscheduled, false) as is_unscheduled,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7)) as crf_count,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_crf_count,
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id IN (2, 6)) as completed_crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id = 6) as locked_crf_count
       FROM study_event se
@@ -340,7 +340,7 @@ export const checkAndUpdateVisitStatus = async (studyEventId: number): Promise<v
     const result = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE ec.status_id NOT IN (5, 7)) AS total,
-        COUNT(*) FILTER (WHERE (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) AS completed,
+        COUNT(*) FILTER (WHERE ec.status_id IN (2, 6)) AS completed,
         COUNT(*) FILTER (WHERE ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) AS started
       FROM event_crf ec
       WHERE ec.study_event_id = $1
