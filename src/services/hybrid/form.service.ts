@@ -753,6 +753,16 @@ const saveFormDataDirect = async (
       }
     }
 
+    // Auto-advance visit status after save
+    if (studyEventId) {
+      try {
+        const { checkAndUpdateVisitStatus } = await import('./event.service');
+        await checkAndUpdateVisitStatus(studyEventId);
+      } catch (visitErr: any) {
+        logger.warn('Failed to auto-update visit status after save', { studyEventId, error: visitErr.message });
+      }
+    }
+
     return {
       success: true,
       eventCrfId,       // Top-level for frontend SaveFormDataResponse compatibility
@@ -4548,22 +4558,22 @@ export const markFormComplete = async (
 
     if (ecResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Form instance not found' };
+      throw new Error(`Form instance not found (event_crf_id=${eventCrfId})`);
     }
 
     const ec = ecResult.rows[0];
 
     if (ec.status_id === 6) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Form is already locked and cannot be modified' };
+      throw new Error('Form is already locked and cannot be modified');
     }
     if (ec.frozen) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Form is frozen — it is already in the lock pipeline' };
+      throw new Error('Form is frozen — it is already in the lock pipeline');
     }
     if (ec.completion_status_id >= 4 && ec.status_id === 2) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Form is already marked as complete' };
+      throw new Error('Form is already marked as complete');
     }
 
     // 2. Check required fields have data
@@ -4586,10 +4596,9 @@ export const markFormComplete = async (
     const missingCount = parseInt(missingResult.rows[0]?.missing_count || '0');
     if (missingCount > 0) {
       await client.query('ROLLBACK');
-      return {
-        success: false,
-        message: `${missingCount} required field${missingCount > 1 ? 's are' : ' is'} missing data. All required fields must be filled before marking complete.`
-      };
+      throw new Error(
+        `${missingCount} required field${missingCount > 1 ? 's are' : ' is'} missing data. All required fields must be filled before marking complete.`
+      );
     }
 
     // 3. Mark complete
@@ -4616,11 +4625,25 @@ export const markFormComplete = async (
 
     await client.query('COMMIT');
     logger.info('Form marked complete', { eventCrfId, userId });
+
+    // Auto-advance visit status if all forms in this visit are now complete
+    try {
+      const seResult = await pool.query(
+        `SELECT study_event_id FROM event_crf WHERE event_crf_id = $1`, [eventCrfId]
+      );
+      if (seResult.rows.length > 0) {
+        const { checkAndUpdateVisitStatus } = await import('./event.service');
+        await checkAndUpdateVisitStatus(seResult.rows[0].study_event_id);
+      }
+    } catch (visitErr: any) {
+      logger.warn('Failed to auto-update visit status after form completion', { eventCrfId, error: visitErr.message });
+    }
+
     return { success: true, message: 'Form marked as complete and is now eligible for data lock' };
   } catch (error: any) {
     await client.query('ROLLBACK');
     logger.error('markFormComplete error', { eventCrfId, error: error.message });
-    return { success: false, message: error.message };
+    throw new Error(`Failed to mark form complete: ${error.message}`);
   } finally {
     client.release();
   }

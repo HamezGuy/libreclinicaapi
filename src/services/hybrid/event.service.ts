@@ -121,8 +121,8 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
         se.location,
         se.scheduled_date,
         COALESCE(se.is_unscheduled, false) as is_unscheduled,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id) as crf_count,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id = 2) as completed_crf_count
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7)) as crf_count,
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_crf_count
       FROM study_event se
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       INNER JOIN subject_event_status ses ON se.subject_event_status_id = ses.subject_event_status_id
@@ -265,6 +265,8 @@ export const getVisitForms = async (studyEventId: number): Promise<any[]> => {
         -- Patient-specific instance (may be NULL if form not yet started)
         ec.event_crf_id,
         ec.crf_version_id  AS patient_version_id,
+        ec.status_id,
+        COALESCE(ec.frozen, false) AS frozen,
         COALESCE(cs.name, 'not_started') AS completion_status,
         ec.completion_status_id,
         ec.date_created    AS started_at,
@@ -300,6 +302,56 @@ export const getVisitForms = async (studyEventId: number): Promise<any[]> => {
   } catch (error: any) {
     logger.error('Get visit forms error', { error: error.message, studyEventId });
     throw error;
+  }
+};
+
+/**
+ * Check all eCRFs for a visit and auto-advance subject_event_status:
+ *   - If ALL non-removed forms are complete (completion_status_id >= 4 or status_id IN (2,6)):
+ *     set status to 4 (completed)
+ *   - If ANY form has data entry (completion_status_id >= 2): set status to 3 (data_entry_started)
+ *   - Otherwise leave as-is (scheduled = 1)
+ *
+ * Called after markFormComplete / saveFormData to keep visit status in sync.
+ */
+export const checkAndUpdateVisitStatus = async (studyEventId: number): Promise<void> => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE ec.status_id NOT IN (5, 7)) AS total,
+        COUNT(*) FILTER (WHERE (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) AS completed,
+        COUNT(*) FILTER (WHERE ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) AS started
+      FROM event_crf ec
+      WHERE ec.study_event_id = $1
+    `, [studyEventId]);
+
+    const { total, completed, started } = result.rows[0] || {};
+    const totalNum = parseInt(total) || 0;
+    const completedNum = parseInt(completed) || 0;
+    const startedNum = parseInt(started) || 0;
+
+    if (totalNum === 0) return;
+
+    let newStatusId: number | null = null;
+
+    if (completedNum >= totalNum) {
+      newStatusId = 4; // completed
+    } else if (startedNum > 0) {
+      newStatusId = 3; // data_entry_started
+    }
+
+    if (newStatusId !== null) {
+      // Only advance — never regress (e.g. don't go from completed back to data_entry_started)
+      await pool.query(`
+        UPDATE study_event
+        SET subject_event_status_id = GREATEST(subject_event_status_id, $1),
+            date_updated = CURRENT_TIMESTAMP
+        WHERE study_event_id = $2
+          AND subject_event_status_id < $1
+      `, [newStatusId, studyEventId]);
+    }
+  } catch (error: any) {
+    logger.error('checkAndUpdateVisitStatus error', { studyEventId, error: error.message });
   }
 };
 
@@ -2081,6 +2133,7 @@ export default {
   getEventCRFs,
   getPatientEventCRFs,
   getVisitForms,
+  checkAndUpdateVisitStatus,
   scheduleSubjectEvent,
   createStudyEvent,
   updateStudyEvent,

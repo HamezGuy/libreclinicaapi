@@ -560,7 +560,9 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
 
     if (ecResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'CRF instance not found' };
+      const err = new Error(`CRF instance not found (event_crf_id=${eventCrfId})`);
+      (err as any).statusCode = 404;
+      throw err;
     }
 
     const ec = ecResult.rows[0];
@@ -606,8 +608,11 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
 
     // Check open queries on this CRF — covers both form-level and field-level queries
     const queryResult = await client.query(`
-      SELECT COUNT(DISTINCT dn.discrepancy_note_id) as cnt
+      SELECT dn.discrepancy_note_id, dn.description,
+             rs.name AS status_name, dnt.name AS note_type
       FROM discrepancy_note dn
+      LEFT JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+      LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       WHERE dn.resolution_status_id NOT IN (4, 5)
         AND dn.parent_dn_id IS NULL
         AND (
@@ -623,10 +628,17 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
               AND id.event_crf_id = $1
           )
         )
+      ORDER BY dn.date_created
     `, [eventCrfId]);
-    const openQueries = parseInt(queryResult.rows[0]?.cnt || '0');
+    const openQueries = queryResult.rows.length;
     if (openQueries > 0) {
-      blockingReasons.push(`${openQueries} open ${openQueries === 1 ? 'query' : 'queries'} must be resolved before locking`);
+      const queryDetails = queryResult.rows.slice(0, 5).map(
+        (q: any) => `#${q.discrepancy_note_id} (${q.status_name || 'open'})`
+      ).join(', ');
+      const suffix = openQueries > 5 ? ` and ${openQueries - 5} more` : '';
+      blockingReasons.push(
+        `${openQueries} open ${openQueries === 1 ? 'query' : 'queries'} must be resolved before locking: ${queryDetails}${suffix}`
+      );
     }
 
     if (blockingReasons.length > 0) {

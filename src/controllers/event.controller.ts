@@ -143,7 +143,9 @@ export const getVisitForms = asyncHandler(async (req: Request, res: Response) =>
     // Patient-specific
     eventCrfId: r.event_crf_id || null,
     patientVersionId: r.patient_version_id || null,
-    completionStatus: r.completion_status || 'not_started',
+    statusId: r.status_id ?? null,
+    frozen: r.frozen || false,
+    completionStatus: r.status_id === 6 ? 'locked' : (r.completion_status || 'not_started'),
     completionStatusId: r.completion_status_id || null,
     startedAt: r.started_at || null,
     completedAt: r.completed_at || null,
@@ -155,6 +157,20 @@ export const getVisitForms = asyncHandler(async (req: Request, res: Response) =>
   }));
 
   res.json({ success: true, data: forms, total: forms.length });
+});
+
+/**
+ * Get lock eligibility for a visit — shows whether all forms are complete,
+ * open query counts, and whether the visit can be locked.
+ */
+export const getVisitLockEligibility = asyncHandler(async (req: Request, res: Response) => {
+  const studyEventId = parseInt(req.params.studyEventId);
+
+  // Reuse the data-locks eligibility check
+  const { checkEventLockEligibility } = await import('../services/database/data-locks.service');
+  const eligibility = await checkEventLockEligibility(studyEventId);
+
+  res.json({ success: true, data: eligibility });
 });
 
 export const scheduleEvent = asyncHandler(async (req: Request, res: Response) => {
@@ -421,6 +437,7 @@ export default {
   getPatientEventCRFs,
   getPatientEventCRFStatuses,
   getVisitForms,
+  getVisitLockEligibility,
   scheduleEvent, 
   create, 
   update, 

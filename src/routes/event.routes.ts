@@ -40,6 +40,9 @@ router.get('/instance/:studyEventId/crfs/status', controller.getPatientEventCRFS
 // Get ALL forms for a patient's visit (template forms + patient status in one call)
 router.get('/instance/:studyEventId/visit-forms', controller.getVisitForms);
 
+// Get lock eligibility for a visit (all forms complete? open queries?)
+router.get('/instance/:studyEventId/lock-eligibility', controller.getVisitLockEligibility);
+
 // Create/Update/Delete - require coordinator or admin role + signature
 router.post('/', 
   requireRole('admin', 'data_manager'), 

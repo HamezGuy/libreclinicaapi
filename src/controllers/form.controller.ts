@@ -527,20 +527,19 @@ export const markComplete = asyncHandler(async (req: Request, res: Response) => 
     return;
   }
 
+  // markFormComplete throws on failure — asyncHandler converts to HTTP error
   const result = await formService.markFormComplete(eventCrfId, user.userId);
 
-  if (result.success) {
-    await trackUserAction({
-      userId: user.userId,
-      username: user.username,
-      action: 'FORM_COMPLETED',
-      entityType: 'event_crf',
-      entityId: eventCrfId,
-      details: 'Form marked as data-entry complete'
-    });
-  }
+  await trackUserAction({
+    userId: user.userId,
+    username: user.username,
+    action: 'FORM_COMPLETED',
+    entityType: 'event_crf',
+    entityId: eventCrfId,
+    details: 'Form marked as data-entry complete'
+  });
 
-  res.status(result.success ? 200 : 400).json(result);
+  res.json(result);
 });
 
 export default { 
