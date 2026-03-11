@@ -280,10 +280,19 @@ async function createConsentTables(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_subject_consent_subject ON acc_subject_consent(study_subject_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_subject_consent_status ON acc_subject_consent(consent_status)`);
 
-  // Add scanned consent columns if not present
+  // Add scanned consent and Part 11 metadata columns if not present
   for (const col of [
     { name: 'scanned_consent_file_ids', type: 'JSONB' },
     { name: 'is_scanned_consent', type: 'BOOLEAN DEFAULT FALSE' },
+    { name: 'subject_signature_id', type: 'INTEGER' },
+    { name: 'witness_signature_id', type: 'INTEGER' },
+    { name: 'lar_signature_id', type: 'INTEGER' },
+    { name: 'investigator_signature_id', type: 'INTEGER' },
+    { name: 'content_hash', type: 'VARCHAR(128)' },
+    { name: 'device_info', type: 'JSONB' },
+    { name: 'page_view_records', type: 'JSONB' },
+    { name: 'consent_form_data', type: 'JSONB' },
+    { name: 'template_id', type: 'VARCHAR(255)' },
   ]) {
     await pool.query(`
       ALTER TABLE acc_subject_consent ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}

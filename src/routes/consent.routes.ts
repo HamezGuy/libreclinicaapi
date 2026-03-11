@@ -21,11 +21,13 @@ import {
   createConsentVersion,
   getConsentVersion,
   getActiveVersion,
+  listConsentVersions,
   activateConsentVersion,
   recordConsent,
   getSubjectConsent,
   hasValidConsent,
   withdrawConsent,
+  getConsentAuditTrail,
   requestReconsent,
   getPendingReconsents,
   getConsentDashboard
@@ -135,6 +137,21 @@ router.post('/documents/:id/versions', authMiddleware, requireAdminOrInvestigato
   } catch (error: any) {
     logger.error('Error creating consent version', { error: error.message });
     res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * GET /api/consent/documents/:id/versions
+ * List all versions for a document
+ */
+router.get('/documents/:id/versions', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const documentId = parseInt(req.params.id);
+    const versions = await listConsentVersions(documentId);
+    res.json({ success: true, data: versions });
+  } catch (error: any) {
+    logger.error('Error listing consent versions', { error: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -282,6 +299,25 @@ router.post('/:consentId/withdraw',
     }
   }
 );
+
+// ============================================================================
+// Audit Trail
+// ============================================================================
+
+/**
+ * GET /api/consent/:consentId/audit-trail
+ * Get audit trail for a consent record
+ */
+router.get('/:consentId/audit-trail', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const consentId = parseInt(req.params.consentId);
+    const trail = await getConsentAuditTrail(consentId);
+    res.json({ success: true, data: trail });
+  } catch (error: any) {
+    logger.error('Error getting consent audit trail', { error: error.message });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 // ============================================================================
 // Re-consent

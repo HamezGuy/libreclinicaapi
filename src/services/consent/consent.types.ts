@@ -204,6 +204,19 @@ export interface SubjectConsentCreate {
   // Scanned physical consent
   scannedConsentFileIds?: string[];
   isScannedConsent?: boolean;
+
+  // Part 11 e-signature IDs
+  subjectSignatureId?: number;
+  witnessSignatureId?: number;
+  larSignatureId?: number;
+  investigatorSignatureId?: number;
+
+  // Part 11 metadata
+  contentHash?: string;
+  deviceInfo?: any;
+  pageViewRecords?: any;
+  formData?: Record<string, any>;
+  templateId?: string;
 }
 
 // ============================================================================

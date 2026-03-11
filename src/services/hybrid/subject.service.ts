@@ -367,7 +367,7 @@ const createSubjectDirect = async (
     // Unscheduled event definitions are NOT auto-scheduled during enrollment —
     // they are only used when a user manually adds an unscheduled visit later.
     const eventDefsResult = await client.query(`
-      SELECT study_event_definition_id, name, ordinal, type, repeating
+      SELECT study_event_definition_id, name, ordinal, type, repeating, schedule_day
       FROM study_event_definition
       WHERE study_id = $1 AND status_id = 1 AND type != 'unscheduled'
       ORDER BY ordinal
@@ -390,8 +390,11 @@ const createSubjectDirect = async (
           // to be rolled back.
           await client.query(`SAVEPOINT ${spName}`);
 
-          // Calculate start date based on ordinal (each phase starts 7 days after previous)
-          const daysOffset = (eventDef.ordinal - 1) * 7;
+          // Use schedule_day from the event definition if configured,
+          // otherwise fall back to ordinal-based 7-day spacing
+          const daysOffset = eventDef.schedule_day != null
+            ? eventDef.schedule_day
+            : (eventDef.ordinal - 1) * 7;
           const eventStartDate = new Date(enrollmentDate);
           eventStartDate.setDate(eventStartDate.getDate() + daysOffset);
           

@@ -238,6 +238,23 @@ export async function getActiveVersion(documentId: number): Promise<ConsentVersi
 }
 
 /**
+ * List all versions for a consent document
+ */
+export async function listConsentVersions(documentId: number): Promise<ConsentVersion[]> {
+  const query = `
+    SELECT v.*,
+           CONCAT(u.first_name, ' ', u.last_name) as approved_by_name
+    FROM acc_consent_version v
+    LEFT JOIN user_account u ON v.approved_by = u.user_id
+    WHERE v.document_id = $1
+    ORDER BY v.date_created DESC
+  `;
+
+  const result = await pool.query(query, [documentId]);
+  return result.rows.map(mapRowToVersion);
+}
+
+/**
  * Activate a consent version
  */
 export async function activateConsentVersion(
@@ -330,7 +347,7 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
   try {
     await client.query('BEGIN');
 
-    // Insert consent record
+    // Insert consent record with full Part 11 metadata
     const query = `
       INSERT INTO acc_subject_consent (
         study_subject_id, version_id, consent_type, consent_status,
@@ -341,6 +358,8 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
         presented_at, time_spent_reading, pages_viewed, acknowledgments_checked,
         questions_asked, consented_by,
         scanned_consent_file_ids, is_scanned_consent,
+        subject_signature_id, witness_signature_id, lar_signature_id, investigator_signature_id,
+        content_hash, device_info, page_view_records, consent_form_data, template_id,
         date_created, date_updated
       ) VALUES (
         $1, $2, $3, 'consented',
@@ -349,6 +368,8 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
         $11, $12, $13, CASE WHEN $11 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END, $14,
         CURRENT_TIMESTAMP, $15, $16, $17, $18, $19,
         $20, $21,
+        $22, $23, $24, $25,
+        $26, $27, $28, $29, $30,
         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING consent_id
@@ -375,7 +396,16 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
       consent.questionsAsked || null,
       consent.consentedBy,
       consent.scannedConsentFileIds ? JSON.stringify(consent.scannedConsentFileIds) : null,
-      consent.isScannedConsent || false
+      consent.isScannedConsent || false,
+      consent.subjectSignatureId || null,
+      consent.witnessSignatureId || null,
+      consent.larSignatureId || null,
+      consent.investigatorSignatureId || null,
+      consent.contentHash || null,
+      consent.deviceInfo ? JSON.stringify(consent.deviceInfo) : null,
+      consent.pageViewRecords ? JSON.stringify(consent.pageViewRecords) : null,
+      consent.formData ? JSON.stringify(consent.formData) : null,
+      consent.templateId || null
     ]);
 
     const consentId = result.rows[0].consent_id;
@@ -441,6 +471,47 @@ export async function getSubjectConsentById(consentId: number): Promise<SubjectC
 
   const result = await pool.query(query, [consentId]);
   return result.rows.length > 0 ? mapRowToSubjectConsent(result.rows[0]) : null;
+}
+
+/**
+ * Get audit trail for a consent record
+ */
+export async function getConsentAuditTrail(consentId: number): Promise<any[]> {
+  const query = `
+    SELECT 
+      ale.audit_id,
+      ale.audit_date,
+      ale.audit_table,
+      ale.entity_id,
+      ale.entity_name,
+      ale.old_value,
+      ale.new_value,
+      ale.reason_for_change,
+      alet.name as event_type,
+      CONCAT(u.first_name, ' ', u.last_name) as user_name,
+      u.user_name as username
+    FROM audit_log_event ale
+    LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+    LEFT JOIN user_account u ON ale.user_id = u.user_id
+    WHERE ale.audit_table = 'acc_subject_consent'
+      AND ale.entity_id = $1
+    ORDER BY ale.audit_date DESC
+  `;
+
+  const result = await pool.query(query, [consentId]);
+  return result.rows.map(row => ({
+    auditId: row.audit_id,
+    auditDate: row.audit_date,
+    table: row.audit_table,
+    entityId: row.entity_id,
+    entityName: row.entity_name,
+    oldValue: row.old_value,
+    newValue: row.new_value,
+    reasonForChange: row.reason_for_change,
+    eventType: row.event_type,
+    userName: row.user_name,
+    username: row.username
+  }));
 }
 
 /**
