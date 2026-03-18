@@ -234,14 +234,14 @@ export const batchFreeze = asyncHandler(async (req: Request, res: Response) => {
  */
 export const batchLock = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { eventCrfIds } = req.body;
+  const { eventCrfIds, reason } = req.body;
 
   if (!eventCrfIds?.length) {
     res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
     return;
   }
 
-  const result = await dataLocksService.batchLockRecords(eventCrfIds, user.userId);
+  const result = await dataLocksService.batchLockRecords(eventCrfIds, user.userId, reason);
   res.json({ success: result.success, data: result });
 });
 
@@ -252,14 +252,14 @@ export const batchLock = asyncHandler(async (req: Request, res: Response) => {
  */
 export const batchUnlock = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { eventCrfIds } = req.body;
+  const { eventCrfIds, reason } = req.body;
 
   if (!eventCrfIds?.length) {
     res.status(400).json({ success: false, message: 'eventCrfIds array is required' });
     return;
   }
 
-  const result = await dataLocksService.batchUnlockRecords(eventCrfIds, user.userId);
+  const result = await dataLocksService.batchUnlockRecords(eventCrfIds, user.userId, reason);
   res.json({ success: result.success, data: result });
 });
 
@@ -430,6 +430,122 @@ export const unlockStudy = asyncHandler(async (req: Request, res: Response) => {
   res.status(result.success ? 200 : 400).json(result);
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// CASEBOOK READINESS
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/data-locks/readiness/subject/:id
+ */
+export const getSubjectReadiness = asyncHandler(async (req: Request, res: Response) => {
+  const studySubjectId = parseInt(req.params.id);
+  if (isNaN(studySubjectId) || studySubjectId <= 0) {
+    res.status(400).json({ success: false, message: 'Subject ID must be a positive integer' });
+    return;
+  }
+
+  const readiness = await dataLocksService.getSubjectCasebookReadiness(studySubjectId);
+  res.json({ success: true, data: readiness });
+});
+
+/**
+ * GET /api/data-locks/readiness/study/:studyId
+ */
+export const getStudyReadiness = asyncHandler(async (req: Request, res: Response) => {
+  const studyId = parseInt(req.params.studyId);
+  if (isNaN(studyId) || studyId <= 0) {
+    res.status(400).json({ success: false, message: 'studyId must be a positive integer' });
+    return;
+  }
+
+  const readiness = await dataLocksService.getStudyCasebookReadiness(studyId);
+  res.json({ success: true, data: readiness });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// LOCK AUDIT HISTORY
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/data-locks/history/:eventCrfId
+ */
+export const getFormLockHistory = asyncHandler(async (req: Request, res: Response) => {
+  const eventCrfId = parseInt(req.params.eventCrfId);
+  if (isNaN(eventCrfId) || eventCrfId <= 0) {
+    res.status(400).json({ success: false, message: 'eventCrfId must be a positive integer' });
+    return;
+  }
+
+  const history = await dataLocksService.getFormLockHistory(eventCrfId);
+  res.json({ success: true, data: history });
+});
+
+/**
+ * GET /api/data-locks/history/subject/:id
+ */
+export const getSubjectLockHistory = asyncHandler(async (req: Request, res: Response) => {
+  const studySubjectId = parseInt(req.params.id);
+  if (isNaN(studySubjectId) || studySubjectId <= 0) {
+    res.status(400).json({ success: false, message: 'Subject ID must be a positive integer' });
+    return;
+  }
+
+  const history = await dataLocksService.getSubjectLockHistory(studySubjectId);
+  res.json({ success: true, data: history });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// FREEZE / UNFREEZE SUBJECT-LEVEL
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/data-locks/freeze/subject/:id
+ */
+export const freezeSubject = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const studySubjectId = parseInt(req.params.id);
+  const { reason } = req.body;
+
+  const result = await dataLocksService.freezeSubjectData(studySubjectId, user.userId, reason);
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * DELETE /api/data-locks/freeze/subject/:id
+ */
+export const unfreezeSubject = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const studySubjectId = parseInt(req.params.id);
+  const { reason } = req.body;
+
+  if (!reason) {
+    res.status(400).json({ success: false, message: 'Reason is required for unfreezing' });
+    return;
+  }
+
+  const result = await dataLocksService.unfreezeSubjectData(studySubjectId, user.userId, reason);
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// LIST FROZEN RECORDS
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/data-locks/freeze?studyId=X
+ */
+export const listFrozenRecords = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, page, limit } = req.query;
+
+  const result = await dataLocksService.getFrozenRecords({
+    studyId: studyId ? parseInt(studyId as string) : undefined,
+    page: parseInt(page as string) || 1,
+    limit: parseInt(limit as string) || 20
+  });
+
+  res.json(result);
+});
+
 export default { 
   list, 
   lock, 
@@ -454,5 +570,12 @@ export default {
   getSanitationSubjects,
   getStudyLockStatus,
   lockStudy,
-  unlockStudy
+  unlockStudy,
+  getSubjectReadiness,
+  getStudyReadiness,
+  getFormLockHistory,
+  getSubjectLockHistory,
+  freezeSubject,
+  unfreezeSubject,
+  listFrozenRecords
 };

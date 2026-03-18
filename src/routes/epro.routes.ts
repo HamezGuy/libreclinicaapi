@@ -394,11 +394,11 @@ router.post('/assignments/:id/remind', async (req: Part11Request, res: Response,
       { ipAddress: req.ip }
     );
 
-    // TODO: Actually send email via email service
-
     res.json({
       success: true,
-      message: 'Reminder sent successfully',
+      sent: false,
+      warning: 'Email/SMS integration not yet configured',
+      message: 'Reminder record created but not delivered',
       data: { reminderId }
     });
   } catch (error) {
@@ -602,7 +602,9 @@ router.post('/patients/:id/resend-activation', async (req: Request, res: Respons
 
     res.json({
       success: true,
-      message: 'Activation email sent successfully'
+      sent: false,
+      warning: 'Email/SMS integration not yet configured',
+      message: 'Activation email not actually sent'
     });
   } catch (error) {
     logger.error('Failed to resend activation email', { error });
@@ -867,17 +869,16 @@ router.post('/reminders/:id/send', async (req: Part11Request, res: Response, nex
     let sent = false;
     let errorMessage = null;
 
-    // TODO: Integrate with email/SMS service
-    // For now, simulate sending
+    // Email/SMS/push integration not yet configured — always report not sent
     if (reminder.reminder_type === 'email' && patient?.email) {
-      // Queue email
-      sent = true;
+      sent = false;
+      errorMessage = 'Email integration not yet configured';
     } else if (reminder.reminder_type === 'sms' && patient?.phone) {
-      // Queue SMS
-      sent = true;
+      sent = false;
+      errorMessage = 'SMS integration not yet configured';
     } else if (reminder.reminder_type === 'push') {
-      // Queue push notification
-      sent = true;
+      sent = false;
+      errorMessage = 'Push notification integration not yet configured';
     } else {
       errorMessage = `No valid contact method for ${reminder.reminder_type}`;
     }
@@ -905,6 +906,8 @@ router.post('/reminders/:id/send', async (req: Part11Request, res: Response, nex
 
     res.json({
       success: sent,
+      sent,
+      warning: !sent ? 'Email/SMS integration not yet configured' : undefined,
       message: sent ? 'Reminder sent successfully' : `Failed to send reminder: ${errorMessage}`,
       data: { status: sent ? 'sent' : 'failed' }
     });

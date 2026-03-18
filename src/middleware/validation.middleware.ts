@@ -316,11 +316,14 @@ export const formSchemas = {
     // Required identifiers
     studyId: Joi.number().integer().positive().required(),
     subjectId: Joi.number().integer().positive().required(),
-    studyEventDefinitionId: Joi.number().integer().positive().required(),
+    // studyEventDefinitionId is required UNLESS studyEventId or eventCrfId can
+    // identify the visit. The backend resolves the visit from whichever is present.
+    studyEventDefinitionId: Joi.number().integer().positive()
+      .when('studyEventId', { is: Joi.exist(), then: Joi.optional(), otherwise: Joi.when('eventCrfId', { is: Joi.exist(), then: Joi.optional(), otherwise: Joi.required() }) }),
     crfId: Joi.number().integer().positive().required(),
     formData: Joi.object().required(),
 
-    // Precision helpers (optional — used for faster lookups, not as replacements)
+    // Visit / form instance identifiers (optional — backend resolves from these)
     studyEventId: Joi.number().integer().positive().optional(),
     eventCrfId: Joi.number().integer().positive().optional(),
 
@@ -330,6 +333,10 @@ export const formSchemas = {
 
     // 21 CFR Part 11 §11.10(e) - Reason for change
     reasonForChange: Joi.string().optional().allow('', null),
+
+    // Branching/skip logic: field keys hidden by conditional display rules.
+    // Excluded from required-fields completion check on the backend.
+    hiddenFields: Joi.array().items(Joi.string()).optional(),
 
     // Electronic signature
     electronicSignature: Joi.object({

@@ -220,20 +220,27 @@ export const verifyAndUpgrade = async (
   upgradedBcryptHash?: string;
   shouldUpdateDatabase: boolean;
 }> => {
-  // If we have a bcrypt hash, verify against it (preferred)
+  // Try bcrypt first if available
   if (storedBcryptHash) {
-    const bcryptValid = await comparePasswordBcrypt(password, storedBcryptHash);
-    return { valid: bcryptValid, shouldUpdateDatabase: false };
+    try {
+      const bcryptValid = await comparePasswordBcrypt(password, storedBcryptHash);
+      if (bcryptValid) {
+        return { valid: true, shouldUpdateDatabase: false };
+      }
+    } catch (err: any) {
+      logger.warn('bcrypt comparison threw, falling through to MD5', { error: err.message });
+    }
+    // bcrypt failed — fall through to MD5 in case the password was changed
+    // outside the API (e.g. via LibreClinica UI) which only updates the MD5 hash
   }
   
-  // Fall back to MD5 verification
+  // MD5 verification (legacy LibreClinica hash)
   const hashType = detectHashType(storedHash);
   
   if (hashType === PasswordHashType.MD5) {
     const md5Valid = comparePasswordMD5(password, storedHash);
     
     if (md5Valid) {
-      // Password is correct - upgrade to bcrypt
       const bcryptHash = await hashPasswordBcrypt(password);
       logger.info('Password verified via MD5, upgrading to bcrypt');
       
@@ -247,11 +254,13 @@ export const verifyAndUpgrade = async (
     return { valid: false, shouldUpdateDatabase: false };
   }
   
+  // storedHash itself might be bcrypt (no extended table)
   if (hashType === PasswordHashType.BCRYPT) {
     const bcryptValid = await comparePasswordBcrypt(password, storedHash);
     return { valid: bcryptValid, shouldUpdateDatabase: false };
   }
   
+  logger.warn('Could not verify password - unknown hash type', { hashLength: storedHash?.length });
   return { valid: false, shouldUpdateDatabase: false };
 };
 

@@ -19,6 +19,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import crypto from 'crypto';
+import { verifyAndUpgrade } from '../../utils/password.util';
 import { 
   logElectronicSignature as logToLibreClinica, 
   LibreClinicaAuditEventType 
@@ -43,7 +44,8 @@ export type SignableEntityType =
   | 'study_event'       // Study event completion
   | 'study_subject'     // Subject enrollment
   | 'discrepancy_note'  // Query closure
-  | 'data_lock';        // Data lock confirmation
+  | 'data_lock'         // Data lock confirmation
+  | 'consent';          // eConsent signature
 
 export interface SignatureRequest {
   userId: number;
@@ -84,14 +86,20 @@ export const verifyPasswordForSignature = async (
   logger.info('Verifying password for e-signature', { userId, username });
 
   try {
-    // Get user's stored password hash from database
-    const query = `
-      SELECT passwd, enabled
-      FROM user_account
-      WHERE user_id = $1
-    `;
-
-    const result = await pool.query(query, [userId]);
+    // Query both legacy MD5 hash and upgraded bcrypt hash (dual-auth, matching login system)
+    let result;
+    try {
+      result = await pool.query(`
+        SELECT u.passwd, u.enabled, uae.bcrypt_passwd
+        FROM user_account u
+        LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
+        WHERE u.user_id = $1
+      `, [userId]);
+    } catch {
+      result = await pool.query(`
+        SELECT passwd, enabled FROM user_account WHERE user_id = $1
+      `, [userId]);
+    }
 
     if (result.rows.length === 0) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'User not found');
@@ -100,24 +108,38 @@ export const verifyPasswordForSignature = async (
 
     const user = result.rows[0];
 
-    // Check if user account is enabled
     if (!user.enabled) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'Account disabled');
       return { success: false, data: { valid: false }, message: 'Account is disabled' };
     }
 
-    // Hash the provided password using MD5 (LibreClinica compatibility)
-    const passwordHash = crypto.createHash('md5').update(password).digest('hex');
+    // Use the same dual-auth verification as the login system:
+    // checks bcrypt first (if available), falls back to MD5
+    const verification = await verifyAndUpgrade(
+      password,
+      user.passwd,
+      user.bcrypt_passwd || null
+    );
 
-    // Compare with stored hash
-    if (passwordHash !== user.passwd) {
+    if (!verification.valid) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'Invalid password');
       return { success: true, data: { valid: false }, message: 'Invalid password' };
     }
 
-    // Log successful verification
-    await logSignatureAttempt(userId, username, 'password_verification', 0, true, 'Password verified');
+    // If password was verified via MD5 and an upgrade hash was generated, persist it
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      try {
+        await pool.query(`
+          INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
+          VALUES ($1, $2, NOW(), 2)
+          ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW(), password_version = 2
+        `, [userId, verification.upgradedBcryptHash]);
+      } catch (upgradeErr: any) {
+        logger.warn('Failed to upgrade password hash during e-signature (non-blocking)', { error: upgradeErr.message });
+      }
+    }
 
+    await logSignatureAttempt(userId, username, 'password_verification', 0, true, 'Password verified');
     return { success: true, data: { valid: true }, message: 'Password verified successfully' };
 
   } catch (error: any) {
@@ -188,6 +210,17 @@ export const applyElectronicSignature = async (
         break;
 
       case 'study_subject':
+        updateQuery = `
+          UPDATE study_subject
+          SET date_updated = CURRENT_TIMESTAMP,
+              update_id = $2
+          WHERE study_subject_id = $1
+          RETURNING study_subject_id as entity_id
+        `;
+        updateParams = [request.entityId, request.userId];
+        break;
+
+      case 'consent':
         updateQuery = `
           UPDATE study_subject
           SET date_updated = CURRENT_TIMESTAMP,

@@ -61,6 +61,7 @@ export const getAuditTrail = async (
     const conditions: string[] = ['1=1'];
     const params: any[] = [];
     let paramIndex = 1;
+    const extraJoins: string[] = [];
 
     // Org-scoping: only show audit events from users in the same org
     if (callerUserId) {
@@ -71,8 +72,28 @@ export const getAuditTrail = async (
       }
     }
 
-    // Note: audit_log_event table doesn't have direct study_id or subject_id columns
-    // These would need to be joined through related tables if needed
+    if (studyId) {
+      extraJoins.push(
+        `LEFT JOIN event_crf ec_s ON ale.event_crf_id = ec_s.event_crf_id`,
+        `LEFT JOIN study_event se_s ON ec_s.study_event_id = se_s.study_event_id`
+      );
+      conditions.push(`se_s.study_id = $${paramIndex++}`);
+      params.push(studyId);
+    }
+
+    if (subjectId) {
+      if (!studyId) {
+        extraJoins.push(
+          `LEFT JOIN event_crf ec_s ON ale.event_crf_id = ec_s.event_crf_id`,
+          `LEFT JOIN study_event se_s ON ec_s.study_event_id = se_s.study_event_id`
+        );
+      }
+      extraJoins.push(
+        `LEFT JOIN study_subject ss_s ON se_s.study_subject_id = ss_s.study_subject_id`
+      );
+      conditions.push(`ss_s.study_subject_id = $${paramIndex++}`);
+      params.push(subjectId);
+    }
 
     if (userId) {
       conditions.push(`ale.user_id = $${paramIndex++}`);
@@ -95,12 +116,13 @@ export const getAuditTrail = async (
     }
 
     const whereClause = conditions.join(' AND ');
+    const joinClause = extraJoins.length > 0 ? '\n      ' + extraJoins.join('\n      ') : '';
 
     // Get total count
     const countQuery = `
       SELECT COUNT(*) as total
       FROM audit_log_event ale
-      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id${joinClause}
       WHERE ${whereClause}
     `;
 
@@ -126,7 +148,7 @@ export const getAuditTrail = async (
         ale.event_crf_id
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
-      LEFT JOIN user_account u ON ale.user_id = u.user_id
+      LEFT JOIN user_account u ON ale.user_id = u.user_id${joinClause}
       WHERE ${whereClause}
       ORDER BY ale.audit_date DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -473,7 +495,7 @@ export const getAuditEventTypes = async (): Promise<any[]> => {
     return result.rows;
   } catch (error: any) {
     logger.error('Get audit event types error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -496,7 +518,7 @@ export const getAuditableTables = async (): Promise<any[]> => {
     return result.rows;
   } catch (error: any) {
     logger.error('Get auditable tables error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -542,7 +564,7 @@ export const getFormAudit = async (eventCrfId: number, callerUserId?: number): P
     return result.rows;
   } catch (error: any) {
     logger.error('Get form audit error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -786,37 +808,39 @@ export const recordAuditEvent = async (data: {
 };
 
 /**
- * Common audit event types for tracking user actions
+ * Common audit event type names for tracking user actions.
+ * Values are human-readable names looked up at runtime against
+ * the audit_log_event_type table, so they stay in sync with the DB.
  */
-export const AuditEventTypes = {
+export const AuditEventTypes: Record<string, string> = {
   // Document/Form access
-  FORM_VIEWED: 1,
-  FORM_CREATED: 2,
-  FORM_UPDATED: 3,
-  FORM_DELETED: 4,
-  FORM_SIGNED: 5,
+  FORM_VIEWED: 'Form Viewed',
+  FORM_CREATED: 'Form Created',
+  FORM_UPDATED: 'Form Updated',
+  FORM_DELETED: 'Form Deleted',
+  FORM_SIGNED: 'Form Signed',
   
   // Subject access
-  SUBJECT_VIEWED: 10,
-  SUBJECT_CREATED: 11,
-  SUBJECT_UPDATED: 12,
+  SUBJECT_VIEWED: 'Subject Viewed',
+  SUBJECT_CREATED: 'Subject Created',
+  SUBJECT_UPDATED: 'Subject Updated',
   
   // Study access
-  STUDY_ACCESSED: 20,
-  STUDY_EXPORTED: 21,
+  STUDY_ACCESSED: 'Study Accessed',
+  STUDY_EXPORTED: 'Study Exported',
   
   // Query events  
-  QUERY_CREATED: 30,
-  QUERY_RESPONDED: 31,
-  QUERY_CLOSED: 32,
+  QUERY_CREATED: 'Query Created',
+  QUERY_RESPONDED: 'Query Responded',
+  QUERY_CLOSED: 'Query Closed',
   
   // SDV events
-  SDV_VERIFIED: 40,
-  SDV_REJECTED: 41,
+  SDV_VERIFIED: 'SDV Verified',
+  SDV_REJECTED: 'SDV Rejected',
   
   // Report events
-  REPORT_GENERATED: 50,
-  AUDIT_EXPORTED: 51
+  REPORT_GENERATED: 'Report Generated',
+  AUDIT_EXPORTED: 'Audit Exported'
 };
 
 /**
@@ -848,8 +872,18 @@ export const trackUserAction = async (data: {
   studyEventId?: number;
 }): Promise<{ success: boolean; auditId?: number }> => {
   try {
-    // Map action to event type ID (or use 1 as default)
-    const eventTypeId = (AuditEventTypes as any)[data.action] || 1;
+    // Resolve event type ID by name from the database
+    const eventTypeName = AuditEventTypes[data.action] || data.action;
+    let eventTypeId = 1; // fallback
+    try {
+      const etResult = await pool.query(
+        `SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = $1 LIMIT 1`,
+        [eventTypeName]
+      );
+      if (etResult.rows.length > 0) {
+        eventTypeId = etResult.rows[0].audit_log_event_type_id;
+      }
+    } catch { /* use fallback */ }
     
     // Use LibreClinica's CORRECT column order
     // NOTE: There is NO study_id column in audit_log_event!

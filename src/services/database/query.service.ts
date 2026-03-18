@@ -11,6 +11,7 @@ import { logger } from '../../config/logger';
 import { ApiResponse, PaginatedResponse } from '../../types';
 import * as notificationService from './notification.service';
 import { resolveAllQueryAssignees } from './workflow-config.provider';
+import { verifyAndUpgrade } from '../../utils/password.util';
 import {
   NotFoundError,
   ConflictError,
@@ -153,11 +154,17 @@ export const getQueries = async (
         dn.description,
         dn.detailed_notes,
         dn.entity_type,
+        dn.resolution_status_id,
+        dn.discrepancy_note_type_id,
+        dn.owner_id,
+        dn.assigned_user_id,
         dnt.name as type_name,
         dnst.name as status_name,
         dn.date_created,
         u1.user_name as created_by,
+        u1.first_name || ' ' || u1.last_name as owner_name,
         u2.user_name as assigned_to,
+        u2.first_name || ' ' || u2.last_name as assigned_user_name,
         dn.study_id,
         ss.study_subject_id,
         ss.label as subject_label,
@@ -776,7 +783,8 @@ export const addQueryResponse = async (
     if (data.correctedValue !== undefined && data.correctedValue !== null && data.correctedValue !== '') {
       try {
         const linkedData = await client.query(`
-          SELECT dim.item_data_id, id.value AS old_value, id.event_crf_id, i.name AS field_name
+          SELECT dim.item_data_id, id.value AS old_value, id.event_crf_id,
+                 i.name AS field_name, i.item_id, i.description AS item_description
           FROM dn_item_data_map dim
           INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
           INNER JOIN item i ON id.item_id = i.item_id
@@ -785,7 +793,21 @@ export const addQueryResponse = async (
         `, [parentQueryId]);
 
         if (linkedData.rows.length > 0) {
-          const { item_data_id, old_value, event_crf_id, field_name } = linkedData.rows[0];
+          const { item_data_id, old_value, event_crf_id, field_name, item_id, item_description } = linkedData.rows[0];
+
+          // Resolve the technical fieldName from extended_props for JSONB sync.
+          // The patient_event_form.form_data may be keyed by the technical name
+          // (e.g., "heart_rate") rather than the display name (e.g., "Heart Rate").
+          let technicalFieldName: string | null = null;
+          if (item_description?.includes('---EXTENDED_PROPS---')) {
+            try {
+              const json = item_description.split('---EXTENDED_PROPS---')[1]?.trim();
+              if (json) {
+                const ext = JSON.parse(json);
+                if (ext.fieldName) technicalFieldName = ext.fieldName;
+              }
+            } catch { /* ignore parse errors */ }
+          }
 
           // Check lock/freeze status — query-driven corrections are ALLOWED on
           // locked/frozen forms (EDC standard) but we log an explicit audit entry
@@ -823,28 +845,80 @@ export const addQueryResponse = async (
             event_crf_id, correctionReason
           ]);
 
-          // 3. Sync corrected value into patient_event_form JSONB snapshot
-          if (event_crf_id && field_name) {
-            try {
-              await client.query(`
-                UPDATE patient_event_form
-                SET form_data = jsonb_set(
-                      COALESCE(form_data, '{}'::jsonb),
-                      $1::text[], to_jsonb($2::text)
-                    ),
-                    date_updated = NOW()
-                WHERE event_crf_id = $3
-              `, [[field_name], data.correctedValue, event_crf_id]);
-            } catch (snapErr: any) {
-              logger.warn('Failed to sync correction to patient_event_form (non-blocking)', {
-                error: snapErr.message, event_crf_id, field_name
-              });
+          // 3. Write audit trail for the query-driven correction (separate entry
+          //    on discrepancy_note table for the full query audit history)
+          await client.query(`
+            INSERT INTO audit_log_event (
+              audit_date, audit_table, user_id, entity_id, entity_name,
+              old_value, new_value, reason_for_change,
+              audit_log_event_type_id
+            ) VALUES (
+              NOW(), 'discrepancy_note', $1, $2, 'Query Data Correction',
+              $3, $4, $5,
+              COALESCE(
+                (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+                1
+              )
+            )
+          `, [
+            userId, parentQueryId,
+            `Field: ${field_name}, Value: ${old_value}`,
+            `Field: ${field_name}, Corrected Value: ${data.correctedValue}`,
+            correctionReason
+          ]);
+
+          // 4. Sync corrected value into patient_event_form JSONB snapshot.
+          //    Try both the technical fieldName and display name to ensure the
+          //    JSONB key matches regardless of how the form was originally saved.
+          if (event_crf_id) {
+            const keysToTry = [technicalFieldName, field_name].filter(Boolean) as string[];
+            for (const key of keysToTry) {
+              try {
+                const updateResult = await client.query(`
+                  UPDATE patient_event_form
+                  SET form_data = jsonb_set(
+                        COALESCE(form_data, '{}'::jsonb),
+                        $1::text[], to_jsonb($2::text)
+                      ),
+                      date_updated = NOW()
+                  WHERE event_crf_id = $3
+                    AND form_data ? $4
+                `, [[key], data.correctedValue, event_crf_id, key]);
+                if ((updateResult as any).rowCount > 0) {
+                  logger.info('Synced correction to patient_event_form', { 
+                    event_crf_id, key, queryId: parentQueryId 
+                  });
+                  break;
+                }
+              } catch (snapErr: any) {
+                logger.warn('Failed to sync correction to patient_event_form', {
+                  error: snapErr.message, event_crf_id, key
+                });
+              }
+            }
+            // Fallback: if no key matched (form_data doesn't contain either key),
+            // insert using the technical fieldName or display name
+            if (keysToTry.length > 0) {
+              try {
+                const fallbackKey = technicalFieldName || field_name;
+                await client.query(`
+                  UPDATE patient_event_form
+                  SET form_data = jsonb_set(
+                        COALESCE(form_data, '{}'::jsonb),
+                        $1::text[], to_jsonb($2::text)
+                      ),
+                      date_updated = NOW()
+                  WHERE event_crf_id = $3
+                    AND NOT (form_data ? $4)
+                `, [[fallbackKey], data.correctedValue, event_crf_id, fallbackKey]);
+              } catch { /* non-blocking */ }
             }
           }
 
           correctionApplied = true;
           logger.info('Data correction applied via query resolution', {
             queryId: parentQueryId, item_data_id, field_name,
+            technicalFieldName,
             oldValue: old_value, newValue: data.correctedValue
           });
         } else {
@@ -1055,28 +1129,50 @@ export const closeQueryWithSignature = async (
   try {
     await client.query('BEGIN');
 
-    // Verify password (get user's password hash)
-    const userResult = await client.query(
-      `SELECT passwd, user_name, first_name, last_name FROM user_account WHERE user_id = $1`,
-      [userId]
-    );
+    // Query both MD5 and bcrypt hashes (dual-auth, matching login system)
+    let userResult;
+    try {
+      userResult = await client.query(
+        `SELECT u.passwd, u.user_name, u.first_name, u.last_name, uae.bcrypt_passwd
+         FROM user_account u
+         LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
+         WHERE u.user_id = $1`,
+        [userId]
+      );
+    } catch {
+      userResult = await client.query(
+        `SELECT passwd, user_name, first_name, last_name FROM user_account WHERE user_id = $1`,
+        [userId]
+      );
+    }
 
     if (userResult.rows.length === 0) {
       throw new Error('User not found');
     }
 
     const user = userResult.rows[0];
-    
-    // LibreClinica uses MD5 hash for passwords
-    const crypto = require('crypto');
-    const passwordHash = crypto.createHash('md5').update(data.password).digest('hex');
 
-    if (passwordHash !== user.passwd) {
+    const verification = await verifyAndUpgrade(
+      data.password,
+      user.passwd,
+      user.bcrypt_passwd || null
+    );
+
+    if (!verification.valid) {
       logger.warn('Invalid password for query signature', { queryId, userId });
       throw new ForbiddenError('Invalid password. Electronic signature verification failed.');
     }
 
-    // Password verified - delegate to the verified function
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      try {
+        await client.query(`
+          INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
+          VALUES ($1, $2, NOW(), 2)
+          ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW(), password_version = 2
+        `, [userId, verification.upgradedBcryptHash]);
+      } catch { /* non-blocking */ }
+    }
+
     return closeQueryWithSignatureVerified(queryId, userId, {
       reason: data.reason,
       meaning: data.meaning
@@ -1218,7 +1314,8 @@ export const getQueryAuditTrail = async (queryId: number, callerUserId?: number)
   logger.info('Getting query audit trail', { queryId, callerUserId });
 
   try {
-    const query = `
+    // Get audit events for the query itself
+    const queryAuditSql = `
       SELECT 
         ale.audit_id,
         ale.audit_date,
@@ -1229,16 +1326,48 @@ export const getQueryAuditTrail = async (queryId: number, callerUserId?: number)
         ale.user_id,
         u.user_name,
         u.first_name || ' ' || u.last_name as user_full_name,
-        alet.name as event_type
+        alet.name as event_type,
+        ale.audit_table
       FROM audit_log_event ale
       LEFT JOIN user_account u ON ale.user_id = u.user_id
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
       WHERE ale.audit_table = 'discrepancy_note'
         AND ale.entity_id = $1
-      ORDER BY ale.audit_date DESC
     `;
 
-    const result = await pool.query(query, [queryId]);
+    // Also fetch audit events for any linked item_data corrections driven by this query.
+    // These are stored with reason_for_change containing 'Query resolution data correction'
+    // and the item_data_id matching the query's dn_item_data_map.
+    const dataCorrectionAuditSql = `
+      SELECT 
+        ale.audit_id,
+        ale.audit_date,
+        'Data Correction (via Query)' as action,
+        ale.old_value,
+        ale.new_value,
+        ale.reason_for_change,
+        ale.user_id,
+        u.user_name,
+        u.first_name || ' ' || u.last_name as user_full_name,
+        alet.name as event_type,
+        ale.audit_table
+      FROM audit_log_event ale
+      LEFT JOIN user_account u ON ale.user_id = u.user_id
+      LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
+      INNER JOIN dn_item_data_map dim ON dim.discrepancy_note_id = $1
+      WHERE ale.audit_table = 'item_data'
+        AND ale.entity_id = dim.item_data_id
+        AND ale.reason_for_change ILIKE '%query%correction%'
+    `;
+
+    const combinedSql = `
+      (${queryAuditSql})
+      UNION ALL
+      (${dataCorrectionAuditSql})
+      ORDER BY audit_date DESC
+    `;
+
+    const result = await pool.query(combinedSql, [queryId]);
 
     // Org-scoping: verify caller can see this query's audit trail
     if (callerUserId && result.rows.length > 0) {
@@ -1251,7 +1380,7 @@ export const getQueryAuditTrail = async (queryId: number, callerUserId?: number)
     return result.rows;
   } catch (error: any) {
     logger.error('Get query audit trail error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1314,7 +1443,7 @@ export const getQueryTypes = async (): Promise<any[]> => {
     return result.rows;
   } catch (error: any) {
     logger.error('Get query types error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1337,7 +1466,7 @@ export const getResolutionStatuses = async (): Promise<any[]> => {
     return result.rows;
   } catch (error: any) {
     logger.error('Get resolution statuses error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1385,7 +1514,7 @@ export const getFormQueries = async (eventCrfId: number, callerUserId?: number):
     return result.rows;
   } catch (error: any) {
     logger.error('Get form queries error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1482,7 +1611,7 @@ export const getQueryCountByStatus = async (studyId: number, callerUserId?: numb
     return result.rows;
   } catch (error: any) {
     logger.error('Get query count by status error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1520,7 +1649,7 @@ export const getQueryCountByType = async (studyId: number, callerUserId?: number
     return result.rows;
   } catch (error: any) {
     logger.error('Get query count by type error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1625,7 +1754,7 @@ export const getQueryThread = async (queryId: number, callerUserId?: number): Pr
     return result.rows;
   } catch (error: any) {
     logger.error('Get query thread error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1675,7 +1804,7 @@ export const getOverdueQueries = async (studyId: number, daysThreshold: number =
     return result.rows;
   } catch (error: any) {
     logger.error('Get overdue queries error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1719,7 +1848,7 @@ export const getMyAssignedQueries = async (userId: number, studyId?: number): Pr
     return result.rows;
   } catch (error: any) {
     logger.error('Get my assigned queries error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1733,6 +1862,17 @@ export const getFieldQueries = async (itemDataId: number, callerUserId?: number)
   logger.info('Getting field queries', { itemDataId, callerUserId });
 
   try {
+    const params: any[] = [itemDataId];
+    let orgFilter = '';
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND dn.owner_id = ANY($2::int[])`;
+        params.push(orgUserIds);
+      }
+    }
+
     const query = `
       SELECT 
         dn.discrepancy_note_id,
@@ -1752,21 +1892,15 @@ export const getFieldQueries = async (itemDataId: number, callerUserId?: number)
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
       INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
       WHERE dim.item_data_id = $1
-        AND dn.parent_dn_id IS NULL${callerUserId ? ` AND dn.owner_id = ANY($2::int[])` : ''}
+        AND dn.parent_dn_id IS NULL${orgFilter}
       ORDER BY dn.date_created DESC
     `;
-
-    const params: any[] = [itemDataId];
-    if (callerUserId) {
-      const orgUserIds = await getOrgMemberUserIds(callerUserId);
-      if (orgUserIds) params.push(orgUserIds);
-    }
 
     const result = await pool.query(query, params);
     return result.rows;
   } catch (error: any) {
     logger.error('Get field queries error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1820,7 +1954,7 @@ export const getQueriesByField = async (eventCrfId: number, fieldName: string, c
     return await getFieldQueries(itemDataId, callerUserId);
   } catch (error: any) {
     logger.error('Get queries by field error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -2118,6 +2252,21 @@ export const reopenQuery = async (
   reason: string
 ): Promise<{ success: true; message: string }> => {
   logger.info('Reopening query', { queryId, userId, reason });
+
+  const result = await pool.query(
+    `SELECT resolution_status_id FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+    [queryId]
+  );
+  if (result.rows.length === 0) {
+    throw new NotFoundError('Query not found');
+  }
+  const currentStatusId = result.rows[0].resolution_status_id;
+  if (currentStatusId !== 4 && currentStatusId !== 5) {
+    throw new ConflictError(
+      'Only closed or not-applicable queries can be reopened. Current status is not eligible for reopen.'
+    );
+  }
+
   return updateQueryStatus(queryId, 1, userId, { reason: reason || 'Query reopened' });
 };
 

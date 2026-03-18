@@ -289,6 +289,18 @@ export const getTopPerformers = asyncHandler(async (req: Request, res: Response)
   res.json({ success: true, data: result });
 });
 
+export const getQueryAgingAnalysis = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const result = await dashboardService.getQueryAgingAnalysis(parseInt(studyId as string) || 1);
+  res.json({ success: true, data: result });
+});
+
+export const getVisitWindowCompliance = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const result = await dashboardService.getVisitWindowCompliance(parseInt(studyId as string) || 1);
+  res.json({ success: true, data: result });
+});
+
 export default { 
   getSummary,
   getStats,
@@ -305,6 +317,8 @@ export default {
   getActivityFeed,
   getStudyHealthScore,
   getUserAnalytics,
-  getTopPerformers
+  getTopPerformers,
+  getQueryAgingAnalysis,
+  getVisitWindowCompliance
 };
 

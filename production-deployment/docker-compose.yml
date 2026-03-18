@@ -163,7 +163,7 @@ services:
       - ./certbot/www:/var/www/certbot
     networks:
       - lc_network
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --deploy-hook \"wget --spider -q http://nginx/health || true\" 2>&1; sleep 12h & wait $${!}; done;'"
 
 volumes:
   db_data:

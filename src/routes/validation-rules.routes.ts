@@ -57,6 +57,7 @@ router.post('/validate-field',
 
 router.get('/crf/:crfId', validate({ params: crfIdParam }), controller.getRulesForCrf);
 router.get('/study/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), controller.getRulesForStudy);
+router.get('/all-crfs', controller.getAllCrfsWithRules);
 
 // /format-types MUST be registered before /:ruleId — Express matches routes in order and
 // /:ruleId would shadow any static path segment like /format-types.

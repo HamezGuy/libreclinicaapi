@@ -56,6 +56,20 @@ export const getRulesForStudy = async (req: Request, res: Response, next: NextFu
 };
 
 /**
+ * Get ALL CRFs with their validation rule counts (no study filter)
+ */
+export const getAllCrfsWithRules = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const caller = (req as any).user;
+    const results = await validationRulesService.getAllCrfsWithRuleCounts(caller?.userId);
+    res.json({ success: true, data: results });
+  } catch (error) {
+    logger.error('Get all CRFs with rules error:', error);
+    next(error);
+  }
+};
+
+/**
  * Get a single validation rule
  */
 export const getRule = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -479,6 +493,7 @@ export const validateFieldChange = async (req: Request, res: Response, next: Nex
 export default {
   getRulesForCrf,
   getRulesForStudy,
+  getAllCrfsWithRules,
   getRulesForEventCrf,
   getRule,
   createRule,

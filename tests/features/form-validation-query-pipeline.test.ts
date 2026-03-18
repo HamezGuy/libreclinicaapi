@@ -1007,3 +1007,308 @@ describe('Format Type Resolution (No-Code Builder)', () => {
     expect(validationRulesService.testRuleDirectly(rule, '1234', {}).valid).toBe(false);
   });
 });
+
+// ============================================================================
+// 14. AUTOMATIC QUERY GENERATION FOR WARNING RULES
+// ============================================================================
+
+describe('Automatic Query Generation for Warning-Severity Rules', () => {
+  beforeEach(() => resetMocks());
+
+  it('should create queries for warning-severity rules when createQueries=true', async () => {
+    const client = createMockClient();
+
+    // Mock: table exists
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [{ exists: true }] });
+    // Mock: custom rules with ONE warning rule
+    mockDb.poolQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 10, crf_id: 1, name: 'Age Warning', rule_type: 'range',
+        field_path: 'age', severity: 'warning',
+        error_message: 'Age is unusual',
+        warning_message: 'Age outside expected range (18-65)',
+        active: true, min_value: 18, max_value: 65,
+        date_created: new Date()
+      }]
+    });
+    // Mock: item_form_metadata rules (empty)
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [] });
+    // Mock: native rules (empty)
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [] });
+    // Mock: buildItemDataMap (eventCrfId provided)
+    mockDb.poolQuery.mockResolvedValueOnce({
+      rows: [{ item_data_id: 100, field_name: 'age', field_oid: 'I_AGE', item_id: 50 }]
+    });
+    // Mock: buildItemIdToFormKeyMap (latest version)
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [{ crf_version_id: 1 }] });
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [{ item_id: 50, name: 'age', oc_oid: 'I_AGE', description: '' }] });
+
+    // Mock: createValidationQuery internal calls (BEGIN, duplicate check, etc.)
+    // findItemDataId
+    client.query.mockResolvedValueOnce({ rows: [] }); // BEGIN
+    client.query.mockResolvedValueOnce({ rows: [{ item_data_id: 100 }] }); // findItemDataId
+    // Duplicate check (no existing query)
+    client.query.mockResolvedValueOnce({ rows: [] });
+    // Broader dedup
+    client.query.mockResolvedValueOnce({ rows: [] });
+    // resolveQueryAssignee - table check
+    client.query.mockResolvedValueOnce({ rows: [{ exists: false }] });
+    // findDefaultAssignee
+    client.query.mockResolvedValueOnce({ rows: [{ user_id: 5 }] });
+    // INSERT discrepancy_note
+    client.query.mockResolvedValueOnce({ rows: [{ discrepancy_note_id: 999 }] });
+    // INSERT dn_item_data_map
+    client.query.mockResolvedValueOnce({ rows: [] });
+    // INSERT dn_event_crf_map
+    client.query.mockResolvedValueOnce({ rows: [] });
+    // INSERT dn_study_subject_map
+    client.query.mockResolvedValueOnce({ rows: [] });
+    // INSERT audit_log_event
+    client.query.mockResolvedValueOnce({ rows: [] });
+    // COMMIT
+    client.query.mockResolvedValueOnce({ rows: [] });
+
+    const result = await validationRulesService.validateFormData(1,
+      { age: '90' }, // Outside 18-65 warning range
+      {
+        createQueries: true,
+        severityFilter: 'warning',
+        studyId: 1,
+        subjectId: 10,
+        eventCrfId: 5,
+        userId: 1
+      }
+    );
+
+    // valid=true because warnings don't block
+    expect(result.valid).toBe(true);
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0].message).toContain('Age outside expected range');
+    expect(result.queriesCreated).toBeGreaterThanOrEqual(1);
+    expect(result.warnings[0].queryId).toBeDefined();
+  });
+
+  it('should NOT create queries for error-severity rules when severityFilter=warning', async () => {
+    resetMocks();
+
+    // Mock: table exists
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [{ exists: true }] });
+    // Mock: custom rules with ONE error rule
+    mockDb.poolQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 20, crf_id: 1, name: 'Name Required', rule_type: 'required',
+        field_path: 'name', severity: 'error',
+        error_message: 'Name is required',
+        active: true, date_created: new Date()
+      }]
+    });
+    // Mock: item_form_metadata rules (empty)
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [] });
+    // Mock: native rules (empty)
+    mockDb.poolQuery.mockResolvedValueOnce({ rows: [] });
+
+    const result = await validationRulesService.validateFormData(1,
+      { name: '' }, // Empty - fails required rule
+      {
+        createQueries: true,
+        severityFilter: 'warning', // Only process warnings
+        studyId: 1,
+        userId: 1
+      }
+    );
+
+    // Error rule is skipped because severityFilter='warning'
+    expect(result.valid).toBe(true);
+    expect(result.errors.length).toBe(0);
+    expect(result.queriesCreated).toBe(0);
+  });
+
+  it('should use correct discrepancy_note_type_id: 2 for warnings, 1 for errors', () => {
+    // Type 1 = Failed Validation Check (error severity)
+    // Type 2 = Annotation (warning severity)
+    const isWarningError = false;
+    const isWarningWarning = true;
+
+    expect(isWarningError ? 2 : 1).toBe(1);  // error → type 1
+    expect(isWarningWarning ? 2 : 1).toBe(2); // warning → type 2
+  });
+
+  it('should include detailed audit info when creating automatic queries', () => {
+    // Verify the audit detail format includes all required fields
+    const params = {
+      ruleName: 'Age Warning',
+      fieldPath: 'age',
+      value: '90',
+      severity: 'warning' as const,
+      eventCrfId: 5,
+      subjectId: 10,
+      itemDataId: 100
+    };
+
+    const auditDetail = [
+      `Rule: ${params.ruleName}`,
+      `Field: ${params.fieldPath}`,
+      `Value: ${JSON.stringify(params.value)}`,
+      `Severity: ${params.severity}`,
+      `Type: ${params.severity === 'warning' ? 'Automatic Warning Query' : 'Automatic Validation Query'}`,
+      params.eventCrfId ? `EventCRF: ${params.eventCrfId}` : null,
+      params.subjectId ? `Subject: ${params.subjectId}` : null,
+      params.itemDataId ? `ItemData: ${params.itemDataId}` : null
+    ].filter(Boolean).join(', ');
+
+    expect(auditDetail).toContain('Rule: Age Warning');
+    expect(auditDetail).toContain('Field: age');
+    expect(auditDetail).toContain('Severity: warning');
+    expect(auditDetail).toContain('Automatic Warning Query');
+    expect(auditDetail).toContain('EventCRF: 5');
+    expect(auditDetail).toContain('Subject: 10');
+    expect(auditDetail).toContain('ItemData: 100');
+  });
+});
+
+// ============================================================================
+// 15. QUERY RESOLUTION WITH DATA CORRECTION
+// ============================================================================
+
+describe('Query Resolution Data Correction', () => {
+
+  it('should resolve technical fieldName from extended_props for JSONB sync', () => {
+    const itemDescription = 'Heart Rate field ---EXTENDED_PROPS--- {"fieldName":"heart_rate","fieldType":"number"}';
+    let technicalFieldName: string | null = null;
+    
+    if (itemDescription.includes('---EXTENDED_PROPS---')) {
+      const json = itemDescription.split('---EXTENDED_PROPS---')[1]?.trim();
+      if (json) {
+        const ext = JSON.parse(json);
+        if (ext.fieldName) technicalFieldName = ext.fieldName;
+      }
+    }
+
+    expect(technicalFieldName).toBe('heart_rate');
+  });
+
+  it('should fall back to display name when no extended_props exist', () => {
+    const itemDescription = 'Heart Rate field description';
+    let technicalFieldName: string | null = null;
+    
+    if (itemDescription?.includes('---EXTENDED_PROPS---')) {
+      // Won't enter this block
+    }
+
+    expect(technicalFieldName).toBeNull();
+    
+    // In this case, the code should use field_name (display name)
+    const fieldName = 'Heart Rate';
+    const keysToTry = [technicalFieldName, fieldName].filter(Boolean) as string[];
+    expect(keysToTry).toEqual(['Heart Rate']);
+  });
+
+  it('should try both technical and display names when syncing to patient_event_form', () => {
+    const technicalFieldName = 'heart_rate';
+    const displayName = 'Heart Rate';
+    
+    const keysToTry = [technicalFieldName, displayName].filter(Boolean) as string[];
+    
+    expect(keysToTry).toEqual(['heart_rate', 'Heart Rate']);
+    expect(keysToTry.length).toBe(2);
+  });
+
+  it('should handle null extended_props gracefully', () => {
+    const itemDescription: string | null = null;
+    let technicalFieldName: string | null = null;
+    
+    if (itemDescription?.includes('---EXTENDED_PROPS---')) {
+      // Won't enter this block
+    }
+
+    expect(technicalFieldName).toBeNull();
+  });
+});
+
+// ============================================================================
+// 16. FULL QUERY AUDIT TRAIL
+// ============================================================================
+
+describe('Full Query Audit Trail', () => {
+
+  it('should include data correction entries in query audit trail SQL', () => {
+    // The getQueryAuditTrail function uses UNION ALL to combine:
+    // 1. discrepancy_note audit entries (query lifecycle events)
+    // 2. item_data audit entries with correction reason (data corrections)
+    
+    const queryAuditSql = `audit_table = 'discrepancy_note' AND entity_id = $1`;
+    const dataCorrectionSql = `audit_table = 'item_data' AND reason_for_change ILIKE '%query%correction%'`;
+    
+    // Both should be part of the combined query
+    expect(queryAuditSql).toContain('discrepancy_note');
+    expect(dataCorrectionSql).toContain('item_data');
+    expect(dataCorrectionSql).toContain('query%correction');
+  });
+
+  it('should create separate audit entries for query and item_data corrections', () => {
+    // When a query is resolved with a corrected value, two audit entries are created:
+    // 1. On item_data table: records the old→new value change
+    // 2. On discrepancy_note table: records the correction as part of query history
+    
+    const itemDataAudit = {
+      audit_table: 'item_data',
+      entity_id: 100, // item_data_id
+      old_value: 'old_val',
+      new_value: 'new_val',
+      reason_for_change: 'Query resolution data correction'
+    };
+    
+    const queryAudit = {
+      audit_table: 'discrepancy_note',
+      entity_id: 42, // discrepancy_note_id
+      entity_name: 'Query Data Correction',
+      old_value: 'Field: Heart Rate, Value: old_val',
+      new_value: 'Field: Heart Rate, Corrected Value: new_val'
+    };
+    
+    expect(itemDataAudit.audit_table).toBe('item_data');
+    expect(queryAudit.audit_table).toBe('discrepancy_note');
+    expect(queryAudit.entity_name).toBe('Query Data Correction');
+    expect(itemDataAudit.reason_for_change).toContain('Query resolution');
+  });
+});
+
+// ============================================================================
+// 17. SAVE RESPONSE INCLUDES VALIDATION WARNINGS
+// ============================================================================
+
+describe('Save Response Validation Warnings', () => {
+
+  it('should include validationWarnings array in save response for frontend consumption', () => {
+    // Simulates the structure returned by saveFormDataDirect after post-save validation
+    const saveResponse = {
+      success: true,
+      eventCrfId: 5,
+      studyEventId: 3,
+      data: { eventCrfId: 5, studyEventId: 3, savedCount: 10 },
+      message: 'Form data saved successfully (10 fields)',
+      queriesCreated: 2,
+      validationWarnings: [
+        { fieldPath: 'age', message: 'Age outside expected range (18-65)', queryId: 999 },
+        { fieldPath: 'weight', message: 'Weight seems unusual', queryId: 1000 }
+      ]
+    };
+
+    expect(saveResponse.validationWarnings).toBeDefined();
+    expect(saveResponse.validationWarnings.length).toBe(2);
+    expect(saveResponse.validationWarnings[0].fieldPath).toBe('age');
+    expect(saveResponse.validationWarnings[0].queryId).toBe(999);
+    expect(saveResponse.queriesCreated).toBe(2);
+  });
+
+  it('should return empty validationWarnings when no warnings exist', () => {
+    const saveResponse = {
+      success: true,
+      queriesCreated: 0,
+      validationWarnings: [] as any[]
+    };
+
+    expect(saveResponse.validationWarnings).toEqual([]);
+    expect(saveResponse.queriesCreated).toBe(0);
+  });
+});

@@ -275,6 +275,32 @@ router.get('/subjects/:studySubjectId/has-consent', authMiddleware, async (req: 
 });
 
 /**
+ * GET /api/consent/subjects/:studySubjectId/consent-gate
+ * Consent gate — checks if data entry should be allowed for this subject.
+ * Returns a gate decision (none / soft_warning / hard_block) based on consent status.
+ */
+router.get('/subjects/:studySubjectId/consent-gate', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const studySubjectId = parseInt(req.params.studySubjectId);
+    const hasConsent = await hasValidConsent(studySubjectId);
+
+    res.json({
+      success: true,
+      data: {
+        allowed: true,
+        hasValidConsent: hasConsent,
+        consentStatus: hasConsent ? 'valid' : 'missing',
+        message: hasConsent ? undefined : 'Subject does not have valid informed consent on file.',
+        gateType: hasConsent ? 'none' : 'soft_warning'
+      }
+    });
+  } catch (error: any) {
+    logger.error('Error checking consent gate', { error: error.message });
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
  * POST /api/consent/:consentId/withdraw
  * Withdraw consent (requires electronic signature per §11.50)
  */

@@ -487,6 +487,63 @@ export const getRulesForStudy = async (studyId: number, callerUserId?: number): 
 };
 
 /**
+ * Get ALL CRFs with their validation rule counts (no study filter).
+ * Used by the validation rules config UI which now allows direct form selection.
+ */
+export const getAllCrfsWithRuleCounts = async (callerUserId?: number): Promise<{ crfId: number; crfName: string; rules: ValidationRule[] }[]> => {
+  logger.info('Getting all CRFs with rule counts', { callerUserId });
+
+  try {
+    let orgCrfFilter = '';
+    const queryParams: any[] = [];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgCrfFilter = ` AND c.crf_id IN (SELECT cv2.crf_id FROM crf_version cv2 WHERE cv2.owner_id = ANY($1::int[]))`;
+        queryParams.push(orgUserIds);
+      }
+    }
+
+    const allCrfsQuery = `
+      SELECT DISTINCT c.crf_id, c.name
+      FROM crf c
+      WHERE c.status_id = 1${orgCrfFilter}
+      ORDER BY c.name
+      LIMIT 100
+    `;
+    const crfsResult = await pool.query(allCrfsQuery, queryParams);
+    logger.info('All CRFs for validation rules config', { count: crfsResult.rows.length });
+
+    const crfMap = new Map<number, { crfId: number; crfName: string }>();
+    for (const crf of crfsResult.rows) {
+      if (!crfMap.has(crf.crf_id)) {
+        crfMap.set(crf.crf_id, {
+          crfId: crf.crf_id,
+          crfName: crf.name
+        });
+      }
+    }
+
+    const results = [];
+    for (const crf of crfMap.values()) {
+      const rules = await getRulesForCrf(crf.crfId, callerUserId);
+      results.push({
+        crfId: crf.crfId,
+        crfName: crf.crfName,
+        rules
+      });
+    }
+
+    results.sort((a, b) => a.crfName.localeCompare(b.crfName));
+    return results;
+  } catch (error: any) {
+    logger.error('Get all CRFs with rule counts error', { error: error.message });
+    throw error;
+  }
+};
+
+/**
  * Get a single validation rule by ID
  */
 export const getRuleById = async (ruleId: number, callerUserId?: number): Promise<ValidationRule | null> => {
@@ -1614,6 +1671,17 @@ async function createValidationQuery(params: {
 
     // Log audit event for query creation (best-effort, don't fail the whole query)
     try {
+      const auditDetail = [
+        `Rule: ${params.ruleName}`,
+        `Field: ${params.fieldPath}`,
+        `Value: ${JSON.stringify(params.value)}`,
+        `Severity: ${params.severity || 'error'}`,
+        `Type: ${isWarning ? 'Automatic Warning Query' : 'Automatic Validation Query'}`,
+        params.eventCrfId ? `EventCRF: ${params.eventCrfId}` : null,
+        params.subjectId ? `Subject: ${params.subjectId}` : null,
+        itemDataId ? `ItemData: ${itemDataId}` : null
+      ].filter(Boolean).join(', ');
+
       await client.query(`
         INSERT INTO audit_log_event (
           audit_date, audit_table, user_id, entity_id, entity_name,
@@ -1626,9 +1694,8 @@ async function createValidationQuery(params: {
             1
           )
         )
-      `, [params.userId, queryId, description, `Rule: ${params.ruleName}, Field: ${params.fieldPath}`]);
+      `, [params.userId, queryId, description, auditDetail]);
     } catch (auditError: any) {
-      // Audit logging should not prevent query creation
       logger.warn('Audit log for validation query failed (non-blocking)', { 
         queryId, error: auditError.message 
       });
@@ -2233,6 +2300,7 @@ export default {
   initializeValidationRulesTable,
   getRulesForCrf,
   getRulesForStudy,
+  getAllCrfsWithRuleCounts,
   getRulesForEventCrf,
   getRuleById,
   createRule,

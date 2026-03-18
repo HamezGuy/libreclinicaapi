@@ -14,6 +14,7 @@ import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
 import { pool } from '../config/database';
 import { v4 as uuidv4 } from 'uuid';
+import { verifyAndUpgrade } from '../utils/password.util';
 
 /**
  * Extended Express Request with audit information
@@ -355,9 +356,10 @@ export const electronicSignatureMiddleware = async (
   try {
     // Verify credentials (password check)
     const authQuery = `
-      SELECT user_id, user_name, passwd 
-      FROM user_account 
-      WHERE user_name = $1 AND status_id = 1
+      SELECT ua.user_id, ua.user_name, ua.passwd, uae.bcrypt_passwd
+      FROM user_account ua
+      LEFT JOIN user_account_extended uae ON ua.user_id = uae.user_id
+      WHERE ua.user_name = $1 AND ua.status_id = 1
     `;
     
     const result = await pool.query(authQuery, [username]);
@@ -381,10 +383,47 @@ export const electronicSignatureMiddleware = async (
       return;
     }
 
+    const user = result.rows[0];
+
+    // Verify the submitted password against stored hash
+    const verification = await verifyAndUpgrade(
+      password,
+      user.passwd,
+      user.bcrypt_passwd || null
+    );
+
+    if (!verification.valid) {
+      await logAuditEvent(
+        AuditEventType.FAILED_LOGIN,
+        user.user_id,
+        username,
+        {
+          entityName: 'electronic_signature',
+          reasonForChange: 'Invalid password for electronic signature',
+          ipAddress: req.ip
+        }
+      );
+
+      res.status(401).json({
+        success: false,
+        message: 'Invalid electronic signature credentials'
+      });
+      return;
+    }
+
+    // Upgrade hash to bcrypt if needed (non-blocking)
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      pool.query(`
+        INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
+        VALUES ($1, $2, NOW(), 2)
+        ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW(), password_version = 2
+      `, [user.user_id, verification.upgradedBcryptHash]).catch(() => {});
+    }
+
     // Log electronic signature
     await logAuditEvent(
       AuditEventType.DATA_ENTERED,
-      result.rows[0].user_id,
+      user.user_id,
       username,
       {
         entityName: 'electronic_signature',
@@ -396,7 +435,7 @@ export const electronicSignatureMiddleware = async (
 
     // Add signature info to request
     (req as any).electronicSignature = {
-      userId: result.rows[0].user_id,
+      userId: user.user_id,
       username,
       meaning,
       timestamp: new Date()

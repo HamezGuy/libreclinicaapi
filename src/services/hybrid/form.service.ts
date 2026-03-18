@@ -53,17 +53,24 @@ export const saveFormData = async (
     userId 
   });
 
-  // Validate required fields
-  if (!request.studyId || !request.subjectId || !request.studyEventDefinitionId || !request.crfId) {
+  // Validate required fields — studyEventDefinitionId is not needed when
+  // the visit can be resolved from studyEventId or eventCrfId.
+  if (!request.studyId || !request.subjectId || !request.crfId) {
     logger.warn('Missing required fields for form save', {
       studyId: request.studyId,
       subjectId: request.subjectId,
-      studyEventDefinitionId: request.studyEventDefinitionId,
       crfId: request.crfId
     });
     return {
       success: false,
-      message: 'Missing required fields: studyId, subjectId, studyEventDefinitionId, crfId'
+      message: 'Missing required fields: studyId, subjectId, crfId'
+    };
+  }
+  if (!request.studyEventDefinitionId && !(request as any).studyEventId && !(request as any).eventCrfId) {
+    logger.warn('No visit context for form save — need studyEventDefinitionId, studyEventId, or eventCrfId');
+    return {
+      success: false,
+      message: 'Missing visit context: provide studyEventDefinitionId, studyEventId, or eventCrfId'
     };
   }
 
@@ -269,11 +276,14 @@ const saveFormDataDirect = async (
       logger.info('Created study event', { studyEventId });
     }
 
-    // 2. Get the CRF version
+    // 2. Get the CRF version — prefer active (status_id=1), fall back to
+    //    the newest available version of any status so draft forms can still be saved.
     const crfVersionResult = await client.query(`
       SELECT crf_version_id FROM crf_version
-      WHERE crf_id = $1 AND status_id = 1
-      ORDER BY crf_version_id DESC
+      WHERE crf_id = $1
+      ORDER BY
+        CASE WHEN status_id = 1 THEN 0 ELSE 1 END,
+        crf_version_id DESC
       LIMIT 1
     `, [request.crfId]);
 
@@ -560,23 +570,90 @@ const saveFormDataDirect = async (
       savedCount++;
     }
 
-    // 6. Update event_crf completion status based on how many fields are filled
+    // 6. Update event_crf completion status based on VISIBLE required fields only.
+    //    Fields hidden by branching/skip logic are excluded so they don't block completion.
     //    2 = initial_data_entry, 4 = complete
-    // Combined into one query to avoid two separate round-trips.
-    const completionCountResult = await client.query(`
-      SELECT
-        (SELECT COUNT(DISTINCT i.item_id)
-         FROM item i
-         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
-         WHERE igm.crf_version_id = $1) AS total,
-        (SELECT COUNT(*)
-         FROM item_data
-         WHERE event_crf_id = $2 AND deleted = false AND value IS NOT NULL AND value != '') AS filled
-    `, [resolvedVersionId, eventCrfId]);
 
-    const totalItems = parseInt(completionCountResult.rows[0]?.total) || 0;
-    const filledItems = parseInt(completionCountResult.rows[0]?.filled) || 0;
-    const isComplete = totalItems > 0 && filledItems >= totalItems;
+    // Build a set of hidden field names sent by the frontend (branching logic).
+    // These are field names (matching item.name or extended_properties.fieldName)
+    // that should be excluded from the required-fields completion check.
+    const hiddenFieldNames: Set<string> = new Set();
+    if (request.hiddenFields && Array.isArray(request.hiddenFields)) {
+      for (const hf of request.hiddenFields) {
+        if (hf) hiddenFieldNames.add(hf.toLowerCase());
+      }
+    }
+
+    let requiredTotal = 0;
+    let requiredFilled = 0;
+    let totalFilled = 0;
+
+    if (hiddenFieldNames.size > 0) {
+      // When branching is active, query items individually to exclude hidden ones
+      const allRequiredResult = await client.query(`
+        SELECT i.item_id, i.name, i.description
+        FROM item i
+        INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+        INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
+        WHERE igm.crf_version_id = $1 AND ifm.required = true
+      `, [resolvedVersionId]);
+
+      for (const row of allRequiredResult.rows) {
+        const extProps = parseExtendedProps(row.description);
+        const fieldName = extProps.fieldName || row.name;
+        if (hiddenFieldNames.has(fieldName.toLowerCase()) || hiddenFieldNames.has(row.name.toLowerCase())) {
+          continue;
+        }
+        requiredTotal++;
+      }
+
+      const filledResult = await client.query(`
+        SELECT COUNT(DISTINCT id2.item_id) AS cnt
+        FROM item_data id2
+        INNER JOIN item i2 ON id2.item_id = i2.item_id
+        INNER JOIN item_group_metadata igm2 ON i2.item_id = igm2.item_id AND igm2.crf_version_id = $1
+        INNER JOIN item_form_metadata ifm2 ON i2.item_id = ifm2.item_id AND ifm2.crf_version_id = $1
+        WHERE id2.event_crf_id = $2
+          AND id2.deleted = false AND id2.value IS NOT NULL AND id2.value != ''
+          AND ifm2.required = true
+      `, [resolvedVersionId, eventCrfId]);
+      requiredFilled = parseInt(filledResult.rows[0]?.cnt) || 0;
+
+      const totalFilledResult = await client.query(`
+        SELECT COUNT(*) AS cnt FROM item_data
+        WHERE event_crf_id = $1 AND deleted = false AND value IS NOT NULL AND value != ''
+      `, [eventCrfId]);
+      totalFilled = parseInt(totalFilledResult.rows[0]?.cnt) || 0;
+    } else {
+      const completionCountResult = await client.query(`
+        SELECT
+          (SELECT COUNT(DISTINCT i.item_id)
+           FROM item i
+           INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+           INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
+           WHERE igm.crf_version_id = $1
+             AND ifm.required = true) AS required_total,
+          (SELECT COUNT(DISTINCT id2.item_id)
+           FROM item_data id2
+           INNER JOIN item i2 ON id2.item_id = i2.item_id
+           INNER JOIN item_group_metadata igm2 ON i2.item_id = igm2.item_id AND igm2.crf_version_id = $1
+           INNER JOIN item_form_metadata ifm2 ON i2.item_id = ifm2.item_id AND ifm2.crf_version_id = $1
+           WHERE id2.event_crf_id = $2
+             AND id2.deleted = false AND id2.value IS NOT NULL AND id2.value != ''
+             AND ifm2.required = true) AS required_filled,
+          (SELECT COUNT(*)
+           FROM item_data
+           WHERE event_crf_id = $2 AND deleted = false AND value IS NOT NULL AND value != '') AS total_filled
+      `, [resolvedVersionId, eventCrfId]);
+
+      requiredTotal = parseInt(completionCountResult.rows[0]?.required_total) || 0;
+      requiredFilled = parseInt(completionCountResult.rows[0]?.required_filled) || 0;
+      totalFilled = parseInt(completionCountResult.rows[0]?.total_filled) || 0;
+    }
+
+    const isComplete = requiredTotal > 0
+      ? requiredFilled >= requiredTotal
+      : savedCount > 0;
     const completionStatusId = isComplete ? 4 : 2;
 
     await client.query(`
@@ -658,12 +735,14 @@ const saveFormDataDirect = async (
               updated_by    = $7
       `, [studyEventId, eventCrfId, resolvedVersionId,
           JSON.stringify(canonicalFormData),
-          savedCount, savedCount >= (totalItems || 999), userId]);
+          savedCount, isComplete, userId]);
       logger.debug('Upserted patient_event_form.form_data', { eventCrfId, fieldCount: Object.keys(canonicalFormData).length });
     } catch (snapUpdateError: any) {
       // Non-blocking - item_data is the primary store
-      logger.warn('Failed to upsert patient_event_form.form_data (non-blocking)', { error: snapUpdateError.message });
+      logger.error('Failed to upsert patient_event_form.form_data (non-blocking)', { error: snapUpdateError.message });
     }
+
+    const saveWarnings: { fieldPath: string; message: string; queryId?: number }[] = [];
 
     // 7. AUTO-TRIGGER WORKFLOW — deduplicated
     // Only create a 'form_submitted' event ONCE per eventCrfId.
@@ -718,15 +797,27 @@ const saveFormDataDirect = async (
         }
       }
     } catch (workflowError: any) {
-      logger.warn('Failed to auto-create workflow for form submission', { error: workflowError.message });
+      logger.error('Failed to auto-create workflow for form submission', { error: workflowError.message });
+      saveWarnings.push({ fieldPath: '_workflow', message: `Workflow trigger failed: ${workflowError.message}` });
     }
 
     // ===== POST-SAVE VALIDATION: Create queries for warnings ONLY =====
     // Hard edit errors were already caught in the pre-save pass and blocked the save.
     // Use severityFilter: 'warning' so only soft edits create queries post-save.
     let queriesCreated = 0;
+    let postSaveWarnings: { fieldPath: string; message: string; queryId?: number }[] = [];
     if (request.crfId && request.formData && eventCrfId) {
       try {
+        // Look up crf_version_id for precise item matching
+        let crfVersionId: number | undefined;
+        try {
+          const cvResult = await pool.query(
+            `SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1`,
+            [eventCrfId]
+          );
+          if (cvResult.rows.length > 0) crfVersionId = cvResult.rows[0].crf_version_id;
+        } catch { /* use undefined — service will resolve from crfId */ }
+
         const postSaveValidation = await validationRulesService.validateFormData(
           request.crfId,
           request.formData,
@@ -736,20 +827,23 @@ const saveFormDataDirect = async (
             studyId: request.studyId,
             subjectId: request.subjectId,
             eventCrfId: eventCrfId,
-            userId: userId
+            userId: userId,
+            crfVersionId
           }
         );
         queriesCreated = postSaveValidation.queriesCreated || 0;
+        postSaveWarnings = postSaveValidation.warnings || [];
         if (queriesCreated > 0) {
           logger.info('Post-save validation created queries', { 
-            eventCrfId, crfId: request.crfId, queriesCreated 
+            eventCrfId, crfId: request.crfId, queriesCreated,
+            warningFields: postSaveWarnings.map(w => w.fieldPath)
           });
         }
       } catch (postValidationError: any) {
-        // Don't fail the save response if post-save validation fails
-        logger.warn('Post-save validation query creation failed', { 
+        logger.error('Post-save validation query creation failed', { 
           error: postValidationError.message 
         });
+        saveWarnings.push({ fieldPath: '_validation', message: `Post-save validation failed: ${postValidationError.message}` });
       }
     }
 
@@ -759,7 +853,8 @@ const saveFormDataDirect = async (
         const { checkAndUpdateVisitStatus } = await import('./event.service');
         await checkAndUpdateVisitStatus(studyEventId);
       } catch (visitErr: any) {
-        logger.warn('Failed to auto-update visit status after save', { studyEventId, error: visitErr.message });
+        logger.error('Failed to auto-update visit status after save', { studyEventId, error: visitErr.message });
+        saveWarnings.push({ fieldPath: '_visit', message: `Visit status update failed: ${visitErr.message}` });
       }
     }
 
@@ -769,7 +864,8 @@ const saveFormDataDirect = async (
       studyEventId,     // The patient-visit instance that was used
       data: { eventCrfId, studyEventId, savedCount },
       message: `Form data saved successfully (${savedCount} fields)`,
-      queriesCreated
+      queriesCreated,
+      validationWarnings: [...postSaveWarnings, ...saveWarnings]
     } as any;
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -1103,7 +1199,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         definition: nv.definition
       }));
     } catch (e: any) {
-      // Not critical
+      logger.warn('Failed to load null_value_type reference data', { error: e.message });
     }
 
     // Parse items with all properties including extended props
@@ -1446,8 +1542,8 @@ export const getNullValueTypes = async (): Promise<any[]> => {
       definition: nv.definition || nv.name
     }));
   } catch (error: any) {
-    logger.warn('Could not load null value types', { error: error.message });
-    return [];
+    logger.error('Could not load null value types', { error: error.message });
+    throw error;
   }
 };
 
@@ -1460,8 +1556,8 @@ export const getMeasurementUnits = async (): Promise<any[]> => {
     const result = await pool.query(`SELECT id, oc_oid, name, description FROM measurement_unit ORDER BY name`);
     return result.rows;
   } catch (error: any) {
-    logger.warn('Could not load measurement units', { error: error.message });
-    return [];
+    logger.error('Could not load measurement units', { error: error.message });
+    throw error;
   }
 };
 
@@ -4150,6 +4246,7 @@ export const forkForm = async (
         await client.query('RELEASE SAVEPOINT copy_igm');
       } catch (igmError: any) {
         await client.query('ROLLBACK TO SAVEPOINT copy_igm');
+        logger.error('Failed to copy item_group_map entry', { itemId: item.item_id, error: igmError.message });
       }
     }
 
@@ -4502,14 +4599,46 @@ export const updateFieldData = async (
       hasValidationErrors: !validationResult.valid
     });
 
+    // Post-save: create queries for warning-severity validation failures.
+    // The pre-save validateFieldChange above blocked errors but let warnings through.
+    // Now that the data is saved, create queries for any warning rules that failed.
+    let postSaveQueriesCreated = validationResult.queriesCreated || 0;
+    let postSaveWarnings = validationResult.warnings || [];
+    if (validationResult.warnings.length > 0 && !validationResult.warnings[0]?.queryId) {
+      try {
+        const warningValidation = await validationRulesService.validateFieldChange(
+          eventCrf.crf_id,
+          fieldName,
+          value,
+          allFormData,
+          {
+            createQueries: true,
+            studyId: eventCrf.study_id,
+            subjectId: eventCrf.study_subject_id,
+            eventCrfId: eventCrfId,
+            itemDataId: savedItemDataId,
+            itemId: itemId,
+            userId: userId
+          }
+        );
+        postSaveQueriesCreated = warningValidation.queriesCreated || 0;
+        postSaveWarnings = warningValidation.warnings || [];
+      } catch (warnErr: any) {
+        logger.warn('Post-save warning query creation failed for field', { 
+          fieldName, error: warnErr.message 
+        });
+      }
+    }
+
     return {
       success: true,
       data: {
         itemDataId: savedItemDataId,
         valid: validationResult.valid,
         errors: validationResult.errors,
-        warnings: validationResult.warnings,
-        queryCreated: validationResult.queryCreated
+        warnings: postSaveWarnings,
+        queryCreated: postSaveQueriesCreated > 0,
+        queriesCreated: postSaveQueriesCreated
       },
       message: validationResult.valid 
         ? 'Field updated successfully' 

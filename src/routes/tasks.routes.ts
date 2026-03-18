@@ -28,6 +28,9 @@ router.get('/summary', tasksController.getTaskSummary);
 // Get overdue tasks
 router.get('/overdue', tasksController.getOverdueTasks);
 
+// Get completed/dismissed task history
+router.get('/completed', tasksController.getCompletedTasks);
+
 // Get tasks by type
 router.get('/type/:type', tasksController.getTasksByType);
 

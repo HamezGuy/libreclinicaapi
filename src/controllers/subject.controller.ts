@@ -256,6 +256,7 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
     const currentResult = await client.query(currentQuery, [parseInt(id)]);
 
     if (currentResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       res.status(404).json({ success: false, message: 'Subject not found' });
       return;
     }
@@ -370,10 +371,16 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
         se.scheduled_date,
         COALESCE(se.is_unscheduled, false) as is_unscheduled,
         se.date_created,
-        -- Total forms (excluding removed/auto-removed)
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7)) as total_forms,
-        -- Completed forms: status_id=2 means explicitly marked complete, status_id=6 means locked
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id IN (2, 6)) as completed_forms,
+        -- Total forms: count assigned forms from the study definition, not just started event_crf rows
+        GREATEST(
+          (SELECT COUNT(*) FROM event_definition_crf edc2
+           INNER JOIN crf c2 ON edc2.crf_id = c2.crf_id
+           WHERE edc2.study_event_definition_id = sed.study_event_definition_id
+             AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
+          (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
+        ) as total_forms,
+        -- Completed forms: completion_status_id >= 4 means all fields filled, status_id=2 means explicitly marked complete, status_id=6 means locked
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_forms,
         -- Started forms: any form with data entry (completion_status_id >= 2 means at least initial data entry)
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_forms,
         -- Locked forms
@@ -480,7 +487,8 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
         ec.date_updated,
         ec.validator_id,
         ec.date_validate,
-        ec.date_completed
+        ec.date_completed,
+        COALESCE(edc.required_crf, false) as required_crf
       FROM event_crf ec
       INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
@@ -488,6 +496,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
       INNER JOIN crf c ON cv.crf_id = c.crf_id
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       INNER JOIN status st ON ec.status_id = st.status_id
+      LEFT JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id AND edc.crf_id = c.crf_id
       WHERE se.study_subject_id = $1
         AND ec.status_id NOT IN (5, 7)
       ORDER BY sed.ordinal, c.name
@@ -546,6 +555,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
       interviewer: form.interviewer_name || '',
       completionStatus: form.completion_status,
       status: form.status,
+      required: form.required_crf === true,
       dateCreated: form.date_created,
       dateUpdated: form.date_updated,
       dateCompleted: form.date_completed,
@@ -570,6 +580,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
           interviewer: '',
           completionStatus: 'not_started',
           status: 'available',
+          required: assigned.required_crf === true,
           dateCreated: null,
           dateUpdated: null,
           dateCompleted: null,

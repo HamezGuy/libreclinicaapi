@@ -31,6 +31,40 @@ router.use(authMiddleware);
 router.get('/', dataLocksController.list);
 
 // ═══════════════════════════════════════════════════════════════════
+// CASEBOOK READINESS ENDPOINTS (Read-only)
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /api/data-locks/readiness/subject/:id - Casebook readiness for a subject
+router.get('/readiness/subject/:id',
+  requireRole('monitor', 'data_manager', 'admin'),
+  dataLocksController.getSubjectReadiness
+);
+
+// GET /api/data-locks/readiness/study/:studyId - Study-wide casebook readiness
+router.get('/readiness/study/:studyId',
+  requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: commonSchemas.studyIdParam }),
+  dataLocksController.getStudyReadiness
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// LOCK AUDIT HISTORY ENDPOINTS (Read-only)
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /api/data-locks/history/subject/:id - Lock history for all subject forms
+router.get('/history/subject/:id',
+  requireRole('monitor', 'data_manager', 'admin', 'investigator'),
+  dataLocksController.getSubjectLockHistory
+);
+
+// GET /api/data-locks/history/:eventCrfId - Lock history for a single form
+router.get('/history/:eventCrfId',
+  requireRole('monitor', 'data_manager', 'admin', 'investigator'),
+  validate({ params: dataLockSchemas.eventCrfIdParam }),
+  dataLocksController.getFormLockHistory
+);
+
+// ═══════════════════════════════════════════════════════════════════
 // ELIGIBILITY CHECK ENDPOINTS (No signature required - read only)
 // ═══════════════════════════════════════════════════════════════════
 
@@ -111,6 +145,26 @@ router.delete('/event/:studyEventId',
 // ═══════════════════════════════════════════════════════════════════
 // FREEZE / UNFREEZE (two-stage protection before lock)
 // ═══════════════════════════════════════════════════════════════════
+
+// GET /api/data-locks/freeze?studyId=X - List frozen records
+router.get('/freeze',
+  requireRole('monitor', 'data_manager', 'admin'),
+  dataLocksController.listFrozenRecords
+);
+
+// POST /api/data-locks/freeze/subject/:id - Freeze all subject data
+router.post('/freeze/subject/:id',
+  requireRole('monitor', 'data_manager', 'admin'),
+  requireSignatureFor('I confirm this subject data is ready to be frozen'),
+  dataLocksController.freezeSubject
+);
+
+// DELETE /api/data-locks/freeze/subject/:id - Unfreeze all subject data
+router.delete('/freeze/subject/:id',
+  requireRole('data_manager', 'admin'),
+  requireSignatureFor('I authorize unfreezing this subject data for editing'),
+  dataLocksController.unfreezeSubject
+);
 
 // POST /api/data-locks/freeze/:eventCrfId - Freeze a single form
 router.post('/freeze/:eventCrfId',

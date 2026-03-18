@@ -7,27 +7,18 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 
 export const chat = asyncHandler(async (req: Request, res: Response) => {
-  const { message, context } = req.body;
-  const user = (req as any).user;
-
-  // TODO: Integrate full AI Assistant service from ElectronicDataCaptureReal/backend
-  res.json({
-    success: true,
-    type: 'answer',
-    message: `AI Assistant received: "${message}". Full AI integration pending.`,
-    data: {
-      userId: user.userId,
-      timestamp: new Date().toISOString()
-    }
+  res.status(501).json({
+    success: false,
+    message: 'AI service not configured'
   });
 });
 
 export const getHistory = asyncHandler(async (req: Request, res: Response) => {
-  res.json({ success: true, data: [] });
+  res.status(501).json({ success: false, message: 'AI service not configured' });
 });
 
 export const clearHistory = asyncHandler(async (req: Request, res: Response) => {
-  res.json({ success: true, message: 'History cleared' });
+  res.status(501).json({ success: false, message: 'AI service not configured' });
 });
 
 export default { chat, getHistory, clearHistory };

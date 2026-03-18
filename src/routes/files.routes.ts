@@ -62,8 +62,7 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10MB
   },
   fileFilter: (req, file, cb) => {
-    // Allowed MIME types
-    const allowedTypes = [
+    const allowedMimeTypes = [
       'image/jpeg',
       'image/png',
       'image/gif',
@@ -74,13 +73,22 @@ const upload = multer({
       'application/vnd.ms-excel',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'text/plain',
-      'text/csv'
+      'text/csv',
+      'application/dicom',
+      'application/octet-stream'
     ];
-    
-    if (allowedTypes.includes(file.mimetype)) {
+
+    const allowedExtensions = [
+      '.jpg', '.jpeg', '.png', '.gif', '.bmp',
+      '.pdf', '.doc', '.docx', '.xls', '.xlsx',
+      '.txt', '.csv', '.dcm'
+    ];
+
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error(`File type ${file.mimetype} not allowed`));
+      cb(new Error(`File type ${file.mimetype} (${ext}) not allowed`));
     }
   }
 });

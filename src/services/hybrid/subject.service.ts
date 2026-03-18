@@ -766,10 +766,12 @@ export const getSubjectList = async (
         ss.label,
         ss.secondary_label,
         ss.enrollment_date,
+        ss.status_id,
         st.name as status,
         s.gender,
         s.date_of_birth,
         ss.date_created,
+        ss.date_updated,
         u.user_name as created_by,
         (
           SELECT COUNT(*)
@@ -779,11 +781,57 @@ export const getSubjectList = async (
         (
           SELECT COUNT(*)
           FROM study_event se
-          INNER JOIN event_crf ec ON se.study_event_id = ec.study_event_id
-          INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+          INNER JOIN study_event_definition sed2 ON se.study_event_definition_id = sed2.study_event_definition_id
+          INNER JOIN event_definition_crf edc2 ON edc2.study_event_definition_id = sed2.study_event_definition_id
           WHERE se.study_subject_id = ss.study_subject_id
-            AND cs.name IN ('complete', 'signed')
+            AND edc2.status_id = 1
+        ) as total_forms,
+        (
+          SELECT COUNT(*)
+          FROM study_event se
+          INNER JOIN event_crf ec ON se.study_event_id = ec.study_event_id
+          WHERE se.study_subject_id = ss.study_subject_id
+            AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6))
+            AND ec.status_id NOT IN (5, 7)
         ) as completed_forms,
+        (
+          SELECT sed_cur.name
+          FROM study_event se_cur
+          INNER JOIN study_event_definition sed_cur ON se_cur.study_event_definition_id = sed_cur.study_event_definition_id
+          WHERE se_cur.study_subject_id = ss.study_subject_id
+            AND NOT EXISTS (
+              SELECT 1 FROM event_crf ec_check 
+              INNER JOIN study_event se_check ON ec_check.study_event_id = se_check.study_event_id
+              WHERE se_check.study_event_id = se_cur.study_event_id
+                AND (ec_check.completion_status_id >= 4 OR ec_check.status_id IN (2, 6))
+                AND ec_check.status_id NOT IN (5, 7)
+              HAVING COUNT(*) >= (
+                SELECT COUNT(*) FROM event_definition_crf edc_check 
+                WHERE edc_check.study_event_definition_id = sed_cur.study_event_definition_id
+                  AND edc_check.status_id = 1
+              )
+            )
+          ORDER BY COALESCE(se_cur.scheduled_date, se_cur.date_start, se_cur.date_created) ASC, sed_cur.ordinal ASC
+          LIMIT 1
+        ) as current_visit_name,
+        (
+          SELECT COUNT(*)
+          FROM study_event se_od
+          INNER JOIN study_event_definition sed_od ON se_od.study_event_definition_id = sed_od.study_event_definition_id
+          INNER JOIN event_definition_crf edc_od ON edc_od.study_event_definition_id = sed_od.study_event_definition_id AND edc_od.status_id = 1
+          WHERE se_od.study_subject_id = ss.study_subject_id
+            AND se_od.scheduled_date IS NOT NULL
+            AND se_od.scheduled_date < CURRENT_DATE
+            AND NOT EXISTS (
+              SELECT 1 FROM event_crf ec_od
+              WHERE ec_od.study_event_id = se_od.study_event_id
+                AND ec_od.status_id NOT IN (5, 7)
+                AND (ec_od.completion_status_id >= 4 OR ec_od.status_id IN (2, 6))
+                AND ec_od.crf_version_id IN (
+                  SELECT cv_od.crf_version_id FROM crf_version cv_od WHERE cv_od.crf_id = edc_od.crf_id
+                )
+            )
+        ) as overdue_forms,
         'DATABASE' as source
       FROM study_subject ss
       INNER JOIN subject s ON ss.subject_id = s.subject_id
@@ -884,10 +932,32 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
     const completedForms = eventsResult.rows.reduce((sum, e) => sum + parseInt(e.completed_forms), 0);
     const completionPercentage = totalForms > 0 ? Math.round((completedForms / totalForms) * 100) : 0;
 
-    // Get last activity
-    // Note: audit_log_event doesn't have direct subject_id, would need to join through entity mappings
-    // For now, use the subject's date_updated as last activity
-    const lastActivity = subject.date_updated || subject.date_created;
+    // Get last activity from form data (most recent event_crf change)
+    const lastActivityQuery = `
+      SELECT GREATEST(
+        COALESCE((SELECT MAX(ec.date_updated) FROM event_crf ec 
+          INNER JOIN study_event se2 ON ec.study_event_id = se2.study_event_id
+          WHERE se2.study_subject_id = $1 AND ec.date_updated IS NOT NULL), '1970-01-01'),
+        COALESCE((SELECT MAX(ec.date_created) FROM event_crf ec 
+          INNER JOIN study_event se2 ON ec.study_event_id = se2.study_event_id
+          WHERE se2.study_subject_id = $1 AND ec.date_created IS NOT NULL), '1970-01-01'),
+        COALESCE(ss2.date_updated, ss2.date_created)
+      ) as last_activity_date
+      FROM study_subject ss2
+      WHERE ss2.study_subject_id = $1
+    `;
+    let lastActivity = subject.date_updated || subject.date_created;
+    try {
+      const activityResult = await pool.query(lastActivityQuery, [subjectId]);
+      if (activityResult.rows.length > 0 && activityResult.rows[0].last_activity_date) {
+        const actDate = new Date(activityResult.rows[0].last_activity_date);
+        if (actDate.getFullYear() > 1970) {
+          lastActivity = activityResult.rows[0].last_activity_date;
+        }
+      }
+    } catch (err) {
+      logger.warn('Failed to get last activity date', { error: (err as any).message });
+    }
 
     // Convert to LibreClinica StudySubject format
     const studySubject = toStudySubject(subject);
@@ -941,7 +1011,8 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
         totalForms: totalForms,
         completedForms: completedForms,
         percentComplete: completionPercentage
-      }
+      },
+      lastActivityDate: lastActivity
     };
 
     return details;

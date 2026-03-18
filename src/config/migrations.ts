@@ -49,6 +49,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'study_group_class_extended', fn: createStudyGroupClassExtendedColumns },
     { name: 'event_crf_extended', fn: createEventCrfExtendedColumns },
     { name: 'patient_event_form_unique_constraint', fn: addPatientEventFormUniqueConstraint },
+    { name: 'unscheduled_visit_isolation', fn: createUnscheduledVisitIsolation },
   ];
 
   let successCount = 0;
@@ -1424,4 +1425,45 @@ async function addPatientEventFormUniqueConstraint(pool: any): Promise<void> {
     // Index or table may not exist yet — non-fatal
     logger.warn('patient_event_form unique index migration warning:', e.message);
   }
+}
+
+// ============================================================================
+// Unscheduled Visit Isolation
+// Ensures is_unscheduled column on study_event, and adds an index on
+// study_event_definition.category for filtering SubjectSpecific definitions.
+// Also retroactively tags orphan custom unscheduled definitions as SubjectSpecific
+// if they were created before this migration.
+// ============================================================================
+async function createUnscheduledVisitIsolation(pool: any): Promise<void> {
+  // Ensure is_unscheduled column exists on study_event
+  try {
+    await pool.query(`ALTER TABLE study_event ADD COLUMN IF NOT EXISTS is_unscheduled BOOLEAN DEFAULT false`);
+  } catch { /* already exists */ }
+
+  // Index for fast filtering of SubjectSpecific event definitions
+  try {
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_sed_category_subject_specific
+      ON study_event_definition (study_id, category)
+      WHERE category LIKE '%SubjectSpecific%'
+    `);
+  } catch { /* index may already exist */ }
+
+  // Retroactively tag any orphaned custom unscheduled definitions.
+  // These are definitions created by the old code (category = 'Unscheduled')
+  // that are NOT the premade unscheduled visit types (which typically have
+  // ordinal <= the max scheduled ordinal) but are ad-hoc patient-created ones.
+  // We identify them by: type = 'unscheduled', category = 'Unscheduled',
+  // and oc_oid containing '_UNSCHED_' (the pattern used by createUnscheduledVisit).
+  try {
+    await pool.query(`
+      UPDATE study_event_definition
+      SET category = 'Unscheduled:SubjectSpecific'
+      WHERE type = 'unscheduled'
+        AND category = 'Unscheduled'
+        AND oc_oid LIKE '%_UNSCHED_%'
+    `);
+  } catch { /* best effort */ }
+
+  logger.info('Unscheduled visit isolation migration verified');
 }

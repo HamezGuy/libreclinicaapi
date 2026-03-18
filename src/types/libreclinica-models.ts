@@ -1181,6 +1181,7 @@ export interface StudySubjectWithDetails extends StudySubject {
   study: Study;
   events: StudyEvent[];
   progress: SubjectProgress;
+  lastActivityDate?: Date | string;
 }
 
 /**

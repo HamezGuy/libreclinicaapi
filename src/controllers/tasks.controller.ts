@@ -240,6 +240,24 @@ export const reopenTask = asyncHandler(async (req: Request, res: Response) => {
   res.json(result);
 });
 
+/**
+ * Get completed/dismissed tasks from history
+ * GET /api/tasks/completed
+ */
+export const getCompletedTasks = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { status, limit, offset } = req.query;
+
+  const result = await tasksService.getCompletedTasks({
+    userId: user?.userId,
+    status: (status as 'completed' | 'dismissed') || undefined,
+    limit: parseInt(limit as string) || 50,
+    offset: parseInt(offset as string) || 0
+  });
+
+  res.json(result);
+});
+
 export default {
   getTasks,
   getUserTasks,
@@ -248,6 +266,7 @@ export default {
   getTask,
   getTasksByType,
   getOverdueTasks,
+  getCompletedTasks,
   completeTask,
   dismissTask,
   reopenTask

@@ -103,6 +103,22 @@ export function now(): string {
 }
 
 /**
+ * Parse a YYYY-MM-DD string as local midnight (not UTC midnight).
+ * Avoids the off-by-one-day bug where new Date("2026-03-17") becomes March 16 at UTC-5.
+ */
+export function parseDateLocal(value: string | Date | null | undefined): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  const str = String(value);
+  const dateOnlyMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    return new Date(parseInt(dateOnlyMatch[1]), parseInt(dateOnlyMatch[2]) - 1, parseInt(dateOnlyMatch[3]));
+  }
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/**
  * Safely format a database row's date field for API response.
  * Handles both Date objects and string values from PostgreSQL.
  * 

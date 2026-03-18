@@ -25,78 +25,38 @@
 // Re-export all LibreClinica core models (CANONICAL — single source of truth)
 export * from './libreclinica-models';
 
-// Re-export Wound Scanner types
-export * from './wound.types';
-
 /**
- * ============================================================================
- * LEGACY TYPES — TARGET FOR REMOVAL
- * ============================================================================
- *
- * Everything below this line is DEPRECATED. These snake_case interfaces
- * exist only for backward compatibility with older code that directly maps
- * database rows. New code MUST use the canonical camelCase models from
- * libreclinica-models.ts with their toXxx() converter functions.
- *
- * Migration path:
- *   Old: import { StudySubjectDB } from '../../types';
- *   New: import { StudySubject, toStudySubject } from '../../types/libreclinica-models';
- *
- * @deprecated All interfaces below are scheduled for removal.
- */
-
-// ─── USER & AUTHENTICATION (legacy) ─────────────────────────────────────────
-
-/**
- * @deprecated Use UserAccount from libreclinica-models.ts with toUserAccount() converter
+ * User account row from user_account table.
+ * Used by auth and user services for database-row mapping.
  */
 export interface User {
   user_id: number;
   user_name: string;
+  passwd: string;
   first_name: string;
   last_name: string;
   email: string;
   institutional_affiliation?: string;
-  active_study?: number;
-  passwd: string;
-  passwd_timestamp?: Date;
-  passwd_challenge_question?: string;
-  passwd_challenge_answer?: string;
   phone?: string;
-  owner_id?: number;
-  date_created?: Date;
-  date_updated?: Date;
-  date_lastvisit?: Date;
-  user_type_id?: number;
-  status_id?: number;  // 1 = active, 5 = locked
-  update_id?: number;
   enabled?: boolean;
-  // Aggregated fields from getUserById
-  study_ids?: number[];
-  roles?: string[];
+  account_non_locked?: boolean;
+  user_type_id?: number;
   user_type?: string;
+  owner_id?: number;
+  status_id?: number;
+  update_id?: number;
+  date_created?: Date | string;
+  date_lastvisit?: Date | string;
+  passwd_timestamp?: Date | string;
+  lock_counter?: number;
+  run_webservices?: boolean;
+  bcrypt_passwd?: string;
 }
 
-export interface UserRole {
-  role_id: number;
-  role_name: string;
-  parent_id?: number;
-  role_desc?: string;
-}
+// Re-export Wound Scanner types
+export * from './wound.types';
 
-/**
- * @deprecated Use StudyUserRole from libreclinica-models.ts
- */
-export interface StudyUserRoleDB {
-  role_name: string;
-  study_id: number;
-  status_id: number;
-  owner_id: number;
-  date_created: Date;
-  date_updated?: Date;
-  update_id: number;
-  user_name: string;
-}
+// ─── USER & AUTHENTICATION ──────────────────────────────────────────────────
 
 export interface LoginRequest {
   username: string;
@@ -128,110 +88,13 @@ export interface GoogleAuthRequest {
  * ============================================================================
  * STUDY TYPES
  * ============================================================================
- * 
- * NOTE: Use Study from libreclinica-models.ts for new code.
- * These snake_case versions are for direct database row mapping.
  */
-
-/**
- * @deprecated Use Study from libreclinica-models.ts with toStudy() converter
- */
-export interface StudyDB {
-  study_id: number;
-  parent_study_id?: number;
-  unique_identifier: string;
-  secondary_identifier?: string;
-  name: string;
-  summary?: string;
-  date_planned_start?: Date;
-  date_planned_end?: Date;
-  date_created: Date;
-  date_updated?: Date;
-  owner_id: number;
-  update_id: number;
-  type_id: number;
-  status_id: number;
-  protocol_type?: string;
-  protocol_description?: string;
-  phase?: string;
-  expected_total_enrollment?: number;
-  sponsor?: string;
-  collaborators?: string;
-  principal_investigator?: string;
-}
-
-export interface StudyMetadataDB {
-  study: StudyDB;
-  events: StudyEventDefinitionDB_Legacy[];
-  crfs: CRFDB[];
-  subjects?: StudySubjectDB[];
-  enrollmentStats?: EnrollmentStats;
-}
-
-/**
- * @deprecated Use StudyEventDefinition from libreclinica-models.ts (camelCase).
- * This snake_case version is for direct database row mapping only.
- * RENAMED from StudyEventDefinition to avoid shadowing the canonical export.
- * TARGET: Remove in next major refactor.
- */
-export interface StudyEventDefinitionDB_Legacy {
-  study_event_definition_id: number;
-  study_id: number;
-  name: string;
-  description?: string;
-  repeating: boolean;
-  type: string;
-  category?: string;
-  ordinal: number;
-  owner_id: number;
-  date_created: Date;
-  date_updated?: Date;
-  update_id: number;
-}
 
 /**
  * ============================================================================
  * SUBJECT (PATIENT) TYPES
  * ============================================================================
- * 
- * NOTE: Use StudySubject and Subject from libreclinica-models.ts for new code.
- * These snake_case versions are for direct database row mapping.
  */
-
-/**
- * @deprecated Use StudySubject from libreclinica-models.ts with toStudySubject() converter
- */
-export interface StudySubjectDB {
-  study_subject_id: number;
-  label: string;
-  secondary_label?: string;
-  subject_id: number;
-  study_id: number;
-  status_id: number;
-  enrollment_date?: Date;
-  date_created: Date;
-  date_updated?: Date;
-  owner_id: number;
-  update_id: number;
-  oc_oid?: string;
-}
-
-/**
- * @deprecated Use Subject from libreclinica-models.ts
- */
-export interface SubjectDB {
-  subject_id: number;
-  unique_identifier: string;
-  father_id?: number;
-  mother_id?: number;
-  status_id: number;
-  date_of_birth?: Date;
-  gender: string;
-  date_created: Date;
-  owner_id: number;
-  update_id: number;
-  date_updated?: Date;
-}
 
 export interface SubjectCreateRequest {
   studyId: number;
@@ -249,104 +112,11 @@ export interface SubjectListQuery {
   limit?: number;
 }
 
-export interface SubjectDetailsDB extends StudySubjectDB {
-  subject: SubjectDB;
-  events: StudyEventDB[];
-  completionPercentage: number;
-  lastActivity?: Date;
-}
-
 /**
  * ============================================================================
  * EVENT & CRF TYPES
  * ============================================================================
- * 
- * NOTE: Use StudyEvent, CRF, EventCRF from libreclinica-models.ts for new code.
- * These snake_case versions are for direct database row mapping.
  */
-
-/**
- * @deprecated Use StudyEvent from libreclinica-models.ts with toStudyEvent() converter
- */
-export interface StudyEventDB {
-  study_event_id: number;
-  study_event_definition_id: number;
-  study_subject_id: number;
-  location?: string;
-  sample_ordinal: number;
-  date_start?: Date;
-  date_end?: Date;
-  owner_id: number;
-  status_id: number;
-  date_created: Date;
-  date_updated?: Date;
-  update_id: number;
-  subject_event_status_id: number;
-  start_time_flag: boolean;
-  end_time_flag: boolean;
-  reference_visit_id?: number;
-  scheduled_date?: Date;
-  is_unscheduled?: boolean;
-}
-
-/**
- * @deprecated Use CRF from libreclinica-models.ts with toCRF() converter
- */
-export interface CRFDB {
-  crf_id: number;
-  source_study_id?: number;  // Correct column name - CRF table uses source_study_id, NOT study_id
-  name: string;
-  description?: string;
-  oc_oid?: string;
-  owner_id: number;
-  date_created: Date;
-  date_updated?: Date;
-  update_id: number;
-  status_id: number;
-}
-
-/**
- * @deprecated Use EventCRF from libreclinica-models.ts with toEventCRF() converter
- */
-export interface EventCRFDB {
-  event_crf_id: number;
-  study_event_id: number;
-  crf_version_id: number;
-  date_interviewed?: Date;
-  interviewer_name?: string;
-  completion_status_id: number;
-  status_id: number;
-  annotations?: string;
-  date_created: Date;
-  date_updated?: Date;
-  owner_id: number;
-  update_id: number;
-  validator_id?: number;
-  date_validate?: Date;
-  date_validate_completed?: Date;
-  validator_annotations?: string;
-  validate_string?: string;
-  sdv_status: boolean;
-  sdv_update_id?: number;
-}
-
-/**
- * @deprecated Use ItemData from libreclinica-models.ts
- */
-export interface ItemDataDB {
-  item_data_id: number;
-  item_id: number;
-  event_crf_id: number;
-  status_id: number;
-  value?: string;
-  date_created: Date;
-  date_updated?: Date;
-  owner_id: number;
-  update_id: number;
-  ordinal: number;
-  deleted: boolean;
-  old_status_id?: number;
-}
 
 /**
  * ============================================================================
@@ -360,6 +130,7 @@ export interface FormDataRequest {
   studyEventDefinitionId: number;
   crfId: number;
   formData: Record<string, any>;
+  hiddenFields?: string[];
   electronicSignature?: ElectronicSignature;
 }
 
@@ -586,27 +357,6 @@ export interface ValidationError {
  * ============================================================================
  */
 
-/**
- * @deprecated Use DiscrepancyNote from libreclinica-models.ts
- */
-export interface DiscrepancyNoteDB {
-  discrepancy_note_id: number;
-  description: string;
-  discrepancy_note_type_id: number;
-  resolution_status_id: number;
-  detailed_notes?: string;
-  date_created: Date;
-  owner_id: number;
-  parent_dn_id?: number;
-  entity_type: string;
-  study_id: number;
-  assigned_user_id?: number;
-  entity_id?: number;
-  column_name?: string;
-  event_crf_id?: number;
-  study_subject_id?: number;
-}
-
 export interface QueryCreateRequest {
   entityType: 'itemData' | 'eventCrf' | 'studySubject' | 'studyEvent';
   entityId: number;
@@ -636,25 +386,6 @@ export interface QueryListQuery {
  * AUDIT TRAIL TYPES
  * ============================================================================
  */
-
-/**
- * @deprecated Use AuditLogEvent from libreclinica-models.ts
- */
-export interface AuditLogEventDB {
-  audit_id: number;
-  audit_date: Date;
-  audit_table: string;
-  user_id: number;
-  entity_id?: number;
-  entity_name?: string;
-  old_value?: string;
-  new_value?: string;
-  event_type_id: number;
-  reason_for_change?: string;
-  study_id?: number;
-  subject_id?: number;
-  event_crf_id?: number;
-}
 
 export interface AuditQuery {
   studyId?: number;

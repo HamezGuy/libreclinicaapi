@@ -93,13 +93,12 @@ export const checkSubjectLockEligibility = async (studySubjectId: number): Promi
     const openQueries = parseInt(openQueriesResult.rows[0]?.count || '0');
 
     // Get form completion status
-    // status_id: 1=available, 2=data complete, 4=pending, 6=locked
-    // We consider forms complete if status_id is 2 (complete) or 6 (already locked)
+    // completion_status_id >= 4 means all fields filled, status_id=2 means explicitly marked complete, status_id=6 means locked
     const formsQuery = `
       SELECT 
         COUNT(*) as total_forms,
-        COUNT(CASE WHEN ec.status_id IN (2, 6) THEN 1 END) as completed_forms,
-        COUNT(CASE WHEN ec.status_id NOT IN (2, 6) THEN 1 END) as incomplete_forms
+        COUNT(CASE WHEN ec.completion_status_id >= 4 OR ec.status_id IN (2, 6) THEN 1 END) as completed_forms,
+        COUNT(CASE WHEN ec.completion_status_id < 4 AND ec.status_id NOT IN (2, 6) THEN 1 END) as incomplete_forms
       FROM event_crf ec
       INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
       WHERE se.study_subject_id = $1
@@ -200,8 +199,8 @@ export const checkEventLockEligibility = async (studyEventId: number): Promise<L
     const formsQuery = `
       SELECT 
         COUNT(*) as total_forms,
-        COUNT(CASE WHEN ec.status_id IN (2, 6) THEN 1 END) as completed_forms,
-        COUNT(CASE WHEN ec.status_id NOT IN (2, 6) THEN 1 END) as incomplete_forms
+        COUNT(CASE WHEN ec.completion_status_id >= 4 OR ec.status_id IN (2, 6) THEN 1 END) as completed_forms,
+        COUNT(CASE WHEN ec.completion_status_id < 4 AND ec.status_id NOT IN (2, 6) THEN 1 END) as incomplete_forms
       FROM event_crf ec
       WHERE ec.study_event_id = $1
         AND ec.status_id NOT IN (5, 7)
@@ -689,7 +688,8 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
  */
 export const batchLockRecords = async (
   eventCrfIds: number[],
-  userId: number
+  userId: number,
+  reason?: string
 ): Promise<{ success: boolean; locked: number; failed: number; errors: string[] }> => {
   logger.info('Batch locking records', { count: eventCrfIds.length, userId });
   let locked = 0;
@@ -698,7 +698,7 @@ export const batchLockRecords = async (
 
   for (const ecId of eventCrfIds) {
     try {
-      const result = await lockRecord(ecId, userId);
+      const result = await lockRecord(ecId, userId, reason);
       if (result.success) {
         locked++;
       } else {
@@ -719,7 +719,8 @@ export const batchLockRecords = async (
  */
 export const batchUnlockRecords = async (
   eventCrfIds: number[],
-  userId: number
+  userId: number,
+  reason?: string
 ): Promise<{ success: boolean; unlocked: number; failed: number; errors: string[] }> => {
   logger.info('Batch unlocking records', { count: eventCrfIds.length, userId });
   let unlocked = 0;
@@ -728,7 +729,7 @@ export const batchUnlockRecords = async (
 
   for (const ecId of eventCrfIds) {
     try {
-      const result = await unlockRecord(ecId, userId);
+      const result = await unlockRecord(ecId, userId, reason);
       if (result.success) {
         unlocked++;
       } else {
@@ -1580,4 +1581,391 @@ export const unlockEventData = async (
   } finally {
     client.release();
   }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// CASEBOOK READINESS
+// ═══════════════════════════════════════════════════════════════════
+
+export interface CasebookReadiness {
+  studySubjectId: number;
+  subjectLabel: string;
+  totalForms: number;
+  completedForms: number;
+  sdvForms: number;
+  signedForms: number;
+  lockedForms: number;
+  frozenForms: number;
+  readinessPercent: number;
+}
+
+export const getSubjectCasebookReadiness = async (
+  studySubjectId: number
+): Promise<CasebookReadiness> => {
+  await ensureFrozenColumn();
+
+  const labelResult = await pool.query(
+    `SELECT label FROM study_subject WHERE study_subject_id = $1`,
+    [studySubjectId]
+  );
+  const subjectLabel = labelResult.rows[0]?.label || String(studySubjectId);
+
+  const result = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE ec.status_id NOT IN (5, 7)) AS total_forms,
+      COUNT(*) FILTER (WHERE (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) AS completed_forms,
+      COUNT(*) FILTER (WHERE COALESCE(ec.sdv_status, false) = true AND ec.status_id NOT IN (5, 7)) AS sdv_forms,
+      COUNT(*) FILTER (WHERE COALESCE(ec.electronic_signature_status, false) = true AND ec.status_id NOT IN (5, 7)) AS signed_forms,
+      COUNT(*) FILTER (WHERE ec.status_id = 6) AS locked_forms,
+      COUNT(*) FILTER (WHERE COALESCE(ec.frozen, false) = true AND ec.status_id != 6 AND ec.status_id NOT IN (5, 7)) AS frozen_forms
+    FROM event_crf ec
+    INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+    WHERE se.study_subject_id = $1
+  `, [studySubjectId]);
+
+  const r = result.rows[0] || {};
+  const totalForms = parseInt(r.total_forms || '0');
+  const completedForms = parseInt(r.completed_forms || '0');
+  const sdvForms = parseInt(r.sdv_forms || '0');
+  const signedForms = parseInt(r.signed_forms || '0');
+  const lockedForms = parseInt(r.locked_forms || '0');
+  const frozenForms = parseInt(r.frozen_forms || '0');
+
+  let readinessPercent = 0;
+  if (totalForms > 0) {
+    const completionWeight = (completedForms / totalForms) * 40;
+    const sdvWeight = (sdvForms / totalForms) * 20;
+    const signatureWeight = (signedForms / totalForms) * 10;
+    const lockWeight = (lockedForms / totalForms) * 30;
+    readinessPercent = Math.round(completionWeight + sdvWeight + signatureWeight + lockWeight);
+  }
+
+  return {
+    studySubjectId,
+    subjectLabel,
+    totalForms,
+    completedForms,
+    sdvForms,
+    signedForms,
+    lockedForms,
+    frozenForms,
+    readinessPercent
+  };
+};
+
+export const getStudyCasebookReadiness = async (
+  studyId: number
+): Promise<{ studyId: number; subjects: CasebookReadiness[]; aggregated: { totalForms: number; completedForms: number; sdvForms: number; signedForms: number; lockedForms: number; frozenForms: number; readinessPercent: number } }> => {
+  const subjectsResult = await pool.query(
+    `SELECT study_subject_id FROM study_subject WHERE study_id = $1 AND status_id NOT IN (5, 7) ORDER BY label`,
+    [studyId]
+  );
+
+  const subjects: CasebookReadiness[] = [];
+  let aggTotal = 0, aggCompleted = 0, aggSdv = 0, aggSigned = 0, aggLocked = 0, aggFrozen = 0;
+
+  for (const row of subjectsResult.rows) {
+    const readiness = await getSubjectCasebookReadiness(row.study_subject_id);
+    subjects.push(readiness);
+    aggTotal += readiness.totalForms;
+    aggCompleted += readiness.completedForms;
+    aggSdv += readiness.sdvForms;
+    aggSigned += readiness.signedForms;
+    aggLocked += readiness.lockedForms;
+    aggFrozen += readiness.frozenForms;
+  }
+
+  let readinessPercent = 0;
+  if (aggTotal > 0) {
+    const completionWeight = (aggCompleted / aggTotal) * 40;
+    const sdvWeight = (aggSdv / aggTotal) * 20;
+    const signatureWeight = (aggSigned / aggTotal) * 10;
+    const lockWeight = (aggLocked / aggTotal) * 30;
+    readinessPercent = Math.round(completionWeight + sdvWeight + signatureWeight + lockWeight);
+  }
+
+  return {
+    studyId,
+    subjects,
+    aggregated: {
+      totalForms: aggTotal,
+      completedForms: aggCompleted,
+      sdvForms: aggSdv,
+      signedForms: aggSigned,
+      lockedForms: aggLocked,
+      frozenForms: aggFrozen,
+      readinessPercent
+    }
+  };
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// LOCK AUDIT HISTORY
+// ═══════════════════════════════════════════════════════════════════
+
+export interface LockHistoryEntry {
+  auditDate: string;
+  userName: string;
+  action: string;
+  reason: string | null;
+  entityId: number;
+}
+
+export const getFormLockHistory = async (
+  eventCrfId: number
+): Promise<LockHistoryEntry[]> => {
+  const result = await pool.query(`
+    SELECT
+      ale.audit_date,
+      COALESCE(ua.first_name || ' ' || ua.last_name, 'System') AS user_name,
+      ale.entity_name AS action,
+      ale.reason_for_change AS reason,
+      ale.entity_id
+    FROM audit_log_event ale
+    LEFT JOIN user_account ua ON ale.user_id = ua.user_id
+    WHERE ale.audit_table = 'event_crf'
+      AND ale.entity_id = $1
+      AND ale.entity_name IN ('Data Locked', 'Data Unlocked', 'Data Frozen', 'Data Unfrozen')
+    ORDER BY ale.audit_date DESC
+  `, [eventCrfId]);
+
+  return result.rows.map((r: any) => ({
+    auditDate: r.audit_date,
+    userName: r.user_name,
+    action: r.action,
+    reason: r.reason,
+    entityId: r.entity_id
+  }));
+};
+
+export const getSubjectLockHistory = async (
+  studySubjectId: number
+): Promise<LockHistoryEntry[]> => {
+  const result = await pool.query(`
+    SELECT
+      ale.audit_date,
+      COALESCE(ua.first_name || ' ' || ua.last_name, 'System') AS user_name,
+      ale.entity_name AS action,
+      ale.reason_for_change AS reason,
+      ale.entity_id
+    FROM audit_log_event ale
+    LEFT JOIN user_account ua ON ale.user_id = ua.user_id
+    WHERE (
+      (ale.audit_table = 'event_crf'
+        AND ale.entity_id IN (
+          SELECT ec.event_crf_id FROM event_crf ec
+          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+          WHERE se.study_subject_id = $1
+        )
+        AND ale.entity_name IN ('Data Locked', 'Data Unlocked', 'Data Frozen', 'Data Unfrozen')
+      )
+      OR (
+        ale.audit_table = 'study_subject'
+        AND ale.entity_id = $1
+        AND (ale.entity_name ILIKE '%locked%' OR ale.entity_name ILIKE '%unlocked%'
+             OR ale.entity_name ILIKE '%frozen%' OR ale.entity_name ILIKE '%unfrozen%')
+      )
+    )
+    ORDER BY ale.audit_date DESC
+  `, [studySubjectId]);
+
+  return result.rows.map((r: any) => ({
+    auditDate: r.audit_date,
+    userName: r.user_name,
+    action: r.action,
+    reason: r.reason,
+    entityId: r.entity_id
+  }));
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// FREEZE / UNFREEZE SUBJECT-LEVEL
+// ═══════════════════════════════════════════════════════════════════
+
+export const freezeSubjectData = async (
+  studySubjectId: number,
+  userId: number,
+  reason?: string
+): Promise<{ success: boolean; message: string; frozenCount?: number }> => {
+  await ensureFrozenColumn();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const freezeResult = await client.query(`
+      UPDATE event_crf ec
+      SET frozen = true, update_id = $2, date_updated = CURRENT_TIMESTAMP
+      FROM study_event se
+      WHERE ec.study_event_id = se.study_event_id
+        AND se.study_subject_id = $1
+        AND COALESCE(ec.frozen, false) = false
+        AND ec.status_id NOT IN (5, 6, 7)
+      RETURNING ec.event_crf_id
+    `, [studySubjectId, userId]);
+    const frozenCount = freezeResult.rowCount || 0;
+
+    const subjectResult = await client.query(
+      `SELECT label FROM study_subject WHERE study_subject_id = $1`,
+      [studySubjectId]
+    );
+    const subjectLabel = subjectResult.rows[0]?.label || studySubjectId;
+
+    for (const row of freezeResult.rows) {
+      await client.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+        VALUES (NOW(), 'event_crf', $1, $2, 'Data Frozen', $3,
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      `, [userId, row.event_crf_id, reason || null]);
+    }
+
+    await client.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+      VALUES (NOW(), 'study_subject', $1, $2, $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+    `, [userId, studySubjectId, `Subject ${subjectLabel} data frozen`, reason || null]);
+
+    await client.query('COMMIT');
+    logger.info('Subject data frozen', { studySubjectId, userId, frozenCount });
+
+    return {
+      success: true,
+      message: `Successfully frozen ${frozenCount} forms for subject ${subjectLabel}`,
+      frozenCount
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('freezeSubjectData error', { studySubjectId, error: error.message });
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+export const unfreezeSubjectData = async (
+  studySubjectId: number,
+  userId: number,
+  reason: string
+): Promise<{ success: boolean; message: string; unfrozenCount?: number }> => {
+  await ensureFrozenColumn();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const unfreezeResult = await client.query(`
+      UPDATE event_crf ec
+      SET frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
+      FROM study_event se
+      WHERE ec.study_event_id = se.study_event_id
+        AND se.study_subject_id = $1
+        AND ec.frozen = true
+        AND ec.status_id NOT IN (5, 6, 7)
+      RETURNING ec.event_crf_id
+    `, [studySubjectId, userId]);
+    const unfrozenCount = unfreezeResult.rowCount || 0;
+
+    const subjectResult = await client.query(
+      `SELECT label FROM study_subject WHERE study_subject_id = $1`,
+      [studySubjectId]
+    );
+    const subjectLabel = subjectResult.rows[0]?.label || studySubjectId;
+
+    for (const row of unfreezeResult.rows) {
+      await client.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+        VALUES (NOW(), 'event_crf', $1, $2, 'Data Unfrozen', $3,
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      `, [userId, row.event_crf_id, reason]);
+    }
+
+    await client.query(`
+      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+      VALUES (NOW(), 'study_subject', $1, $2, $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+    `, [userId, studySubjectId, `Subject ${subjectLabel} data unfrozen`, reason]);
+
+    await client.query('COMMIT');
+    logger.info('Subject data unfrozen', { studySubjectId, userId, unfrozenCount });
+
+    return {
+      success: true,
+      message: `Successfully unfrozen ${unfrozenCount} forms for subject ${subjectLabel}`,
+      unfrozenCount
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('unfreezeSubjectData error', { studySubjectId, error: error.message });
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// LIST FROZEN RECORDS
+// ═══════════════════════════════════════════════════════════════════
+
+export const getFrozenRecords = async (filters: {
+  studyId?: number;
+  page?: number;
+  limit?: number;
+}): Promise<{ success: boolean; data: any[]; pagination: { page: number; limit: number; total: number } }> => {
+  await ensureFrozenColumn();
+
+  const { studyId, page = 1, limit = 20 } = filters;
+  const offset = (page - 1) * limit;
+  const params: any[] = [];
+  let paramIndex = 1;
+
+  let whereClause = 'COALESCE(ec.frozen, false) = true AND ec.status_id NOT IN (5, 6, 7)';
+
+  if (studyId) {
+    whereClause += ` AND ss.study_id = $${paramIndex}`;
+    params.push(studyId);
+    paramIndex++;
+  }
+
+  const query = `
+    SELECT
+      ec.event_crf_id,
+      ec.status_id,
+      ec.date_updated AS freeze_date,
+      ss.study_subject_id,
+      ss.label AS subject_label,
+      se.study_event_id,
+      sed.name AS event_name,
+      c.name AS crf_name,
+      ua.user_name AS frozen_by
+    FROM event_crf ec
+    INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+    INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+    INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+    INNER JOIN crf c ON cv.crf_id = c.crf_id
+    LEFT JOIN user_account ua ON ec.update_id = ua.user_id
+    WHERE ${whereClause}
+    ORDER BY ec.date_updated DESC
+    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+  `;
+  params.push(limit, offset);
+
+  const result = await pool.query(query, params);
+
+  const countParams = params.slice(0, -2);
+  const countQuery = `
+    SELECT COUNT(*) AS total
+    FROM event_crf ec
+    INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+    INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+    WHERE ${whereClause}
+  `;
+  const countResult = await pool.query(countQuery, countParams);
+  const total = parseInt(countResult.rows[0]?.total || '0');
+
+  return {
+    success: true,
+    data: result.rows,
+    pagination: { page, limit, total }
+  };
 };

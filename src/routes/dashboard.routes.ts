@@ -34,5 +34,9 @@ router.get('/health-score', controller.getStudyHealthScore);
 router.get('/user-analytics', controller.getUserAnalytics);
 router.get('/top-performers', controller.getTopPerformers);
 
+// Advanced Analytics endpoints
+router.get('/query-aging', controller.getQueryAgingAnalysis);
+router.get('/visit-compliance', controller.getVisitWindowCompliance);
+
 export default router;
 

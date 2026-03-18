@@ -319,6 +319,19 @@ export const buildCsvExport = async (
   const rows: string[] = [headers.join(',')];
 
   for (const row of result.rows) {
+    // Flatten JSON values (criteria_list, question_table) into readable text
+    let displayValue = row.item_value || '';
+    if (displayValue.startsWith('{') && displayValue.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(displayValue);
+        if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+          displayValue = Object.entries(parsed)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('; ');
+        }
+      } catch { /* use raw value */ }
+    }
+
     const csvRow: string[] = [
       csvEscape(row.subject_id || '')
     ];
@@ -331,7 +344,7 @@ export const buildCsvExport = async (
       csvEscape(row.form_name || ''),
       csvEscape(row.form_status || ''),
       csvEscape(row.item_name || ''),
-      csvEscape(row.item_value || '')
+      csvEscape(displayValue)
     );
     rows.push(csvRow.join(','));
   }

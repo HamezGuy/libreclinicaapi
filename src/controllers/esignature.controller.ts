@@ -66,7 +66,7 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   } = req.body;
 
   // Validate required fields
-  if (!entityType || !entityId || !password || !meaning) {
+  if (!entityType || entityId === undefined || entityId === null || !password || !meaning) {
     res.status(400).json({
       success: false,
       message: 'entityType, entityId, password, and meaning are required'
@@ -75,7 +75,7 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   }
 
   // Validate entity type
-  const validEntityTypes = ['event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock'];
+  const validEntityTypes = ['event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock', 'consent'];
   if (!validEntityTypes.includes(entityType)) {
     res.status(400).json({
       success: false,
@@ -102,10 +102,11 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
     return;
   }
 
+  const resolvedUsername = user.userName || user.username || req.body.username;
   const result = await esignatureService.applyElectronicSignature({
     userId: user.userId,
-    username: user.username,
-    userFullName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
+    username: resolvedUsername,
+    userFullName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || resolvedUsername,
     entityType,
     entityId: parseInt(entityId),
     password,
@@ -116,7 +117,7 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   if (result.success) {
     logger.info('Electronic signature applied', {
       userId: user.userId,
-      username: user.username,
+      username: resolvedUsername,
       entityType,
       entityId,
       meaning,

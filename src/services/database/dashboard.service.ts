@@ -533,7 +533,7 @@ export const getEnrollmentTrend = async (
     }));
   } catch (error: any) {
     logger.error('Enrollment trend error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -573,7 +573,7 @@ export const getCompletionTrend = async (
     }));
   } catch (error: any) {
     logger.error('Completion trend error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -622,7 +622,7 @@ export const getSitePerformance = async (studyId: number): Promise<any[]> => {
     }));
   } catch (error: any) {
     logger.error('Site performance error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -713,7 +713,7 @@ export const getFormCompletionRates = async (studyId: number, callerUserId?: num
     });
   } catch (error: any) {
     logger.error('Form completion rates error', { error: error.message });
-    return [];
+    throw error;
   }
 };
 
@@ -1226,6 +1226,140 @@ export const getTopPerformers = async (
   }
 };
 
+/**
+ * Query Aging Analysis - Categorizes open queries by age
+ * Critical for data management: identifies queries that are getting stale
+ */
+export const getQueryAgingAnalysis = async (studyId: number): Promise<any> => {
+  logger.info('Getting query aging analysis', { studyId });
+  try {
+    const query = `
+      SELECT 
+        CASE 
+          WHEN EXTRACT(DAY FROM NOW() - dn.date_created) <= 7 THEN '0-7 days'
+          WHEN EXTRACT(DAY FROM NOW() - dn.date_created) <= 14 THEN '8-14 days'
+          WHEN EXTRACT(DAY FROM NOW() - dn.date_created) <= 30 THEN '15-30 days'
+          WHEN EXTRACT(DAY FROM NOW() - dn.date_created) <= 60 THEN '31-60 days'
+          ELSE '60+ days'
+        END as age_bucket,
+        COUNT(*) as query_count,
+        ROUND(AVG(EXTRACT(DAY FROM NOW() - dn.date_created))::numeric, 1) as avg_age_days,
+        COUNT(*) FILTER (WHERE dnt.name = 'Query') as manual_queries,
+        COUNT(*) FILTER (WHERE dnt.name = 'Failed Validation Check') as validation_queries
+      FROM discrepancy_note dn
+      LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      WHERE dn.study_id = $1
+        AND dn.resolution_status_id IN (1, 2, 3)
+        AND dn.parent_dn_id IS NULL
+      GROUP BY age_bucket
+      ORDER BY 
+        CASE age_bucket
+          WHEN '0-7 days' THEN 1
+          WHEN '8-14 days' THEN 2
+          WHEN '15-30 days' THEN 3
+          WHEN '31-60 days' THEN 4
+          ELSE 5
+        END
+    `;
+    const result = await pool.query(query, [studyId]);
+
+    const totalOpen = result.rows.reduce((sum: number, r: any) => sum + parseInt(r.query_count), 0);
+    const overallAvgQuery = `
+      SELECT ROUND(AVG(EXTRACT(DAY FROM NOW() - dn.date_created))::numeric, 1) as overall_avg
+      FROM discrepancy_note dn
+      WHERE dn.study_id = $1 AND dn.resolution_status_id IN (1,2,3) AND dn.parent_dn_id IS NULL
+    `;
+    const avgResult = await pool.query(overallAvgQuery, [studyId]);
+
+    return {
+      buckets: result.rows.map((r: any) => ({
+        ageBucket: r.age_bucket,
+        count: parseInt(r.query_count),
+        avgAgeDays: parseFloat(r.avg_age_days) || 0,
+        manualQueries: parseInt(r.manual_queries) || 0,
+        validationQueries: parseInt(r.validation_queries) || 0,
+        percentage: totalOpen > 0 ? Math.round((parseInt(r.query_count) / totalOpen) * 100) : 0
+      })),
+      totalOpenQueries: totalOpen,
+      overallAvgAgeDays: parseFloat(avgResult.rows[0]?.overall_avg) || 0
+    };
+  } catch (error: any) {
+    logger.error('Query aging analysis error', { error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Visit Window Compliance - How many visits happened within their protocol-defined windows
+ * Measures protocol adherence and site performance
+ */
+export const getVisitWindowCompliance = async (studyId: number): Promise<any> => {
+  logger.info('Getting visit window compliance', { studyId });
+  try {
+    const query = `
+      SELECT 
+        sed.name as visit_name,
+        sed.ordinal,
+        COUNT(DISTINCT se.study_event_id) as total_visits,
+        COUNT(DISTINCT se.study_event_id) FILTER (
+          WHERE se.date_start IS NOT NULL
+        ) as visits_with_date,
+        COUNT(DISTINCT ec.event_crf_id) as total_forms,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (
+          WHERE ec.date_completed IS NOT NULL AND ec.status_id NOT IN (5, 7)
+        ) as completed_forms,
+        ROUND(AVG(
+          CASE WHEN ec.date_completed IS NOT NULL AND ec.date_created IS NOT NULL
+               THEN EXTRACT(EPOCH FROM (ec.date_completed - ec.date_created)) / 86400.0
+               ELSE NULL END
+        )::numeric, 1) as avg_days_to_complete
+      FROM study_event_definition sed
+      LEFT JOIN study_event se ON se.study_event_definition_id = sed.study_event_definition_id
+        AND se.status_id NOT IN (5, 7)
+      LEFT JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+        AND ss.study_id = $1 AND ss.status_id NOT IN (5, 7)
+      LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+        AND ec.status_id NOT IN (5, 7)
+      WHERE sed.study_id = $1
+        AND sed.status_id NOT IN (5, 7)
+      GROUP BY sed.study_event_definition_id, sed.name, sed.ordinal
+      ORDER BY sed.ordinal
+    `;
+    const result = await pool.query(query, [studyId]);
+
+    const visits = result.rows.map((r: any) => ({
+      visitName: r.visit_name,
+      ordinal: r.ordinal,
+      totalVisits: parseInt(r.total_visits) || 0,
+      visitsWithDate: parseInt(r.visits_with_date) || 0,
+      totalForms: parseInt(r.total_forms) || 0,
+      completedForms: parseInt(r.completed_forms) || 0,
+      completionRate: r.total_forms > 0 ? Math.round((parseInt(r.completed_forms) / parseInt(r.total_forms)) * 100) : 0,
+      avgDaysToComplete: parseFloat(r.avg_days_to_complete) || 0
+    }));
+
+    const totals = visits.reduce((acc: any, v: any) => ({
+      totalVisits: acc.totalVisits + v.totalVisits,
+      totalForms: acc.totalForms + v.totalForms,
+      completedForms: acc.completedForms + v.completedForms
+    }), { totalVisits: 0, totalForms: 0, completedForms: 0 });
+
+    return {
+      visits,
+      summary: {
+        totalVisitDefinitions: visits.length,
+        totalVisitInstances: totals.totalVisits,
+        overallFormCompletion: totals.totalForms > 0 ? Math.round((totals.completedForms / totals.totalForms) * 100) : 0,
+        totalForms: totals.totalForms,
+        completedForms: totals.completedForms
+      }
+    };
+  } catch (error: any) {
+    logger.error('Visit window compliance error', { error: error.message });
+    throw error;
+  }
+};
+
 export default {
   getEnrollmentStats,
   getCompletionStats,
@@ -1240,6 +1374,8 @@ export default {
   getActivityFeed,
   getStudyHealthScore,
   getUserAnalytics,
-  getTopPerformers
+  getTopPerformers,
+  getQueryAgingAnalysis,
+  getVisitWindowCompliance
 };
 

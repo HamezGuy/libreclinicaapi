@@ -62,6 +62,12 @@ cp nginx-prod.conf nginx.conf
 echo "Starting full stack..."
 $DOCKER_COMPOSE up -d --build
 
+echo "=== Verifying SSL certificate ==="
+$DOCKER_COMPOSE run --rm --entrypoint "" certbot certbot renew --force-renewal 2>&1 || true
+
+echo "Reloading Nginx to pick up renewed certificate..."
+$DOCKER_COMPOSE exec nginx nginx -s reload 2>/dev/null || true
+
 echo "=== Deployment Complete ==="
 echo "API should be reachable at https://$DOMAIN/api/health"
 echo "Core should be reachable at https://$DOMAIN/LibreClinica"

@@ -11,6 +11,28 @@ import { logger } from '../../config/logger';
 import * as eventSoap from '../soap/eventSoap.service';
 import { getFormMetadata } from './form.service';
 import { ApiResponse, PaginatedResponse } from '../../types';
+
+/**
+ * Parse a date string safely, avoiding the UTC-midnight off-by-one issue.
+ * Date-only strings ("2026-03-12") are interpreted as UTC midnight by the
+ * JS Date constructor, which shifts to the previous calendar day in western
+ * timezones. Appending T12:00:00 keeps the date on the correct day everywhere.
+ */
+function parseDateSafe(value: any): Date {
+  if (!value) return new Date();
+  const str = typeof value === 'string' ? value : String(value);
+  if (str.toLowerCase() === 'now') {
+    return new Date();
+  }
+  if (value.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(value + 'T12:00:00');
+  }
+  const d = new Date(value);
+  if (isNaN(d.getTime())) {
+    return new Date();
+  }
+  return d;
+}
 import {
   CreateEventRequest,
   UpdateEventRequest,
@@ -55,6 +77,7 @@ export const getStudyEvents = async (studyId: number): Promise<any[]> => {
       FROM study_event_definition sed
       INNER JOIN status s ON sed.status_id = s.status_id
       WHERE sed.study_id = $1 AND sed.status_id NOT IN (5, 7)
+        AND COALESCE(sed.category, '') NOT LIKE '%SubjectSpecific%'
       ORDER BY sed.ordinal
     `;
 
@@ -120,8 +143,14 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
         se.location,
         se.scheduled_date,
         COALESCE(se.is_unscheduled, false) as is_unscheduled,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7)) as crf_count,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id IN (2, 6)) as completed_crf_count,
+        GREATEST(
+          (SELECT COUNT(*) FROM event_definition_crf edc2
+           INNER JOIN crf c2 ON edc2.crf_id = c2.crf_id
+           WHERE edc2.study_event_definition_id = sed.study_event_definition_id
+             AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
+          (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
+        ) as crf_count,
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id = 6) as locked_crf_count
       FROM study_event se
@@ -340,7 +369,7 @@ export const checkAndUpdateVisitStatus = async (studyEventId: number): Promise<v
     const result = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE ec.status_id NOT IN (5, 7)) AS total,
-        COUNT(*) FILTER (WHERE ec.status_id IN (2, 6)) AS completed,
+        COUNT(*) FILTER (WHERE (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) AS completed,
         COUNT(*) FILTER (WHERE ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) AS started
       FROM event_crf ec
       WHERE ec.study_event_id = $1
@@ -473,9 +502,9 @@ export const scheduleSubjectEvent = async (
         RETURNING study_event_id
       `;
 
-      const startDate = data.startDate ? new Date(data.startDate) : new Date();
-      const endDate = data.endDate ? new Date(data.endDate) : null;
-      const scheduledDate = data.scheduledDate ? new Date(data.scheduledDate) : (data.isUnscheduled ? startDate : null);
+      const startDate = data.startDate ? parseDateSafe(data.startDate) : new Date();
+      const endDate = data.endDate ? parseDateSafe(data.endDate) : null;
+      const scheduledDate = data.scheduledDate ? parseDateSafe(data.scheduledDate) : (data.isUnscheduled ? startDate : null);
       const isUnscheduled = data.isUnscheduled || false;
       // Unscheduled visits start as 'not_scheduled' (2) until data entry begins
       const subjectEventStatusId = isUnscheduled ? 2 : 1;
@@ -1641,62 +1670,54 @@ export const createUnscheduledVisit = async (
       }
       eventDefId = data.studyEventDefinitionId;
     } else {
-      const existsResult = await pool.query(`
-        SELECT study_event_definition_id FROM study_event_definition
-        WHERE study_id = $1 AND name = $2 AND type = 'unscheduled' AND status_id = 1
-      `, [studyId, visitName]);
+      // Custom unscheduled visit: always create a NEW definition.
+      // Each patient's custom visit must be independent — never reuse by name
+      // to prevent cross-patient data leakage.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
 
-      if (existsResult.rows.length > 0) {
-        eventDefId = existsResult.rows[0].study_event_definition_id;
-      } else {
-        // Create the event definition and assign CRFs in a transaction
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
+        const maxOrd = await client.query(
+          `SELECT COALESCE(MAX(ordinal), 0) + 1 as next FROM study_event_definition WHERE study_id = $1`,
+          [studyId]
+        );
+        const ocOid = `SE_${studyId}_UNSCHED_${Date.now()}`;
+        const insertDef = await client.query(`
+          INSERT INTO study_event_definition (
+            study_id, name, description, ordinal, type, repeating, category,
+            status_id, owner_id, date_created, oc_oid
+          ) VALUES ($1, $2, $3, $4, 'unscheduled', true, 'Unscheduled:SubjectSpecific', 1, $5, NOW(), $6)
+          RETURNING study_event_definition_id
+        `, [studyId, visitName, data.description || '', maxOrd.rows[0].next, userId, ocOid]);
+        eventDefId = insertDef.rows[0].study_event_definition_id;
 
-          const maxOrd = await client.query(
-            `SELECT COALESCE(MAX(ordinal), 0) + 1 as next FROM study_event_definition WHERE study_id = $1`,
-            [studyId]
-          );
-          const ocOid = `SE_${studyId}_UNSCHED_${Date.now()}`;
-          const insertDef = await client.query(`
-            INSERT INTO study_event_definition (
-              study_id, name, description, ordinal, type, repeating, category,
-              status_id, owner_id, date_created, oc_oid
-            ) VALUES ($1, $2, $3, $4, 'unscheduled', true, 'Unscheduled', 1, $5, NOW(), $6)
-            RETURNING study_event_definition_id
-          `, [studyId, visitName, data.description || '', maxOrd.rows[0].next, userId, ocOid]);
-          eventDefId = insertDef.rows[0].study_event_definition_id;
-
-          // Assign selected CRFs to the definition
-          if (data.crfIds && data.crfIds.length > 0) {
-            for (let i = 0; i < data.crfIds.length; i++) {
-              const crfId = data.crfIds[i];
-              const crfCheck = await client.query(`SELECT crf_id FROM crf WHERE crf_id = $1 AND status_id NOT IN (5,7)`, [crfId]);
-              if (crfCheck.rows.length === 0) {
-                throw new Error(`CRF ${crfId} not found or is inactive`);
-              }
-              const versionQ = await client.query(
-                `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
-                [crfId]
-              );
-              const defVersionId = versionQ.rows[0]?.crf_version_id || null;
-              await client.query(`
-                INSERT INTO event_definition_crf (
-                  study_event_definition_id, study_id, crf_id, required_crf,
-                  double_entry, hide_crf, ordinal, status_id, owner_id, date_created, default_version_id
-                ) VALUES ($1, $2, $3, false, false, false, $4, 1, $5, NOW(), $6)
-              `, [eventDefId, studyId, crfId, i + 1, userId, defVersionId]);
+        if (data.crfIds && data.crfIds.length > 0) {
+          for (let i = 0; i < data.crfIds.length; i++) {
+            const crfId = data.crfIds[i];
+            const crfCheck = await client.query(`SELECT crf_id FROM crf WHERE crf_id = $1 AND status_id NOT IN (5,7)`, [crfId]);
+            if (crfCheck.rows.length === 0) {
+              throw new Error(`CRF ${crfId} not found or is inactive`);
             }
+            const versionQ = await client.query(
+              `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
+              [crfId]
+            );
+            const defVersionId = versionQ.rows[0]?.crf_version_id || null;
+            await client.query(`
+              INSERT INTO event_definition_crf (
+                study_event_definition_id, study_id, crf_id, required_crf,
+                double_entry, hide_crf, ordinal, status_id, owner_id, date_created, default_version_id
+              ) VALUES ($1, $2, $3, false, false, false, $4, 1, $5, NOW(), $6)
+            `, [eventDefId, studyId, crfId, i + 1, userId, defVersionId]);
           }
-
-          await client.query('COMMIT');
-        } catch (txErr: any) {
-          await client.query('ROLLBACK');
-          throw txErr;
-        } finally {
-          client.release();
         }
+
+        await client.query('COMMIT');
+      } catch (txErr: any) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
       }
     }
 
