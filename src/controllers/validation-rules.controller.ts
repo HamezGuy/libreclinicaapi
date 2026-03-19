@@ -295,6 +295,7 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
       minValue: rule.minValue,
       maxValue: rule.maxValue,
       pattern: rule.pattern,
+      formatType: rule.formatType,
       operator: rule.operator,
       compareFieldPath: rule.compareFieldPath,
       customExpression: rule.customExpression,

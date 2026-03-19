@@ -502,7 +502,9 @@ export const validationRuleSchemas = {
   testRule: Joi.object({
     ruleId: Joi.number().integer().positive().optional(),
     rule: Joi.object().optional(),
-    value: Joi.any().required(),
+    testValue: Joi.any().required(),
+    value: Joi.any().optional(),
+    testData: Joi.object().optional(),
     allFormData: Joi.object().optional(),
   }),
 
@@ -515,6 +517,10 @@ export const validationRuleSchemas = {
     allFormData: Joi.object().optional(),
     eventCrfId: Joi.number().integer().positive().optional(),
     createQueries: Joi.boolean().optional().default(false),
+    studyId: Joi.number().integer().positive().optional(),
+    subjectId: Joi.number().integer().positive().optional(),
+    itemDataId: Joi.number().integer().positive().optional(),
+    operationType: Joi.string().optional().valid('insert', 'update', 'delete'),
   }),
 };
 

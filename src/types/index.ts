@@ -157,12 +157,15 @@ export interface FormFieldOption {
   order?: number;
 }
 
-/** Validation rule attached to a form field */
-export interface ValidationRule {
+/** Inline validation constraint on a form field definition (not the validation rules engine) */
+export interface FieldValidationConstraint {
   type: string;
   value?: any;
   message?: string;
 }
+
+/** @deprecated Use FieldValidationConstraint instead */
+export type ValidationRule = FieldValidationConstraint;
 
 /** Cross-field validation (like Medidata Rave edit checks) */
 export interface EditCheck {
