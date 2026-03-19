@@ -780,18 +780,17 @@ export const getSubjectList = async (
         ) as total_events,
         (
           SELECT COUNT(*)
-          FROM study_event se
-          INNER JOIN study_event_definition sed2 ON se.study_event_definition_id = sed2.study_event_definition_id
-          INNER JOIN event_definition_crf edc2 ON edc2.study_event_definition_id = sed2.study_event_definition_id
+          FROM event_crf ec
+          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
           WHERE se.study_subject_id = ss.study_subject_id
-            AND edc2.status_id = 1
+            AND ec.status_id NOT IN (5, 7)
         ) as total_forms,
         (
           SELECT COUNT(*)
-          FROM study_event se
-          INNER JOIN event_crf ec ON se.study_event_id = ec.study_event_id
+          FROM event_crf ec
+          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
           WHERE se.study_subject_id = ss.study_subject_id
-            AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6))
+            AND ec.completion_status_id >= 4
             AND ec.status_id NOT IN (5, 7)
         ) as completed_forms,
         (
@@ -803,7 +802,7 @@ export const getSubjectList = async (
               SELECT 1 FROM event_crf ec_check 
               INNER JOIN study_event se_check ON ec_check.study_event_id = se_check.study_event_id
               WHERE se_check.study_event_id = se_cur.study_event_id
-                AND (ec_check.completion_status_id >= 4 OR ec_check.status_id IN (2, 6))
+                AND ec_check.completion_status_id >= 4
                 AND ec_check.status_id NOT IN (5, 7)
               HAVING COUNT(*) >= (
                 SELECT COUNT(*) FROM event_definition_crf edc_check 
@@ -826,7 +825,7 @@ export const getSubjectList = async (
               SELECT 1 FROM event_crf ec_od
               WHERE ec_od.study_event_id = se_od.study_event_id
                 AND ec_od.status_id NOT IN (5, 7)
-                AND (ec_od.completion_status_id >= 4 OR ec_od.status_id IN (2, 6))
+                AND ec_od.completion_status_id >= 4
                 AND ec_od.crf_version_id IN (
                   SELECT cv_od.crf_version_id FROM crf_version cv_od WHERE cv_od.crf_id = edc_od.crf_id
                 )

@@ -379,8 +379,8 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
              AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
           (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
         ) as total_forms,
-        -- Completed forms: completion_status_id >= 4 means all fields filled, status_id=2 means explicitly marked complete, status_id=6 means locked
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_forms,
+        -- Completed forms: completion_status_id >= 4 means explicitly marked complete
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 4 AND ec.status_id NOT IN (5, 7)) as completed_forms,
         -- Started forms: any form with data entry (completion_status_id >= 2 means at least initial data entry)
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_forms,
         -- Locked forms

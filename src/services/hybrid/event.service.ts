@@ -150,7 +150,7 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
              AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
           (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
         ) as crf_count,
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND (ec.completion_status_id >= 4 OR ec.status_id IN (2, 6)) AND ec.status_id NOT IN (5, 7)) as completed_crf_count,
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 4 AND ec.status_id NOT IN (5, 7)) as completed_crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id = 6) as locked_crf_count
       FROM study_event se
