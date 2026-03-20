@@ -1233,6 +1233,24 @@ export const getTopPerformers = async (
 export const getQueryAgingAnalysis = async (studyId: number): Promise<any> => {
   logger.info('Getting query aging analysis', { studyId });
   try {
+    // First check if required tables exist
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'discrepancy_note') as has_dn,
+             EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'discrepancy_note_type') as has_dnt
+    `);
+    const { has_dn, has_dnt } = tableCheck.rows[0] || {};
+    if (!has_dn) {
+      return { buckets: [], totalOpen: 0, overallAvgDays: 0, oldestDays: 0 };
+    }
+
+    const dntJoin = has_dnt
+      ? `LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id`
+      : '';
+    const dntCols = has_dnt
+      ? `, COUNT(*) FILTER (WHERE dnt.name = 'Query') as manual_queries,
+         COUNT(*) FILTER (WHERE dnt.name = 'Failed Validation Check') as validation_queries`
+      : `, 0 as manual_queries, 0 as validation_queries`;
+
     const query = `
       SELECT 
         CASE 
@@ -1243,11 +1261,10 @@ export const getQueryAgingAnalysis = async (studyId: number): Promise<any> => {
           ELSE '60+ days'
         END as age_bucket,
         COUNT(*) as query_count,
-        ROUND(AVG(EXTRACT(DAY FROM NOW() - dn.date_created))::numeric, 1) as avg_age_days,
-        COUNT(*) FILTER (WHERE dnt.name = 'Query') as manual_queries,
-        COUNT(*) FILTER (WHERE dnt.name = 'Failed Validation Check') as validation_queries
+        ROUND(AVG(EXTRACT(DAY FROM NOW() - dn.date_created))::numeric, 1) as avg_age_days
+        ${dntCols}
       FROM discrepancy_note dn
-      LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
+      ${dntJoin}
       WHERE dn.study_id = $1
         AND dn.resolution_status_id IN (1, 2, 3)
         AND dn.parent_dn_id IS NULL
@@ -1360,6 +1377,392 @@ export const getVisitWindowCompliance = async (studyId: number): Promise<any> =>
   }
 };
 
+/**
+ * Subject Progress Matrix - Per-patient visit/form progress grid
+ * Returns each subject with their site, enrollment info, and per-visit completion
+ */
+export const getSubjectProgressMatrix = async (
+  studyId: number,
+  siteId?: number,
+  page: number = 1,
+  pageSize: number = 50
+): Promise<any> => {
+  logger.info('Getting subject progress matrix', { studyId, siteId, page, pageSize });
+  try {
+    const offset = (page - 1) * pageSize;
+    const siteFilter = siteId ? `AND ss.study_id = $4` : '';
+    const params: any[] = [studyId, pageSize, offset];
+    if (siteId) params.push(siteId);
+
+    const subjectsQuery = `
+      SELECT
+        ss.study_subject_id,
+        ss.label,
+        ss.enrollment_date,
+        ss.date_created,
+        st.name as status,
+        site.name as site_name,
+        site.study_id as site_id,
+        (SELECT sed2.name FROM study_event se2
+         INNER JOIN study_event_definition sed2 ON se2.study_event_definition_id = sed2.study_event_definition_id
+         WHERE se2.study_subject_id = ss.study_subject_id AND se2.status_id NOT IN (5,7)
+         ORDER BY se2.date_start DESC NULLS LAST LIMIT 1) as current_visit,
+        (SELECT COUNT(*) FROM event_crf ec2
+         INNER JOIN study_event se2 ON ec2.study_event_id = se2.study_event_id
+         WHERE se2.study_subject_id = ss.study_subject_id AND ec2.status_id NOT IN (5,7)) as total_forms,
+        (SELECT COUNT(*) FROM event_crf ec2
+         INNER JOIN study_event se2 ON ec2.study_event_id = se2.study_event_id
+         WHERE se2.study_subject_id = ss.study_subject_id AND ec2.date_completed IS NOT NULL AND ec2.status_id NOT IN (5,7)) as completed_forms,
+        (SELECT COUNT(*) FROM discrepancy_note dn
+         INNER JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+         WHERE dssm.study_subject_id = ss.study_subject_id AND dn.resolution_status_id IN (1,2,3) AND dn.parent_dn_id IS NULL) as open_queries
+      FROM study_subject ss
+      LEFT JOIN status st ON ss.status_id = st.status_id
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ss.status_id NOT IN (5, 7)
+        ${siteFilter}
+      ORDER BY ss.label
+      LIMIT $2 OFFSET $3
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM study_subject ss
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ss.status_id NOT IN (5, 7)
+        ${siteId ? 'AND ss.study_id = $2' : ''}
+    `;
+
+    const [subjectsResult, countResult] = await Promise.all([
+      pool.query(subjectsQuery, params),
+      pool.query(countQuery, siteId ? [studyId, siteId] : [studyId])
+    ]);
+
+    const subjects = subjectsResult.rows.map((row: any) => {
+      const totalForms = parseInt(row.total_forms) || 0;
+      const completedForms = parseInt(row.completed_forms) || 0;
+      return {
+        studySubjectId: row.study_subject_id,
+        label: row.label,
+        siteName: row.site_name || 'Main Study',
+        siteId: row.site_id || studyId,
+        enrollmentDate: row.enrollment_date ? formatDate(row.enrollment_date) : formatDate(row.date_created),
+        status: row.status || 'available',
+        currentVisit: row.current_visit || null,
+        totalForms,
+        completedForms,
+        percentComplete: totalForms > 0 ? Math.round((completedForms / totalForms) * 100) : 0,
+        openQueries: parseInt(row.open_queries) || 0
+      };
+    });
+
+    return {
+      subjects,
+      total: parseInt(countResult.rows[0].total) || 0,
+      page,
+      pageSize
+    };
+  } catch (error: any) {
+    logger.error('Subject progress matrix error', { error: error.message, studyId });
+    return { subjects: [], total: 0, page, pageSize };
+  }
+};
+
+/**
+ * Overdue Forms - Forms that are started but not completed past expected window
+ */
+export const getOverdueForms = async (studyId: number): Promise<any> => {
+  logger.info('Getting overdue forms', { studyId });
+  try {
+    const query = `
+      SELECT
+        ss.study_subject_id,
+        ss.label as subject_label,
+        site.name as site_name,
+        sed.name as visit_name,
+        c.name as form_name,
+        ec.event_crf_id,
+        se.date_start as visit_start_date,
+        ec.date_created as form_created_date,
+        EXTRACT(DAY FROM NOW() - COALESCE(se.date_start, ec.date_created))::int as days_since_start
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+      INNER JOIN crf c ON cv.crf_id = c.crf_id
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ec.date_completed IS NULL
+        AND ec.status_id NOT IN (5, 7)
+        AND ss.status_id NOT IN (5, 7)
+        AND COALESCE(se.date_start, ec.date_created) < CURRENT_DATE - INTERVAL '14 days'
+      ORDER BY days_since_start DESC
+      LIMIT 100
+    `;
+
+    const result = await pool.query(query, [studyId]);
+
+    return result.rows.map((row: any) => ({
+      studySubjectId: row.study_subject_id,
+      subjectLabel: row.subject_label,
+      siteName: row.site_name || 'Main Study',
+      visitName: row.visit_name,
+      formName: row.form_name,
+      eventCrfId: row.event_crf_id,
+      daysOverdue: parseInt(row.days_since_start) || 0,
+      visitStartDate: row.visit_start_date ? formatDate(row.visit_start_date) : null,
+      formCreatedDate: row.form_created_date ? formatDate(row.form_created_date) : null
+    }));
+  } catch (error: any) {
+    logger.error('Overdue forms error', { error: error.message, studyId });
+    return [];
+  }
+};
+
+/**
+ * Data Lock Progress - Lock/freeze/SDV/signature status across the study
+ */
+export const getDataLockProgress = async (studyId: number): Promise<any> => {
+  logger.info('Getting data lock progress', { studyId });
+  try {
+    const query = `
+      SELECT
+        COUNT(DISTINCT ec.event_crf_id) as total_crfs,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.date_completed IS NOT NULL) as completed_crfs,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.sdv_status = true) as sdvd_count,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.electronic_signature_status IS NOT NULL AND ec.electronic_signature_status != '') as signed_count,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.frozen = true) as frozen_count,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.status_id = 4) as locked_count
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ec.status_id NOT IN (5, 7)
+        AND ss.status_id NOT IN (5, 7)
+    `;
+
+    const openQueriesQuery = `
+      SELECT COUNT(DISTINCT dn.discrepancy_note_id) as with_open_queries
+      FROM discrepancy_note dn
+      WHERE dn.study_id = $1
+        AND dn.resolution_status_id IN (1, 2, 3)
+        AND dn.parent_dn_id IS NULL
+    `;
+
+    const subjectReadinessQuery = `
+      SELECT
+        ss.label as subject_label,
+        COALESCE(site.name, 'Main Study') as site_name,
+        COUNT(DISTINCT ec.event_crf_id) as total_forms,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.date_completed IS NOT NULL) as completed_forms,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.sdv_status = true) as sdvd_forms,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.electronic_signature_status IS NOT NULL AND ec.electronic_signature_status != '') as signed_forms,
+        (SELECT COUNT(*) FROM discrepancy_note dn
+         INNER JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+         WHERE dssm.study_subject_id = ss.study_subject_id AND dn.resolution_status_id IN (1,2,3) AND dn.parent_dn_id IS NULL) as open_queries
+      FROM study_subject ss
+      INNER JOIN study_event se ON se.study_subject_id = ss.study_subject_id
+      INNER JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ss.status_id NOT IN (5, 7)
+        AND ec.status_id NOT IN (5, 7)
+      GROUP BY ss.study_subject_id, ss.label, site.name
+      ORDER BY ss.label
+      LIMIT 100
+    `;
+
+    const [mainResult, queriesResult, readinessResult] = await Promise.all([
+      pool.query(query, [studyId]),
+      pool.query(openQueriesQuery, [studyId]),
+      pool.query(subjectReadinessQuery, [studyId])
+    ]);
+
+    const row = mainResult.rows[0] || {};
+    const totalCRFs = parseInt(row.total_crfs) || 0;
+
+    const subjectReadiness = readinessResult.rows.map((r: any) => {
+      const total = parseInt(r.total_forms) || 0;
+      const completed = parseInt(r.completed_forms) || 0;
+      const sdvd = parseInt(r.sdvd_forms) || 0;
+      const signed = parseInt(r.signed_forms) || 0;
+      const openQ = parseInt(r.open_queries) || 0;
+      return {
+        subjectLabel: r.subject_label,
+        siteName: r.site_name,
+        allComplete: total > 0 && completed === total,
+        allQueriesResolved: openQ === 0,
+        allSdvd: total > 0 && sdvd === total,
+        allSigned: total > 0 && signed === total,
+        lockReady: total > 0 && completed === total && openQ === 0 && sdvd === total && signed === total
+      };
+    });
+
+    return {
+      totalCRFs,
+      completedCount: parseInt(row.completed_crfs) || 0,
+      sdvdCount: parseInt(row.sdvd_count) || 0,
+      signedCount: parseInt(row.signed_count) || 0,
+      frozenCount: parseInt(row.frozen_count) || 0,
+      lockedCount: parseInt(row.locked_count) || 0,
+      withOpenQueries: parseInt(queriesResult.rows[0]?.with_open_queries) || 0,
+      subjectReadiness
+    };
+  } catch (error: any) {
+    logger.error('Data lock progress error', { error: error.message, studyId });
+    return { totalCRFs: 0, completedCount: 0, sdvdCount: 0, signedCount: 0, frozenCount: 0, lockedCount: 0, withOpenQueries: 0, subjectReadiness: [] };
+  }
+};
+
+/**
+ * CRF Lifecycle Summary - counts of CRFs at each pipeline stage
+ */
+export const getCrfLifecycleSummary = async (studyId: number): Promise<any> => {
+  logger.info('Getting CRF lifecycle summary', { studyId });
+  try {
+    const query = `
+      SELECT
+        COUNT(*) FILTER (WHERE ec.date_completed IS NULL AND ec.date_created IS NOT NULL) as data_entry_in_progress,
+        COUNT(*) FILTER (WHERE ec.date_completed IS NOT NULL AND COALESCE(ec.sdv_status, false) = false
+          AND (ec.electronic_signature_status IS NULL OR ec.electronic_signature_status = '')
+          AND COALESCE(ec.frozen, false) = false) as data_entry_complete,
+        COUNT(*) FILTER (WHERE ec.sdv_status = true
+          AND (ec.electronic_signature_status IS NULL OR ec.electronic_signature_status = '')
+          AND COALESCE(ec.frozen, false) = false) as sdv_complete,
+        COUNT(*) FILTER (WHERE ec.electronic_signature_status IS NOT NULL AND ec.electronic_signature_status != ''
+          AND COALESCE(ec.frozen, false) = false) as signed,
+        COUNT(*) FILTER (WHERE ec.frozen = true AND ec.status_id != 4) as frozen,
+        COUNT(*) FILTER (WHERE ec.status_id = 4) as locked,
+        COUNT(*) as total
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ec.status_id NOT IN (5, 7)
+        AND ss.status_id NOT IN (5, 7)
+    `;
+
+    const expectedQuery = `
+      SELECT COUNT(*) as not_started
+      FROM event_definition_crf edc
+      INNER JOIN study_event_definition sed ON edc.study_event_definition_id = sed.study_event_definition_id
+      CROSS JOIN study_subject ss
+      LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+      LEFT JOIN study_event se ON se.study_event_definition_id = sed.study_event_definition_id
+        AND se.study_subject_id = ss.study_subject_id AND se.status_id NOT IN (5,7)
+      LEFT JOIN crf_version cv ON cv.crf_id = edc.crf_id
+      LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id
+        AND ec.crf_version_id = cv.crf_version_id AND ec.status_id NOT IN (5,7)
+      WHERE sed.study_id = $1
+        AND (ss.study_id = $1 OR site.parent_study_id = $1)
+        AND ss.status_id NOT IN (5, 7)
+        AND sed.status_id NOT IN (5, 7)
+        AND edc.status_id NOT IN (5, 7)
+        AND ec.event_crf_id IS NULL
+        AND se.study_event_id IS NOT NULL
+    `;
+
+    const [lifecycleResult, expectedResult] = await Promise.all([
+      pool.query(query, [studyId]),
+      pool.query(expectedQuery, [studyId]).catch(() => ({ rows: [{ not_started: 0 }] }))
+    ]);
+
+    const row = lifecycleResult.rows[0] || {};
+    const total = parseInt(row.total) || 0;
+    const notStarted = parseInt(expectedResult.rows[0]?.not_started) || 0;
+    const grandTotal = total + notStarted;
+
+    const stages = [
+      { stage: 'Not Started', count: notStarted, percentage: grandTotal > 0 ? Math.round((notStarted / grandTotal) * 100) : 0 },
+      { stage: 'Data Entry', count: parseInt(row.data_entry_in_progress) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.data_entry_in_progress) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'Complete', count: parseInt(row.data_entry_complete) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.data_entry_complete) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'SDV Verified', count: parseInt(row.sdv_complete) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.sdv_complete) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'Signed', count: parseInt(row.signed) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.signed) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'Frozen', count: parseInt(row.frozen) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.frozen) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'Locked', count: parseInt(row.locked) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.locked) || 0) / grandTotal) * 100) : 0 }
+    ];
+
+    return { stages, grandTotal };
+  } catch (error: any) {
+    logger.error('CRF lifecycle summary error', { error: error.message, studyId });
+    return { stages: [], grandTotal: 0 };
+  }
+};
+
+/**
+ * Action Items - Unified "To Do" list for the current study
+ */
+export const getActionItems = async (studyId: number): Promise<any> => {
+  logger.info('Getting action items', { studyId });
+  try {
+    const [overdueResult, openQueriesResult, pendingSdvResult, awaitingSignResult, pendingTasksResult] = await Promise.all([
+      pool.query(`
+        SELECT COUNT(*) as cnt FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+        LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+        WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+          AND ec.date_completed IS NULL AND ec.status_id NOT IN (5,7) AND ss.status_id NOT IN (5,7)
+          AND COALESCE(se.date_start, ec.date_created) < CURRENT_DATE - INTERVAL '14 days'
+      `, [studyId]),
+
+      pool.query(`
+        SELECT COUNT(*) as cnt FROM discrepancy_note dn
+        WHERE dn.study_id = $1 AND dn.resolution_status_id IN (1,2,3) AND dn.parent_dn_id IS NULL
+      `, [studyId]),
+
+      pool.query(`
+        SELECT COUNT(*) as cnt FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+        LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+        WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+          AND ec.date_completed IS NOT NULL AND COALESCE(ec.sdv_status, false) = false
+          AND ec.status_id NOT IN (5,7) AND ss.status_id NOT IN (5,7)
+      `, [studyId]),
+
+      pool.query(`
+        SELECT COUNT(*) as cnt FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+        LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
+        WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
+          AND ec.date_completed IS NOT NULL AND ec.sdv_status = true
+          AND (ec.electronic_signature_status IS NULL OR ec.electronic_signature_status = '')
+          AND ec.status_id NOT IN (5,7) AND ss.status_id NOT IN (5,7)
+      `, [studyId]),
+
+      pool.query(`
+        SELECT COUNT(*) as cnt FROM acc_workflow_tasks
+        WHERE study_id = $1 AND status IN ('pending', 'in_progress')
+      `, [studyId]).catch(() => ({ rows: [{ cnt: 0 }] }))
+    ]);
+
+    const overdueForms = parseInt(overdueResult.rows[0]?.cnt) || 0;
+    const openQueries = parseInt(openQueriesResult.rows[0]?.cnt) || 0;
+    const pendingSdv = parseInt(pendingSdvResult.rows[0]?.cnt) || 0;
+    const awaitingSignature = parseInt(awaitingSignResult.rows[0]?.cnt) || 0;
+    const pendingTasks = parseInt(pendingTasksResult.rows[0]?.cnt) || 0;
+
+    return {
+      overdueForms,
+      openQueries,
+      pendingSdv,
+      awaitingSignature,
+      pendingTasks,
+      totalActionItems: overdueForms + openQueries + pendingSdv + awaitingSignature + pendingTasks
+    };
+  } catch (error: any) {
+    logger.error('Action items error', { error: error.message, studyId });
+    return { overdueForms: 0, openQueries: 0, pendingSdv: 0, awaitingSignature: 0, pendingTasks: 0, totalActionItems: 0 };
+  }
+};
+
 export default {
   getEnrollmentStats,
   getCompletionStats,
@@ -1376,6 +1779,11 @@ export default {
   getUserAnalytics,
   getTopPerformers,
   getQueryAgingAnalysis,
-  getVisitWindowCompliance
+  getVisitWindowCompliance,
+  getSubjectProgressMatrix,
+  getOverdueForms,
+  getDataLockProgress,
+  getCrfLifecycleSummary,
+  getActionItems
 };
 

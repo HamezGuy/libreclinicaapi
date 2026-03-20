@@ -301,6 +301,41 @@ export const getVisitWindowCompliance = asyncHandler(async (req: Request, res: R
   res.json({ success: true, data: result });
 });
 
+export const getSubjectProgressMatrix = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId, siteId, page, pageSize } = req.query;
+  const result = await dashboardService.getSubjectProgressMatrix(
+    parseInt(studyId as string) || 1,
+    siteId ? parseInt(siteId as string) : undefined,
+    parseInt(page as string) || 1,
+    parseInt(pageSize as string) || 50
+  );
+  res.json({ success: true, data: result });
+});
+
+export const getOverdueForms = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const result = await dashboardService.getOverdueForms(parseInt(studyId as string) || 1);
+  res.json({ success: true, data: result });
+});
+
+export const getDataLockProgress = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const result = await dashboardService.getDataLockProgress(parseInt(studyId as string) || 1);
+  res.json({ success: true, data: result });
+});
+
+export const getCrfLifecycle = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const result = await dashboardService.getCrfLifecycleSummary(parseInt(studyId as string) || 1);
+  res.json({ success: true, data: result });
+});
+
+export const getActionItems = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  const result = await dashboardService.getActionItems(parseInt(studyId as string) || 1);
+  res.json({ success: true, data: result });
+});
+
 export default { 
   getSummary,
   getStats,
@@ -319,6 +354,11 @@ export default {
   getUserAnalytics,
   getTopPerformers,
   getQueryAgingAnalysis,
-  getVisitWindowCompliance
+  getVisitWindowCompliance,
+  getSubjectProgressMatrix,
+  getOverdueForms,
+  getDataLockProgress,
+  getCrfLifecycle,
+  getActionItems
 };
 

@@ -38,5 +38,12 @@ router.get('/top-performers', controller.getTopPerformers);
 router.get('/query-aging', controller.getQueryAgingAnalysis);
 router.get('/visit-compliance', controller.getVisitWindowCompliance);
 
+// New clinical analytics endpoints
+router.get('/subject-progress', controller.getSubjectProgressMatrix);
+router.get('/overdue-forms', controller.getOverdueForms);
+router.get('/data-lock-progress', controller.getDataLockProgress);
+router.get('/crf-lifecycle', controller.getCrfLifecycle);
+router.get('/action-items', controller.getActionItems);
+
 export default router;
 
