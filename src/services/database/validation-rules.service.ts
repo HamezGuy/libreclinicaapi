@@ -251,8 +251,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
       logger.debug('Custom validation_rules table not available:', e.message);
     }
 
-    // Also extract rules from item_form_metadata
-    // Detect =FORMULA: prefix to distinguish Excel formulas from regex patterns
+    // Also extract format/formula rules from item_form_metadata (NOT required — that's a field property now)
     const itemRulesQuery = `
       SELECT 
         ifm.item_id as id,
@@ -264,14 +263,12 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         CASE 
           WHEN ifm.regexp IS NOT NULL AND ifm.regexp LIKE '=FORMULA:%' THEN 'formula'
           WHEN ifm.regexp IS NOT NULL THEN 'format'
-          WHEN ifm.required = true THEN 'required'
           ELSE NULL
         END as rule_type,
         i.name as field_path,
         'error' as severity,
         CASE
           WHEN ifm.regexp IS NOT NULL THEN COALESCE(ifm.regexp_error_msg, 'Invalid format')
-          WHEN ifm.required = true THEN 'This field is required'
           ELSE 'Validation failed'
         END as error_message,
         NULL as warning_message,
@@ -293,7 +290,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
       INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
       INNER JOIN item i ON ifm.item_id = i.item_id
       WHERE cv.crf_id = $1
-        AND (ifm.regexp IS NOT NULL OR ifm.required = true)
+        AND ifm.regexp IS NOT NULL
       ORDER BY i.name
     `;
 
@@ -2301,6 +2298,55 @@ export const testRuleDirectly = (
   return applyRule(rule, value, allData);
 };
 
+/**
+ * Toggle a field's required status directly on item_form_metadata.
+ * Bypasses the validation_rules table — "required" is a field property, not a rule.
+ */
+export const toggleFieldRequired = async (
+  itemId: number,
+  crfId: number,
+  required: boolean,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Toggling field required status', { itemId, crfId, required, userId });
+
+  try {
+    const versionResult = await pool.query(
+      `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
+      [crfId]
+    );
+    if (versionResult.rows.length === 0) {
+      return { success: false, message: 'CRF version not found' };
+    }
+    const crfVersionId = versionResult.rows[0].crf_version_id;
+
+    const updateResult = await pool.query(
+      `UPDATE item_form_metadata SET required = $1 WHERE item_id = $2 AND crf_version_id = $3`,
+      [required, itemId, crfVersionId]
+    );
+
+    if (updateResult.rowCount === 0) {
+      return { success: false, message: 'Field metadata not found' };
+    }
+
+    await pool.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'item_form_metadata', $1, $2, 'Field Required Toggle',
+        $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1)
+      )
+    `, [userId, itemId, required ? 'false' : 'true', required ? 'true' : 'false']);
+
+    return { success: true, message: `Field ${required ? 'marked as required' : 'marked as optional'}` };
+  } catch (error: any) {
+    logger.error('Toggle field required error', { error: error.message, itemId, crfId });
+    return { success: false, message: error.message };
+  }
+};
+
 export default {
   initializeValidationRulesTable,
   getRulesForCrf,
@@ -2315,6 +2361,7 @@ export default {
   validateFormData,
   validateFieldChange,
   validateEventCrf,
-  testRuleDirectly
+  testRuleDirectly,
+  toggleFieldRequired
 };
 

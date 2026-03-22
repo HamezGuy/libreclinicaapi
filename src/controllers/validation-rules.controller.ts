@@ -491,6 +491,36 @@ export const validateFieldChange = async (req: Request, res: Response, next: Nex
   }
 };
 
+/**
+ * Toggle field required status (not a validation rule — direct field property)
+ */
+export const toggleFieldRequired = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const user = (req as any).user;
+    const { itemId, crfId, required } = req.body;
+
+    const result = await validationRulesService.toggleFieldRequired(
+      parseInt(itemId), parseInt(crfId), !!required, user.userId
+    );
+
+    if (result.success) {
+      await trackUserAction({
+        userId: user.userId,
+        username: user.username || user.userName,
+        action: required ? 'FIELD_MARKED_REQUIRED' : 'FIELD_MARKED_OPTIONAL',
+        entityType: 'item_form_metadata',
+        entityId: parseInt(itemId),
+        details: `Field ${required ? 'required' : 'optional'} (CRF ${crfId})`
+      });
+    }
+
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    logger.error('Toggle field required error:', error);
+    next(error);
+  }
+};
+
 export default {
   getRulesForCrf,
   getRulesForStudy,
@@ -504,6 +534,7 @@ export default {
   validateData,
   validateEventCrf,
   validateFieldChange,
-  testRule
+  testRule,
+  toggleFieldRequired
 };
 

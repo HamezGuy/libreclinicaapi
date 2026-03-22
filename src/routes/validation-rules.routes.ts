@@ -59,6 +59,13 @@ router.get('/crf/:crfId', validate({ params: crfIdParam }), controller.getRulesF
 router.get('/study/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), controller.getRulesForStudy);
 router.get('/all-crfs', controller.getAllCrfsWithRules);
 
+// Toggle field required status (direct field property, not a validation rule)
+router.put('/field-required',
+  requireRole('admin', 'data_manager'),
+  requireSignatureFor('I authorize changing this field required status'),
+  controller.toggleFieldRequired
+);
+
 // /format-types MUST be registered before /:ruleId — Express matches routes in order and
 // /:ruleId would shadow any static path segment like /format-types.
 router.get('/format-types', (_req, res) => {
