@@ -521,7 +521,7 @@ const saveFormDataDirect = async (
 
       // Handle field clearing: when value is null/undefined/empty, 
       // clear existing data instead of skipping
-      const isEmpty = value === null || value === undefined || value === '';
+      const isEmpty = value === null || value === undefined || value === '' || value === '[]' || value === '{}';
       
       if (isEmpty) {
         // Only need to clear if there's existing data
@@ -648,14 +648,15 @@ const saveFormDataDirect = async (
         INNER JOIN item_group_metadata igm2 ON i2.item_id = igm2.item_id AND igm2.crf_version_id = $1
         INNER JOIN item_form_metadata ifm2 ON i2.item_id = ifm2.item_id AND ifm2.crf_version_id = $1
         WHERE id2.event_crf_id = $2
-          AND id2.deleted = false AND id2.value IS NOT NULL AND id2.value != ''
+          AND id2.deleted = false AND id2.value IS NOT NULL
+          AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}'
           AND ifm2.required = true
       `, [resolvedVersionId, eventCrfId]);
       requiredFilled = parseInt(filledResult.rows[0]?.cnt) || 0;
 
       const totalFilledResult = await client.query(`
         SELECT COUNT(*) AS cnt FROM item_data
-        WHERE event_crf_id = $1 AND deleted = false AND value IS NOT NULL AND value != ''
+        WHERE event_crf_id = $1 AND deleted = false AND value IS NOT NULL AND value != '' AND value != '[]' AND value != '{}'
       `, [eventCrfId]);
       totalFilled = parseInt(totalFilledResult.rows[0]?.cnt) || 0;
     } else {
@@ -673,11 +674,12 @@ const saveFormDataDirect = async (
            INNER JOIN item_group_metadata igm2 ON i2.item_id = igm2.item_id AND igm2.crf_version_id = $1
            INNER JOIN item_form_metadata ifm2 ON i2.item_id = ifm2.item_id AND ifm2.crf_version_id = $1
            WHERE id2.event_crf_id = $2
-             AND id2.deleted = false AND id2.value IS NOT NULL AND id2.value != ''
+             AND id2.deleted = false AND id2.value IS NOT NULL
+             AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}'
              AND ifm2.required = true) AS required_filled,
           (SELECT COUNT(*)
            FROM item_data
-           WHERE event_crf_id = $2 AND deleted = false AND value IS NOT NULL AND value != '') AS total_filled
+           WHERE event_crf_id = $2 AND deleted = false AND value IS NOT NULL AND value != '' AND value != '[]' AND value != '{}') AS total_filled
       `, [resolvedVersionId, eventCrfId]);
 
       requiredTotal = parseInt(completionCountResult.rows[0]?.required_total) || 0;
