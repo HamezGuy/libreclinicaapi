@@ -476,10 +476,10 @@ async function run(): Promise<boolean> {
         fail('Respond to query', `POST /queries/${queryIds[0]}/respond failed (${respondRes.status}): ${(respondRes.data as any)?.message}`);
       }
 
-      // 5d. Verify the eCRF field was actually updated
+      // 5d. Verify the eCRF field was actually updated (correct URL: /forms/data/:eventCrfId)
       if (testEventCrfId) {
         const formData = await apiCall({
-          method: 'GET', url: `/forms/${testEventCrfId}/data`,
+          method: 'GET', url: `/forms/data/${testEventCrfId}`,
           script: SCRIPT, step: 'Verify corrected value in eCRF',
           quiet: true,
         });
@@ -497,7 +497,7 @@ async function run(): Promise<boolean> {
             logWarn(SCRIPT, 'Value verification', `Could not find pain_level field in form data (${items.length} items)`);
           }
         } else {
-          logWarn(SCRIPT, 'Value verification', `GET /forms/${testEventCrfId}/data failed (${formData.status})`);
+          logWarn(SCRIPT, 'Value verification', `GET /forms/data/${testEventCrfId} failed (${formData.status})`);
         }
       }
 
@@ -557,21 +557,34 @@ async function run(): Promise<boolean> {
   // ═══════════════════════════════════════════════════════════
   // PART 6: DATA LOCK WORKFLOW
   // ═══════════════════════════════════════════════════════════
-  logInfo('--- Part 6: Data Lock (Freeze → Lock → Verify) ---');
+  logInfo('--- Part 6: Data Lock (Complete → Freeze → Lock → Verify) ---');
 
   if (testEventCrfId) {
-    // 6a. Freeze the form
+    // 6a. Mark form as complete first (required before freeze)
+    const completeRes = await apiCall({
+      method: 'POST', url: `/forms/${testEventCrfId}/complete`,
+      script: SCRIPT, step: 'Mark form complete',
+      data: {},
+      quiet: true,
+    });
+    if (completeRes.ok) {
+      logPass(SCRIPT, `Form ${testEventCrfId} marked complete`);
+    } else {
+      logWarn(SCRIPT, 'Mark complete', `Failed (${completeRes.status}): ${(completeRes.data as any)?.message || ''} — freeze may fail`);
+    }
+
+    // 6b. Freeze the form
     const freezeRes = await apiCall({
       method: 'POST', url: `/data-locks/freeze/${testEventCrfId}`,
       script: SCRIPT, step: 'Freeze form',
-      data: { signatureUsername: '', signaturePassword: '', signatureMeaning: 'I authorize freezing this form' },
+      data: {},
     });
     if (freezeRes.ok) {
       logPass(SCRIPT, `Form ${testEventCrfId} frozen`);
     } else {
       const msg = (freezeRes.data as any)?.message || '';
       if (msg.includes('already frozen') || msg.includes('already locked')) {
-        logPass(SCRIPT, `Form already frozen/locked — skipping freeze test`);
+        logPass(SCRIPT, `Form already frozen/locked`);
       } else {
         logWarn(SCRIPT, 'Freeze form', `Failed (${freezeRes.status}): ${msg}`);
       }
@@ -596,11 +609,11 @@ async function run(): Promise<boolean> {
       logWarn(SCRIPT, 'Frozen form edit', 'Edit was accepted on frozen form — freeze may not block saves');
     }
 
-    // 6c. Lock the form
+    // 6d. Lock the form
     const lockRes = await apiCall({
       method: 'POST', url: '/data-locks',
       script: SCRIPT, step: 'Lock form',
-      data: { eventCrfId: testEventCrfId, reason: 'E2E test lock', signatureUsername: '', signaturePassword: '', signatureMeaning: 'I authorize locking this form' },
+      data: { eventCrfId: testEventCrfId, reason: 'E2E test lock' },
     });
     if (lockRes.ok) {
       logPass(SCRIPT, `Form ${testEventCrfId} locked`);
@@ -705,6 +718,119 @@ async function run(): Promise<boolean> {
   if (exportEvents.ok) {
     const events = (exportEvents.data as any).data ?? [];
     logPass(SCRIPT, `Export events available: ${Array.isArray(events) ? events.length : 'unknown'}`);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PART 8: RANDOMIZATION
+  // ═══════════════════════════════════════════════════════════
+  logInfo('--- Part 8: Randomization ---');
+
+  // 8a. Get randomization config
+  const randConfig = await apiCall({
+    method: 'GET', url: `/randomization/config/${studyId}`,
+    script: SCRIPT, step: 'Get randomization config', quiet: true,
+  });
+  if (randConfig.ok) {
+    const cfg = (randConfig.data as any).data ?? randConfig.data;
+    logPass(SCRIPT, `Randomization config: ${JSON.stringify(cfg).substring(0, 150)}`);
+  } else {
+    logInfo('No randomization config for this study — creating one');
+    const createCfg = await apiCall({
+      method: 'POST', url: '/randomization/config',
+      script: SCRIPT, step: 'Create randomization config',
+      data: {
+        studyId, randomizationType: 'simple', blindingLevel: 'open',
+        allocationRatios: { 'Treatment A': 1, 'Treatment B': 1 },
+        stratificationFactors: [],
+      },
+    });
+    if (createCfg.ok) {
+      const d = (createCfg.data as any).data ?? createCfg.data;
+      logPass(SCRIPT, `Randomization config created (ID: ${d?.configId || d?.config_id || 'unknown'})`);
+    } else {
+      logWarn(SCRIPT, 'Create randomization config', `Failed (${createCfg.status}): ${(createCfg.data as any)?.message}`);
+    }
+  }
+
+  // 8b. Check randomization stats
+  const randStats = await apiCall({
+    method: 'GET', url: '/randomization/stats',
+    script: SCRIPT, step: 'Randomization stats',
+    params: { studyId }, quiet: true,
+  });
+  if (randStats.ok) {
+    logPass(SCRIPT, `Randomization stats: ${JSON.stringify((randStats.data as any).data ?? randStats.data).substring(0, 150)}`);
+  } else {
+    logWarn(SCRIPT, 'Randomization stats', `Failed (${randStats.status})`);
+  }
+
+  // 8c. Check if subject can be randomized
+  if (subjectId) {
+    const canRand = await apiCall({
+      method: 'GET', url: `/randomization/subject/${subjectId}/can-randomize`,
+      script: SCRIPT, step: 'Check randomization eligibility', quiet: true,
+    });
+    if (canRand.ok) {
+      const d = (canRand.data as any).data ?? canRand.data;
+      logPass(SCRIPT, `Subject randomization eligibility: ${JSON.stringify(d).substring(0, 100)}`);
+    } else {
+      logWarn(SCRIPT, 'Randomization eligibility', `Failed (${canRand.status})`);
+    }
+
+    // 8d. Get subject's current randomization
+    const subjectRand = await apiCall({
+      method: 'GET', url: `/randomization/subject/${subjectId}`,
+      script: SCRIPT, step: 'Get subject randomization', quiet: true,
+    });
+    if (subjectRand.ok) {
+      const d = (subjectRand.data as any).data ?? subjectRand.data;
+      logPass(SCRIPT, `Subject randomization: ${d ? JSON.stringify(d).substring(0, 100) : 'not randomized'}`);
+    } else {
+      logWarn(SCRIPT, 'Subject randomization', `Failed (${subjectRand.status})`);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PART 9: DOUBLE DATA ENTRY (DDE)
+  // ═══════════════════════════════════════════════════════════
+  logInfo('--- Part 9: Double Data Entry (DDE) ---');
+
+  // 9a. DDE dashboard
+  const ddeDash = await apiCall({
+    method: 'GET', url: '/dde/dashboard',
+    script: SCRIPT, step: 'DDE dashboard', quiet: true,
+  });
+  if (ddeDash.ok) {
+    const d = (ddeDash.data as any).data ?? ddeDash.data;
+    logPass(SCRIPT, `DDE dashboard: ${JSON.stringify(d).substring(0, 150)}`);
+  } else {
+    logWarn(SCRIPT, 'DDE dashboard', `Failed (${ddeDash.status}): ${(ddeDash.data as any)?.message}`);
+  }
+
+  // 9b. Check DDE status for a form
+  if (testEventCrfId) {
+    const ddeStatus = await apiCall({
+      method: 'GET', url: `/dde/forms/${testEventCrfId}/status`,
+      script: SCRIPT, step: 'DDE status for form', quiet: true,
+    });
+    if (ddeStatus.ok) {
+      const d = (ddeStatus.data as any).data ?? ddeStatus.data;
+      logPass(SCRIPT, `DDE status: required=${d?.isRequired}, status=${d?.status || d?.ddeStatus || 'none'}`);
+    } else {
+      logWarn(SCRIPT, 'DDE status', `Failed (${ddeStatus.status}): ${(ddeStatus.data as any)?.message}`);
+    }
+
+    // 9c. Check if user can enter DDE
+    const canDde = await apiCall({
+      method: 'GET', url: `/dde/forms/${testEventCrfId}/can-enter`,
+      script: SCRIPT, step: 'Can enter DDE', quiet: true,
+    });
+    if (canDde.ok) {
+      const d = (canDde.data as any).data ?? canDde.data;
+      logPass(SCRIPT, `DDE entry allowed: ${JSON.stringify(d).substring(0, 100)}`);
+    } else {
+      logWarn(SCRIPT, 'DDE can-enter', `Failed (${canDde.status})`);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
