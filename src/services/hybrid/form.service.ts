@@ -231,12 +231,17 @@ const saveFormDataDirect = async (
     // Strategy A2: Resolve from eventCrfId (if we know the existing form, we can get the event)
     if (!studyEventId && request.eventCrfId) {
       const ecResult = await client.query(`
-        SELECT study_event_id FROM event_crf WHERE event_crf_id = $1
+        SELECT ec.study_event_id FROM event_crf ec
+        WHERE ec.event_crf_id = $1 AND ec.study_subject_id = $2
         LIMIT 1
-      `, [request.eventCrfId]);
+      `, [request.eventCrfId, request.subjectId]);
       if (ecResult.rows.length > 0) {
         studyEventId = ecResult.rows[0].study_event_id;
         logger.debug('Resolved studyEventId from eventCrfId', { studyEventId, eventCrfId: request.eventCrfId });
+      } else {
+        logger.warn('eventCrfId does not belong to this subject — ignoring for safety', {
+          eventCrfId: request.eventCrfId, subjectId: request.subjectId
+        });
       }
     }
 
@@ -372,14 +377,43 @@ const saveFormDataDirect = async (
     // Strategy C: Look up by study_event_id + any version of this CRF (handles version mismatch)
     if (!eventCrfId) {
       const eventCrfByAnyVersion = await client.query(`
-        SELECT ec.event_crf_id FROM event_crf ec
+        SELECT ec.event_crf_id, ec.status_id
+        FROM event_crf ec
         INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-        WHERE ec.study_event_id = $1 AND cv.crf_id = $2
+        WHERE ec.study_event_id = $1 AND cv.crf_id = $2 AND ec.study_subject_id = $3
         LIMIT 1
-      `, [studyEventId, request.crfId]);
+      `, [studyEventId, request.crfId, request.subjectId]);
       if (eventCrfByAnyVersion.rows.length > 0) {
-        eventCrfId = eventCrfByAnyVersion.rows[0].event_crf_id;
+        const row = eventCrfByAnyVersion.rows[0];
+        eventCrfId = row.event_crf_id;
         logger.info('Found event_crf with different version (using existing)', { eventCrfId });
+
+        if (row.status_id === 6) {
+          await client.query('ROLLBACK');
+          return {
+            success: false,
+            message: 'Cannot edit data - this form is locked.',
+            errors: ['RECORD_LOCKED']
+          };
+        }
+
+        // Check frozen status (table may not exist in all deployments)
+        try {
+          const frozenCheck = await client.query(
+            `SELECT 1 FROM acc_frozen_event_crfs WHERE event_crf_id = $1 LIMIT 1`,
+            [eventCrfId]
+          );
+          if (frozenCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return {
+              success: false,
+              message: 'Cannot edit data - this record is frozen. Request an unfreeze from a Data Manager before editing.',
+              errors: ['RECORD_FROZEN']
+            };
+          }
+        } catch {
+          // Table doesn't exist yet — skip frozen check
+        }
       }
     }
 
@@ -518,7 +552,7 @@ const saveFormDataDirect = async (
         continue; // Skip to next field
       }
 
-      let stringValue = String(value);
+      let stringValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
       
       // 21 CFR Part 11 §11.10(a) - Encrypt sensitive form data at rest
       // Only encrypt if field-level encryption is enabled

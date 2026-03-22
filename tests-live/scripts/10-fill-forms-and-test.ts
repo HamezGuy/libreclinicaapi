@@ -47,11 +47,11 @@ const VALID_LAB_DATA: Record<string, any> = {
   patient_weight: 78,
   // bmi_calculated omitted — it's a calculation field, value is computed server-side
   lab_results_table: JSON.stringify([
-    { test_name: 'WBC', result_value: 7.2, unit: 'k_ul', ref_range: '4.5-11.0', flag: 'normal', comments: '' },
-    { test_name: 'Hemoglobin', result_value: 14.1, unit: 'g_dl', ref_range: '13.5-17.5', flag: 'normal', comments: '' },
-    { test_name: 'Platelet Count', result_value: 250, unit: 'k_ul', ref_range: '150-400', flag: 'normal', comments: '' },
-    { test_name: 'ALT', result_value: 22, unit: 'u_l', ref_range: '7-56', flag: 'normal', comments: 'Within limits' },
-    { test_name: 'Creatinine', result_value: 1.0, unit: 'mg_dl', ref_range: '0.7-1.3', flag: 'normal', comments: '' },
+    { test_name: 'WBC', result: 7.2, unit: 'k_ul', flag: 'normal', comment: '' },
+    { test_name: 'Hemoglobin', result: 14.1, unit: 'g_dl', flag: 'normal', comment: '' },
+    { test_name: 'Platelet Count', result: 250, unit: 'k_ul', flag: 'normal', comment: '' },
+    { test_name: 'ALT', result: 22, unit: 'u_l', flag: 'normal', comment: 'Within limits' },
+    { test_name: 'Creatinine', result: 1.0, unit: 'mg_dl', flag: 'normal', comment: '' },
   ]),
   inclusion_criteria: JSON.stringify({
     age_eligible: true,
@@ -70,8 +70,8 @@ const VALID_LAB_DATA: Record<string, any> = {
     neuropathy: 'none',
     hepatotoxicity: 'none',
   }),
-  concomitant_meds: JSON.stringify([
-    { med_name: 'Acetaminophen', dose: '500 mg', route: 'oral', frequency: 'prn', start_date: todayStr(), ongoing: true },
+  conmeds_table: JSON.stringify([
+    { med_name: 'Acetaminophen', dose: '500 mg', route: 'oral', ongoing: true },
   ]),
   specimen_notes: 'Blood samples collected per protocol. Centrifuged within 30 min. Stored at -80C.',
 };
@@ -96,8 +96,7 @@ const INVALID_LAB_DATA: Record<string, any> = {
   patient_weight: 300,           // Out of 20-250 range — should trigger error
   // bmi_calculated omitted — calculation field, server-computed
   lab_results_table: JSON.stringify([
-    { test_name: '', result_value: 5000, unit: 'mg_dl', ref_range: '', flag: 'critical', comments: '' },
-    // test_name empty → required error; result_value 5000 → range error (0-1000)
+    { test_name: '', result: 5000, unit: 'mg_dl', flag: 'critical', comment: '' },
   ]),
   inclusion_criteria: JSON.stringify({}),
   ae_assessment: JSON.stringify({}),
