@@ -2231,6 +2231,23 @@ export const createForm = async (
   try {
     await client.query('BEGIN');
 
+    // Check for existing active CRF with the same name (owned by this user)
+    const nameCheck = await client.query(
+      `SELECT crf_id FROM crf WHERE name = $1 AND status_id IN (1, 2) AND owner_id = $2 LIMIT 1`,
+      [data.name, userId]
+    );
+    if (nameCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      client.release();
+      const existingId = nameCheck.rows[0].crf_id;
+      logger.info('Form with same name already exists, returning existing', { name: data.name, existingCrfId: existingId });
+      return {
+        success: true,
+        crfId: existingId,
+        message: 'Form already exists'
+      };
+    }
+
     // Generate OC OID for CRF
     const timestamp = Date.now().toString().slice(-6);
     const ocOid = `F_${data.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase().substring(0, 24)}_${timestamp}`;

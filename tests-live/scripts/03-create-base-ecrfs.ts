@@ -317,6 +317,27 @@ export const ECRF2_FIELDS = [
 ];
 
 async function createForm(name: string, description: string, fields: any[], stepLabel: string) {
+  // Idempotency: check if a form with this name already exists
+  const listRes = await apiCall({
+    method: 'GET',
+    url: '/forms',
+    script: SCRIPT,
+    step: `Check existing: ${name}`,
+    quiet: true,
+  });
+  if (listRes.ok) {
+    const allForms = (listRes.data as any)?.data ?? (listRes.data as any)?.forms ?? [];
+    const existing = (Array.isArray(allForms) ? allForms : []).find(
+      (f: any) => (f.name ?? '') === name && f.status_id !== 5 && f.status_id !== 7
+    );
+    if (existing) {
+      const crfId = existing.crfId ?? existing.crf_id ?? existing.id;
+      const versionId = existing.crfVersionId ?? existing.crf_version_id ?? existing.versionId;
+      logPass(SCRIPT, `${stepLabel} — already exists (crfId: ${crfId}), reusing`);
+      return { crfId, versionId };
+    }
+  }
+
   // Set dynamic defaults at call time (not module load time)
   const processedFields = fields.map(f => {
     if (f.name === 'assessment_date' && !f.defaultValue) {

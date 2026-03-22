@@ -196,9 +196,15 @@ async function cleanupForms(): Promise<void> {
   const forms = Array.isArray(data) ? data : (data?.forms ?? []);
 
   const testNames = [
+    'Vitals & Assessment',
+    'Lab Review',
+    'Safety Monitoring',
     'General Assessment Form',
     'Lab Results & Procedures Form',
     'Branching Logic Test Form',
+    'Branching Logic',
+    'Hard + Soft Validation',
+    'Workflow + Queries',
   ];
 
   let deleted = 0;
