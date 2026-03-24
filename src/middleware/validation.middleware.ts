@@ -1051,7 +1051,7 @@ export const userSchemas = {
     lastName: Joi.string().required().max(50),
     email: Joi.string().email().required().max(120),
     institutionalAffiliation: Joi.string().optional().max(255).allow('', null),
-    phone: Joi.string().optional().max(40).allow('', null),
+    phone: Joi.string().optional().max(64).allow('', null),
     timeZone: Joi.string().optional().max(255).allow('', null),
     password: Joi.string().required()
       .min(8)
@@ -1076,7 +1076,7 @@ export const userSchemas = {
     lastName: Joi.string().optional().max(50).allow(''),
     email: Joi.string().email().optional().max(120).allow(''),
     institutionalAffiliation: Joi.string().optional().max(255).allow(''),
-    phone: Joi.string().optional().max(40).allow(''),
+    phone: Joi.string().optional().max(64).allow(''),
     role: Joi.string().optional().valid(
       // Current 6 canonical roles
       'admin', 'data_manager', 'investigator', 'coordinator', 'monitor', 'viewer',
