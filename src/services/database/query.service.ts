@@ -482,9 +482,12 @@ export const createQuery = async (
     const queryId = noteResult.rows[0].discrepancy_note_id;
 
     // Resolve the correct entity ID for the mapping table.
-    // For itemData queries the frontend sends item.item_id (field definition PK).
-    // dn_item_data_map.item_data_id requires the actual item_data row PK.
     let resolvedEntityId = data.entityId;
+
+    // For eventCrf queries, entityId may not be provided — fall back to eventCrfId
+    if (data.entityType === 'eventCrf' && !resolvedEntityId && (data as any).eventCrfId) {
+      resolvedEntityId = (data as any).eventCrfId;
+    }
 
     if (data.entityType === 'itemData') {
       if ((data as any).itemDataId) {
