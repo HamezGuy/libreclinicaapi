@@ -2238,7 +2238,6 @@ export const createForm = async (
     );
     if (nameCheck.rows.length > 0) {
       await client.query('ROLLBACK');
-      client.release();
       const existingId = nameCheck.rows[0].crf_id;
       logger.info('Form with same name already exists, returning existing', { name: data.name, existingCrfId: existingId });
       return {
