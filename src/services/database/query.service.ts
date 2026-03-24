@@ -484,9 +484,41 @@ export const createQuery = async (
     // Resolve the correct entity ID for the mapping table.
     let resolvedEntityId = data.entityId;
 
-    // For eventCrf queries, entityId may not be provided — fall back to eventCrfId
-    if (data.entityType === 'eventCrf' && !resolvedEntityId && (data as any).eventCrfId) {
-      resolvedEntityId = (data as any).eventCrfId;
+    // For eventCrf type: entityId or eventCrfId must resolve to a valid event_crf row
+    if (data.entityType === 'eventCrf') {
+      if (!resolvedEntityId && (data as any).eventCrfId) {
+        resolvedEntityId = (data as any).eventCrfId;
+      }
+      if (!resolvedEntityId) {
+        throw new BadRequestError(
+          'Cannot create eventCrf query: entityId or eventCrfId is required. ' +
+          'Please save the form before creating a query.'
+        );
+      }
+      // Validate the event_crf actually exists
+      const ecCheck = await client.query(
+        'SELECT event_crf_id FROM event_crf WHERE event_crf_id = $1',
+        [resolvedEntityId]
+      );
+      if (ecCheck.rows.length === 0) {
+        throw new BadRequestError(
+          `Cannot create query: event_crf_id ${resolvedEntityId} does not exist. ` +
+          'The form may not have been saved yet.'
+        );
+      }
+    }
+
+    // For studySubject type: validate the subject exists
+    if (data.entityType === 'studySubject' && resolvedEntityId) {
+      const ssCheck = await client.query(
+        'SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1',
+        [resolvedEntityId]
+      );
+      if (ssCheck.rows.length === 0) {
+        throw new BadRequestError(
+          `Cannot create query: study_subject_id ${resolvedEntityId} does not exist.`
+        );
+      }
     }
 
     if (data.entityType === 'itemData') {
