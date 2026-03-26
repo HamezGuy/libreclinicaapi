@@ -292,17 +292,17 @@ export const subjectSchemas = {
  */
 export const formSchemas = {
   create: Joi.object({
-    name: Joi.string().required().min(1).max(255)
+    name: Joi.string().required().min(1).max(2000)
       .messages({ 'any.required': 'Form name is required' }),
-    description: Joi.string().optional().max(10000).allow(''),
+    description: Joi.string().optional().max(50000).allow(''),
     studyId: Joi.number().integer().positive().optional(),
-    category: Joi.string().optional().max(64).allow(''),
-    version: Joi.string().optional().max(30).allow(''),
+    category: Joi.string().optional().max(2000).allow(''),
+    version: Joi.string().optional().max(255).allow(''),
     status: Joi.string().optional().valid('draft', 'published', 'archived'),
     fields: Joi.array().items(Joi.object().unknown(true)).optional(),
     sections: Joi.array().items(Joi.object({
       id: Joi.string().optional(),
-      name: Joi.string().required().max(255),
+      name: Joi.string().required().max(2000),
       ordinal: Joi.number().integer().min(0).optional(),
     }).unknown(true)).optional(),
     editChecks: Joi.array().items(Joi.object().unknown(true)).optional(),
@@ -360,20 +360,19 @@ export const formSchemas = {
 
   // PUT /api/forms/:id — update an existing form/CRF template
   update: Joi.object({
-    name: Joi.string().optional().min(1).max(255),
-    description: Joi.string().optional().max(10000).allow(''),
+    name: Joi.string().optional().min(1).max(2000),
+    description: Joi.string().optional().max(50000).allow(''),
     studyId: Joi.number().integer().positive().optional(),
-    category: Joi.string().optional().max(64).allow(''),
-    version: Joi.string().optional().max(30).allow(''),
+    category: Joi.string().optional().max(2000).allow(''),
+    version: Joi.string().optional().max(255).allow(''),
     status: Joi.string().optional().valid('draft', 'published', 'archived'),
     fields: Joi.array().items(Joi.object().unknown(true)).optional(),
     sections: Joi.array().items(Joi.object({
       id: Joi.string().optional(),
-      name: Joi.string().required().max(255),
+      name: Joi.string().required().max(2000),
       ordinal: Joi.number().integer().min(0).optional()
     })).optional(),
     editChecks: Joi.array().items(Joi.object().unknown(true)).optional(),
-    // 21 CFR Part 11
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
     signatureUsername: Joi.string().optional(),

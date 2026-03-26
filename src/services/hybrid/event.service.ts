@@ -436,6 +436,7 @@ export const scheduleSubjectEvent = async (
     const studyId = subjectResult.rows[0].parent_study_id;
 
     // Try SOAP service first for GxP-compliant event scheduling
+    let soapCreatedEventId: number | null = null;
     try {
       const result = await eventSoap.scheduleEvent({
         studyId,
@@ -447,19 +448,62 @@ export const scheduleSubjectEvent = async (
       }, userId, username);
       
       if (result.success) {
-        return result;
+        // SOAP only creates the study_event row — it does NOT create event_crf
+        // records or patient_event_form snapshots. We must find the newly created
+        // study_event and create those records ourselves so that the patient can
+        // actually open and edit the forms.
+        const soapEventQuery = `
+          SELECT study_event_id FROM study_event
+          WHERE study_subject_id = $1
+            AND study_event_definition_id = $2
+          ORDER BY study_event_id DESC LIMIT 1
+        `;
+        const soapEventResult = await pool.query(soapEventQuery, [
+          data.studySubjectId, data.studyEventDefinitionId
+        ]);
+        if (soapEventResult.rows.length > 0) {
+          soapCreatedEventId = soapEventResult.rows[0].study_event_id;
+          logger.info('SOAP scheduled event, now creating event_crfs + snapshots', {
+            studyEventId: soapCreatedEventId
+          });
+        } else {
+          logger.warn('SOAP reported success but no study_event found in DB');
+        }
+        // Fall through to create event_crf + snapshots below
+      } else {
+        logger.warn('SOAP scheduling failed, falling back to direct SQL', { error: result.message });
       }
-      logger.warn('SOAP scheduling failed, falling back to direct SQL', { error: result.message });
     } catch (soapError: any) {
       logger.warn('SOAP service unavailable, using direct SQL fallback', { error: soapError.message });
     }
 
-    // Direct SQL fallback for development/testing when SOAP is not available
-    logger.info('Using direct SQL to schedule event');
+    // Direct SQL path — also used after SOAP to create event_crfs + snapshots.
+    // If SOAP created the study_event, soapCreatedEventId will be set and we
+    // skip the INSERT INTO study_event but still create event_crf + snapshots.
+    logger.info('Creating event records via direct SQL', { soapCreatedEventId });
     
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      let studyEventId: number;
+      const isUnscheduled = data.isUnscheduled || false;
+
+      if (soapCreatedEventId) {
+        // SOAP already created the study_event — use its ID
+        studyEventId = soapCreatedEventId;
+
+        // Update is_unscheduled flag if SOAP didn't set it
+        if (isUnscheduled) {
+          await client.query(`
+            UPDATE study_event
+            SET is_unscheduled = true,
+                scheduled_date = COALESCE(scheduled_date, $1)
+            WHERE study_event_id = $2
+          `, [data.scheduledDate ? parseDateSafe(data.scheduledDate) : new Date(), studyEventId]);
+        }
+      } else {
+        // No SOAP event — create study_event via direct SQL
 
       // Check if event definition exists and get study_id
       const eventDefQuery = `SELECT study_event_definition_id, study_id, oc_oid, repeating FROM study_event_definition WHERE study_event_definition_id = $1`;
@@ -504,8 +548,7 @@ export const scheduleSubjectEvent = async (
 
       const startDate = data.startDate ? parseDateSafe(data.startDate) : new Date();
       const endDate = data.endDate ? parseDateSafe(data.endDate) : null;
-      const scheduledDate = data.scheduledDate ? parseDateSafe(data.scheduledDate) : (data.isUnscheduled ? startDate : null);
-      const isUnscheduled = data.isUnscheduled || false;
+      const scheduledDate = data.scheduledDate ? parseDateSafe(data.scheduledDate) : (isUnscheduled ? startDate : null);
       // Unscheduled visits start as 'not_scheduled' (2) until data entry begins
       const subjectEventStatusId = isUnscheduled ? 2 : 1;
 
@@ -522,7 +565,8 @@ export const scheduleSubjectEvent = async (
         isUnscheduled
       ]);
 
-      const studyEventId = insertResult.rows[0].study_event_id;
+      studyEventId = insertResult.rows[0].study_event_id;
+      } // end of !soapCreatedEventId block
 
       // Create event_crf records for all CRFs assigned to this event definition
       // These are the editable copies of form templates for this patient's phase
@@ -530,8 +574,10 @@ export const scheduleSubjectEvent = async (
         SELECT edc.crf_id, edc.default_version_id, cv.crf_version_id, c.name as crf_name
         FROM event_definition_crf edc
         LEFT JOIN crf_version cv ON cv.crf_version_id = edc.default_version_id
-        LEFT JOIN crf c ON edc.crf_id = c.crf_id
-        WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
+        INNER JOIN crf c ON edc.crf_id = c.crf_id
+        WHERE edc.study_event_definition_id = $1
+          AND edc.status_id = 1
+          AND c.status_id NOT IN (5, 7)
         ORDER BY edc.ordinal
       `;
       const crfAssignments = await client.query(crfAssignmentQuery, [data.studyEventDefinitionId]);
@@ -542,13 +588,30 @@ export const scheduleSubjectEvent = async (
         });
       }
 
+      // Check which event_crfs already exist (SOAP may have created some)
+      const existingEventCrfs = await client.query(
+        `SELECT ec.event_crf_id, cv.crf_id
+         FROM event_crf ec
+         INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+         WHERE ec.study_event_id = $1 AND ec.status_id NOT IN (5, 7)`,
+        [studyEventId]
+      );
+      const existingCrfIds = new Set(existingEventCrfs.rows.map((r: any) => r.crf_id));
+
+      // Check which snapshots already exist
+      const existingSnapshots = await client.query(
+        `SELECT crf_id FROM patient_event_form WHERE study_event_id = $1`,
+        [studyEventId]
+      );
+      const existingSnapshotCrfIds = new Set(existingSnapshots.rows.map((r: any) => r.crf_id));
+
       let createdCrfCount = 0;
       for (const crf of crfAssignments.rows) {
         let crfVersionId = crf.crf_version_id || crf.default_version_id;
         if (!crfVersionId) {
           const latestVersionQuery = `
             SELECT crf_version_id FROM crf_version
-            WHERE crf_id = $1 AND status_id = 1
+            WHERE crf_id = $1 AND status_id NOT IN (5, 7)
             ORDER BY crf_version_id DESC LIMIT 1
           `;
           const latestVersion = await client.query(latestVersionQuery, [crf.crf_id]);
@@ -560,28 +623,39 @@ export const scheduleSubjectEvent = async (
         }
 
         if (crfVersionId) {
-          const insertEventCrfQuery = `
-            INSERT INTO event_crf (
-              study_event_id, crf_version_id, study_subject_id,
-              status_id, owner_id, date_created, completion_status_id, sdv_status
-            ) VALUES ($1, $2, $3, 1, $4, NOW(), 1, false)
-            RETURNING event_crf_id
-          `;
-          const ecResult = await client.query(insertEventCrfQuery, [
-            studyEventId, crfVersionId, data.studySubjectId, userId
-          ]);
-          const eventCrfId = ecResult.rows[0].event_crf_id;
+          let eventCrfId: number;
+
+          // Skip event_crf creation if it already exists (e.g., SOAP created it)
+          if (existingCrfIds.has(crf.crf_id)) {
+            const existing = existingEventCrfs.rows.find((r: any) => r.crf_id === crf.crf_id);
+            eventCrfId = existing.event_crf_id;
+            logger.debug('event_crf already exists, reusing', { eventCrfId, crfId: crf.crf_id });
+          } else {
+            const insertEventCrfQuery = `
+              INSERT INTO event_crf (
+                study_event_id, crf_version_id, study_subject_id,
+                status_id, owner_id, date_created, completion_status_id, sdv_status
+              ) VALUES ($1, $2, $3, 1, $4, NOW(), 1, false)
+              RETURNING event_crf_id
+            `;
+            const ecResult = await client.query(insertEventCrfQuery, [
+              studyEventId, crfVersionId, data.studySubjectId, userId
+            ]);
+            eventCrfId = ecResult.rows[0].event_crf_id;
+          }
           createdCrfCount++;
 
-          // Create patient_event_form snapshot (frozen copy of form structure).
+          // Create patient_event_form snapshot if it doesn't already exist.
           // This is MANDATORY — every patient must have their own copy of each
           // form. If snapshot creation fails the entire event scheduling must
           // roll back so we never end up with event_crf records that have no
           // corresponding patient_event_form snapshot.
-          await createPatientFormSnapshot(
-            client, studyEventId, eventCrfId, crf.crf_id, crfVersionId,
-            data.studySubjectId, crf.crf_name, createdCrfCount, userId
-          );
+          if (!existingSnapshotCrfIds.has(crf.crf_id)) {
+            await createPatientFormSnapshot(
+              client, studyEventId, eventCrfId, crf.crf_id, crfVersionId,
+              data.studySubjectId, crf.crf_name, createdCrfCount, userId
+            );
+          }
 
           logger.debug('Created event_crf + snapshot for patient phase', {
             studyEventId, crfId: crf.crf_id, crfName: crf.crf_name,
@@ -594,23 +668,29 @@ export const scheduleSubjectEvent = async (
         studyEventId,
         studySubjectId: data.studySubjectId,
         crfAssignmentsFound: crfAssignments.rows.length,
-        crfsCreated: createdCrfCount
+        crfsCreated: createdCrfCount,
+        soapCreated: !!soapCreatedEventId
       });
 
-      // Log audit trail
-      await client.query(`
-        INSERT INTO audit_log_event (
-          audit_id, audit_log_event_type_id, audit_date, user_id,
-          audit_table, entity_id, entity_name, old_value, new_value
-        ) VALUES (
-          nextval('audit_log_event_audit_id_seq'), 31, NOW(), $1,
-          'study_event', $2, 'Event Scheduled', NULL, $3
-        )
-      `, [userId, studyEventId, `Scheduled event ${eventDef.oc_oid} for subject`]);
+      // Log audit trail (skip if SOAP already logged it)
+      if (!soapCreatedEventId) {
+        await client.query(`
+          INSERT INTO audit_log_event (
+            audit_id, audit_log_event_type_id, audit_date, user_id,
+            audit_table, entity_id, entity_name, old_value, new_value
+          ) VALUES (
+            nextval('audit_log_event_audit_id_seq'), 31, NOW(), $1,
+            'study_event', $2, 'Event Scheduled', NULL, $3
+          )
+        `, [userId, studyEventId, `Scheduled event for subject`]);
+      }
 
       await client.query('COMMIT');
 
-      logger.info('Event scheduled successfully via direct SQL', { studyEventId });
+      logger.info('Event scheduled successfully', { studyEventId, soapCreated: !!soapCreatedEventId });
+
+      const startDate = data.startDate ? parseDateSafe(data.startDate) : new Date();
+      const scheduledDate = data.scheduledDate ? parseDateSafe(data.scheduledDate) : (isUnscheduled ? startDate : null);
 
       return {
         success: true,
@@ -1783,6 +1863,22 @@ export const savePatientFormData = async (
   userId: number
 ): Promise<{ success: boolean; message?: string; statusCode?: number }> => {
   try {
+    // Ensure all values are native — parse any legacy JSON strings so the
+    // JSONB column always stores structured data natively.
+    const cleanedData: Record<string, any> = {};
+    for (const [key, value] of Object.entries(formData)) {
+      if (typeof value === 'string' && value.length > 1) {
+        const trimmed = value.trim();
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+            (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+          try { cleanedData[key] = JSON.parse(trimmed); continue; }
+          catch { /* not valid JSON — keep as string */ }
+        }
+      }
+      // Native arrays/objects pass through as-is
+      cleanedData[key] = value;
+    }
+
     const result = await pool.query(`
       UPDATE patient_event_form
       SET form_data = $1::jsonb,
@@ -1790,7 +1886,7 @@ export const savePatientFormData = async (
           date_updated = NOW(),
           updated_by = $2
       WHERE patient_event_form_id = $3
-    `, [JSON.stringify(formData), userId, patientEventFormId]);
+    `, [JSON.stringify(cleanedData), userId, patientEventFormId]);
 
     if (result.rowCount === 0) {
       return { success: false, message: `Patient form snapshot ${patientEventFormId} not found`, statusCode: 404 };
@@ -1989,8 +2085,13 @@ export const verifyPatientFormIntegrity = async (
 };
 
 /**
- * Repair missing patient_event_form snapshots.
- * For every event_crf that lacks a snapshot, creates one from the current template.
+ * Repair missing patient_event_form snapshots AND missing event_crf records.
+ *
+ * Two-phase repair:
+ *   Phase 1: Create missing event_crf + snapshot for CRFs that the study defines
+ *            but the patient doesn't have (e.g., CRFs added after enrollment).
+ *   Phase 2: Create missing snapshots for event_crf records that exist but lack
+ *            a patient_event_form row (e.g., SOAP-created events).
  */
 export const repairMissingSnapshots = async (
   studySubjectId: number,
@@ -2002,32 +2103,98 @@ export const repairMissingSnapshots = async (
   let repaired = 0;
 
   try {
-    // Find event_crf records without a patient_event_form
-    const query = `
-      SELECT
-        ec.event_crf_id,
-        ec.study_event_id,
-        ec.crf_version_id,
-        cv.crf_id,
-        c.name AS crf_name,
-        ec.study_subject_id
-      FROM event_crf ec
-      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-      INNER JOIN crf c ON cv.crf_id = c.crf_id
-      LEFT JOIN patient_event_form pef ON pef.event_crf_id = ec.event_crf_id
-      WHERE se.study_subject_id = $1
-        AND pef.patient_event_form_id IS NULL
-        AND ec.status_id NOT IN (5, 7)
-    `;
-    const result = await pool.query(query, [studySubjectId]);
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      for (const row of result.rows) {
-        // Get the next ordinal for this specific event (avoid collisions with existing snapshots)
+      // Phase 1: Create missing event_crf + snapshot for CRFs the study defines
+      //          but the patient doesn't have yet.
+      const missingCrfsQuery = `
+        SELECT
+          se.study_event_id,
+          se.study_subject_id,
+          edc.crf_id,
+          edc.default_version_id,
+          c.name AS crf_name
+        FROM study_event se
+        INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+        INNER JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id
+        INNER JOIN crf c ON edc.crf_id = c.crf_id
+        WHERE se.study_subject_id = $1
+          AND edc.status_id NOT IN (5, 7)
+          AND c.status_id NOT IN (5, 7)
+          AND NOT EXISTS (
+            SELECT 1 FROM event_crf ec
+            INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+            WHERE ec.study_event_id = se.study_event_id
+              AND cv.crf_id = edc.crf_id
+              AND ec.status_id NOT IN (5, 7)
+          )
+      `;
+      const missingCrfs = await client.query(missingCrfsQuery, [studySubjectId]);
+      logger.info(`Phase 1: ${missingCrfs.rows.length} missing event_crf(s) to create`);
+
+      for (const row of missingCrfs.rows) {
+        let crfVersionId = row.default_version_id;
+        if (!crfVersionId) {
+          const vr = await client.query(
+            `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id NOT IN (5, 7) ORDER BY crf_version_id DESC LIMIT 1`,
+            [row.crf_id]
+          );
+          if (vr.rows.length > 0) crfVersionId = vr.rows[0].crf_version_id;
+          else continue;
+        }
+
+        const sp = `sp_phase1_${row.study_event_id}_${row.crf_id}`;
+        try {
+          await client.query(`SAVEPOINT ${sp}`);
+          const ecResult = await client.query(`
+            INSERT INTO event_crf (
+              study_event_id, crf_version_id, study_subject_id,
+              status_id, owner_id, date_created, completion_status_id, sdv_status
+            ) VALUES ($1, $2, $3, 1, $4, NOW(), 1, false)
+            RETURNING event_crf_id
+          `, [row.study_event_id, crfVersionId, row.study_subject_id, userId]);
+          const eventCrfId = ecResult.rows[0].event_crf_id;
+
+          const ordResult = await client.query(
+            `SELECT COALESCE(MAX(ordinal), 0) + 1 AS next_ordinal FROM patient_event_form WHERE study_event_id = $1`,
+            [row.study_event_id]
+          );
+          await createPatientFormSnapshot(
+            client, row.study_event_id, eventCrfId, row.crf_id, crfVersionId,
+            row.study_subject_id, row.crf_name, ordResult.rows[0].next_ordinal, userId
+          );
+          await client.query(`RELEASE SAVEPOINT ${sp}`);
+          repaired++;
+        } catch (err: any) {
+          await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+          errors.push(`Phase 1: Failed event_crf for CRF ${row.crf_id} on event ${row.study_event_id}: ${err.message}`);
+        }
+      }
+
+      // Phase 2: Create missing snapshots for existing event_crf records
+      const missingSnapsQuery = `
+        SELECT
+          ec.event_crf_id,
+          ec.study_event_id,
+          ec.crf_version_id,
+          cv.crf_id,
+          c.name AS crf_name,
+          ec.study_subject_id
+        FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        INNER JOIN crf c ON cv.crf_id = c.crf_id
+        LEFT JOIN patient_event_form pef ON pef.event_crf_id = ec.event_crf_id
+        WHERE se.study_subject_id = $1
+          AND pef.patient_event_form_id IS NULL
+          AND ec.status_id NOT IN (5, 7)
+      `;
+      const missingSnaps = await client.query(missingSnapsQuery, [studySubjectId]);
+      logger.info(`Phase 2: ${missingSnaps.rows.length} missing snapshot(s) to create`);
+
+      for (const row of missingSnaps.rows) {
         const ordResult = await client.query(
           `SELECT COALESCE(MAX(ordinal), 0) + 1 AS next_ordinal
            FROM patient_event_form WHERE study_event_id = $1`,
@@ -2035,8 +2202,7 @@ export const repairMissingSnapshots = async (
         );
         const ordinal = ordResult.rows[0].next_ordinal;
 
-        // Use SAVEPOINT so one failed snapshot doesn't abort the entire transaction
-        const sp = `sp_repair_${row.event_crf_id}`;
+        const sp = `sp_phase2_${row.event_crf_id}`;
         try {
           await client.query(`SAVEPOINT ${sp}`);
           await createPatientFormSnapshot(
@@ -2054,7 +2220,7 @@ export const repairMissingSnapshots = async (
           repaired++;
         } catch (snapErr: any) {
           await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-          errors.push(`Failed to create snapshot for event_crf ${row.event_crf_id}: ${snapErr.message}`);
+          errors.push(`Phase 2: Failed snapshot for event_crf ${row.event_crf_id}: ${snapErr.message}`);
         }
       }
 

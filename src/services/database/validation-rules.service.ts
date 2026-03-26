@@ -713,17 +713,17 @@ export const updateRule = async (
         severity = COALESCE($5, severity),
         error_message = COALESCE($6, error_message),
         warning_message = COALESCE($7, warning_message),
-        min_value = $8,
-        max_value = $9,
-        pattern = $10,
-        format_type = $11,
-        operator = $12,
-        compare_field_path = $13,
-        custom_expression = $14,
-        bp_systolic_min = $15,
-        bp_systolic_max = $16,
-        bp_diastolic_min = $17,
-        bp_diastolic_max = $18,
+        min_value = COALESCE($8, min_value),
+        max_value = COALESCE($9, max_value),
+        pattern = COALESCE($10, pattern),
+        format_type = COALESCE($11, format_type),
+        operator = COALESCE($12, operator),
+        compare_field_path = COALESCE($13, compare_field_path),
+        custom_expression = COALESCE($14, custom_expression),
+        bp_systolic_min = COALESCE($15, bp_systolic_min),
+        bp_systolic_max = COALESCE($16, bp_systolic_max),
+        bp_diastolic_min = COALESCE($17, bp_diastolic_min),
+        bp_diastolic_max = COALESCE($18, bp_diastolic_max),
         date_updated = CURRENT_TIMESTAMP,
         update_id = $19
       WHERE validation_rule_id = $20
@@ -2075,12 +2075,11 @@ function evaluateExcelFormula(
  * Compare two values with an operator
  */
 function compareValues(a: any, b: any, operator: string): boolean {
-  // Handle date comparison
-  if (a instanceof Date || !isNaN(Date.parse(a))) {
-    const dateA = new Date(a).getTime();
-    const dateB = new Date(b).getTime();
-    a = dateA;
-    b = dateB;
+  const aIsDate = a instanceof Date || (typeof a === 'string' && a.length > 4 && !isNaN(Date.parse(a)) && isNaN(Number(a)));
+  const bIsDate = b instanceof Date || (typeof b === 'string' && b.length > 4 && !isNaN(Date.parse(b)) && isNaN(Number(b)));
+  if (aIsDate && bIsDate) {
+    a = new Date(a).getTime();
+    b = new Date(b).getTime();
   }
 
   switch (operator) {

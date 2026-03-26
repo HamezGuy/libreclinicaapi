@@ -32,6 +32,7 @@ export const AVAILABLE_PERMISSIONS: { key: string; label: string; category: stri
   { key: 'canViewQueries',      label: 'View Data Queries',           category: '§11.10(d) Access Control' },
   { key: 'canViewReports',      label: 'View Reports & Analytics',    category: '§11.10(d) Access Control' },
   { key: 'canViewAuditLogs',    label: 'View Audit Trail',            category: '§11.10(d) Access Control' },
+  { key: 'canViewWorkflows',    label: 'View Workflow Tasks',         category: '§11.10(d) Access Control' },
 
   // §11.10(c) Data Entry & Modification — creating and changing records
   { key: 'canEnrollPatients',      label: 'Enroll Patients',             category: '§11.10(c) Data Entry & Records' },
@@ -42,6 +43,10 @@ export const AVAILABLE_PERMISSIONS: { key: string; label: string; category: stri
   { key: 'canCreateQueries',       label: 'Create Data Queries',         category: '§11.10(c) Data Entry & Records' },
   { key: 'canRespondToQueries',    label: 'Respond to Data Queries',     category: '§11.10(c) Data Entry & Records' },
   { key: 'canCloseQueries',        label: 'Close / Resolve Queries',     category: '§11.10(c) Data Entry & Records' },
+  { key: 'canReportAdverseEvents', label: 'Report Adverse Events',       category: '§11.10(c) Data Entry & Records' },
+  { key: 'canPerformCoding',       label: 'Perform Medical Coding',      category: '§11.10(c) Data Entry & Records' },
+  { key: 'canTransferSubjects',    label: 'Transfer Subjects Between Sites', category: '§11.10(c) Data Entry & Records' },
+  { key: 'canRandomizeSubjects',   label: 'Randomize Subjects',          category: '§11.10(c) Data Entry & Records' },
 
   // §11.300 Electronic Signatures — signing, locking, verifying
   { key: 'canSignForms',       label: 'Apply Electronic Signature',   category: '§11.300 Electronic Signatures' },
@@ -54,16 +59,19 @@ export const AVAILABLE_PERMISSIONS: { key: string; label: string; category: stri
   { key: 'canManageDataLocks',       label: 'Manage Data Locks',            category: '§11.10(e) Audit, Export & Compliance' },
   { key: 'canManageValidationRules', label: 'Manage Validation Rules',      category: '§11.10(e) Audit, Export & Compliance' },
   { key: 'canManageBranchingLogic',  label: 'Manage Branching / Skip Logic', category: '§11.10(e) Audit, Export & Compliance' },
+  { key: 'canManageWorkflows',       label: 'Configure Workflows',          category: '§11.10(e) Audit, Export & Compliance' },
 
   // §11.10(g) Study & System Administration — authority checks, configuration
   { key: 'canCreateStudy',       label: 'Create Studies',              category: '§11.10(g) Study & System Admin' },
   { key: 'canEditStudy',         label: 'Edit Study Configuration',    category: '§11.10(g) Study & System Admin' },
   { key: 'canDeleteStudy',       label: 'Delete / Archive Studies',    category: '§11.10(g) Study & System Admin' },
+  { key: 'canManageSites',       label: 'Manage Study Sites',          category: '§11.10(g) Study & System Admin' },
   { key: 'canCreateTemplates',   label: 'Create Form Templates',      category: '§11.10(g) Study & System Admin' },
   { key: 'canEditTemplates',     label: 'Edit Form Templates',        category: '§11.10(g) Study & System Admin' },
   { key: 'canDeleteTemplates',   label: 'Delete Form Templates',      category: '§11.10(g) Study & System Admin' },
   { key: 'canPublishTemplates',  label: 'Publish Form Templates',     category: '§11.10(g) Study & System Admin' },
   { key: 'canManageUsers',       label: 'Manage User Accounts',       category: '§11.10(g) Study & System Admin' },
+  { key: 'canManageTraining',    label: 'Manage Training Modules',    category: '§11.10(g) Study & System Admin' },
 ];
 
 const VALID_PERMISSION_KEYS = new Set(AVAILABLE_PERMISSIONS.map(p => p.key));

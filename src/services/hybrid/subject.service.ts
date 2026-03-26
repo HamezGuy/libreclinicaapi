@@ -363,7 +363,16 @@ const createSubjectDirect = async (
     const enrollmentDate = request.enrollmentDate || todayIso();
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
-    // Get all scheduled/common event definitions for this study.
+    // Resolve to parent study for event definitions.
+    // In multi-site studies, patients enroll at a SITE (child study) but event
+    // definitions and CRF assignments live on the PARENT study.
+    const parentStudyResult = await client.query(
+      `SELECT COALESCE(parent_study_id, study_id) AS parent_study_id FROM study WHERE study_id = $1`,
+      [request.studyId]
+    );
+    const parentStudyId = parentStudyResult.rows[0]?.parent_study_id || request.studyId;
+
+    // Get all scheduled/common event definitions for this study (using parent study).
     // Unscheduled event definitions are NOT auto-scheduled during enrollment —
     // they are only used when a user manually adds an unscheduled visit later.
     const eventDefsResult = await client.query(`
@@ -371,7 +380,7 @@ const createSubjectDirect = async (
       FROM study_event_definition
       WHERE study_id = $1 AND status_id = 1 AND type != 'unscheduled'
       ORDER BY ordinal
-    `, [request.studyId]);
+    `, [parentStudyId]);
     
     if (eventDefsResult.rows.length > 0) {
       logger.info('🗓️ Auto-scheduling study phases for patient enrollment', { 
@@ -417,8 +426,8 @@ const createSubjectDirect = async (
                 owner_id, status_id, subject_event_status_id, date_created,
                 scheduled_date, is_unscheduled
               ) VALUES (
-                $1, $2, $3, 1, $4, $4, $5, 1, $6,
-                NOW(), $4, false
+                $1, $2, $3, 1, $4::timestamp, $5::timestamp, $6, 1, $7,
+                NOW(), $8::date, false
               )
               RETURNING study_event_id
             `, [
@@ -426,8 +435,10 @@ const createSubjectDirect = async (
               studySubjectId,
               request.scheduleEvent?.location || '',
               formatIsoDate(eventStartDate),
+              formatIsoDate(eventStartDate),
               userId,
-              sesId
+              sesId,
+              formatIsoDate(eventStartDate)
             ]);
             await client.query(`RELEASE SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
           } catch (insertErr: any) {
@@ -440,13 +451,14 @@ const createSubjectDirect = async (
                   sample_ordinal, date_start, date_end,
                   owner_id, status_id, subject_event_status_id, date_created
                 ) VALUES (
-                  $1, $2, $3, 1, $4, $4, $5, 1, $6, NOW()
+                  $1, $2, $3, 1, $4::timestamp, $5::timestamp, $6, 1, $7, NOW()
                 )
                 RETURNING study_event_id
               `, [
                 eventDef.study_event_definition_id,
                 studySubjectId,
                 request.scheduleEvent?.location || '',
+                formatIsoDate(eventStartDate),
                 formatIsoDate(eventStartDate),
                 userId,
                 sesId
@@ -467,7 +479,9 @@ const createSubjectDirect = async (
                      edc.ordinal as edc_ordinal
               FROM event_definition_crf edc
               INNER JOIN crf c ON edc.crf_id = c.crf_id
-              WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
+              WHERE edc.study_event_definition_id = $1
+                AND edc.status_id = 1
+                AND c.status_id NOT IN (5, 7)
               ORDER BY edc.ordinal
             `, [eventDef.study_event_definition_id]);
             
@@ -482,7 +496,7 @@ const createSubjectDirect = async (
               if (!crfVersionId) {
                 const versionResult = await client.query(`
                   SELECT crf_version_id FROM crf_version 
-                  WHERE crf_id = $1 AND status_id = 1 
+                  WHERE crf_id = $1 AND status_id NOT IN (5, 7) 
                   ORDER BY crf_version_id DESC LIMIT 1
                 `, [crfAssign.crf_id]);
                 if (versionResult.rows.length > 0) {
@@ -507,14 +521,27 @@ const createSubjectDirect = async (
               totalFormsCreated++;
               
               // Create patient_event_form snapshot (frozen copy of form structure at enrollment)
+              // This is CRITICAL — without it the patient cannot open or edit the form.
+              // Re-create using SAVEPOINT so a single snapshot failure doesn't abort the
+              // entire enrollment, but DO log prominently so issues are visible.
+              const snapSp = `snap_${eventCrfId}`;
               try {
+                await client.query(`SAVEPOINT ${snapSp}`);
                 await createPatientFormSnapshotForEnrollment(
                   client, studyEventId, eventCrfId,
                   crfAssign.crf_id, crfVersionId, studySubjectId,
                   crfAssign.crf_name, crfAssign.edc_ordinal ?? phaseFormsCreated, userId
                 );
+                await client.query(`RELEASE SAVEPOINT ${snapSp}`);
               } catch (snapErr: any) {
-                logger.warn('Form snapshot warning (non-blocking)', { error: snapErr.message });
+                await client.query(`ROLLBACK TO SAVEPOINT ${snapSp}`);
+                logger.error('❌ CRITICAL: Form snapshot creation failed during enrollment — patient will not be able to open this form', {
+                  error: snapErr.message,
+                  crfId: crfAssign.crf_id,
+                  crfName: crfAssign.crf_name,
+                  studyEventId,
+                  eventCrfId
+                });
               }
               
               logger.debug('📋 Created event_crf + snapshot for patient phase', {

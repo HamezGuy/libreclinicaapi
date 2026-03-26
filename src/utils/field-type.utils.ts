@@ -73,3 +73,14 @@ export function resolveFieldType(rawType: string | undefined | null): string {
   return FIELD_TYPE_MAP[rawType.toLowerCase()] ?? 'text';
 }
 
+/**
+ * Does this canonical field type store structured data (array or object)?
+ *
+ * Structured types use patient_event_form.form_data JSONB as the source of
+ * truth — NOT the item_data.value text column.  They are stored, transmitted,
+ * and rendered as native arrays / objects, never JSON strings.
+ */
+export function isStructuredDataType(type: string | undefined | null): boolean {
+  return ['table', 'question_table', 'criteria_list', 'inline_group'].includes(type?.toLowerCase() ?? '');
+}
+

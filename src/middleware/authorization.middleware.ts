@@ -5,42 +5,29 @@ import { AuthRequest } from './auth.middleware';
 
 /**
  * Role-based authorization middleware (21 CFR Part 11 §11.10(g))
- * Checks user permissions for the requested operation
- * 
- * LibreClinica User Types:
- * - user_type_id 1: business_admin (has all privileges)
- * - user_type_id 2: tech-admin (has technical privileges)
- * - user_type_id 3: user (standard user)
- */
-/**
- * Role alias map: maps the 6 canonical role names used in requireRole() calls
- * to ALL equivalent LibreClinica role_name values (case-insensitive matching).
- * 
- * Canonical roles: admin, data_manager, investigator, coordinator, monitor, viewer
- * 
- * Legacy LibreClinica role names (director, ra, ra2) are included as aliases
- * so existing study_user_role data still grants correct access.
+ *
+ * Permission flow (simple, no study dependency):
+ *   1. Fast path: JWT carries role + userType set at login. Check those first.
+ *   2. Slow path: query platform_role from user_account_extended (single row).
+ *
+ * study_user_role is NOT consulted here. It is only used by requireStudyAccess()
+ * to gate study-specific data access, not feature-level permissions.
  */
 /**
  * Role alias mapping for requireRole() calls.
- * 
+ *
  * 6 canonical roles (sorted by descending privilege):
  *   'admin'        → admin, system_administrator
- *   'data_manager' → data_manager, director, study_coordinator (study management level)
- *   'investigator' → investigator, site_investigator (PI / e-sign authority)
- *   'coordinator'  → coordinator, crc, ra, ra2, data_entry_person (CRC / data entry level)
- *   'monitor'      → monitor, site_monitor (SDV / read-only monitoring)
+ *   'data_manager' → data_manager, director, study_coordinator
+ *   'investigator' → investigator, site_investigator
+ *   'coordinator'  → coordinator, crc, ra, ra2, data_entry_person
+ *   'monitor'      → monitor, site_monitor
  *   'viewer'       → viewer, sponsor, read_only
- *
- * IMPORTANT: In the new system, 'coordinator' in the DB = CRC (data entry).
- * Legacy LibreClinica data with 'study_coordinator' or 'director' still maps
- * to data_manager-level access via aliases.
  */
-// Study management level: data_manager role + legacy aliases that meant study coordination
-// NOTE: bare 'coordinator' is NOT here — in the new system 'coordinator' = CRC (data entry)
+// data_manager role + legacy aliases
 const STUDY_MGMT_ROLES = ['data_manager', 'study_coordinator', 'site_study_coordinator', 'director', 'study_director', 'site_study_director'];
 
-// Data entry / CRC level: coordinator role + legacy aliases for data entry personnel
+// coordinator role + legacy aliases
 const DATA_ENTRY_ROLES = ['coordinator', 'ra', 'ra2', 'data_entry', 'data_entry_person', 'crc', 'site_data_entry_person', 'site_data_entry_person2', 'user'];
 
 const ROLE_ALIASES: Record<string, string[]> = {
@@ -108,13 +95,14 @@ export const requireRole = (...allowedRoles: string[]) => {
         return;
       }
 
-      // Slow path: fall back to DB for users whose study-level roles may differ
-      // from their token role (e.g. coordinators with monitor access on specific studies).
+      // Slow path: JWT role didn't match. Query platform_role from DB as
+      // the definitive role source. This covers edge cases like token issued
+      // before a role change, or legacy tokens with stale claims.
       const roleResult = await pool.query(`
-        SELECT DISTINCT role_name
-        FROM study_user_role
-        WHERE user_name = $1
-          AND status_id = 1
+        SELECT uae.platform_role AS role_name
+        FROM user_account_extended uae
+        INNER JOIN user_account ua ON uae.user_id = ua.user_id
+        WHERE ua.user_name = $1 AND uae.platform_role IS NOT NULL
       `, [authReq.user.userName]);
 
       const userRoles = roleResult.rows.map((r: any) => r.role_name);

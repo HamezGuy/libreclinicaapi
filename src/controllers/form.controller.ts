@@ -12,19 +12,17 @@ import { trackDocumentAccess, trackUserAction } from '../services/database/audit
 export const saveData = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
 
-  const result = await formService.saveFormData(req.body, user.userId, user.username);
+  const result = await formService.saveFormData(req.body, user.userId, user.username || user.userName);
 
-  // Track form save action - use the actual eventCrfId from the result
-  // (for new saves, req.body.eventCrfId won't exist yet; the service creates it)
   if (result.success) {
-    await trackUserAction({
+    trackUserAction({
       userId: user.userId,
-      username: user.username,
+      username: user.username || user.userName,
       action: 'FORM_UPDATED',
       entityType: 'event_crf',
-      entityId: (result as any).eventCrfId || req.body.eventCrfId || req.body.crfId,
+      entityId: (result as any).eventCrfId || (result as any).data?.eventCrfId || req.body.eventCrfId || req.body.crfId,
       details: 'Form data saved'
-    });
+    }).catch(() => {});
   }
 
   res.status(result.success ? 200 : 400).json(result);

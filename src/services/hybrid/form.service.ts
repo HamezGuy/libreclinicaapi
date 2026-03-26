@@ -25,7 +25,12 @@ import * as validationRulesService from '../database/validation-rules.service';
 import { encryptField, decryptField, isEncrypted } from '../../utils/encryption.util';
 import * as workflowService from '../database/workflow.service';
 import { stripExtendedProps, parseExtendedProps } from '../../utils/extended-props';
-import { resolveFieldType } from '../../utils/field-type.utils';
+import { resolveFieldType, isStructuredDataType } from '../../utils/field-type.utils';
+
+/** Attempt to parse a JSON string; return fallback on failure. */
+function tryParseJson(str: string, fallback: any): any {
+  try { return JSON.parse(str); } catch { return fallback; }
+}
 
 /**
  * Save form data via SOAP (GxP compliant)
@@ -459,6 +464,7 @@ const saveFormDataDirect = async (
     `, [resolvedVersionId]);
 
     const itemMap = new Map<string, number>();
+    const itemTypeMap = new Map<number, string>();
     for (const item of itemsResult.rows) {
       // Map by display label (item.name in DB)
       itemMap.set(item.name.toLowerCase(), item.item_id);
@@ -473,7 +479,17 @@ const saveFormDataDirect = async (
       if (extProps.fieldName) {
         itemMap.set(extProps.fieldName.toLowerCase(), item.item_id);
       }
+      // Store the canonical field type so the save loop can distinguish
+      // structured types (table, question_table, ...) from scalar types.
+      if (extProps.type) {
+        itemTypeMap.set(item.item_id, resolveFieldType(extProps.type));
+      }
     }
+
+    // Collect structured field data (table, question_table, criteria_list,
+    // inline_group) to write into patient_event_form.form_data JSONB.
+    // These values are stored as native arrays/objects — never JSON strings.
+    const structuredFieldData: Record<string, any> = {};
 
     // 5. Save each form field value to item_data
     let savedCount = 0;
@@ -515,13 +531,56 @@ const saveFormDataDirect = async (
         continue;
       }
 
+      // Determine if this field is a structured type (table, question_table, etc.)
+      // whose data belongs in form_data JSONB, not in item_data.value.
+      const fieldType = itemTypeMap.get(itemId) || '';
+      const isStructured = isStructuredDataType(fieldType);
+
+      if (isStructured) {
+        // ── STRUCTURED FIELDS: source of truth is form_data JSONB ──
+        // Collect the native value (array or object) for the JSONB upsert below.
+        // Also store a lightweight marker in item_data so the audit trail and
+        // completion checks know this field has data.
+        const canonical = fieldName.replace(/_[a-z0-9]{6}$/, '');
+        const nativeValue = (typeof value === 'string') ? tryParseJson(value, value) : value;
+        structuredFieldData[canonical] = nativeValue;
+
+        const marker = '__STRUCTURED_DATA__';
+
+        // Use the pre-fetched map instead of a per-field query
+        const existingRow = existingByItemId.get(itemId);
+        if (existingRow) {
+          if (existingRow.value !== marker) {
+            await client.query(`
+              UPDATE item_data
+              SET value = $1, date_updated = NOW(), update_id = $2
+              WHERE item_data_id = $3
+            `, [marker, userId, existingRow.item_data_id]);
+          }
+        } else {
+          await client.query(`
+            INSERT INTO item_data (
+              item_id, event_crf_id, value, status_id, owner_id, date_created, ordinal
+            ) VALUES ($1, $2, $3, 1, $4, NOW(), 1)
+          `, [itemId, eventCrfId, marker, userId]);
+        }
+
+        savedCount++;
+        continue;
+      }
+
+      // ── SCALAR FIELDS: item_data.value is the source of truth ──
+
       // Use the pre-fetched map instead of a per-field query
       const existingRow = existingByItemId.get(itemId);
       const existingResult = { rows: existingRow ? [existingRow] : [] };
 
       // Handle field clearing: when value is null/undefined/empty, 
       // clear existing data instead of skipping
-      const isEmpty = value === null || value === undefined || value === '' || value === '[]' || value === '{}';
+      const isEmpty = value === null || value === undefined || value === ''
+        || value === '[]' || value === '{}'
+        || (Array.isArray(value) && value.length === 0)
+        || (typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === 0);
       
       if (isEmpty) {
         // Only need to clear if there's existing data
@@ -553,6 +612,20 @@ const saveFormDataDirect = async (
       }
 
       let stringValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
+
+      // Guard against double-encoded JSON strings for table/complex fields.
+      // If the value is a string that looks like a JSON array/object, verify it isn't
+      // about to be double-stringified (frontend may send pre-serialized JSON).
+      if (typeof value === 'string' && value.length > 1) {
+        const trimmed = value.trim();
+        if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+            (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+          try {
+            JSON.parse(trimmed);
+            stringValue = trimmed;
+          } catch { /* not valid JSON, keep as-is */ }
+        }
+      }
       
       // 21 CFR Part 11 §11.10(a) - Encrypt sensitive form data at rest
       // Only encrypt if field-level encryption is enabled
@@ -735,17 +808,65 @@ const saveFormDataDirect = async (
       allFieldsMatched: skippedCount === 0
     });
 
-    // 6b. Also persist form data to patient_event_form.form_data (JSONB snapshot).
-    // Uses INSERT ... ON CONFLICT so new event_crf rows (Strategy D) also get a snapshot row.
+    // 6b. Persist ALL form data to patient_event_form.form_data (JSONB).
+    //
+    // This is the SOURCE OF TRUTH for structured field types (table,
+    // question_table, criteria_list, inline_group).  Scalar fields are
+    // also stored here for completeness / fallback.
+    //
+    // Uses INSERT ... ON CONFLICT so new event_crf rows (Strategy D)
+    // also get a patient_event_form row.
     try {
-      // Build a canonical key→value map using item.name (DB canonical name) as key
-      // so the fallback read path in getFormData() resolves correctly regardless of
-      // whether the frontend sent deduplicated keys.
-      const canonicalFormData: Record<string, any> = {};
+      // Start with the structured field data collected in step 5 —
+      // these are already native arrays/objects, never strings.
+      const canonicalFormData: Record<string, any> = { ...structuredFieldData };
+
+      // Add scalar fields, de-duplicating the key suffix and parsing
+      // any remaining JSON-string edge cases from legacy clients.
       for (const [fieldName, value] of Object.entries(formData)) {
-        // Strip exactly-6-char base-36 dedup suffix (see saveFormDataDirect item lookup)
         const canonical = fieldName.replace(/_[a-z0-9]{6}$/, '');
+        // Skip if already populated by structuredFieldData
+        if (canonical in canonicalFormData) continue;
+
+        if (typeof value === 'string' && value.length > 1) {
+          const trimmed = value.trim();
+          if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+              (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+            try {
+              canonicalFormData[canonical] = JSON.parse(trimmed);
+              continue;
+            } catch { /* not valid JSON, store as string */ }
+          }
+        }
         canonicalFormData[canonical] = value;
+      }
+
+      // Build a form_structure for new rows — fetch full metadata so the
+      // patient_event_form snapshot has real field definitions, not an empty shell.
+      let formStructureJson = '{"snapshotDate":"' + new Date().toISOString() + '"}';
+      const existingSnapshot = await pool.query(
+        `SELECT 1 FROM patient_event_form WHERE event_crf_id = $1 LIMIT 1`,
+        [eventCrfId]
+      );
+      if (existingSnapshot.rows.length === 0) {
+        try {
+          const crfIdForSnapshot = request.crfId;
+          if (crfIdForSnapshot) {
+            const metadata = await getFormMetadata(crfIdForSnapshot);
+            if (metadata?.items?.length) {
+              formStructureJson = JSON.stringify({
+                crfId: crfIdForSnapshot,
+                crfVersionId: resolvedVersionId,
+                name: metadata.name || '',
+                snapshotDate: new Date().toISOString(),
+                fieldCount: metadata.items.length,
+                fields: metadata.items
+              });
+            }
+          }
+        } catch (metaErr: any) {
+          logger.warn('Could not fetch metadata for form_structure on upsert', { error: metaErr.message });
+        }
       }
 
       await pool.query(`
@@ -757,7 +878,7 @@ const saveFormDataDirect = async (
         SELECT
           $1, $2, cv.crf_id, $3,
           ec.study_subject_id,
-          c.name, '{"snapshotDate":"' || NOW()::text || '"}'::jsonb, $4::jsonb,
+          c.name, $8::jsonb, $4::jsonb,
           CASE WHEN $5 = 0 THEN 'not_started' WHEN $6 THEN 'complete' ELSE 'in_progress' END,
           1, $7, NOW(), NOW(), $7
         FROM event_crf ec
@@ -771,11 +892,22 @@ const saveFormDataDirect = async (
               updated_by    = $7
       `, [studyEventId, eventCrfId, resolvedVersionId,
           JSON.stringify(canonicalFormData),
-          savedCount, isComplete, userId]);
-      logger.debug('Upserted patient_event_form.form_data', { eventCrfId, fieldCount: Object.keys(canonicalFormData).length });
+          savedCount, isComplete, userId, formStructureJson]);
+      logger.debug('Upserted patient_event_form.form_data (JSONB source of truth)', {
+        eventCrfId,
+        totalFields: Object.keys(canonicalFormData).length,
+        structuredFields: Object.keys(structuredFieldData).length
+      });
     } catch (snapUpdateError: any) {
-      // Non-blocking - item_data is the primary store
-      logger.error('Failed to upsert patient_event_form.form_data (non-blocking)', { error: snapUpdateError.message });
+      // For structured fields this is CRITICAL — log at error level
+      if (Object.keys(structuredFieldData).length > 0) {
+        logger.error('CRITICAL: Failed to save structured field data to form_data JSONB', {
+          error: snapUpdateError.message,
+          structuredFieldCount: Object.keys(structuredFieldData).length
+        });
+      } else {
+        logger.error('Failed to upsert patient_event_form.form_data', { error: snapUpdateError.message });
+      }
     }
 
     const saveWarnings: { fieldPath: string; message: string; queryId?: number }[] = [];
@@ -938,6 +1070,7 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       lockedBy: lockResult.rows[0].locked_by
     } : { locked: false };
 
+    // ── Load item_data (scalar fields + markers for structured fields) ──
     const query = `
       SELECT 
         id.item_data_id,
@@ -959,13 +1092,63 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     `;
 
     const result = await pool.query(query, [eventCrfId]);
-    
-    // Enrich each item with the technical fieldName from extended_properties
+
+    // ── Load JSONB data from patient_event_form (source of truth for structured fields) ──
+    let jsonbData: Record<string, any> = {};
+    try {
+      const jsonbQuery = `
+        SELECT pef.form_data
+        FROM patient_event_form pef
+        WHERE pef.event_crf_id = $1
+          AND pef.form_data IS NOT NULL
+          AND pef.form_data::text != '{}'
+        LIMIT 1
+      `;
+      const jsonbResult = await pool.query(jsonbQuery, [eventCrfId]);
+      if (jsonbResult.rows.length > 0 && jsonbResult.rows[0].form_data) {
+        jsonbData = jsonbResult.rows[0].form_data;
+      }
+    } catch (jsonbErr: any) {
+      logger.warn('Could not load form_data JSONB', { error: jsonbErr.message });
+    }
+
+    // Enrich each item with the technical fieldName and resolve structured values
+    const STRUCTURED_MARKER = '__STRUCTURED_DATA__';
+
     for (const row of result.rows) {
       const extProps = parseExtendedProps(row.item_description);
       if (extProps.fieldName) {
         row.field_name = extProps.fieldName;
       }
+      const fieldType = extProps.type ? resolveFieldType(extProps.type) : '';
+
+      // For structured fields, replace the marker with the real native value
+      // from the JSONB column.  The value is sent as-is (array or object) so
+      // the frontend never needs to parse JSON strings.
+      if (row.value === STRUCTURED_MARKER || isStructuredDataType(fieldType)) {
+        const lookupKey = extProps.fieldName || row.item_name;
+        const nativeValue = jsonbData[lookupKey]
+          ?? jsonbData[lookupKey?.toLowerCase()]
+          ?? jsonbData[row.item_name]
+          ?? jsonbData[row.item_name?.toLowerCase()];
+
+        if (nativeValue !== undefined) {
+          row.value = nativeValue; // native array or object — NOT a string
+        } else if (row.value === STRUCTURED_MARKER) {
+          // Marker present but no JSONB data found — field was cleared or not saved
+          row.value = isStructuredDataType(fieldType)
+            ? (['table'].includes(fieldType) ? [] : {})
+            : '';
+        }
+        // If value is a legacy JSON string (pre-migration), parse it once
+        if (typeof row.value === 'string' && row.value !== STRUCTURED_MARKER && row.value !== '') {
+          try {
+            const parsed = JSON.parse(row.value);
+            if (typeof parsed === 'object') row.value = parsed;
+          } catch { /* keep as string */ }
+        }
+      }
+
       // Clean up — don't send the raw description to the frontend
       delete row.item_description;
     }
@@ -973,7 +1156,7 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     // 21 CFR Part 11 §11.10(a) - Decrypt encrypted form data
     // Transparently decrypt any encrypted values before returning
     const decryptedRows = result.rows.map(row => {
-      if (row.value && isEncrypted(row.value)) {
+      if (typeof row.value === 'string' && row.value && isEncrypted(row.value)) {
         try {
           return { ...row, value: decryptField(row.value) };
         } catch (decryptError: any) {
@@ -981,58 +1164,32 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
             itemDataId: row.item_data_id, 
             error: decryptError.message 
           });
-          // Return encrypted value with marker for troubleshooting
           return { ...row, value: '[DECRYPTION_ERROR]', encryptedValue: row.value };
         }
       }
       return row;
     });
 
-    // If item_data is empty, try loading from patient_event_form.form_data as fallback.
-    // This handles cases where data was stored in the snapshot but not yet in item_data,
-    // or where the data structures were migrated.
-    if (decryptedRows.length === 0) {
-      logger.info('No item_data found, checking patient_event_form.form_data fallback', { eventCrfId });
-      try {
-        const snapshotQuery = `
-          SELECT pef.form_data, pef.patient_event_form_id
-          FROM patient_event_form pef
-          WHERE pef.event_crf_id = $1
-            AND pef.form_data IS NOT NULL
-            AND pef.form_data::text != '{}'
-          LIMIT 1
-        `;
-        const snapshotResult = await pool.query(snapshotQuery, [eventCrfId]);
-        if (snapshotResult.rows.length > 0 && snapshotResult.rows[0].form_data) {
-          const snapData = snapshotResult.rows[0].form_data;
-          logger.info('Found form data in patient_event_form snapshot', {
-            eventCrfId,
-            snapshotId: snapshotResult.rows[0].patient_event_form_id,
-            fieldCount: Object.keys(snapData).length
-          });
-          // Convert snapshot JSONB data to the same format as item_data rows
-          // so the frontend mapping logic works identically
-          const syntheticRows = Object.entries(snapData).map(([fieldName, value]) => ({
-            item_data_id: null,
-            item_id: null,
-            item_name: fieldName,
-            item_oid: null,
-            field_name: fieldName,
-            value: String(value),
-            status_id: 1,
-            date_created: null,
-            date_updated: null,
-            entered_by: null
-          }));
-          return {
-            data: syntheticRows,
-            lockStatus: lockInfo,
-            source: 'patient_event_form'
-          };
-        }
-      } catch (snapError: any) {
-        logger.warn('Failed to check patient_event_form fallback', { error: snapError.message });
-      }
+    // If item_data is empty, build rows entirely from the JSONB snapshot.
+    if (decryptedRows.length === 0 && Object.keys(jsonbData).length > 0) {
+      logger.info('No item_data found, using patient_event_form.form_data as sole source', { eventCrfId });
+      const syntheticRows = Object.entries(jsonbData).map(([fieldName, value]) => ({
+        item_data_id: null,
+        item_id: null,
+        item_name: fieldName,
+        item_oid: null,
+        field_name: fieldName,
+        value: value, // native value — arrays/objects stay native
+        status_id: 1,
+        date_created: null,
+        date_updated: null,
+        entered_by: null
+      }));
+      return {
+        data: syntheticRows,
+        lockStatus: lockInfo,
+        source: 'patient_event_form'
+      };
     }
 
     // Return data with lock status for UI to respect
@@ -1404,8 +1561,14 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         // Custom
         customAttributes: extendedProps.customAttributes,
         
-        // Table field properties
-        tableColumns: extendedProps.tableColumns,
+        // Table field properties — normalize column keys so every column
+        // has a stable `key` even if old data was serialized without one.
+        tableColumns: Array.isArray(extendedProps.tableColumns)
+          ? extendedProps.tableColumns.map((col: any) => ({
+              ...col,
+              key: col.key || col.name || (col.id ? String(col.id).substring(0, 32) : `col_${Math.random().toString(36).substr(2, 8)}`)
+            }))
+          : extendedProps.tableColumns,
         tableRows: extendedProps.tableRows,
         tableSettings: extendedProps.tableSettings,
         
@@ -1775,7 +1938,7 @@ export const getAllForms = async (userId?: number): Promise<any[]> => {
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN study st ON c.source_study_id = st.study_id
-      WHERE c.status_id IN (1, 2)
+      WHERE c.status_id IN (1, 2, 6)
       ${orgFilter}
       ORDER BY c.date_created DESC, c.name
     `;
@@ -2231,14 +2394,27 @@ export const createForm = async (
   try {
     await client.query('BEGIN');
 
-    // Check for existing active CRF with the same name (owned by this user)
+    // Check for existing CRF with the same name (owned by this user, any active status)
+    // Statuses: 1=available, 2=draft, 6=archived. Only skip 5=removed and 7=auto-removed.
     const nameCheck = await client.query(
-      `SELECT crf_id FROM crf WHERE name = $1 AND status_id IN (1, 2) AND owner_id = $2 LIMIT 1`,
+      `SELECT crf_id, status_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 7) AND owner_id = $2 LIMIT 1`,
       [data.name, userId]
     );
     if (nameCheck.rows.length > 0) {
-      await client.query('ROLLBACK');
       const existingId = nameCheck.rows[0].crf_id;
+      const existingStatus = nameCheck.rows[0].status_id;
+      
+      // If the form was archived (6), restore it to available (1) so it can be used
+      if (existingStatus === 6) {
+        const targetStatus = data.status === 'draft' ? 2 : 1;
+        await client.query(`UPDATE crf SET status_id = $1, date_updated = NOW() WHERE crf_id = $2`, [targetStatus, existingId]);
+        await client.query(`UPDATE crf_version SET status_id = $1 WHERE crf_id = $2`, [targetStatus, existingId]);
+        await client.query('COMMIT');
+        logger.info('Restored archived form to active status', { name: data.name, crfId: existingId, newStatus: targetStatus });
+      } else {
+        await client.query('ROLLBACK');
+      }
+      
       logger.info('Form with same name already exists, returning existing', { name: data.name, existingCrfId: existingId });
       return {
         success: true,
@@ -4110,11 +4286,21 @@ export const forkForm = async (
     const timestamp = Date.now().toString().slice(-6);
     const newOid = `F_${data.newName.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase().substring(0, 24)}_${timestamp}`;
 
+    // Check if a form with this name already exists (any non-removed status)
+    const nameCheck = await client.query(
+      `SELECT crf_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 7) LIMIT 1`,
+      [data.newName]
+    );
+    if (nameCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: true, newCrfId: nameCheck.rows[0].crf_id, message: 'A form with this name already exists' };
+    }
+
     // Check if OID exists
     const existsCheck = await client.query(`SELECT crf_id FROM crf WHERE oc_oid = $1`, [newOid]);
     if (existsCheck.rows.length > 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'A form with this name already exists' };
+      return { success: false, message: 'Generated OID collision — try again' };
     }
 
     // 3. Create new CRF
@@ -4588,7 +4774,26 @@ export const updateFieldData = async (
     // Proceed with update
     await client.query('BEGIN');
 
-    let stringValue = value === null || value === undefined ? '' : String(value);
+    let stringValue: string;
+    if (value === null || value === undefined) {
+      stringValue = '';
+    } else if (typeof value === 'object') {
+      stringValue = JSON.stringify(value);
+    } else {
+      stringValue = String(value);
+    }
+
+    // Guard against double-encoded JSON strings (frontend may send pre-serialized JSON)
+    if (typeof value === 'string' && value.length > 1) {
+      const trimmed = value.trim();
+      if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+          (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+        try {
+          JSON.parse(trimmed);
+          stringValue = trimmed;
+        } catch { /* not valid JSON, keep as-is */ }
+      }
+    }
 
     // Encrypt if needed
     if (config.encryption?.enableFieldEncryption && stringValue) {

@@ -8,8 +8,12 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as exportService from '../services/export/export.service';
 import { pool } from '../config/database';
 import { logger } from '../config/logger';
+import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 
 const router = Router();
+
+router.use(authMiddleware);
 
 /**
  * GET /api/export/forms/:studyId
@@ -181,7 +185,11 @@ router.post('/execute', asyncHandler(async (req: Request, res: Response) => {
   // Set headers for file download
   res.setHeader('Content-Type', result.data!.mimeType);
   res.setHeader('Content-Disposition', `attachment; filename="${result.data!.filename}"`);
-  res.send(result.data!.content);
+  if ((result.data as any).isBuffer) {
+    res.end(Buffer.from(result.data!.content));
+  } else {
+    res.send(result.data!.content);
+  }
 }));
 
 /**

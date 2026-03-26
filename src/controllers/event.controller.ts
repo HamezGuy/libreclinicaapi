@@ -352,11 +352,15 @@ export const assignFormToPatientVisit = asyncHandler(async (req: Request, res: R
  */
 export const createUnscheduledVisit = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
+  if (!user || !user.userId) {
+    res.status(401).json({ success: false, message: 'Authentication required' });
+    return;
+  }
 
   const result = await eventService.createUnscheduledVisit(
     req.body,
     user.userId,
-    user.username || user.userName
+    user.username || user.userName || 'unknown'
   );
 
   res.status(result.success ? 201 : 400).json(result);

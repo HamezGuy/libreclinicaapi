@@ -83,7 +83,7 @@ export const getUsers = async (
     const countResult = await pool.query(countQuery, params);
     const total = parseInt(countResult.rows[0].total);
 
-    // Get users
+    // Get users with their platform_role (single source of truth for permissions)
     const dataQuery = `
       SELECT DISTINCT ON (u.user_id)
         u.user_id,
@@ -97,15 +97,17 @@ export const getUsers = async (
         u.date_created,
         u.date_lastvisit,
         u.date_updated,
-        u.enabled,
+        (u.status_id = 1) as enabled,
         u.account_non_locked,
         u.lock_counter,
         u.run_webservices,
         u.enable_api_key,
         u.user_type_id,
-        ut.user_type
+        ut.user_type,
+        uae.platform_role as role
       FROM user_account u
       LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
+      LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
       LEFT JOIN study_user_role sur ON u.user_name = sur.user_name
       WHERE ${whereClause}
       ORDER BY u.user_id, u.date_created DESC
@@ -330,7 +332,12 @@ export const createUser = async (
       
       const lcRoleName = roleNameMap[data.role.toLowerCase()] || data.role;
 
-      // Find a valid study to assign: explicit studyId, or any study accessible to the creator
+      // Find a valid study to assign. Priority:
+      // 1. Explicit studyId from the request
+      // 2. Creator's own study assignments
+      // 3. Any study accessible to the creator's organization (org-scoped fallback)
+      // This ensures newly created users always get a study_user_role entry
+      // (and therefore won't get blanket 403s on every protected endpoint).
       let studyId = data.studyId || null;
       if (!studyId) {
         const creatorStudy = await client.query(
@@ -339,10 +346,37 @@ export const createUser = async (
         );
         if (creatorStudy.rows.length > 0) {
           studyId = creatorStudy.rows[0].study_id;
-        } else {
-          // Fallback: any active study
-          const anyStudy = await client.query(`SELECT study_id FROM study WHERE status_id = 1 ORDER BY study_id LIMIT 1`);
-          if (anyStudy.rows.length > 0) studyId = anyStudy.rows[0].study_id;
+        }
+      }
+      if (!studyId) {
+        // Org-scoped fallback: find a study that any member of the creator's org has access to
+        const orgStudy = await client.query(
+          `SELECT DISTINCT sr.study_id
+           FROM study_user_role sr
+           INNER JOIN user_account ua ON sr.user_name = ua.user_name
+           INNER JOIN acc_organization_member om ON ua.user_id = om.user_id
+           WHERE om.organization_id IN (
+             SELECT organization_id FROM acc_organization_member
+             WHERE user_id = $1 AND status = 'active'
+           )
+           AND sr.status_id = 1
+           ORDER BY sr.study_id LIMIT 1`,
+          [creatorId]
+        );
+        if (orgStudy.rows.length > 0) {
+          studyId = orgStudy.rows[0].study_id;
+          logger.info('Using org-scoped study fallback for new user', { userId, studyId });
+        }
+      }
+      if (!studyId) {
+        // Last resort: pick any active study so the user is not permission-less.
+        // This only fires if the creator has no org and no studies at all.
+        const anyStudy = await client.query(
+          `SELECT study_id FROM study WHERE status_id = 1 ORDER BY study_id LIMIT 1`
+        );
+        if (anyStudy.rows.length > 0) {
+          studyId = anyStudy.rows[0].study_id;
+          logger.warn('No org/creator studies found — falling back to first active study', { userId, studyId });
         }
       }
 
@@ -363,6 +397,17 @@ export const createUser = async (
         logger.info('Feature access defaults applied for new user', { userId, role: lcRoleName });
       } catch (featureError: any) {
         logger.warn('Could not apply feature defaults (non-fatal)', { error: featureError.message });
+      }
+
+      // Persist platform_role so the user's role is available even without study assignments
+      try {
+        await client.query(`
+          INSERT INTO user_account_extended (user_id, platform_role)
+          VALUES ($1, $2)
+          ON CONFLICT (user_id) DO UPDATE SET platform_role = EXCLUDED.platform_role
+        `, [userId, lcRoleName]);
+      } catch (prErr: any) {
+        logger.warn('Could not set platform_role (non-fatal)', { error: prErr.message });
       }
     }
 
@@ -434,9 +479,10 @@ export const updateUser = async (
     enabled?: boolean;
     accountNonLocked?: boolean;
     
-    // User type
+    // User type and role
     userTypeId?: number;
     activeStudyId?: number;
+    role?: string;
     
     // API Access
     runWebservices?: boolean;
@@ -577,10 +623,10 @@ export const updateUser = async (
 
     await client.query(updateQuery, params);
 
-    // Handle role change: update study_user_role for the user's active study
-    if ((data as any).role) {
-      const newRole = (data as any).role;
-      // Map frontend role names to DB role names (6 canonical + legacy aliases)
+    // Handle role change: update study_user_role for ALL of the user's study assignments.
+    // This is the "overall type" change — it should be global across all studies.
+    if (data.role) {
+      const newRole = data.role;
       const roleNameMap: Record<string, string> = {
         'admin': 'admin',
         'data_manager': 'data_manager',
@@ -588,7 +634,6 @@ export const updateUser = async (
         'coordinator': 'coordinator',
         'monitor': 'monitor',
         'viewer': 'viewer',
-        // Legacy aliases
         'data_entry': 'coordinator',
         'ra': 'coordinator',
         'ra2': 'coordinator',
@@ -596,38 +641,52 @@ export const updateUser = async (
       };
       const lcRoleName = roleNameMap[newRole.toLowerCase()] || newRole;
 
-      // Get the user's username
       const userNameResult = await client.query(
-        `SELECT user_name, active_study FROM user_account WHERE user_id = $1`,
+        `SELECT user_name FROM user_account WHERE user_id = $1`,
         [userId]
       );
       if (userNameResult.rows.length > 0) {
         const userName = userNameResult.rows[0].user_name;
-        const activeStudy = userNameResult.rows[0].active_study || 1;
 
-        // Validate study exists before role assignment
-        const studyCheck = await client.query(`SELECT study_id FROM study WHERE study_id = $1`, [activeStudy]);
-        if (studyCheck.rows.length === 0) {
-          logger.warn('Active study not found for role assignment, skipping', { userId, activeStudy });
-          // Don't fail the whole update — just skip role assignment
-        } else {
-        // Update existing role or insert new one for the active study
-        const existingRole = await client.query(
-          `SELECT role_name FROM study_user_role WHERE user_name = $1 AND study_id = $2 AND status_id = 1`,
-          [userName, activeStudy]
+        // Update ALL existing study_user_role rows for this user
+        const existingRoles = await client.query(
+          `SELECT study_id FROM study_user_role WHERE user_name = $1 AND status_id = 1`,
+          [userName]
         );
-        if (existingRole.rows.length > 0) {
+
+        if (existingRoles.rows.length > 0) {
           await client.query(
             `UPDATE study_user_role SET role_name = $1, date_updated = NOW(), update_id = $2
-             WHERE user_name = $3 AND study_id = $4 AND status_id = 1`,
-            [lcRoleName, updaterId, userName, activeStudy]
+             WHERE user_name = $3 AND status_id = 1`,
+            [lcRoleName, updaterId, userName]
           );
+          logger.info('User role updated across all studies', {
+            userId, userName, newRole: lcRoleName,
+            studyCount: existingRoles.rows.length
+          });
         } else {
-          await client.query(
-            `INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, date_created, user_name)
-             VALUES ($1, $2, 1, $3, NOW(), $4)`,
-            [lcRoleName, activeStudy, updaterId, userName]
+          // User has no study assignments — find a study to assign them to
+          // so they aren't permission-less. Use the updater's first study.
+          const updaterStudy = await client.query(
+            `SELECT study_id FROM study_user_role
+             WHERE user_name = (SELECT user_name FROM user_account WHERE user_id = $1)
+               AND status_id = 1
+             ORDER BY study_id LIMIT 1`,
+            [updaterId]
           );
+          if (updaterStudy.rows.length > 0) {
+            const studyId = updaterStudy.rows[0].study_id;
+            await client.query(
+              `INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, date_created, user_name)
+               VALUES ($1, $2, 1, $3, NOW(), $4)`,
+              [lcRoleName, studyId, updaterId, userName]
+            );
+            logger.info('User had no study assignments — created one', {
+              userId, userName, newRole: lcRoleName, studyId
+            });
+          } else {
+            logger.warn('Cannot assign role: neither user nor updater have study assignments', { userId });
+          }
         }
 
         // Also update user_type_id based on role
@@ -642,17 +701,23 @@ export const updateUser = async (
           [newUserTypeId, userId]
         );
 
-        logger.info('User role updated', { userId, userName, newRole: lcRoleName, studyId: activeStudy });
-
-        // Apply feature access defaults for the new role
         try {
           await applyRoleDefaults(userId, lcRoleName, updaterId);
           logger.info('Feature access defaults applied for new role', { userId, role: lcRoleName });
         } catch (featureError: any) {
-          // Non-fatal: feature access table may not exist yet on first deploy
           logger.warn('Could not apply feature defaults (non-fatal)', { error: featureError.message });
         }
-        } // end studyCheck else block
+
+        // Persist platform_role so it's available even without study assignments
+        try {
+          await client.query(`
+            INSERT INTO user_account_extended (user_id, platform_role)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET platform_role = EXCLUDED.platform_role
+          `, [userId, lcRoleName]);
+        } catch (prErr: any) {
+          logger.warn('Could not set platform_role (non-fatal)', { error: prErr.message });
+        }
       }
     }
 

@@ -61,6 +61,7 @@ export interface ExportResult {
     filename: string;
     mimeType: string;
     recordCount?: number;
+    isBuffer?: boolean;
   };
   error?: string;
 }
@@ -383,13 +384,33 @@ export const executeExport = async (
         mimeType = 'text/csv';
         extension = 'csv';
         break;
-      case 'xlsx':
-        // XLSX is exported as CSV with Excel-compatible encoding
-        // (true XLSX binary would require a library like exceljs)
-        content = '\uFEFF' + await buildCsvExport(datasetConfig, username); // BOM for Excel
-        mimeType = 'text/csv';
-        extension = 'csv'; // Deliver as CSV that Excel can open
+      case 'xlsx': {
+        const csvData = await buildCsvExport(datasetConfig, username);
+        try {
+          const ExcelJS = require('exceljs');
+          const workbook = new ExcelJS.Workbook();
+          const sheet = workbook.addWorksheet('Export');
+          const lines = csvData.split('\n').filter((l: string) => l.trim());
+          for (let i = 0; i < lines.length; i++) {
+            const cells = lines[i].split(',').map((c: string) => c.replace(/^"|"$/g, ''));
+            sheet.addRow(cells);
+          }
+          // Style header row
+          if (sheet.getRow(1)) {
+            sheet.getRow(1).font = { bold: true };
+          }
+          const buffer = await workbook.xlsx.writeBuffer();
+          content = buffer;
+          mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+          extension = 'xlsx';
+        } catch (xlsxError: any) {
+          logger.warn('ExcelJS not available, falling back to CSV', { error: xlsxError.message });
+          content = '\uFEFF' + csvData;
+          mimeType = 'text/csv';
+          extension = 'csv';
+        }
         break;
+      }
       case 'txt':
         content = await buildCsvExport(datasetConfig, username);
         mimeType = 'text/plain';
@@ -401,13 +422,15 @@ export const executeExport = async (
 
     const filename = `${datasetConfig.studyOID}_export_${Date.now()}.${extension}`;
 
+    const isBuffer = typeof content !== 'string';
     return {
       success: true,
       data: {
         content,
         filename,
         mimeType,
-        recordCount: content.split('\n').length - 1
+        recordCount: isBuffer ? 0 : content.split('\n').length - 1,
+        isBuffer,
       }
     };
   } catch (error: any) {

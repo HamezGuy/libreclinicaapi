@@ -482,31 +482,21 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
   );
   const userTypeName = typeResult.rows.length > 0 ? typeResult.rows[0].user_type : 'unknown';
 
-  // Determine primary role using the SAME logic as buildJwtPayload (auth.service.ts)
-  // Priority: 1) user_type_id check (sys admin), 2) study_user_role, 3) fallback
   let primaryRole: string;
   const userTypeId = dbUser.user_type_id;
 
   if (userTypeId === 1 || userTypeId === 0) {
-    // System admin or tech admin — always 'admin' regardless of study_user_role
     primaryRole = 'admin';
   } else {
-    // Get role(s) from study_user_role and pick the highest privilege
-    const roleResult = await pool.query(`
-      SELECT DISTINCT sur.role_name
-      FROM study_user_role sur
-      INNER JOIN user_account ua ON sur.user_name = ua.user_name
-      WHERE ua.user_id = $1 AND sur.status_id = 1
-    `, [user.userId]);
-
-    if (roleResult.rows.length > 0) {
-      // Use the role constants to pick the highest privilege role
-      const { getHighestRole } = await import('../constants/roles');
-      const roleNames = roleResult.rows.map((r: any) => r.role_name);
-      const highest = getHighestRole(roleNames);
-      primaryRole = highest.name !== 'invalid' ? highest.name : 'coordinator';
+    // Single source of truth: platform_role
+    const platformResult = await pool.query(
+      `SELECT platform_role FROM user_account_extended WHERE user_id = $1`,
+      [user.userId]
+    );
+    if (platformResult.rows.length > 0 && platformResult.rows[0].platform_role) {
+      primaryRole = platformResult.rows[0].platform_role;
     } else {
-      primaryRole = 'coordinator'; // Default for users with no study assignment
+      primaryRole = 'coordinator';
     }
   }
 

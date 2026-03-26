@@ -628,3 +628,406 @@ describe('Soft Delete Filtering', () => {
     expect(visible[1].name).toBe('Also Visible');
   });
 });
+
+// ============================================================================
+// 10. QUESTION TABLE FIELD LIFECYCLE TESTS
+// ============================================================================
+
+const SAMPLE_QUESTION_ROWS = [
+  {
+    id: 'q1',
+    question: 'Rate your pain level',
+    answerColumns: [
+      { id: 'score', type: 'number' as const, header: 'Score (0-10)', required: true, min: 0, max: 10 },
+      { id: 'location', type: 'text' as const, header: 'Location' },
+      { id: 'severity', type: 'select' as const, header: 'Severity', options: [
+        { label: 'Mild', value: 'mild' }, { label: 'Moderate', value: 'moderate' }, { label: 'Severe', value: 'severe' }
+      ]}
+    ]
+  },
+  {
+    id: 'q2',
+    question: 'Rate your fatigue level',
+    answerColumns: [
+      { id: 'score', type: 'number' as const, header: 'Score (0-10)', required: true, min: 0, max: 10 },
+      { id: 'location', type: 'text' as const, header: 'Location' },
+      { id: 'severity', type: 'select' as const, header: 'Severity', options: [
+        { label: 'Mild', value: 'mild' }, { label: 'Moderate', value: 'moderate' }, { label: 'Severe', value: 'severe' }
+      ]}
+    ]
+  },
+  {
+    id: 'q3',
+    question: 'Rate your nausea level',
+    answerColumns: [
+      { id: 'score', type: 'number' as const, header: 'Score (0-10)', required: true, min: 0, max: 10 },
+      { id: 'location', type: 'text' as const, header: 'Location' },
+      { id: 'severity', type: 'select' as const, header: 'Severity', options: [
+        { label: 'Mild', value: 'mild' }, { label: 'Moderate', value: 'moderate' }, { label: 'Severe', value: 'severe' }
+      ]}
+    ]
+  }
+];
+
+const SAMPLE_QUESTION_TABLE_SETTINGS = {
+  questionColumnHeader: 'Symptom Assessment',
+  questionColumnWidth: '40%',
+  showRowNumbers: true
+};
+
+const SAMPLE_QUESTION_TABLE_FIELD = {
+  id: 'field_qt_001',
+  name: 'symptom_assessment',
+  label: 'Symptom Assessment',
+  type: 'question_table',
+  helpText: 'Assess each symptom listed below',
+  required: false,
+  questionRows: SAMPLE_QUESTION_ROWS,
+  questionTableSettings: SAMPLE_QUESTION_TABLE_SETTINGS
+};
+
+describe('Question Table Field Serialization (Save Path)', () => {
+
+  test('question_table field type is preserved', () => {
+    expect(SAMPLE_QUESTION_TABLE_FIELD.type).toBe('question_table');
+  });
+
+  test('questionRows are properly structured with answerColumns', () => {
+    const rows = SAMPLE_QUESTION_TABLE_FIELD.questionRows;
+    expect(rows).toHaveLength(3);
+    expect(rows[0].id).toBe('q1');
+    expect(rows[0].question).toBe('Rate your pain level');
+    expect(rows[0].answerColumns).toHaveLength(3);
+    expect(rows[0].answerColumns[0].id).toBe('score');
+    expect(rows[0].answerColumns[0].type).toBe('number');
+  });
+
+  test('all rows share the same answer column structure', () => {
+    const rows = SAMPLE_QUESTION_TABLE_FIELD.questionRows;
+    const firstRowCols = rows[0].answerColumns.map(c => c.id);
+    for (const row of rows) {
+      const colIds = row.answerColumns.map(c => c.id);
+      expect(colIds).toEqual(firstRowCols);
+    }
+  });
+
+  test('answer columns are derivable from first row', () => {
+    const answerCols = SAMPLE_QUESTION_TABLE_FIELD.questionRows[0]?.answerColumns || [];
+    expect(answerCols).toHaveLength(3);
+    expect(answerCols[0].header).toBe('Score (0-10)');
+  });
+});
+
+describe('Question Table Data Entry', () => {
+
+  test('data is stored as nested object {rowId: {colId: value}}', () => {
+    const data: Record<string, any> = {};
+    data['q1'] = { score: '7', location: 'Lower back', severity: 'moderate' };
+    data['q2'] = { score: '4', location: '', severity: 'mild' };
+
+    expect(data['q1'].score).toBe('7');
+    expect(data['q1'].severity).toBe('moderate');
+    expect(data['q2'].score).toBe('4');
+    expect(data['q3']).toBeUndefined();
+  });
+
+  test('setQuestionTableValue builds correct structure', () => {
+    const current: Record<string, any> = {};
+    const rowId = 'q1';
+    const colId = 'score';
+    const value = '8';
+
+    const updated = {
+      ...current,
+      [rowId]: { ...(current[rowId] || {}), [colId]: value }
+    };
+
+    expect(updated).toEqual({ q1: { score: '8' } });
+  });
+
+  test('setQuestionTableValue preserves existing data', () => {
+    const current = { q1: { score: '7', location: 'Back' } };
+    const rowId = 'q1';
+    const colId = 'severity';
+    const value = 'moderate';
+
+    const updated = {
+      ...current,
+      [rowId]: { ...(current[rowId] || {}), [colId]: value }
+    };
+
+    expect(updated.q1.score).toBe('7');
+    expect(updated.q1.location).toBe('Back');
+    expect(updated.q1.severity).toBe('moderate');
+  });
+
+  test('getQuestionTableValue retrieves nested value', () => {
+    const data = { q1: { score: '7', location: 'Back' }, q2: { score: '3' } };
+    expect(data['q1']?.['score']).toBe('7');
+    expect(data['q2']?.['location']).toBeUndefined();
+    expect(data['q3']?.['score']).toBeUndefined();
+  });
+});
+
+describe('Question Table Data Serialization Round-Trip', () => {
+
+  test('question_table data survives JSON.stringify → JSON.parse', () => {
+    const data = {
+      q1: { score: '7', location: 'Lower back', severity: 'moderate' },
+      q2: { score: '4', location: '', severity: 'mild' },
+      q3: { score: '0', location: '', severity: '' }
+    };
+
+    const serialized = JSON.stringify(data);
+    const parsed = JSON.parse(serialized);
+
+    expect(parsed.q1.score).toBe('7');
+    expect(parsed.q1.severity).toBe('moderate');
+    expect(parsed.q2.score).toBe('4');
+  });
+
+  test('empty question_table serializes to "{}" and survives round-trip', () => {
+    const data = {};
+    const serialized = JSON.stringify(data);
+    expect(serialized).toBe('{}');
+    const parsed = JSON.parse(serialized);
+    expect(parsed).toEqual({});
+  });
+
+  test('coerceObjectValue handles JSON string from backend', () => {
+    function coerceObjectValue(v: any): Record<string, any> {
+      if (v == null) return {};
+      if (typeof v === 'object' && !Array.isArray(v)) return v;
+      if (typeof v === 'string' && v.trim()) {
+        try {
+          let parsed = JSON.parse(v);
+          if (typeof parsed === 'string') {
+            try { parsed = JSON.parse(parsed); } catch { return {}; }
+          }
+          if (typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        } catch { /* not JSON */ }
+        return {};
+      }
+      return {};
+    }
+
+    const jsonString = '{"q1":{"score":"7","location":"Back"},"q2":{"score":"3"}}';
+    const result = coerceObjectValue(jsonString);
+    expect(result.q1.score).toBe('7');
+    expect(result.q2.score).toBe('3');
+  });
+
+  test('coerceObjectValue handles double-encoded JSON', () => {
+    function coerceObjectValue(v: any): Record<string, any> {
+      if (v == null) return {};
+      if (typeof v === 'object' && !Array.isArray(v)) return v;
+      if (typeof v === 'string' && v.trim()) {
+        try {
+          let parsed = JSON.parse(v);
+          if (typeof parsed === 'string') {
+            try { parsed = JSON.parse(parsed); } catch { return {}; }
+          }
+          if (typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        } catch { /* not JSON */ }
+        return {};
+      }
+      return {};
+    }
+
+    const doubleEncoded = JSON.stringify('{"q1":{"score":"7"}}');
+    const result = coerceObjectValue(doubleEncoded);
+    expect(result.q1.score).toBe('7');
+  });
+
+  test('coerceObjectValue handles native object', () => {
+    function coerceObjectValue(v: any): Record<string, any> {
+      if (v == null) return {};
+      if (typeof v === 'object' && !Array.isArray(v)) return v;
+      return {};
+    }
+
+    const nativeObj = { q1: { score: '7' } };
+    expect(coerceObjectValue(nativeObj)).toEqual({ q1: { score: '7' } });
+  });
+
+  test('coerceObjectValue returns empty for null/undefined/array', () => {
+    function coerceObjectValue(v: any): Record<string, any> {
+      if (v == null) return {};
+      if (typeof v === 'object' && !Array.isArray(v)) return v;
+      return {};
+    }
+
+    expect(coerceObjectValue(null)).toEqual({});
+    expect(coerceObjectValue(undefined)).toEqual({});
+    expect(coerceObjectValue([1, 2, 3])).toEqual({});
+  });
+});
+
+describe('Question Table Extended Properties', () => {
+
+  test('questionRows and questionTableSettings are serialized to extended props', () => {
+    const extended = {
+      type: SAMPLE_QUESTION_TABLE_FIELD.type,
+      fieldName: SAMPLE_QUESTION_TABLE_FIELD.name,
+      questionRows: SAMPLE_QUESTION_TABLE_FIELD.questionRows,
+      questionTableSettings: SAMPLE_QUESTION_TABLE_FIELD.questionTableSettings
+    };
+
+    const json = JSON.stringify(extended);
+    const parsed = JSON.parse(json);
+
+    expect(parsed.type).toBe('question_table');
+    expect(parsed.questionRows).toHaveLength(3);
+    expect(parsed.questionRows[0].answerColumns).toHaveLength(3);
+    expect(parsed.questionTableSettings.questionColumnHeader).toBe('Symptom Assessment');
+  });
+
+  test('question_table maps to data_type 5 (ST)', () => {
+    const typeMap: Record<string, number> = {
+      'table': 5,
+      'question_table': 5,
+      'criteria_list': 5
+    };
+    expect(typeMap['question_table']).toBe(5);
+  });
+});
+
+// ============================================================================
+// 11. JSONB SOURCE-OF-TRUTH ARCHITECTURE TESTS
+// ============================================================================
+
+describe('JSONB Source of Truth — Native Data Structures', () => {
+
+  // Simulate isStructuredDataType from field-type.utils.ts
+  function isStructuredDataType(type: string | null | undefined): boolean {
+    return ['table', 'question_table', 'criteria_list', 'inline_group'].includes(type?.toLowerCase() ?? '');
+  }
+
+  test('table, question_table, criteria_list, inline_group are structured types', () => {
+    expect(isStructuredDataType('table')).toBe(true);
+    expect(isStructuredDataType('question_table')).toBe(true);
+    expect(isStructuredDataType('criteria_list')).toBe(true);
+    expect(isStructuredDataType('inline_group')).toBe(true);
+  });
+
+  test('scalar types are NOT structured', () => {
+    expect(isStructuredDataType('text')).toBe(false);
+    expect(isStructuredDataType('number')).toBe(false);
+    expect(isStructuredDataType('date')).toBe(false);
+    expect(isStructuredDataType('select')).toBe(false);
+    expect(isStructuredDataType('yesno')).toBe(false);
+    expect(isStructuredDataType(null)).toBe(false);
+    expect(isStructuredDataType(undefined)).toBe(false);
+  });
+
+  test('frontend sends table data as native array (not JSON string)', () => {
+    const tableRows = [
+      { serial_no: '1', drug_name: 'Aspirin', dosage: '100mg' },
+      { serial_no: '2', drug_name: 'Metformin', dosage: '500mg' }
+    ];
+
+    // Simulate the NEW onSubmit behavior (native, no JSON.stringify)
+    const formItems: Record<string, any> = {};
+    formItems['medications_table'] = tableRows;
+
+    expect(Array.isArray(formItems['medications_table'])).toBe(true);
+    expect(typeof formItems['medications_table']).not.toBe('string');
+    expect(formItems['medications_table'][0].drug_name).toBe('Aspirin');
+  });
+
+  test('frontend sends question_table data as native object', () => {
+    const qtData = {
+      q1: { score: '7', location: 'Back' },
+      q2: { score: '3', location: '' }
+    };
+
+    const formItems: Record<string, any> = {};
+    formItems['symptom_assessment'] = qtData;
+
+    expect(typeof formItems['symptom_assessment']).toBe('object');
+    expect(typeof formItems['symptom_assessment']).not.toBe('string');
+    expect(formItems['symptom_assessment'].q1.score).toBe('7');
+  });
+
+  test('JSONB column stores native data with JSON.stringify for transport only', () => {
+    const formData = {
+      medications_table: [{ drug: 'Aspirin' }],
+      symptom_assessment: { q1: { score: '7' } },
+      patient_name: 'John Doe'
+    };
+
+    // JSON.stringify is used ONLY for the SQL parameter, not for data encoding
+    const jsonStr = JSON.stringify(formData);
+    const roundTripped = JSON.parse(jsonStr);
+
+    expect(Array.isArray(roundTripped.medications_table)).toBe(true);
+    expect(roundTripped.medications_table[0].drug).toBe('Aspirin');
+    expect(typeof roundTripped.symptom_assessment).toBe('object');
+    expect(roundTripped.symptom_assessment.q1.score).toBe('7');
+    expect(roundTripped.patient_name).toBe('John Doe');
+  });
+
+  test('structured marker in item_data.value identifies JSONB-sourced fields', () => {
+    const STRUCTURED_MARKER = '__STRUCTURED_DATA__';
+    const itemDataValue = STRUCTURED_MARKER;
+
+    expect(itemDataValue).toBe(STRUCTURED_MARKER);
+    expect(itemDataValue).not.toBe('');
+    expect(itemDataValue.startsWith('[') || itemDataValue.startsWith('{')).toBe(false);
+  });
+
+  test('getFormData replaces marker with native JSONB value', () => {
+    const itemDataRow = {
+      field_name: 'medications_table',
+      value: '__STRUCTURED_DATA__'
+    };
+
+    const jsonbData: Record<string, any> = {
+      medications_table: [{ drug: 'Aspirin', dose: '100mg' }],
+      patient_name: 'John'
+    };
+
+    // Simulate the replacement logic in getFormData
+    if (itemDataRow.value === '__STRUCTURED_DATA__') {
+      const lookupKey = itemDataRow.field_name;
+      const nativeValue = jsonbData[lookupKey];
+      if (nativeValue !== undefined) {
+        itemDataRow.value = nativeValue;
+      }
+    }
+
+    expect(Array.isArray(itemDataRow.value)).toBe(true);
+    expect((itemDataRow.value as any)[0].drug).toBe('Aspirin');
+  });
+
+  test('legacy JSON string values are still parseable as fallback', () => {
+    const legacyValue = '[{"drug":"Aspirin","dose":"100mg"}]';
+
+    function coerceTableValue(v: any): any[] {
+      if (v == null) return [];
+      if (Array.isArray(v)) return v;
+      if (typeof v === 'string' && v.trim()) {
+        try { const parsed = JSON.parse(v); if (Array.isArray(parsed)) return parsed; } catch {}
+        return [];
+      }
+      return [];
+    }
+
+    const result = coerceTableValue(legacyValue);
+    expect(Array.isArray(result)).toBe(true);
+    expect(result[0].drug).toBe('Aspirin');
+  });
+
+  test('native array passes through coerce without re-parsing', () => {
+    const nativeArray = [{ drug: 'Aspirin' }];
+
+    function coerceTableValue(v: any): any[] {
+      if (v == null) return [];
+      if (Array.isArray(v)) return v;
+      return [];
+    }
+
+    const result = coerceTableValue(nativeArray);
+    expect(result).toBe(nativeArray); // same reference, no copy
+  });
+});

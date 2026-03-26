@@ -398,35 +398,40 @@ export const getUserStudies = async (userId: number): Promise<number[]> => {
 };
 
 /**
- * Build JWT payload from user data
+ * Build JWT payload from user data.
+ *
+ * Role resolution (single source of truth):
+ *   1. user_type_id 0 or 1  → 'admin'
+ *   2. platform_role from user_account_extended (set by createUser / updateUser)
+ *   3. Fallback: 'coordinator'
+ *
+ * study_user_role is NOT consulted here — it controls study-level access
+ * (requireStudyAccess), not feature-level permissions (requireRole).
  */
 export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
-  const roleNames = await getUserRoles(user.user_id);
   const studyIds = await getUserStudies(user.user_id);
-
-  // Check if user is system admin (user_type_id = 1 = ADMIN, 0 = TECH_ADMIN)
-  // This is stored in user_account table
-  // NOTE: Default must be 'ra' (not 'user') because 'user' is not a valid LibreClinica role name.
-  // The frontend getRoleByName('user') returns INVALID, causing permission failures.
-  // 'ra' (Data Entry Person) is the safest minimum-privilege default.
-  let primaryRole = 'ra';
   const userTypeId = (user as any).user_type_id;
-  
+
+  let primaryRole = 'coordinator';
+
   if (userTypeId === 1 || userTypeId === 0) {
-    // System admin or tech admin - set role to admin
     primaryRole = 'admin';
-    logger.info('User is system admin', { userId: user.user_id, userTypeId, username: user.user_name });
-  } else if (roleNames.length > 0) {
-    // Determine primary role using LibreClinica role hierarchy
-    // Lower ID = higher privilege (admin=1 is highest)
-    const highestRole = getHighestRole(roleNames);
-    primaryRole = highestRole.name !== 'invalid' ? highestRole.name : 'ra';
+  } else {
+    try {
+      const result = await pool.query(
+        `SELECT platform_role FROM user_account_extended WHERE user_id = $1`,
+        [user.user_id]
+      );
+      if (result.rows.length > 0 && result.rows[0].platform_role) {
+        primaryRole = result.rows[0].platform_role;
+      }
+    } catch (e: any) {
+      logger.warn('Could not read platform_role', { error: e.message, userId: user.user_id });
+    }
   }
 
-  // Get user type from database if not already present
   let userType = (user as any).user_type || 'user';
-  
-  // Fetch organization membership so it's embedded in the JWT
+
   let organizationIds: number[] = [];
   let organizationDetails: { organizationId: number; organizationName: string; role: string }[] = [];
   try {
@@ -447,15 +452,15 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
     logger.warn('Could not fetch org membership for JWT', { error: e.message });
   }
 
-  logger.info('JWT payload built', { userId: user.user_id, role: primaryRole, studyIds, roleNames, organizationIds });
-  
+  logger.info('JWT payload built', { userId: user.user_id, role: primaryRole, studyIds, organizationIds });
+
   return {
     userId: user.user_id,
-    userName: user.user_name, // Use userName for consistency with auth middleware
-    username: user.user_name, // Keep for backwards compatibility
+    userName: user.user_name,
+    username: user.user_name,
     email: user.email,
-    role: primaryRole,        // User's global role (highest across all studies)
-    userType: userType,       // Include user type for authorization checks
+    role: primaryRole,
+    userType: userType,
     studyIds,
     organizationIds,
     organizationDetails

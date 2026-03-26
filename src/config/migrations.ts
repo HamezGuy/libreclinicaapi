@@ -48,8 +48,11 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'study_extended_columns', fn: createStudyExtendedColumns },
     { name: 'study_group_class_extended', fn: createStudyGroupClassExtendedColumns },
     { name: 'event_crf_extended', fn: createEventCrfExtendedColumns },
+    { name: 'patient_event_form_table', fn: createPatientEventFormTable },
     { name: 'patient_event_form_unique_constraint', fn: addPatientEventFormUniqueConstraint },
     { name: 'unscheduled_visit_isolation', fn: createUnscheduledVisitIsolation },
+    { name: 'widen_description_columns', fn: widenDescriptionColumns },
+    { name: 'fix_double_encoded_json', fn: fixDoubleEncodedJson },
   ];
 
   let successCount = 0;
@@ -391,6 +394,19 @@ async function createEproTables(pool: any): Promise<void> {
       date_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Backfill columns that may be missing if the table was created by the .sql migration
+  for (const col of [
+    { name: 'status', type: "VARCHAR(20) DEFAULT 'in_progress'" },
+    { name: 'patient_account_id', type: 'INTEGER' },
+    { name: 'completion_percentage', type: 'NUMERIC DEFAULT 0' },
+    { name: 'severity_category', type: 'VARCHAR(50)' },
+    { name: 'subscale_scores', type: 'JSONB' },
+    { name: 'total_score', type: 'NUMERIC' },
+    { name: 'date_updated', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
+  ]) {
+    await pool.query(`ALTER TABLE acc_pro_response ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => {});
+  }
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pro_response_subject ON acc_pro_response(study_subject_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pro_response_status ON acc_pro_response(status)`);
@@ -913,20 +929,66 @@ async function createUserFeatureAccessTables(pool: any): Promise<void> {
 
   // Seed the feature registry with all application features
   const features = [
-    { key: 'dashboard', name: 'Dashboard', desc: 'Main dashboard with study overview', category: 'core', roleLevel: 0 },
-    { key: 'training', name: 'Training Module', desc: 'GCP training and certification management', category: 'compliance', roleLevel: 0 },
-    { key: 'econsent', name: 'eConsent', desc: 'Electronic informed consent management', category: 'clinical', roleLevel: 0 },
-    { key: 'epro', name: 'ePRO/Patient Portal', desc: 'Patient-reported outcomes and portal access', category: 'clinical', roleLevel: 30 },
-    { key: 'rtsm', name: 'RTSM/IRT', desc: 'Randomization and trial supply management', category: 'clinical', roleLevel: 60 },
-    { key: 'randomization', name: 'Randomization', desc: 'Subject randomization and unblinding', category: 'clinical', roleLevel: 40 },
-    { key: 'woundScanner', name: 'Wound Scanner', desc: 'iOS wound measurement and imaging', category: 'clinical', roleLevel: 0 },
-    { key: 'aiAssistant', name: 'AI Assistant', desc: 'AI-powered protocol and data assistant', category: 'tools', roleLevel: 0 },
-    { key: 'dataLock', name: 'Data Lock Management', desc: 'Database lock and freeze controls', category: 'data', roleLevel: 60 },
-    { key: 'userManagement', name: 'User Management', desc: 'Create, edit, and manage user accounts', category: 'admin', roleLevel: 70 },
-    { key: 'reporting', name: 'Reports & Exports', desc: 'Study data exports and compliance reports', category: 'data', roleLevel: 30 },
-    { key: 'siteManagement', name: 'Site Management', desc: 'Manage clinical trial sites', category: 'admin', roleLevel: 60 },
-    { key: 'studyManagement', name: 'Study Management', desc: 'Create and configure studies', category: 'admin', roleLevel: 70 },
-    { key: 'emailNotifications', name: 'Email Notifications', desc: 'Email notification management', category: 'tools', roleLevel: 60 },
+    // Core — always-visible base functionality
+    { key: 'dashboard', name: 'Dashboard', desc: 'Main dashboard with study overview and patient management', category: 'core', roleLevel: 0 },
+    { key: 'myTasks', name: 'My Tasks', desc: 'Personal task queue and workflow items', category: 'core', roleLevel: 0 },
+    { key: 'notifications', name: 'Notifications', desc: 'In-app notifications and notification preferences', category: 'core', roleLevel: 0 },
+
+    // Patient & Subject Management
+    { key: 'patientManagement', name: 'Patient Management', desc: 'View, search, enroll, and edit patient/subject records', category: 'patients', roleLevel: 0 },
+    { key: 'patientEnrollment', name: 'Patient Enrollment', desc: 'Enroll new patients into studies', category: 'patients', roleLevel: 20 },
+    { key: 'patientPhi', name: 'Patient PHI Access', desc: 'View protected health information (SSN, DOB, contact info)', category: 'patients', roleLevel: 30 },
+
+    // Data Entry & Forms
+    { key: 'formDataEntry', name: 'Form Data Entry', desc: 'Fill in and edit eCRF form data for patients', category: 'data_entry', roleLevel: 0 },
+    { key: 'formManagement', name: 'Form / Template Management', desc: 'Create, edit, publish, and archive CRF form templates', category: 'data_entry', roleLevel: 40 },
+    { key: 'formLayout', name: 'Form Layout Editor', desc: 'Visual drag-and-drop form layout configuration', category: 'data_entry', roleLevel: 40 },
+    { key: 'dde', name: 'Double Data Entry', desc: 'Dual data entry for transcription verification', category: 'data_entry', roleLevel: 30 },
+    { key: 'dataImport', name: 'Data Import', desc: 'Import patient and form data from external sources', category: 'data_entry', roleLevel: 60 },
+    { key: 'fileUploads', name: 'File Uploads', desc: 'Upload and attach files and images to form fields', category: 'data_entry', roleLevel: 0 },
+    { key: 'ocrScanning', name: 'OCR Paper Form Scanning', desc: 'Scan and digitize paper CRFs using optical character recognition', category: 'data_entry', roleLevel: 30 },
+
+    // Clinical Operations
+    { key: 'econsent', name: 'eConsent', desc: 'Electronic informed consent creation, signing, and tracking', category: 'clinical', roleLevel: 0 },
+    { key: 'epro', name: 'ePRO / Patient Portal', desc: 'Patient-reported outcomes instruments and patient portal', category: 'clinical', roleLevel: 30 },
+    { key: 'rtsm', name: 'RTSM / IRT', desc: 'Randomization and trial supply management (kit tracking, dispensing)', category: 'clinical', roleLevel: 60 },
+    { key: 'randomization', name: 'Randomization', desc: 'Subject randomization, unblinding, and stratification', category: 'clinical', roleLevel: 40 },
+    { key: 'woundScanner', name: 'Wound Scanner', desc: 'iOS wound measurement, imaging, and healing trajectory tracking', category: 'clinical', roleLevel: 0 },
+    { key: 'transfers', name: 'Subject Transfers', desc: 'Transfer subjects between clinical sites', category: 'clinical', roleLevel: 40 },
+    { key: 'adverseEvents', name: 'Adverse Events', desc: 'Adverse event and serious AE reporting', category: 'clinical', roleLevel: 20 },
+    { key: 'coding', name: 'Medical Coding', desc: 'MedDRA (conditions/AEs) and WHODrug (medications) coding', category: 'clinical', roleLevel: 40 },
+    { key: 'studyVisits', name: 'Study Visits / Phases', desc: 'Manage study visit schedules, event definitions, and windows', category: 'clinical', roleLevel: 40 },
+
+    // Data Quality & Queries
+    { key: 'queries', name: 'Data Queries', desc: 'Create, respond to, escalate, and resolve data discrepancy queries', category: 'data_quality', roleLevel: 0 },
+    { key: 'validationRules', name: 'Validation Rules', desc: 'Configure field-level, cross-field, and cross-form edit checks', category: 'data_quality', roleLevel: 60 },
+    { key: 'branching', name: 'Branching / Skip Logic', desc: 'Configure conditional field visibility, form linking, and skip logic', category: 'data_quality', roleLevel: 60 },
+
+    // Compliance & Signatures (21 CFR Part 11)
+    { key: 'sdv', name: 'Source Data Verification', desc: 'SDV dashboard, field-level verification, and verification workflows', category: 'compliance', roleLevel: 30 },
+    { key: 'eSignature', name: 'Electronic Signatures', desc: 'Apply 21 CFR Part 11 compliant electronic signatures to forms', category: 'compliance', roleLevel: 20 },
+    { key: 'dataLock', name: 'Data Lock / Freeze', desc: 'Lock and freeze form data, database locks, and point-in-time snapshots', category: 'compliance', roleLevel: 60 },
+    { key: 'audit', name: 'Audit Trail', desc: 'View and export 21 CFR Part 11 compliant audit logs', category: 'compliance', roleLevel: 40 },
+    { key: 'training', name: 'Training & Certification', desc: 'GCP training modules, quizzes, certificates, and compliance tracking', category: 'compliance', roleLevel: 0 },
+    { key: 'complianceDashboard', name: 'Compliance Dashboard', desc: 'Overall compliance status, missing signatures, overdue SDV, and 21 CFR Part 11 checks', category: 'compliance', roleLevel: 30 },
+
+    // Reports & Exports
+    { key: 'reporting', name: 'Reports & Analytics', desc: 'Study data reports, enrollment metrics, and compliance dashboards', category: 'reports', roleLevel: 30 },
+    { key: 'dataExport', name: 'Data Export', desc: 'Export study data in ODM XML, CSV, SAS, and regulatory formats', category: 'reports', roleLevel: 30 },
+    { key: 'printPdf', name: 'Print / PDF Generation', desc: 'Print blank and filled CRFs, generate audit-ready PDFs', category: 'reports', roleLevel: 0 },
+
+    // Administration
+    { key: 'userManagement', name: 'User Management', desc: 'Create, edit, deactivate user accounts; assign roles and permissions', category: 'admin', roleLevel: 70 },
+    { key: 'studyManagement', name: 'Study Management', desc: 'Create and configure studies, protocols, and study parameters', category: 'admin', roleLevel: 70 },
+    { key: 'siteManagement', name: 'Site Management', desc: 'Manage clinical trial site locations, PIs, and IRB info', category: 'admin', roleLevel: 60 },
+    { key: 'workflows', name: 'Workflow Configuration', desc: 'Configure form lifecycles, SDV requirements, signature rules, and task routing', category: 'admin', roleLevel: 60 },
+    { key: 'adminAnalytics', name: 'User Analytics', desc: 'User activity analytics, login history, and usage statistics', category: 'admin', roleLevel: 70 },
+    { key: 'emailNotifications', name: 'Email Notifications', desc: 'Email templates, delivery queue, and notification management', category: 'admin', roleLevel: 60 },
+    { key: 'backupRecovery', name: 'Backup & Recovery', desc: 'Database backups, restore points, and disaster recovery', category: 'admin', roleLevel: 100 },
+    { key: 'systemMonitoring', name: 'System Monitoring', desc: 'Server health, API metrics, and performance monitoring', category: 'admin', roleLevel: 100 },
+
+    // Tools & Utilities
+    { key: 'aiAssistant', name: 'AI Assistant', desc: 'AI-powered protocol assistant, data analysis, and natural language queries', category: 'tools', roleLevel: 0 },
   ];
 
   for (const f of features) {
@@ -940,12 +1002,76 @@ async function createUserFeatureAccessTables(pool: any): Promise<void> {
 
   // Seed default role-feature mappings (6 industry-standard EDC roles)
   const roleDefaults: Record<string, string[]> = {
-    'admin':        ['dashboard', 'training', 'econsent', 'epro', 'rtsm', 'randomization', 'woundScanner', 'aiAssistant', 'dataLock', 'userManagement', 'reporting', 'siteManagement', 'studyManagement', 'emailNotifications'],
-    'data_manager': ['dashboard', 'training', 'econsent', 'epro', 'rtsm', 'randomization', 'woundScanner', 'aiAssistant', 'dataLock', 'reporting', 'siteManagement', 'studyManagement'],
-    'investigator': ['dashboard', 'training', 'econsent', 'epro', 'randomization', 'woundScanner', 'aiAssistant', 'reporting'],
-    'coordinator':  ['dashboard', 'training', 'econsent', 'woundScanner', 'aiAssistant'],
-    'monitor':      ['dashboard', 'training', 'econsent', 'reporting', 'aiAssistant'],
-    'viewer':       ['dashboard', 'training', 'reporting'],
+    'admin': [
+      // Core
+      'dashboard', 'myTasks', 'notifications',
+      // Patient
+      'patientManagement', 'patientEnrollment', 'patientPhi',
+      // Data Entry
+      'formDataEntry', 'formManagement', 'formLayout', 'dde', 'dataImport', 'fileUploads', 'ocrScanning',
+      // Clinical
+      'econsent', 'epro', 'rtsm', 'randomization', 'woundScanner', 'transfers',
+      'adverseEvents', 'coding', 'studyVisits',
+      // Data Quality
+      'queries', 'validationRules', 'branching',
+      // Compliance
+      'sdv', 'eSignature', 'dataLock', 'audit', 'training', 'complianceDashboard',
+      // Reports
+      'reporting', 'dataExport', 'printPdf',
+      // Admin
+      'userManagement', 'studyManagement', 'siteManagement', 'workflows',
+      'adminAnalytics', 'emailNotifications', 'backupRecovery', 'systemMonitoring',
+      // Tools
+      'aiAssistant',
+    ],
+    'data_manager': [
+      'dashboard', 'myTasks', 'notifications',
+      'patientManagement', 'patientEnrollment', 'patientPhi',
+      'formDataEntry', 'formManagement', 'formLayout', 'dde', 'dataImport', 'fileUploads', 'ocrScanning',
+      'econsent', 'epro', 'rtsm', 'randomization', 'woundScanner', 'transfers',
+      'adverseEvents', 'coding', 'studyVisits',
+      'queries', 'validationRules', 'branching',
+      'sdv', 'eSignature', 'dataLock', 'audit', 'training', 'complianceDashboard',
+      'reporting', 'dataExport', 'printPdf',
+      'studyManagement', 'siteManagement', 'workflows',
+      'aiAssistant',
+    ],
+    'investigator': [
+      'dashboard', 'myTasks', 'notifications',
+      'patientManagement', 'patientEnrollment', 'patientPhi',
+      'formDataEntry', 'fileUploads',
+      'econsent', 'epro', 'randomization', 'woundScanner', 'adverseEvents',
+      'queries',
+      'eSignature', 'audit', 'training',
+      'reporting', 'dataExport', 'printPdf',
+      'aiAssistant',
+    ],
+    'coordinator': [
+      'dashboard', 'myTasks', 'notifications',
+      'patientManagement', 'patientEnrollment', 'patientPhi',
+      'formDataEntry', 'fileUploads', 'ocrScanning',
+      'econsent', 'woundScanner', 'adverseEvents', 'transfers',
+      'queries',
+      'training',
+      'printPdf',
+      'aiAssistant',
+    ],
+    'monitor': [
+      'dashboard', 'myTasks', 'notifications',
+      'patientManagement', 'patientPhi',
+      'econsent',
+      'queries',
+      'sdv', 'eSignature', 'audit', 'training', 'complianceDashboard',
+      'reporting', 'dataExport', 'printPdf',
+      'aiAssistant',
+    ],
+    'viewer': [
+      'dashboard', 'myTasks', 'notifications',
+      'patientManagement',
+      'queries',
+      'training',
+      'reporting', 'printPdf',
+    ],
   };
 
   for (const [roleName, featureKeys] of Object.entries(roleDefaults)) {
@@ -1249,6 +1375,13 @@ async function createUserAccountExtendedTable(pool: any): Promise<void> {
       password_version INTEGER DEFAULT 2
     )
   `);
+  // Add platform_role column if it doesn't exist (stores the user's role
+  // independent of study_user_role, so users without study assignments
+  // still have their correct permission level).
+  await pool.query(`
+    ALTER TABLE user_account_extended
+    ADD COLUMN IF NOT EXISTS platform_role VARCHAR(40)
+  `).catch(() => {});
   logger.info('User account extended table verified');
 }
 
@@ -1410,6 +1543,40 @@ async function createEventCrfExtendedColumns(pool: any): Promise<void> {
 }
 
 // ============================================================================
+// Patient Event Form Table — frozen JSONB snapshots per patient per visit form.
+// Must exist BEFORE any enrollment or event scheduling so snapshots can be created.
+// ============================================================================
+async function createPatientEventFormTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS patient_event_form (
+      patient_event_form_id SERIAL PRIMARY KEY,
+      study_event_id INTEGER NOT NULL,
+      event_crf_id INTEGER,
+      crf_id INTEGER NOT NULL,
+      crf_version_id INTEGER NOT NULL,
+      study_subject_id INTEGER NOT NULL,
+      form_name VARCHAR(255) NOT NULL,
+      form_structure JSONB NOT NULL DEFAULT '{}',
+      form_data JSONB NOT NULL DEFAULT '{}',
+      completion_status VARCHAR(30) NOT NULL DEFAULT 'not_started',
+      is_locked BOOLEAN NOT NULL DEFAULT false,
+      is_frozen BOOLEAN NOT NULL DEFAULT false,
+      sdv_status BOOLEAN NOT NULL DEFAULT false,
+      ordinal INTEGER DEFAULT 1,
+      date_created TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      date_updated TIMESTAMP WITH TIME ZONE,
+      created_by INTEGER,
+      updated_by INTEGER
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pef_study_event ON patient_event_form(study_event_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pef_subject ON patient_event_form(study_subject_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pef_event_crf ON patient_event_form(event_crf_id)`);
+
+  logger.info('patient_event_form table verified');
+}
+
+// ============================================================================
 // Patient Event Form — unique constraint on event_crf_id (needed for UPSERT)
 // ============================================================================
 async function addPatientEventFormUniqueConstraint(pool: any): Promise<void> {
@@ -1466,4 +1633,138 @@ async function createUnscheduledVisitIsolation(pool: any): Promise<void> {
   } catch { /* best effort */ }
 
   logger.info('Unscheduled visit isolation migration verified');
+}
+
+// ============================================================================
+// Widen varchar(4000) columns to TEXT for extended properties / options
+// The item.description column stores serialized JSON (extended props) that
+// easily exceeds 4000 chars for complex fields (tables, criteria, branching).
+// response_set.options_text/options_values can also overflow for many options.
+// ============================================================================
+async function widenDescriptionColumns(pool: any): Promise<void> {
+  const columns = [
+    { table: 'item', column: 'description' },
+    { table: 'response_set', column: 'options_text' },
+    { table: 'response_set', column: 'options_values' },
+    { table: 'response_set', column: 'label' },
+    { table: 'crf_version', column: 'description' },
+  ];
+
+  for (const { table, column } of columns) {
+    try {
+      const check = await pool.query(`
+        SELECT data_type, character_maximum_length
+        FROM information_schema.columns
+        WHERE table_name = $1 AND column_name = $2
+      `, [table, column]);
+      if (check.rows.length > 0 && check.rows[0].character_maximum_length) {
+        await pool.query(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE TEXT`);
+        logger.info(`Widened ${table}.${column} from varchar(${check.rows[0].character_maximum_length}) to TEXT`);
+      }
+    } catch (e: any) {
+      // Column may not exist or already be TEXT
+    }
+  }
+
+  logger.info('Description column widening verified');
+}
+
+// ============================================================================
+// Fix double-encoded JSON in patient_event_form.form_data and item_data.value
+//
+// Symptom: table field data stored as a JSON-encoded string inside JSONB,
+//   e.g. form_data = {"field": "[{\"col\":\"val\"}]"}  (string, not array)
+//   instead of {"field": [{"col":"val"}]}               (proper array)
+//
+// Also fixes item_data.value where table data was double-escaped,
+//   e.g. value = '"[{\\"col\\":\\"val\\"}]"' instead of '[{"col":"val"}]'
+// ============================================================================
+async function fixDoubleEncodedJson(pool: any): Promise<void> {
+  let fixed = 0;
+
+  // Phase 1: Fix patient_event_form.form_data JSONB
+  // Find rows where any value in the form_data object is a string that looks
+  // like a JSON array/object (starts with [ or {). These are double-encoded.
+  try {
+    const rows = await pool.query(`
+      SELECT patient_event_form_id, form_data
+      FROM patient_event_form
+      WHERE form_data IS NOT NULL
+        AND form_data::text != '{}'
+        AND form_data::text LIKE '%"[%'
+    `);
+
+    for (const row of rows.rows) {
+      const data = row.form_data;
+      if (!data || typeof data !== 'object') continue;
+
+      let changed = false;
+      const cleaned: Record<string, any> = {};
+
+      for (const [key, value] of Object.entries(data)) {
+        if (typeof value === 'string' && value.length > 1) {
+          const trimmed = (value as string).trim();
+          if ((trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+              (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+            try {
+              cleaned[key] = JSON.parse(trimmed);
+              changed = true;
+              continue;
+            } catch { /* not valid JSON, keep as string */ }
+          }
+        }
+        cleaned[key] = value;
+      }
+
+      if (changed) {
+        await pool.query(
+          `UPDATE patient_event_form SET form_data = $1::jsonb WHERE patient_event_form_id = $2`,
+          [JSON.stringify(cleaned), row.patient_event_form_id]
+        );
+        fixed++;
+      }
+    }
+    if (fixed > 0) {
+      logger.info(`Fixed ${fixed} double-encoded form_data rows in patient_event_form`);
+    }
+  } catch (e: any) {
+    logger.warn('Phase 1 (fix form_data JSONB) skipped:', e.message);
+  }
+
+  // Phase 2: Fix item_data.value for double-escaped JSON strings
+  // These look like: '"[{\"col\":\"val\"}]"' (note leading/trailing quotes)
+  let fixedItems = 0;
+  try {
+    const itemRows = await pool.query(`
+      SELECT item_data_id, value
+      FROM item_data
+      WHERE deleted = false
+        AND value IS NOT NULL
+        AND LENGTH(value) > 4
+        AND (value LIKE '"[%' OR value LIKE '"{%')
+    `);
+
+    for (const row of itemRows.rows) {
+      const v = row.value;
+      if (typeof v !== 'string') continue;
+      try {
+        const parsed = JSON.parse(v);
+        if (typeof parsed === 'string' && (parsed.startsWith('[') || parsed.startsWith('{'))) {
+          JSON.parse(parsed);
+          await pool.query(
+            `UPDATE item_data SET value = $1 WHERE item_data_id = $2`,
+            [parsed, row.item_data_id]
+          );
+          fixedItems++;
+        }
+      } catch { /* not double-encoded */ }
+    }
+    if (fixedItems > 0) {
+      logger.info(`Fixed ${fixedItems} double-encoded item_data.value rows`);
+    }
+  } catch (e: any) {
+    logger.warn('Phase 2 (fix item_data values) skipped:', e.message);
+  }
+
+  logger.info(`Double-encoded JSON fix complete: ${fixed} JSONB rows, ${fixedItems} item_data rows`);
 }
