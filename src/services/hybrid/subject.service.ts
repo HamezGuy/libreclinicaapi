@@ -307,7 +307,7 @@ const createSubjectDirect = async (
       request.secondaryId || '',
       subjectId,
       request.studyId,
-      request.enrollmentDate || todayIso(),
+      request.enrollmentDate || null,
       timeZone,
       userId,
       ocOid
@@ -360,7 +360,7 @@ const createSubjectDirect = async (
     // This implements the COPY PHASES TO PATIENT requirement
     let scheduledEventIds: number[] = [];
     let totalFormsCreated = 0;
-    const enrollmentDate = request.enrollmentDate || todayIso();
+    const enrollmentDate = request.enrollmentDate || null;
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
     // Resolve to parent study for event definitions.
@@ -597,7 +597,7 @@ const createSubjectDirect = async (
         newValue: JSON.stringify({
           label: request.studySubjectId,
           studyId: request.studyId,
-          enrollmentDate: request.enrollmentDate || todayIso(),
+          enrollmentDate: request.enrollmentDate || null,
           gender: request.gender,
           dateOfBirth: request.dateOfBirth
         }),

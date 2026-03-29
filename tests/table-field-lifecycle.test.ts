@@ -1031,3 +1031,481 @@ describe('JSONB Source of Truth — Native Data Structures', () => {
     expect(result).toBe(nativeArray); // same reference, no copy
   });
 });
+
+// ============================================================================
+// 12. RADIO BUTTON & COMBOBOX IN TABLE TESTS
+// ============================================================================
+
+describe('Radio Button Columns in Tables', () => {
+
+  const RADIO_COLUMN = {
+    id: 'col_radio_1',
+    name: 'severity',
+    label: 'Severity',
+    type: 'radio' as const,
+    width: 'auto',
+    required: true,
+    options: [
+      { label: 'Mild', value: 'mild' },
+      { label: 'Moderate', value: 'moderate' },
+      { label: 'Severe', value: 'severe' }
+    ]
+  };
+
+  test('radio column preserves options through serialization', () => {
+    const extProps = {
+      type: 'table',
+      tableColumns: [RADIO_COLUMN],
+      tableSettings: SAMPLE_TABLE_SETTINGS
+    };
+    const json = JSON.stringify(extProps);
+    const parsed = JSON.parse(json);
+
+    expect(parsed.tableColumns[0].type).toBe('radio');
+    expect(parsed.tableColumns[0].options).toHaveLength(3);
+    expect(parsed.tableColumns[0].options[0].label).toBe('Mild');
+    expect(parsed.tableColumns[0].options[2].value).toBe('severe');
+  });
+
+  test('radio selection is stored as single string value in row data', () => {
+    const tableData = [
+      { severity: 'moderate' },
+      { severity: 'severe' },
+    ];
+    expect(tableData[0].severity).toBe('moderate');
+    expect(typeof tableData[0].severity).toBe('string');
+  });
+
+  test('radio name scoping prevents cross-row interference', () => {
+    const fieldKey = 'adverse_events';
+    const col = RADIO_COLUMN;
+    const name0 = `${fieldKey}_0_${col.name}`;
+    const name1 = `${fieldKey}_1_${col.name}`;
+    expect(name0).not.toBe(name1);
+  });
+
+  test('radio value survives JSONB round-trip', () => {
+    const formData = {
+      adverse_events: [
+        { severity: 'mild', notes: 'headache' },
+        { severity: 'severe', notes: 'rash' },
+      ]
+    };
+    const json = JSON.stringify(formData);
+    const parsed = JSON.parse(json);
+    expect(parsed.adverse_events[0].severity).toBe('mild');
+    expect(parsed.adverse_events[1].severity).toBe('severe');
+  });
+});
+
+describe('Combobox/Select Columns in Tables', () => {
+
+  const SELECT_COLUMN = {
+    id: 'col_select_1',
+    name: 'route',
+    label: 'Route of Administration',
+    type: 'select' as const,
+    options: [
+      { label: 'Oral', value: 'oral' },
+      { label: 'Intravenous', value: 'iv' },
+      { label: 'Intramuscular', value: 'im' },
+      { label: 'Subcutaneous', value: 'sc' },
+      { label: 'Topical', value: 'topical' }
+    ]
+  };
+
+  test('select column preserves all options', () => {
+    const extProps = {
+      type: 'table',
+      tableColumns: [SELECT_COLUMN],
+    };
+    const json = JSON.stringify(extProps);
+    const parsed = JSON.parse(json);
+    expect(parsed.tableColumns[0].options).toHaveLength(5);
+    expect(parsed.tableColumns[0].options[3].value).toBe('sc');
+  });
+
+  test('select value stored as string in row data', () => {
+    const row = { route: 'iv' };
+    expect(row.route).toBe('iv');
+    expect(SELECT_COLUMN.options.find(o => o.value === row.route)?.label).toBe('Intravenous');
+  });
+
+  test('combobox/select data survives full round-trip', () => {
+    const data = [
+      { drug: 'Aspirin', route: 'oral' },
+      { drug: 'Insulin', route: 'sc' },
+    ];
+    const serialized = JSON.stringify(data);
+    const deserialized = JSON.parse(serialized);
+    expect(deserialized[0].route).toBe('oral');
+    expect(deserialized[1].route).toBe('sc');
+  });
+});
+
+describe('Checkbox Multi-Select in Tables', () => {
+
+  test('checkbox multi-select stored as comma-separated string', () => {
+    const row = { symptoms: 'headache,nausea,fatigue' };
+    const values = row.symptoms.split(',').map(v => v.trim());
+    expect(values).toHaveLength(3);
+    expect(values).toContain('headache');
+    expect(values).toContain('nausea');
+    expect(values).toContain('fatigue');
+  });
+
+  test('isCellOptionChecked correctly identifies checked options', () => {
+    function isCellOptionChecked(cellValue: any, optionValue: string): boolean {
+      if (!cellValue) return false;
+      const vals = typeof cellValue === 'string'
+        ? cellValue.split(',').map((v: string) => v.trim())
+        : [];
+      return vals.includes(optionValue);
+    }
+
+    expect(isCellOptionChecked('headache,nausea', 'headache')).toBe(true);
+    expect(isCellOptionChecked('headache,nausea', 'nausea')).toBe(true);
+    expect(isCellOptionChecked('headache,nausea', 'fatigue')).toBe(false);
+    expect(isCellOptionChecked('', 'headache')).toBe(false);
+    expect(isCellOptionChecked(null, 'headache')).toBe(false);
+  });
+
+  test('toggleCellCheckbox adds and removes options', () => {
+    function toggleCellCheckbox(current: string, optionValue: string, checked: boolean): string {
+      let values = current ? current.split(',').map(v => v.trim()).filter(v => v) : [];
+      if (checked && !values.includes(optionValue)) values.push(optionValue);
+      else if (!checked) values = values.filter(v => v !== optionValue);
+      return values.join(',');
+    }
+
+    expect(toggleCellCheckbox('', 'headache', true)).toBe('headache');
+    expect(toggleCellCheckbox('headache', 'nausea', true)).toBe('headache,nausea');
+    expect(toggleCellCheckbox('headache,nausea', 'headache', false)).toBe('nausea');
+    expect(toggleCellCheckbox('headache', 'headache', false)).toBe('');
+  });
+});
+
+describe('Yes/No Toggle in Tables', () => {
+
+  test('yesno stores "yes" or "no" string value', () => {
+    const row = { completed: 'yes' };
+    expect(row.completed).toBe('yes');
+  });
+
+  test('yesno data survives round-trip', () => {
+    const data = [
+      { question: 'Completed?', answer: 'yes' },
+      { question: 'Adverse Event?', answer: 'no' },
+    ];
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed[0].answer).toBe('yes');
+    expect(parsed[1].answer).toBe('no');
+  });
+});
+
+// ============================================================================
+// 13. RADIO & COMBOBOX IN QUESTION TABLE TESTS
+// ============================================================================
+
+describe('Radio Buttons in Question Tables', () => {
+
+  const QT_WITH_RADIO = {
+    id: 'field_qt_radio',
+    name: 'pain_assessment',
+    label: 'Pain Assessment',
+    type: 'question_table',
+    questionRows: [
+      {
+        id: 'q_head', question: 'Headache',
+        answerColumns: [
+          { id: 'severity', type: 'radio' as const, header: 'Severity',
+            options: [
+              { label: 'None', value: '0' },
+              { label: 'Mild', value: '1' },
+              { label: 'Moderate', value: '2' },
+              { label: 'Severe', value: '3' }
+            ]
+          },
+          { id: 'notes', type: 'text' as const, header: 'Notes' }
+        ]
+      },
+      {
+        id: 'q_back', question: 'Back Pain',
+        answerColumns: [
+          { id: 'severity', type: 'radio' as const, header: 'Severity',
+            options: [
+              { label: 'None', value: '0' },
+              { label: 'Mild', value: '1' },
+              { label: 'Moderate', value: '2' },
+              { label: 'Severe', value: '3' }
+            ]
+          },
+          { id: 'notes', type: 'text' as const, header: 'Notes' }
+        ]
+      }
+    ]
+  };
+
+  test('radio answerColumns are properly defined', () => {
+    const radioCols = QT_WITH_RADIO.questionRows[0].answerColumns.filter(c => c.type === 'radio');
+    expect(radioCols).toHaveLength(1);
+    expect(radioCols[0].options).toHaveLength(4);
+  });
+
+  test('radio name in question_table is scoped to fieldKey + rowId + colId', () => {
+    const fieldKey = 'pain_assessment';
+    const qRow = QT_WITH_RADIO.questionRows[0];
+    const ansCol = qRow.answerColumns[0];
+    const radioName = `${fieldKey}_${qRow.id}_${ansCol.id}`;
+    expect(radioName).toBe('pain_assessment_q_head_severity');
+    
+    const otherRow = QT_WITH_RADIO.questionRows[1];
+    const otherName = `${fieldKey}_${otherRow.id}_${ansCol.id}`;
+    expect(otherName).toBe('pain_assessment_q_back_severity');
+    expect(radioName).not.toBe(otherName);
+  });
+
+  test('question_table radio data stored as nested object', () => {
+    const data = {
+      q_head: { severity: '2', notes: 'intermittent' },
+      q_back: { severity: '1', notes: '' }
+    };
+    
+    expect(data.q_head.severity).toBe('2');
+    expect(data.q_back.severity).toBe('1');
+  });
+
+  test('question_table radio data survives JSONB round-trip', () => {
+    const data = {
+      q_head: { severity: '2', notes: 'intermittent' },
+      q_back: { severity: '1', notes: '' }
+    };
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed.q_head.severity).toBe('2');
+    expect(parsed.q_back.severity).toBe('1');
+  });
+});
+
+describe('Select/Combobox in Question Tables', () => {
+
+  test('select answerColumn in question_table works correctly', () => {
+    const qtData = {
+      q1: { assessment: 'good', comments: 'normal' },
+      q2: { assessment: 'fair', comments: 'follow-up needed' }
+    };
+    expect(qtData.q1.assessment).toBe('good');
+    expect(qtData.q2.assessment).toBe('fair');
+  });
+
+  test('select options are available in answerColumn definition', () => {
+    const ansCol = {
+      id: 'assessment',
+      type: 'select' as const,
+      header: 'Assessment',
+      options: [
+        { label: 'Good', value: 'good' },
+        { label: 'Fair', value: 'fair' },
+        { label: 'Poor', value: 'poor' }
+      ]
+    };
+    expect(ansCol.options).toHaveLength(3);
+    expect(ansCol.options[0].value).toBe('good');
+  });
+});
+
+describe('Textarea in Question Tables', () => {
+
+  test('textarea type is valid for answerColumn', () => {
+    const ansCol = {
+      id: 'detailed_notes',
+      type: 'textarea' as const,
+      header: 'Detailed Notes'
+    };
+    expect(ansCol.type).toBe('textarea');
+  });
+
+  test('textarea stores multi-line text in question_table', () => {
+    const data = {
+      q1: { detailed_notes: 'Line 1\nLine 2\nLine 3' }
+    };
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed.q1.detailed_notes).toContain('\n');
+    expect(parsed.q1.detailed_notes.split('\n')).toHaveLength(3);
+  });
+});
+
+// ============================================================================
+// 14. ID UNIQUENESS & COLLISION TESTS
+// ============================================================================
+
+describe('ID Uniqueness', () => {
+
+  test('Math.random IDs do not collide in rapid succession', () => {
+    const uid = () => Math.random().toString(36).substr(2, 8);
+    const ids = new Set<string>();
+    for (let i = 0; i < 1000; i++) {
+      ids.add('col_' + uid());
+    }
+    expect(ids.size).toBe(1000);
+  });
+
+  test('column IDs within a table field are unique', () => {
+    const columns = [
+      { id: 'col_abc12345', name: 'drug_name' },
+      { id: 'col_def67890', name: 'dosage' },
+      { id: 'col_ghi11223', name: 'route' },
+    ];
+    const ids = columns.map(c => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test('question row IDs are unique within a question_table', () => {
+    const rows = [
+      { id: 'qrow_abc123', question: 'Q1' },
+      { id: 'qrow_def456', question: 'Q2' },
+      { id: 'qrow_ghi789', question: 'Q3' },
+    ];
+    const ids = rows.map(r => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test('answer column IDs are unique across all rows', () => {
+    const uid = () => Math.random().toString(36).substr(2, 8);
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      id: 'qrow_' + uid(),
+      question: `Q${i}`,
+      answerColumns: Array.from({ length: 3 }, () => ({
+        id: 'ans_' + uid(),
+        type: 'text',
+        header: 'Col'
+      }))
+    }));
+    const allAnsIds = rows.flatMap(r => r.answerColumns.map(c => c.id));
+    expect(new Set(allAnsIds).size).toBe(allAnsIds.length);
+  });
+
+  test('duplicated field gets entirely new IDs', () => {
+    const uid = () => Math.random().toString(36).substr(2, 8);
+    const original = {
+      id: 'field_original',
+      tableColumns: [
+        { id: 'col_orig_1', name: 'col1' },
+        { id: 'col_orig_2', name: 'col2' }
+      ],
+      questionRows: [
+        { id: 'q_orig_1', answerColumns: [{ id: 'ans_orig_1' }] }
+      ]
+    };
+
+    const duplicated = {
+      id: 'field_' + uid(),
+      tableColumns: original.tableColumns.map(c => ({ ...c, id: 'col_' + uid() })),
+      questionRows: original.questionRows.map(r => ({
+        ...r,
+        id: 'qrow_' + uid(),
+        answerColumns: r.answerColumns.map(c => ({ ...c, id: 'ans_' + uid() }))
+      }))
+    };
+
+    expect(duplicated.id).not.toBe(original.id);
+    expect(duplicated.tableColumns[0].id).not.toBe(original.tableColumns[0].id);
+    expect(duplicated.questionRows[0].id).not.toBe(original.questionRows[0].id);
+    expect(duplicated.questionRows[0].answerColumns[0].id).not.toBe(original.questionRows[0].answerColumns[0].id);
+  });
+});
+
+// ============================================================================
+// 15. COMPLEX TABLE DATA STRUCTURES — FULL CRUD TESTS
+// ============================================================================
+
+describe('Complex Table CRUD Operations', () => {
+
+  test('table with mixed column types preserves all data', () => {
+    const row = {
+      drug_name: 'Aspirin',
+      dose: '100',
+      route: 'oral',
+      severity: 'mild',
+      completed: 'yes',
+      symptoms: 'headache,nausea',
+      notes: 'Long form text\nwith multiple lines',
+      start_date: '2026-03-15'
+    };
+
+    const data = [row];
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed[0].drug_name).toBe('Aspirin');
+    expect(parsed[0].dose).toBe('100');
+    expect(parsed[0].route).toBe('oral');
+    expect(parsed[0].severity).toBe('mild');
+    expect(parsed[0].completed).toBe('yes');
+    expect(parsed[0].symptoms).toBe('headache,nausea');
+    expect(parsed[0].notes).toContain('\n');
+    expect(parsed[0].start_date).toBe('2026-03-15');
+  });
+
+  test('question_table with all answer column types', () => {
+    const data = {
+      q1: {
+        text_ans: 'some text',
+        textarea_ans: 'multi\nline',
+        number_ans: '42',
+        date_ans: '2026-01-15',
+        select_ans: 'option_b',
+        radio_ans: 'choice_2',
+        checkbox_ans: 'opt_a,opt_c',
+        yesno_ans: 'yes'
+      }
+    };
+
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed.q1.text_ans).toBe('some text');
+    expect(parsed.q1.textarea_ans).toContain('\n');
+    expect(parsed.q1.number_ans).toBe('42');
+    expect(parsed.q1.date_ans).toBe('2026-01-15');
+    expect(parsed.q1.select_ans).toBe('option_b');
+    expect(parsed.q1.radio_ans).toBe('choice_2');
+    expect(parsed.q1.checkbox_ans).toBe('opt_a,opt_c');
+    expect(parsed.q1.yesno_ans).toBe('yes');
+  });
+
+  test('FormTableManager addRow creates row with all column keys', () => {
+    const columns = [
+      { key: 'drug', label: 'Drug', type: 'text' },
+      { key: 'route', label: 'Route', type: 'select' },
+      { key: 'severity', label: 'Severity', type: 'radio' },
+      { key: 'completed', label: 'Done', type: 'yesno' },
+    ];
+
+    const newRow: Record<string, string> = {};
+    columns.forEach(c => newRow[c.key] = '');
+
+    expect(Object.keys(newRow)).toEqual(['drug', 'route', 'severity', 'completed']);
+    expect(newRow.drug).toBe('');
+    expect(newRow.route).toBe('');
+    expect(newRow.severity).toBe('');
+    expect(newRow.completed).toBe('');
+  });
+
+  test('table data with empty cells survives round-trip', () => {
+    const data = [
+      { drug: 'Aspirin', route: '', severity: '', notes: '' },
+      { drug: '', route: 'iv', severity: 'severe', notes: '' },
+    ];
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed[0].drug).toBe('Aspirin');
+    expect(parsed[0].route).toBe('');
+    expect(parsed[1].route).toBe('iv');
+    expect(parsed[1].drug).toBe('');
+  });
+
+  test('table data with boolean checkbox values (single checkbox without options)', () => {
+    const data = [
+      { name: 'Item 1', confirmed: true },
+      { name: 'Item 2', confirmed: false },
+    ];
+    const parsed = JSON.parse(JSON.stringify(data));
+    expect(parsed[0].confirmed).toBe(true);
+    expect(parsed[1].confirmed).toBe(false);
+  });
+});

@@ -86,6 +86,8 @@ import siteRoutes from './routes/site.routes';
 import formLayoutRoutes from './routes/form-layout.routes';
 // Per-user custom permission overrides (à la carte permissions)
 import permissionRoutes from './routes/permission.routes';
+// Form Folder organization (visual-only, acc_form_folder tables)
+import formFolderRoutes from './routes/form-folder.routes';
 
 // ============================================================================
 // FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
@@ -243,6 +245,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/studies', studyRoutes);
 app.use('/api/forms', formRoutes);
+app.use('/api/form-folders', formFolderRoutes);
 app.use('/api/queries', queryRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/audit', auditRoutes);

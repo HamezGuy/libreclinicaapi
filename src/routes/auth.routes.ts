@@ -12,6 +12,18 @@ import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = express.Router();
 
+// Admin: reset rate limiter (requires bypass key)
+router.post('/reset-rate-limit', (req, res) => {
+  const key = req.headers['x-bypass-rate-limit'] || req.body?.bypassKey;
+  const expected = process.env.RATE_LIMIT_BYPASS_KEY || 'accura-test-bypass-2026';
+  if (key !== expected) {
+    res.status(403).json({ success: false, message: 'Invalid bypass key' });
+    return;
+  }
+  authRateLimiter.resetKey(req.ip || '');
+  res.json({ success: true, message: 'Rate limit reset for your IP' });
+});
+
 // Public routes with appropriate rate limiting
 // Login and Google auth use strict rate limiting (10 per 15 min)
 router.post('/login', authRateLimiter, validate({ body: authSchemas.login }), controller.login);

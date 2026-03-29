@@ -2627,6 +2627,21 @@ export const createForm = async (
             `Inline group field "${field.label || field.name || `field #${i + 1}`}" must have at least one sub-field defined.`
           );
         }
+
+        // Validate question_table fields have at least one question row with at least one answer column.
+        if (field.type === 'question_table' && isNewField) {
+          if (!Array.isArray(field.questionRows) || field.questionRows.length === 0) {
+            throw new Error(
+              `Question table field "${field.label || field.name || `field #${i + 1}`}" must have at least one question row defined.`
+            );
+          }
+          const firstRow = field.questionRows[0];
+          if (!Array.isArray(firstRow.answerColumns) || firstRow.answerColumns.length === 0) {
+            throw new Error(
+              `Question table field "${field.label || field.name || `field #${i + 1}`}" must have at least one answer column defined.`
+            );
+          }
+        }
         // Generate unique item OID with random suffix to avoid collisions
         const itemRandom = Math.random().toString(36).substring(2, 6).toUpperCase();
         const itemOid = `I_${ocOid.substring(2, 12)}_${i}_${itemRandom}`;

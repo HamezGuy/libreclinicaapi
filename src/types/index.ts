@@ -235,11 +235,22 @@ export interface FormLinkDefinition {
 // Table field types
 // ---------------------------------------------------------------------------
 
+/**
+ * All types supported within table column cells and question-table answer cells.
+ * Mirrors the frontend TableCellType in form.models.ts.
+ */
+export type TableCellType =
+  | 'text' | 'number' | 'textarea' | 'date' | 'datetime' | 'time'
+  | 'select' | 'combobox' | 'radio' | 'checkbox' | 'yesno'
+  | 'email' | 'phone'
+  | 'blood_pressure'
+  | 'file' | 'image';
+
 export interface TableColumnDefinition {
   id: string;
   name: string;
   label: string;
-  type: 'text' | 'number' | 'textarea' | 'date' | 'select' | 'radio' | 'checkbox' | 'yesno';
+  type: TableCellType;
   width?: string;
   required?: boolean;
   options?: { label: string; value: string }[];
@@ -314,17 +325,24 @@ export interface CriteriaListSettings {
 // Question table field types
 // ---------------------------------------------------------------------------
 
+export interface QuestionAnswerColumn {
+  id: string;
+  type: TableCellType;
+  header?: string;
+  width?: string;
+  required?: boolean;
+  readonly?: boolean;
+  placeholder?: string;
+  options?: { label: string; value: string }[];
+  min?: number;
+  max?: number;
+  defaultValue?: string;
+}
+
 export interface QuestionRow {
   id: string;
   question: string;
-  answerColumns: {
-    id: string;
-    type: 'text' | 'number' | 'date' | 'select' | 'checkbox' | 'yesno';
-    header?: string;
-    width?: string;
-    required?: boolean;
-    options?: { label: string; value: string }[];
-  }[];
+  answerColumns: QuestionAnswerColumn[];
 }
 
 export interface QuestionTableSettings {

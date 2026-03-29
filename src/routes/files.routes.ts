@@ -318,7 +318,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
     const result = await pool.query(`
       SELECT file_id, original_name, mime_type, file_size, uploaded_at, crf_version_media_id
       FROM file_uploads
-      WHERE file_id = $1
+      WHERE file_id = $1 AND deleted_at IS NULL
     `, [id]);
     
     if (result.rows.length === 0) {
@@ -360,7 +360,7 @@ router.get('/:id/download', authMiddleware, async (req: Request, res: Response) 
     const result = await pool.query(`
       SELECT file_path, original_name, mime_type
       FROM file_uploads
-      WHERE file_id = $1
+      WHERE file_id = $1 AND deleted_at IS NULL
     `, [id]);
     
     if (result.rows.length === 0) {
@@ -396,7 +396,7 @@ router.get('/:id/thumbnail', authMiddleware, async (req: Request, res: Response)
     const result = await pool.query(`
       SELECT file_path, mime_type
       FROM file_uploads
-      WHERE file_id = $1 AND mime_type LIKE 'image/%'
+      WHERE file_id = $1 AND deleted_at IS NULL AND mime_type LIKE 'image/%'
     `, [id]);
     
     if (result.rows.length === 0) {
@@ -432,7 +432,7 @@ router.get('/item/:itemId', authMiddleware, async (req: Request, res: Response) 
     const result = await pool.query(`
       SELECT file_id, original_name, mime_type, file_size, uploaded_at, crf_version_media_id
       FROM file_uploads
-      WHERE item_id = $1
+      WHERE item_id = $1 AND deleted_at IS NULL
       ORDER BY uploaded_at DESC
     `, [itemId]);
     
@@ -466,7 +466,7 @@ router.get('/crf-version/:crfVersionId', authMiddleware, async (req: Request, re
     const result = await pool.query(`
       SELECT file_id, original_name, mime_type, file_size, uploaded_at, crf_version_media_id
       FROM file_uploads
-      WHERE crf_version_id = $1
+      WHERE crf_version_id = $1 AND deleted_at IS NULL
       ORDER BY uploaded_at DESC
     `, [crfVersionId]);
     
@@ -501,7 +501,7 @@ router.get('/event-crf/:eventCrfId', authMiddleware, async (req: Request, res: R
       SELECT file_id, original_name, mime_type, file_size, uploaded_at,
              crf_version_media_id, item_id
       FROM file_uploads
-      WHERE event_crf_id = $1
+      WHERE event_crf_id = $1 AND deleted_at IS NULL
       ORDER BY uploaded_at DESC
     `, [eventCrfId]);
     
@@ -537,7 +537,7 @@ router.get('/consent/:consentId', authMiddleware, async (req: Request, res: Resp
       SELECT file_id, original_name, mime_type, file_size, uploaded_at,
              crf_version_media_id, item_id
       FROM file_uploads
-      WHERE consent_id = $1
+      WHERE consent_id = $1 AND deleted_at IS NULL
       ORDER BY uploaded_at DESC
     `, [consentId]);
     
@@ -571,7 +571,7 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
     const result = await pool.query(`
       SELECT file_path, crf_version_media_id
       FROM file_uploads
-      WHERE file_id = $1
+      WHERE file_id = $1 AND deleted_at IS NULL
     `, [id]);
     
     if (result.rows.length === 0) {
@@ -584,8 +584,11 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
     try {
       await client.query('BEGIN');
       
-      // Delete from file_uploads table
-      await client.query('DELETE FROM file_uploads WHERE file_id = $1', [id]);
+      // Soft-delete from file_uploads table (21 CFR Part 11 audit trail)
+      await client.query(`
+        UPDATE file_uploads SET deleted_at = NOW(), deleted_by = $2
+        WHERE file_id = $1
+      `, [id, (req as any).user?.userId || 1]);
       
       // Delete from crf_version_media if applicable
       if (file.crf_version_media_id) {

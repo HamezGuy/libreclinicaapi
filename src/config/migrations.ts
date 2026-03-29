@@ -53,6 +53,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'unscheduled_visit_isolation', fn: createUnscheduledVisitIsolation },
     { name: 'widen_description_columns', fn: widenDescriptionColumns },
     { name: 'fix_double_encoded_json', fn: fixDoubleEncodedJson },
+    { name: 'form_folders', fn: createFormFolderTables },
   ];
 
   let successCount = 0;
@@ -1382,6 +1383,10 @@ async function createUserAccountExtendedTable(pool: any): Promise<void> {
     ALTER TABLE user_account_extended
     ADD COLUMN IF NOT EXISTS platform_role VARCHAR(40)
   `).catch(() => {});
+  await pool.query(`
+    ALTER TABLE user_account_extended
+    ADD COLUMN IF NOT EXISTS secondary_role VARCHAR(100)
+  `).catch(() => {});
   logger.info('User account extended table verified');
 }
 
@@ -1767,4 +1772,48 @@ async function fixDoubleEncodedJson(pool: any): Promise<void> {
   }
 
   logger.info(`Double-encoded JSON fix complete: ${fixed} JSONB rows, ${fixedItems} item_data rows`);
+}
+
+// ============================================================================
+// Form Folders (acc_form_folder, acc_form_folder_item)
+// Visual-only folder organization for forms in the dashboard.
+// Does not affect form behavior, assignments, or clinical data.
+// ============================================================================
+async function createFormFolderTables(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_form_folder (
+      folder_id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      description TEXT,
+      study_id INTEGER,
+      owner_id INTEGER NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      date_created TIMESTAMP DEFAULT NOW(),
+      date_updated TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_form_folder_item (
+      folder_item_id SERIAL PRIMARY KEY,
+      folder_id INTEGER NOT NULL REFERENCES acc_form_folder(folder_id) ON DELETE CASCADE,
+      crf_id INTEGER NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      date_added TIMESTAMP DEFAULT NOW(),
+      UNIQUE(folder_id, crf_id)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_form_folder_study ON acc_form_folder(study_id)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_form_folder_owner ON acc_form_folder(owner_id)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_form_folder_item_folder ON acc_form_folder_item(folder_id)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_form_folder_item_crf ON acc_form_folder_item(crf_id)
+  `);
 }

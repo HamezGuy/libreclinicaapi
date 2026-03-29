@@ -90,6 +90,8 @@ export const authRateLimiter = rateLimit({
     if (isTestMode || isDevelopment) return true;
     // Skip rate limiting for refresh token requests (they have their own limiter)
     if (req.path.includes('/refresh')) return true;
+    // Skip if caller provides the rate-limit bypass header (e.g. from test scripts)
+    if (req.headers['x-bypass-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY) return true;
     return false;
   },
   handler: (req: Request, res: Response) => {

@@ -490,7 +490,7 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
   } else {
     // Single source of truth: platform_role
     const platformResult = await pool.query(
-      `SELECT platform_role FROM user_account_extended WHERE user_id = $1`,
+      `SELECT platform_role, secondary_role FROM user_account_extended WHERE user_id = $1`,
       [user.userId]
     );
     if (platformResult.rows.length > 0 && platformResult.rows[0].platform_role) {
@@ -499,6 +499,12 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
       primaryRole = 'coordinator';
     }
   }
+
+  const secondaryRoleResult = await pool.query(
+    `SELECT secondary_role FROM user_account_extended WHERE user_id = $1`,
+    [user.userId]
+  );
+  const secondaryRole = secondaryRoleResult.rows.length > 0 ? secondaryRoleResult.rows[0].secondary_role || '' : '';
 
   res.json({
     success: true,
@@ -511,6 +517,7 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
       phone: dbUser.phone || '',
       institutionalAffiliation: dbUser.institutional_affiliation || '',
       role: primaryRole,
+      secondaryRole,
       userType: userTypeName,
       userTypeId: userTypeId,
       timeZone: dbUser.time_zone || 'America/New_York',
@@ -540,10 +547,10 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
     return;
   }
 
-  const { firstName, lastName, email, phone, institutionalAffiliation, timeZone } = req.body;
+  const { firstName, lastName, email, phone, institutionalAffiliation, timeZone, secondaryRole } = req.body;
 
   // Validate at least one field is provided
-  if (!firstName && !lastName && !email && !phone && institutionalAffiliation === undefined && !timeZone) {
+  if (!firstName && !lastName && !email && !phone && institutionalAffiliation === undefined && !timeZone && secondaryRole === undefined) {
     res.status(400).json({
       success: false,
       message: 'At least one field to update is required'
@@ -635,6 +642,15 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
       return;
     }
 
+    // Update secondary_role in user_account_extended if provided
+    if (secondaryRole !== undefined) {
+      await client.query(`
+        INSERT INTO user_account_extended (user_id, secondary_role)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET secondary_role = EXCLUDED.secondary_role
+      `, [user.userId, secondaryRole || null]);
+    }
+
     // Create audit log entry
     await client.query(`
       INSERT INTO audit_log_event (
@@ -676,7 +692,8 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
         email: updatedUser.email,
         phone: updatedUser.phone || '',
         institutionalAffiliation: updatedUser.institutional_affiliation || '',
-        timeZone: updatedUser.time_zone || 'America/New_York'
+        timeZone: updatedUser.time_zone || 'America/New_York',
+        secondaryRole: secondaryRole !== undefined ? (secondaryRole || '') : undefined
       }
     });
 

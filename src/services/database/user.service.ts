@@ -104,7 +104,8 @@ export const getUsers = async (
         u.enable_api_key,
         u.user_type_id,
         ut.user_type,
-        uae.platform_role as role
+        uae.platform_role as role,
+        uae.secondary_role
       FROM user_account u
       LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
       LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
@@ -166,13 +167,16 @@ export const getUserById = async (userId: number, callerUserId?: number): Promis
       SELECT 
         u.*,
         ut.user_type,
+        uae.platform_role as role,
+        uae.secondary_role,
         array_agg(DISTINCT sur.study_id) FILTER (WHERE sur.study_id IS NOT NULL) as study_ids,
         array_agg(DISTINCT sur.role_name) FILTER (WHERE sur.role_name IS NOT NULL) as roles
       FROM user_account u
       LEFT JOIN user_type ut ON u.user_type_id = ut.user_type_id
+      LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
       LEFT JOIN study_user_role sur ON u.user_name = sur.user_name AND sur.status_id = 1
       WHERE u.user_id = $1
-      GROUP BY u.user_id, ut.user_type
+      GROUP BY u.user_id, ut.user_type, uae.platform_role, uae.secondary_role
     `;
 
     const result = await pool.query(query, [userId]);
@@ -226,6 +230,9 @@ export const createUser = async (
     
     // Timezone
     timeZone?: string;
+
+    // Secondary role label (cosmetic, no permissions)
+    secondaryRole?: string;
   },
   creatorId: number
 ): Promise<{ success: boolean; userId?: number; message?: string }> => {
@@ -411,6 +418,19 @@ export const createUser = async (
       }
     }
 
+    // Save secondary role label if provided
+    if (data.secondaryRole !== undefined) {
+      try {
+        await client.query(`
+          INSERT INTO user_account_extended (user_id, secondary_role)
+          VALUES ($1, $2)
+          ON CONFLICT (user_id) DO UPDATE SET secondary_role = EXCLUDED.secondary_role
+        `, [userId, data.secondaryRole || null]);
+      } catch (srErr: any) {
+        logger.warn('Could not set secondary_role (non-fatal)', { error: srErr.message });
+      }
+    }
+
     // Add user to creator's organization(s)
     try {
       const creatorOrgs = await client.query(
@@ -500,6 +520,9 @@ export const updateUser = async (
     
     // Timezone
     timeZone?: string;
+
+    // Secondary role label (cosmetic, no permissions)
+    secondaryRole?: string;
   },
   updaterId: number
 ): Promise<{ success: boolean; message?: string }> => {
@@ -602,26 +625,35 @@ export const updateUser = async (
       params.push((data as any).enableApiKey);
     }
 
-    if (updates.length === 0) {
+    // If there are user_account columns to update, run the UPDATE query.
+    // If only role (or other non-column fields) changed, skip the UPDATE
+    // but still proceed to handle those fields below.
+    const hasAccountUpdates = updates.length > 0;
+    const hasRoleChange = !!data.role;
+    const hasSecondaryRoleChange = data.secondaryRole !== undefined;
+
+    if (!hasAccountUpdates && !hasRoleChange && !hasSecondaryRoleChange) {
       return {
         success: false,
         message: 'No fields to update'
       };
     }
 
-    updates.push(`date_updated = NOW()`);
-    updates.push(`update_id = $${paramIndex++}`);
-    params.push(updaterId);
+    if (hasAccountUpdates) {
+      updates.push(`date_updated = NOW()`);
+      updates.push(`update_id = $${paramIndex++}`);
+      params.push(updaterId);
 
-    params.push(userId);
+      params.push(userId);
 
-    const updateQuery = `
-      UPDATE user_account
-      SET ${updates.join(', ')}
-      WHERE user_id = $${paramIndex}
-    `;
+      const updateQuery = `
+        UPDATE user_account
+        SET ${updates.join(', ')}
+        WHERE user_id = $${paramIndex}
+      `;
 
-    await client.query(updateQuery, params);
+      await client.query(updateQuery, params);
+    }
 
     // Handle role change: update study_user_role for ALL of the user's study assignments.
     // This is the "overall type" change — it should be global across all studies.
@@ -708,6 +740,20 @@ export const updateUser = async (
           logger.warn('Could not apply feature defaults (non-fatal)', { error: featureError.message });
         }
 
+        // Clear custom permission overrides when role changes so the new
+        // role's defaults take effect cleanly. Users can still add overrides
+        // later via the permission management UI.
+        try {
+          await client.query(
+            `DELETE FROM user_custom_permissions WHERE user_id = $1`,
+            [userId]
+          );
+          logger.info('Cleared custom permission overrides after role change', { userId, newRole: lcRoleName });
+        } catch (cpErr: any) {
+          // Table might not exist yet in older installations
+          logger.warn('Could not clear custom permissions (non-fatal)', { error: cpErr.message });
+        }
+
         // Persist platform_role so it's available even without study assignments
         try {
           await client.query(`
@@ -718,6 +764,20 @@ export const updateUser = async (
         } catch (prErr: any) {
           logger.warn('Could not set platform_role (non-fatal)', { error: prErr.message });
         }
+      }
+    }
+
+    // Handle secondary role label change (stored in user_account_extended)
+    if (data.secondaryRole !== undefined) {
+      try {
+        await client.query(`
+          INSERT INTO user_account_extended (user_id, secondary_role)
+          VALUES ($1, $2)
+          ON CONFLICT (user_id) DO UPDATE SET secondary_role = EXCLUDED.secondary_role
+        `, [userId, data.secondaryRole || null]);
+        logger.info('Secondary role updated', { userId, secondaryRole: data.secondaryRole });
+      } catch (srErr: any) {
+        logger.warn('Could not set secondary_role (non-fatal)', { error: srErr.message });
       }
     }
 
