@@ -511,7 +511,7 @@ export const validationRuleSchemas = {
   validateField: Joi.object({
     crfId: Joi.number().integer().positive().required(),
     fieldPath: Joi.string().required().max(255),
-    value: Joi.any().required(),
+    value: Joi.any().allow(null, '').optional(),
     itemId: Joi.number().integer().positive().optional(),
     allFormData: Joi.object().optional(),
     eventCrfId: Joi.number().integer().positive().optional(),
@@ -519,7 +519,7 @@ export const validationRuleSchemas = {
     studyId: Joi.number().integer().positive().optional(),
     subjectId: Joi.number().integer().positive().optional(),
     itemDataId: Joi.number().integer().positive().optional(),
-    operationType: Joi.string().optional().valid('insert', 'update', 'delete'),
+    operationType: Joi.string().optional().valid('create', 'insert', 'update', 'delete'),
   }),
 };
 
@@ -544,6 +544,10 @@ const eventDefinitionSchema = Joi.object({
   type: Joi.string().valid('scheduled', 'unscheduled', 'common').default('scheduled'),
   ordinal: Joi.number().integer().min(1).optional(),
   repeating: Joi.boolean().default(false),
+  scheduleDay: Joi.number().integer().min(0).optional().allow(null),
+  minDay: Joi.number().integer().max(0).optional().allow(null),
+  maxDay: Joi.number().integer().min(0).optional().allow(null),
+  referenceEventId: Joi.number().integer().positive().optional().allow(null),
   crfAssignments: Joi.array().items(crfAssignmentSchema).optional()
 });
 
@@ -630,22 +634,22 @@ export const studySchemas = {
 
   create: Joi.object({
     // Required fields for clinical trial compliance
-    name: Joi.string().required().min(3).max(255)
+    name: Joi.string().required().min(3).max(500)
       .messages({
         'string.min': 'Study name must be at least 3 characters',
-        'string.max': 'Study name cannot exceed 255 characters',
+        'string.max': 'Study name cannot exceed 500 characters',
         'any.required': 'Study name is required'
       }),
-    uniqueIdentifier: Joi.string().required().min(3).max(30)
+    uniqueIdentifier: Joi.string().required().min(3).max(100)
       .pattern(/^[a-zA-Z0-9_-]+$/)
       .messages({
         'string.min': 'Protocol number must be at least 3 characters',
-        'string.max': 'Protocol number cannot exceed 30 characters',
+        'string.max': 'Protocol number cannot exceed 100 characters',
         'string.pattern.base': 'Study identifier can only contain letters, numbers, hyphens, and underscores',
         'any.required': 'Protocol number is required'
       }),
-    principalInvestigator: Joi.string().optional().max(255).allow(''),
-    sponsor: Joi.string().optional().max(255).allow(''),
+    principalInvestigator: Joi.string().optional().max(500).allow(''),
+    sponsor: Joi.string().optional().max(500).allow(''),
     phase: Joi.string().optional().valid('I', 'II', 'III', 'IV', 'N/A', 'i', 'ii', 'iii', 'iv', 'phase_i', 'phase_ii', 'phase_iii', 'phase_iv', '').allow(''),
     expectedTotalEnrollment: Joi.number().integer().min(0).optional().allow(null),
     datePlannedStart: Joi.alternatives().try(
@@ -655,11 +659,11 @@ export const studySchemas = {
 
     // Optional identification fields
     description: Joi.string().optional().max(100000).allow(''),
-    summary: Joi.string().optional().max(10000).allow(''),
-    officialTitle: Joi.string().optional().max(255).allow(''),
-    secondaryIdentifier: Joi.string().optional().max(255).allow(''),
-    studyAcronym: Joi.string().optional().max(64).allow(''),
-    collaborators: Joi.string().optional().max(10000).allow(''),
+    summary: Joi.string().optional().max(100000).allow(''),
+    officialTitle: Joi.string().optional().max(1000).allow(''),
+    secondaryIdentifier: Joi.string().optional().max(500).allow(''),
+    studyAcronym: Joi.string().optional().max(200).allow(''),
+    collaborators: Joi.string().optional().max(100000).allow(''),
     protocolType: Joi.string().optional().valid('interventional', 'observational'),
     targetEnrollment: Joi.number().integer().min(0).optional(),
     datePlannedEnd: Joi.alternatives().try(
@@ -675,56 +679,56 @@ export const studySchemas = {
     databaseLockDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
 
     // Facility fields
-    facilityName: Joi.string().optional().max(255).allow(''),
-    facilityAddress: Joi.string().optional().max(1000).allow(''),
-    facilityCity: Joi.string().optional().max(255).allow(''),
-    facilityState: Joi.string().optional().max(20).allow(''),
-    facilityZip: Joi.string().optional().max(64).allow(''),
-    facilityCountry: Joi.string().optional().max(64).allow(''),
-    facilityRecruitmentStatus: Joi.string().optional().max(60).allow(''),
-    facilityContactName: Joi.string().optional().max(255).allow(''),
-    facilityContactDegree: Joi.string().optional().max(255).allow(''),
-    facilityContactPhone: Joi.string().optional().max(255).allow(''),
-    facilityContactEmail: Joi.string().optional().max(255).email({ tlds: { allow: false } }).allow(''),
+    facilityName: Joi.string().optional().max(500).allow(''),
+    facilityAddress: Joi.string().optional().max(2000).allow(''),
+    facilityCity: Joi.string().optional().max(500).allow(''),
+    facilityState: Joi.string().optional().max(100).allow(''),
+    facilityZip: Joi.string().optional().max(100).allow(''),
+    facilityCountry: Joi.string().optional().max(100).allow(''),
+    facilityRecruitmentStatus: Joi.string().optional().max(100).allow(''),
+    facilityContactName: Joi.string().optional().max(500).allow(''),
+    facilityContactDegree: Joi.string().optional().max(500).allow(''),
+    facilityContactPhone: Joi.string().optional().max(500).allow(''),
+    facilityContactEmail: Joi.string().optional().max(500).email({ tlds: { allow: false } }).allow(''),
 
     // Protocol fields - protocolDescription supports multiple pages
     protocolDescription: Joi.string().optional().max(100000).allow(''),
     protocolDateVerification: Joi.string().optional().allow(''),
-    protocolVersion: Joi.string().optional().max(30).allow(''),
-    protocolAmendmentNumber: Joi.string().optional().max(30).allow(''),
-    medlineIdentifier: Joi.string().optional().max(255).allow(''),
-    url: Joi.string().optional().max(255).allow(''),
-    urlDescription: Joi.string().optional().max(255).allow(''),
+    protocolVersion: Joi.string().optional().max(100).allow(''),
+    protocolAmendmentNumber: Joi.string().optional().max(100).allow(''),
+    medlineIdentifier: Joi.string().optional().max(500).allow(''),
+    url: Joi.string().optional().max(2000).allow(''),
+    urlDescription: Joi.string().optional().max(1000).allow(''),
     resultsReference: Joi.boolean().optional(),
 
     // Regulatory fields
-    therapeuticArea: Joi.string().optional().max(255).allow(''),
-    indication: Joi.string().optional().max(255).allow(''),
-    nctNumber: Joi.string().optional().max(30).allow(''),
-    irbNumber: Joi.string().optional().max(255).allow(''),
-    regulatoryAuthority: Joi.string().optional().max(255).allow(''),
+    therapeuticArea: Joi.string().optional().max(500).allow(''),
+    indication: Joi.string().optional().max(500).allow(''),
+    nctNumber: Joi.string().optional().max(50).allow(''),
+    irbNumber: Joi.string().optional().max(500).allow(''),
+    regulatoryAuthority: Joi.string().optional().max(500).allow(''),
 
     // Eligibility fields - support long clinical criteria text
-    conditions: Joi.string().optional().max(50000).allow(''),
-    keywords: Joi.string().optional().max(255).allow(''),
-    interventions: Joi.string().optional().max(50000).allow(''),
-    eligibility: Joi.string().optional().max(50000).allow(''),
+    conditions: Joi.string().optional().max(100000).allow(''),
+    keywords: Joi.string().optional().max(2000).allow(''),
+    interventions: Joi.string().optional().max(100000).allow(''),
+    eligibility: Joi.string().optional().max(100000).allow(''),
     gender: Joi.string().optional().max(30).allow(''),
-    ageMin: Joi.string().optional().max(3).allow(''),
-    ageMax: Joi.string().optional().max(3).allow(''),
+    ageMin: Joi.string().optional().max(10).allow(''),
+    ageMax: Joi.string().optional().max(10).allow(''),
     healthyVolunteerAccepted: Joi.boolean().optional(),
 
-    // Study Design fields (all varchar 64 in DB)
-    purpose: Joi.string().optional().max(64).allow(''),
-    allocation: Joi.string().optional().max(64).allow(''),
-    masking: Joi.string().optional().max(64).allow(''),
-    control: Joi.string().optional().max(64).allow(''),
-    assignment: Joi.string().optional().max(64).allow(''),
-    endpoint: Joi.string().optional().max(64).allow(''),
-    duration: Joi.string().optional().max(64).allow(''),
-    selection: Joi.string().optional().max(64).allow(''),
-    timing: Joi.string().optional().max(64).allow(''),
-    sdvRequirement: Joi.string().optional().max(64).allow(''),
+    // Study Design fields
+    purpose: Joi.string().optional().max(200).allow(''),
+    allocation: Joi.string().optional().max(200).allow(''),
+    masking: Joi.string().optional().max(100).allow(''),
+    control: Joi.string().optional().max(100).allow(''),
+    assignment: Joi.string().optional().max(100).allow(''),
+    endpoint: Joi.string().optional().max(200).allow(''),
+    duration: Joi.string().optional().max(100).allow(''),
+    selection: Joi.string().optional().max(100).allow(''),
+    timing: Joi.string().optional().max(100).allow(''),
+    sdvRequirement: Joi.string().optional().max(200).allow(''),
 
     // Nested data structures
     eventDefinitions: Joi.array().items(eventDefinitionSchema).optional(),
@@ -759,15 +763,15 @@ export const studySchemas = {
 
   update: Joi.object({
     // Basic fields
-    name: Joi.string().optional().min(3).max(255),
+    name: Joi.string().optional().min(3).max(500),
     description: Joi.string().optional().max(100000).allow(''),
-    summary: Joi.string().optional().max(10000).allow(''),
-    officialTitle: Joi.string().optional().max(255).allow(''),
-    secondaryIdentifier: Joi.string().optional().max(255).allow(''),
-    studyAcronym: Joi.string().optional().max(64).allow(''),
-    principalInvestigator: Joi.string().optional().max(255).allow(''),
-    sponsor: Joi.string().optional().max(255).allow(''),
-    collaborators: Joi.string().optional().max(10000).allow(''),
+    summary: Joi.string().optional().max(100000).allow(''),
+    officialTitle: Joi.string().optional().max(1000).allow(''),
+    secondaryIdentifier: Joi.string().optional().max(500).allow(''),
+    studyAcronym: Joi.string().optional().max(200).allow(''),
+    principalInvestigator: Joi.string().optional().max(500).allow(''),
+    sponsor: Joi.string().optional().max(500).allow(''),
+    collaborators: Joi.string().optional().max(100000).allow(''),
     phase: Joi.string().optional().allow(''),
     protocolType: Joi.string().optional().valid('interventional', 'observational').allow(''),
     expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
@@ -787,56 +791,56 @@ export const studySchemas = {
     databaseLockDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
 
     // Facility fields
-    facilityName: Joi.string().optional().max(255).allow(''),
-    facilityAddress: Joi.string().optional().max(1000).allow(''),
-    facilityCity: Joi.string().optional().max(255).allow(''),
-    facilityState: Joi.string().optional().max(20).allow(''),
-    facilityZip: Joi.string().optional().max(64).allow(''),
-    facilityCountry: Joi.string().optional().max(64).allow(''),
-    facilityRecruitmentStatus: Joi.string().optional().max(60).allow(''),
-    facilityContactName: Joi.string().optional().max(255).allow(''),
-    facilityContactDegree: Joi.string().optional().max(255).allow(''),
-    facilityContactPhone: Joi.string().optional().max(255).allow(''),
-    facilityContactEmail: Joi.string().optional().max(255).email({ tlds: { allow: false } }).allow(''),
+    facilityName: Joi.string().optional().max(500).allow(''),
+    facilityAddress: Joi.string().optional().max(2000).allow(''),
+    facilityCity: Joi.string().optional().max(500).allow(''),
+    facilityState: Joi.string().optional().max(100).allow(''),
+    facilityZip: Joi.string().optional().max(100).allow(''),
+    facilityCountry: Joi.string().optional().max(100).allow(''),
+    facilityRecruitmentStatus: Joi.string().optional().max(100).allow(''),
+    facilityContactName: Joi.string().optional().max(500).allow(''),
+    facilityContactDegree: Joi.string().optional().max(500).allow(''),
+    facilityContactPhone: Joi.string().optional().max(500).allow(''),
+    facilityContactEmail: Joi.string().optional().max(500).email({ tlds: { allow: false } }).allow(''),
 
     // Protocol fields - protocolDescription supports multiple pages
     protocolDescription: Joi.string().optional().max(100000).allow(''),
     protocolDateVerification: Joi.string().optional().allow(''),
-    protocolVersion: Joi.string().optional().max(30).allow(''),
-    protocolAmendmentNumber: Joi.string().optional().max(30).allow(''),
-    medlineIdentifier: Joi.string().optional().max(255).allow(''),
-    url: Joi.string().optional().max(255).allow(''),
-    urlDescription: Joi.string().optional().max(255).allow(''),
+    protocolVersion: Joi.string().optional().max(100).allow(''),
+    protocolAmendmentNumber: Joi.string().optional().max(100).allow(''),
+    medlineIdentifier: Joi.string().optional().max(500).allow(''),
+    url: Joi.string().optional().max(2000).allow(''),
+    urlDescription: Joi.string().optional().max(1000).allow(''),
     resultsReference: Joi.boolean().optional(),
 
     // Regulatory fields
-    therapeuticArea: Joi.string().optional().max(255).allow(''),
-    indication: Joi.string().optional().max(255).allow(''),
-    nctNumber: Joi.string().optional().max(30).allow(''),
-    irbNumber: Joi.string().optional().max(255).allow(''),
-    regulatoryAuthority: Joi.string().optional().max(255).allow(''),
+    therapeuticArea: Joi.string().optional().max(500).allow(''),
+    indication: Joi.string().optional().max(500).allow(''),
+    nctNumber: Joi.string().optional().max(50).allow(''),
+    irbNumber: Joi.string().optional().max(500).allow(''),
+    regulatoryAuthority: Joi.string().optional().max(500).allow(''),
 
     // Eligibility fields - support long clinical criteria text
-    conditions: Joi.string().optional().max(50000).allow(''),
-    keywords: Joi.string().optional().max(255).allow(''),
-    interventions: Joi.string().optional().max(50000).allow(''),
-    eligibility: Joi.string().optional().max(50000).allow(''),
+    conditions: Joi.string().optional().max(100000).allow(''),
+    keywords: Joi.string().optional().max(2000).allow(''),
+    interventions: Joi.string().optional().max(100000).allow(''),
+    eligibility: Joi.string().optional().max(100000).allow(''),
     gender: Joi.string().optional().max(30).allow(''),
-    ageMin: Joi.string().optional().max(3).allow(''),
-    ageMax: Joi.string().optional().max(3).allow(''),
+    ageMin: Joi.string().optional().max(10).allow(''),
+    ageMax: Joi.string().optional().max(10).allow(''),
     healthyVolunteerAccepted: Joi.boolean().optional(),
 
-    // Design fields (all varchar 64 in DB)
-    purpose: Joi.string().optional().max(64).allow(''),
-    allocation: Joi.string().optional().max(64).allow(''),
-    masking: Joi.string().optional().max(64).allow(''),
-    control: Joi.string().optional().max(64).allow(''),
-    assignment: Joi.string().optional().max(64).allow(''),
-    endpoint: Joi.string().optional().max(64).allow(''),
-    duration: Joi.string().optional().max(64).allow(''),
-    selection: Joi.string().optional().max(64).allow(''),
-    timing: Joi.string().optional().max(64).allow(''),
-    sdvRequirement: Joi.string().optional().max(64).allow(''),
+    // Design fields
+    purpose: Joi.string().optional().max(200).allow(''),
+    allocation: Joi.string().optional().max(200).allow(''),
+    masking: Joi.string().optional().max(100).allow(''),
+    control: Joi.string().optional().max(100).allow(''),
+    assignment: Joi.string().optional().max(100).allow(''),
+    endpoint: Joi.string().optional().max(200).allow(''),
+    duration: Joi.string().optional().max(100).allow(''),
+    selection: Joi.string().optional().max(100).allow(''),
+    timing: Joi.string().optional().max(100).allow(''),
+    sdvRequirement: Joi.string().optional().max(200).allow(''),
 
     // Nested data structures
     eventDefinitions: Joi.array().items(eventDefinitionSchema).optional(),
@@ -880,39 +884,41 @@ export const querySchemas = {
     fieldPath: Joi.string().optional().allow('').max(255),
     columnName: Joi.string().optional().allow('').max(255),
     // Required fields
-    description: Joi.string().required().min(10).max(1000)
+    description: Joi.string().required().min(10).max(2000)
       .messages({
         'string.min': 'Query description must be at least 10 characters',
-        'string.max': 'Query description must not exceed 1000 characters'
+        'string.max': 'Query description must not exceed 2000 characters'
       }),
-    detailedNotes: Joi.string().optional().allow('').max(2000),
+    detailedNotes: Joi.string().optional().allow('').max(10000),
     queryType: Joi.string()
       .valid('Query', 'Failed Validation Check', 'Annotation', 'Reason for Change')
       .required()
       .messages({ 'any.only': 'queryType must be one of: Query, Failed Validation Check, Annotation, Reason for Change' }),
     studyId: Joi.number().integer().positive().required(),
     subjectId: Joi.number().integer().positive().optional(),
-    assignedUserId: Joi.number().integer().positive().optional()
+    assignedUserId: Joi.number().integer().positive().optional(),
+    severity: Joi.string().optional().valid('minor', 'major', 'critical').default('minor'),
+    dueDate: Joi.string().optional().allow('', null)
   }),
 
   respond: Joi.object({
     // Either 'description' or 'response' must be present (both map to the same field)
-    description: Joi.string().min(10).max(1000)
+    description: Joi.string().min(10).max(2000)
       .messages({
         'string.min': 'Response must be at least 10 characters',
-        'string.max': 'Response must not exceed 1000 characters'
+        'string.max': 'Response must not exceed 2000 characters'
       }),
-    response: Joi.string().min(10).max(1000)
+    response: Joi.string().min(10).max(2000)
       .messages({
         'string.min': 'Response must be at least 10 characters',
-        'string.max': 'Response must not exceed 1000 characters'
+        'string.max': 'Response must not exceed 2000 characters'
       }),
-    detailedNotes: Joi.string().optional().allow('').max(2000),
+    detailedNotes: Joi.string().optional().allow('').max(10000),
     // Valid response status transitions: 2=Updated, 3=Resolution Proposed, 4=Closed
     newStatusId: Joi.number().integer().valid(2, 3, 4).optional()
       .messages({ 'any.only': 'newStatusId for a response must be 2 (Updated), 3 (Resolution Proposed), or 4 (Closed)' }),
-    correctedValue: Joi.string().optional().allow('').max(500),
-    correctionReason: Joi.string().optional().allow('').max(500)
+    correctedValue: Joi.string().optional().allow('').max(100000),
+    correctionReason: Joi.string().optional().allow('').max(5000)
   }).or('description', 'response'),
 
   updateStatus: Joi.object({
@@ -923,12 +929,12 @@ export const querySchemas = {
   }),
 
   acceptResolution: Joi.object({
-    reason: Joi.string().optional().allow('').max(500),
-    meaning: Joi.string().optional().allow('').max(500)
+    reason: Joi.string().optional().allow('').max(2000),
+    meaning: Joi.string().optional().allow('').max(2000)
   }),
 
   rejectResolution: Joi.object({
-    reason: Joi.string().required().min(10).max(500)
+    reason: Joi.string().required().min(10).max(2000)
       .messages({
         'string.min': 'Rejection reason must be at least 10 characters',
         'string.empty': 'A reason is required when rejecting a resolution'

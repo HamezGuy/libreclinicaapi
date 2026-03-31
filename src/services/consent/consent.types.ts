@@ -172,7 +172,7 @@ export interface SubjectConsent {
 
 export interface SubjectConsentCreate {
   studySubjectId: number;
-  versionId: number;
+  versionId?: number;
   consentType?: 'subject' | 'witness' | 'lar' | 'reconsent';
   
   // Subject signature

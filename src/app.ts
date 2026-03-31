@@ -132,8 +132,10 @@ app.use(helmet({
 }));
 
 // CORS - Cross-Origin Resource Sharing
-// In production, nginx handles CORS to avoid duplicate headers
-// Only enable CORS middleware in development
+// In production, nginx handles CORS as the primary layer.
+// The Express middleware is also enabled as a safety net to ensure
+// CORS headers are always present (e.g. when nginx returns an error
+// before reaching proxy_pass, or during direct API access).
 if (config.server.env !== 'production') {
   const corsOptions = {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
@@ -174,15 +176,41 @@ if (config.server.env !== 'production') {
   app.use(cors(corsOptions));
   logger.info('CORS middleware enabled (development mode)');
 } else {
-  logger.info('CORS handled by nginx (production mode)');
+  // Production: Express is the sole CORS handler.
+  // Nginx proxies without adding CORS headers to avoid duplicates.
+  const productionCorsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      const allowed = [
+        /^https:\/\/(www\.)?accuratrials\.com$/,
+        /^https:\/\/edc-real[a-z0-9-]*\.vercel\.app$/,
+        /^http:\/\/localhost:(3000|3001|4200)$/
+      ];
+      if (allowed.some(pattern => pattern.test(origin))) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
+    credentials: true,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cache-Control', 'If-Modified-Since', 'Range'],
+    exposedHeaders: ['Content-Length', 'Content-Range']
+  };
+  app.use(cors(productionCorsOptions));
+  logger.info('CORS middleware enabled (production — primary CORS handler)');
 }
 
 // ============================================================================
 // BODY PARSING
 // ============================================================================
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // ============================================================================
 // AUDIT LOGGING

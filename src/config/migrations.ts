@@ -54,6 +54,10 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'widen_description_columns', fn: widenDescriptionColumns },
     { name: 'fix_double_encoded_json', fn: fixDoubleEncodedJson },
     { name: 'form_folders', fn: createFormFolderTables },
+    { name: 'form_folders_nesting', fn: createFormFolderNesting },
+    { name: 'screening_date_column', fn: createScreeningDateColumn },
+    { name: 'widen_study_columns', fn: widenStudyColumns },
+    { name: 'query_severity_column', fn: createQuerySeverityColumn },
   ];
 
   let successCount = 0;
@@ -1653,6 +1657,9 @@ async function widenDescriptionColumns(pool: any): Promise<void> {
     { table: 'response_set', column: 'options_values' },
     { table: 'response_set', column: 'label' },
     { table: 'crf_version', column: 'description' },
+    { table: 'item_data', column: 'value' },
+    { table: 'discrepancy_note', column: 'description' },
+    { table: 'discrepancy_note', column: 'detailed_notes' },
   ];
 
   for (const { table, column } of columns) {
@@ -1816,4 +1823,93 @@ async function createFormFolderTables(pool: any): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_form_folder_item_crf ON acc_form_folder_item(crf_id)
   `);
+}
+
+async function createFormFolderNesting(pool: any): Promise<void> {
+  await pool.query(`
+    ALTER TABLE acc_form_folder
+    ADD COLUMN IF NOT EXISTS parent_folder_id INTEGER REFERENCES acc_form_folder(folder_id) ON DELETE SET NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_form_folder_parent ON acc_form_folder(parent_folder_id)
+  `);
+  logger.info('parent_folder_id column verified on acc_form_folder');
+}
+
+async function createScreeningDateColumn(pool: any): Promise<void> {
+  await pool.query(`ALTER TABLE study_subject ADD COLUMN IF NOT EXISTS screening_date DATE`);
+  logger.info('screening_date column verified on study_subject');
+}
+
+async function widenStudyColumns(pool: any): Promise<void> {
+  const alterations = [
+    { table: 'study', column: 'name', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'unique_identifier', type: 'VARCHAR(255)' },
+    { table: 'study', column: 'summary', type: 'TEXT' },
+    { table: 'study', column: 'principal_investigator', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'sponsor', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'collaborators', type: 'TEXT' },
+    { table: 'study', column: 'url', type: 'VARCHAR(2000)' },
+    { table: 'study', column: 'url_description', type: 'VARCHAR(1000)' },
+    { table: 'study', column: 'conditions', type: 'TEXT' },
+    { table: 'study', column: 'keywords', type: 'VARCHAR(2000)' },
+    { table: 'study', column: 'eligibility', type: 'TEXT' },
+    { table: 'study', column: 'protocol_description', type: 'TEXT' },
+    { table: 'study', column: 'facility_name', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'facility_address', type: 'VARCHAR(2000)' },
+    { table: 'study', column: 'facility_city', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'facility_state', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'facility_zip', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'facility_country', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'facility_recruitment_status', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'facility_contact_name', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'facility_contact_degree', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'facility_contact_phone', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'facility_contact_email', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'medline_identifier', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'protocol_version', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'protocol_type', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'purpose', type: 'VARCHAR(200)' },
+    { table: 'study', column: 'allocation', type: 'VARCHAR(200)' },
+    { table: 'study', column: 'masking', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'control', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'assignment', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'endpoint', type: 'VARCHAR(200)' },
+    { table: 'study', column: 'duration', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'selection', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'timing', type: 'VARCHAR(100)' },
+    { table: 'study', column: 'age_min', type: 'VARCHAR(30)' },
+    { table: 'study', column: 'age_max', type: 'VARCHAR(30)' },
+    { table: 'study', column: 'official_title', type: 'TEXT' },
+    { table: 'study', column: 'secondary_identifier', type: 'VARCHAR(500)' },
+    { table: 'study', column: 'interventions', type: 'TEXT' },
+  ];
+
+  let changed = 0;
+  for (const { table, column, type } of alterations) {
+    try {
+      const check = await pool.query(
+        `SELECT data_type, character_maximum_length FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+        [table, column]
+      );
+      if (check.rows.length === 0) continue;
+      const row = check.rows[0];
+      const isText = type === 'TEXT';
+      const targetLen = isText ? null : parseInt(type.match(/\d+/)?.[0] || '0');
+      if (row.data_type === 'text' && isText) continue;
+      if (row.character_maximum_length && targetLen && row.character_maximum_length >= targetLen) continue;
+
+      await pool.query(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE ${type}`);
+      changed++;
+    } catch (err: any) {
+      logger.warn(`Could not widen ${table}.${column} to ${type}: ${err.message}`);
+    }
+  }
+  logger.info(`Study columns widened: ${changed} column(s) updated`);
+}
+
+async function createQuerySeverityColumn(pool: any): Promise<void> {
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS severity VARCHAR(20) DEFAULT 'minor'`);
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS due_date DATE`);
+  logger.info('severity and due_date columns verified on discrepancy_note');
 }

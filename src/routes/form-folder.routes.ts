@@ -15,11 +15,14 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
-// GET /api/form-folders — List all folders (optionally filtered by studyId)
+// GET /api/form-folders — List all folders (optionally filtered by studyId and parentFolderId)
 router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : undefined;
+  const parentFolderId = req.query.parentFolderId !== undefined
+    ? (req.query.parentFolderId === 'null' || req.query.parentFolderId === '0' ? 0 : parseInt(req.query.parentFolderId as string))
+    : undefined;
   const userId = (req as any).user?.userId;
-  const folders = await folderService.getFolders(studyId, userId);
+  const folders = await folderService.getFolders(studyId, userId, parentFolderId);
   res.json({ success: true, data: folders });
 }));
 
@@ -37,7 +40,7 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
 router.post('/',
   requireRole('admin', 'data_manager'),
   asyncHandler(async (req: Request, res: Response) => {
-    const { name, description, studyId } = req.body;
+    const { name, description, studyId, parentFolderId } = req.body;
     const userId = (req as any).user?.userId;
 
     if (!name || !name.trim()) {
@@ -45,7 +48,7 @@ router.post('/',
       return;
     }
 
-    const folder = await folderService.createFolder(name.trim(), userId, studyId, description);
+    const folder = await folderService.createFolder(name.trim(), userId, studyId, description, parentFolderId || null);
     res.status(201).json({ success: true, data: folder });
   })
 );
@@ -125,6 +128,31 @@ router.post('/:id/move-all-out',
     const folderId = parseInt(req.params.id);
     const count = await folderService.moveAllFormsOut(folderId);
     res.json({ success: true, message: `Moved ${count} forms out of folder` });
+  })
+);
+
+// PUT /api/form-folders/:id/move — Move a folder to a new parent (or root)
+router.put('/:id/move',
+  requireRole('admin', 'data_manager'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const folderId = parseInt(req.params.id);
+    const { parentFolderId } = req.body;
+    const folder = await folderService.moveFolder(folderId, parentFolderId ?? null);
+    if (!folder) {
+      res.status(404).json({ success: false, message: 'Folder not found' });
+      return;
+    }
+    res.json({ success: true, data: folder });
+  })
+);
+
+// POST /api/form-folders/:id/move-children — Move all subfolders to the folder's parent
+router.post('/:id/move-children',
+  requireRole('admin', 'data_manager'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const folderId = parseInt(req.params.id);
+    const count = await folderService.moveChildrenToParent(folderId);
+    res.json({ success: true, message: `Moved ${count} subfolders to parent` });
   })
 );
 

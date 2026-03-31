@@ -335,6 +335,9 @@ export async function activateConsentVersion(
 
 /**
  * Record subject consent
+ * 
+ * version_id is nullable — when no formal consent document/version has been
+ * configured for the study, consent can still be recorded with version_id NULL.
  */
 export async function recordConsent(consent: SubjectConsentCreate): Promise<SubjectConsent> {
   logger.info('Recording subject consent', { 
@@ -346,6 +349,10 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
 
   try {
     await client.query('BEGIN');
+
+    const effectiveVersionId = (consent.versionId && consent.versionId > 0)
+      ? consent.versionId
+      : null;
 
     // Insert consent record with full Part 11 metadata
     const query = `
@@ -377,7 +384,7 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
 
     const result = await client.query(query, [
       consent.studySubjectId,
-      consent.versionId,
+      effectiveVersionId,
       consent.consentType || 'subject',
       consent.subjectName,
       JSON.stringify(consent.subjectSignatureData),
@@ -462,8 +469,8 @@ export async function getSubjectConsentById(consentId: number): Promise<SubjectC
            CONCAT(w.first_name, ' ', w.last_name) as withdrawn_by_name
     FROM acc_subject_consent sc
     JOIN study_subject ss ON sc.study_subject_id = ss.study_subject_id
-    JOIN acc_consent_version v ON sc.version_id = v.version_id
-    JOIN acc_consent_document d ON v.document_id = d.document_id
+    LEFT JOIN acc_consent_version v ON sc.version_id = v.version_id
+    LEFT JOIN acc_consent_document d ON v.document_id = d.document_id
     LEFT JOIN user_account u ON sc.consented_by = u.user_id
     LEFT JOIN user_account w ON sc.withdrawn_by = w.user_id
     WHERE sc.consent_id = $1
@@ -527,8 +534,8 @@ export async function getSubjectConsent(studySubjectId: number): Promise<Subject
            CONCAT(w.first_name, ' ', w.last_name) as withdrawn_by_name
     FROM acc_subject_consent sc
     JOIN study_subject ss ON sc.study_subject_id = ss.study_subject_id
-    JOIN acc_consent_version v ON sc.version_id = v.version_id
-    JOIN acc_consent_document d ON v.document_id = d.document_id
+    LEFT JOIN acc_consent_version v ON sc.version_id = v.version_id
+    LEFT JOIN acc_consent_document d ON v.document_id = d.document_id
     LEFT JOIN user_account u ON sc.consented_by = u.user_id
     LEFT JOIN user_account w ON sc.withdrawn_by = w.user_id
     WHERE sc.study_subject_id = $1
@@ -545,11 +552,13 @@ export async function getSubjectConsent(studySubjectId: number): Promise<Subject
 export async function hasValidConsent(studySubjectId: number): Promise<boolean> {
   const query = `
     SELECT 1 FROM acc_subject_consent sc
-    JOIN acc_consent_version v ON sc.version_id = v.version_id
+    LEFT JOIN acc_consent_version v ON sc.version_id = v.version_id
     WHERE sc.study_subject_id = $1
       AND sc.consent_status = 'consented'
-      AND v.status = 'active'
-      AND (v.expiration_date IS NULL OR v.expiration_date > CURRENT_DATE)
+      AND (
+        sc.version_id IS NULL
+        OR (v.status = 'active' AND (v.expiration_date IS NULL OR v.expiration_date > CURRENT_DATE))
+      )
     LIMIT 1
   `;
 
@@ -776,10 +785,10 @@ export async function getConsentDashboard(studyId: number): Promise<ConsentDashb
            CONCAT(u.first_name, ' ', u.last_name) as consented_by_name
     FROM acc_subject_consent sc
     JOIN study_subject ss ON sc.study_subject_id = ss.study_subject_id
-    JOIN acc_consent_version v ON sc.version_id = v.version_id
-    JOIN acc_consent_document d ON v.document_id = d.document_id
+    LEFT JOIN acc_consent_version v ON sc.version_id = v.version_id
+    LEFT JOIN acc_consent_document d ON v.document_id = d.document_id
     LEFT JOIN user_account u ON sc.consented_by = u.user_id
-    WHERE d.study_id = $1
+    WHERE ss.study_id IN (SELECT study_id FROM study WHERE study_id = $1 OR parent_study_id = $1)
     ORDER BY sc.date_created DESC
     LIMIT 10
   `;

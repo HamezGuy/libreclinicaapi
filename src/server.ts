@@ -139,6 +139,45 @@ async function initializeBackupScheduler(): Promise<void> {
 }
 
 /**
+ * Repair all auto-increment sequences so nextval() never collides with existing PKs.
+ * This is a one-shot fix at startup that covers every table the API inserts into.
+ */
+async function repairAllSequences(): Promise<void> {
+  const pairs: [string, string, string][] = [
+    ['crf_crf_id_seq', 'crf', 'crf_id'],
+    ['crf_version_crf_version_id_seq', 'crf_version', 'crf_version_id'],
+    ['item_item_id_seq', 'item', 'item_id'],
+    ['item_group_item_group_id_seq', 'item_group', 'item_group_id'],
+    ['event_crf_event_crf_id_seq', 'event_crf', 'event_crf_id'],
+    ['study_event_definition_study_event_definition_id_seq', 'study_event_definition', 'study_event_definition_id'],
+    ['study_event_study_event_id_seq', 'study_event', 'study_event_id'],
+    ['event_definition_crf_event_definition_crf_id_seq', 'event_definition_crf', 'event_definition_crf_id'],
+    ['discrepancy_note_discrepancy_note_id_seq', 'discrepancy_note', 'discrepancy_note_id'],
+    ['item_data_item_data_id_seq', 'item_data', 'item_data_id'],
+    ['subject_subject_id_seq', 'subject', 'subject_id'],
+    ['study_subject_study_subject_id_seq', 'study_subject', 'study_subject_id'],
+  ];
+
+  let repaired = 0;
+  for (const [seq, table, pk] of pairs) {
+    try {
+      const result = await pool.query(`
+        SELECT setval($1::regclass,
+          GREATEST(
+            (SELECT COALESCE(MAX(${pk}), 0) FROM ${table}),
+            (SELECT last_value FROM ${seq})
+          )
+        )
+      `, [seq]);
+      repaired++;
+    } catch {
+      // Table or sequence may not exist yet — skip silently
+    }
+  }
+  logger.info(`Sequence repair complete: ${repaired} sequences verified`);
+}
+
+/**
  * Start the server
  */
 async function startServer() {
@@ -157,6 +196,11 @@ async function startServer() {
 
     // Run startup migrations for acc_* extension tables
     await runStartupMigrations(pool);
+
+    // Repair all auto-increment sequences to prevent "duplicate key" errors.
+    // Seed scripts and external tools (LibreClinica Core) can leave sequences
+    // behind the actual max PK, causing INSERT failures.
+    await repairAllSequences();
 
     // Test SOAP connection (warning only)
     await testSoapConnection();

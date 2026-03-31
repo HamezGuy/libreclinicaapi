@@ -312,6 +312,7 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
     const checkResult = await client.query(checkQuery, [parseInt(id)]);
 
     if (checkResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       res.status(404).json({ success: false, message: 'Subject not found' });
       return;
     }

@@ -15,10 +15,12 @@ export interface FormFolder {
   study_id?: number;
   owner_id: number;
   sort_order: number;
+  parent_folder_id?: number | null;
   date_created: string;
   date_updated: string;
   form_count?: number;
   crf_ids?: number[];
+  child_count?: number;
 }
 
 export interface FormFolderItem {
@@ -29,19 +31,33 @@ export interface FormFolderItem {
   date_added: string;
 }
 
-export const getFolders = async (studyId?: number, userId?: number): Promise<FormFolder[]> => {
+export const getFolders = async (studyId?: number, userId?: number, parentFolderId?: number | null): Promise<FormFolder[]> => {
+  const conditions = ['($1::int IS NULL OR f.study_id = $1 OR f.study_id IS NULL)'];
+  const params: any[] = [studyId || null];
+
+  if (parentFolderId === null || parentFolderId === undefined) {
+    // No filter on parent — return all folders
+  } else if (parentFolderId === 0) {
+    // Explicit root: only folders with no parent
+    conditions.push('f.parent_folder_id IS NULL');
+  } else {
+    conditions.push(`f.parent_folder_id = $${params.length + 1}`);
+    params.push(parentFolderId);
+  }
+
   const result = await pool.query(`
     SELECT 
       f.folder_id, f.name, f.description, f.study_id, f.owner_id,
-      f.sort_order, f.date_created, f.date_updated,
+      f.sort_order, f.parent_folder_id, f.date_created, f.date_updated,
       COUNT(DISTINCT fi.crf_id)::int AS form_count,
-      COALESCE(ARRAY_AGG(DISTINCT fi.crf_id ORDER BY fi.crf_id) FILTER (WHERE fi.crf_id IS NOT NULL), '{}') AS crf_ids
+      COALESCE(ARRAY_AGG(DISTINCT fi.crf_id ORDER BY fi.crf_id) FILTER (WHERE fi.crf_id IS NOT NULL), '{}') AS crf_ids,
+      (SELECT COUNT(*)::int FROM acc_form_folder cf WHERE cf.parent_folder_id = f.folder_id) AS child_count
     FROM acc_form_folder f
     LEFT JOIN acc_form_folder_item fi ON f.folder_id = fi.folder_id
-    WHERE ($1::int IS NULL OR f.study_id = $1 OR f.study_id IS NULL)
+    WHERE ${conditions.join(' AND ')}
     GROUP BY f.folder_id
     ORDER BY f.sort_order, f.name
-  `, [studyId || null]);
+  `, params);
 
   return result.rows;
 };
@@ -50,9 +66,10 @@ export const getFolderById = async (folderId: number): Promise<FormFolder | null
   const result = await pool.query(`
     SELECT 
       f.folder_id, f.name, f.description, f.study_id, f.owner_id,
-      f.sort_order, f.date_created, f.date_updated,
+      f.sort_order, f.parent_folder_id, f.date_created, f.date_updated,
       COUNT(DISTINCT fi.crf_id)::int AS form_count,
-      COALESCE(ARRAY_AGG(DISTINCT fi.crf_id ORDER BY fi.crf_id) FILTER (WHERE fi.crf_id IS NOT NULL), '{}') AS crf_ids
+      COALESCE(ARRAY_AGG(DISTINCT fi.crf_id ORDER BY fi.crf_id) FILTER (WHERE fi.crf_id IS NOT NULL), '{}') AS crf_ids,
+      (SELECT COUNT(*)::int FROM acc_form_folder cf WHERE cf.parent_folder_id = f.folder_id) AS child_count
     FROM acc_form_folder f
     LEFT JOIN acc_form_folder_item fi ON f.folder_id = fi.folder_id
     WHERE f.folder_id = $1
@@ -66,9 +83,18 @@ export const createFolder = async (
   name: string,
   userId: number,
   studyId?: number,
-  description?: string
+  description?: string,
+  parentFolderId?: number | null
 ): Promise<FormFolder> => {
-  logger.info('Creating form folder', { name, userId, studyId });
+  logger.info('Creating form folder', { name, userId, studyId, parentFolderId });
+
+  // Validate depth limit (max 4 levels)
+  if (parentFolderId) {
+    const depth = await getFolderDepth(parentFolderId);
+    if (depth >= 4) {
+      throw new Error('Maximum folder depth (4 levels) reached. Cannot create a subfolder here.');
+    }
+  }
 
   const maxOrder = await pool.query(`
     SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM acc_form_folder
@@ -76,12 +102,12 @@ export const createFolder = async (
   `, [studyId || null]);
 
   const result = await pool.query(`
-    INSERT INTO acc_form_folder (name, description, study_id, owner_id, sort_order)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING folder_id, name, description, study_id, owner_id, sort_order, date_created, date_updated
-  `, [name, description || null, studyId || null, userId, maxOrder.rows[0].next_order]);
+    INSERT INTO acc_form_folder (name, description, study_id, owner_id, sort_order, parent_folder_id)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    RETURNING folder_id, name, description, study_id, owner_id, sort_order, parent_folder_id, date_created, date_updated
+  `, [name, description || null, studyId || null, userId, maxOrder.rows[0].next_order, parentFolderId || null]);
 
-  return { ...result.rows[0], form_count: 0, crf_ids: [] };
+  return { ...result.rows[0], form_count: 0, crf_ids: [], child_count: 0 };
 };
 
 export const updateFolder = async (
@@ -166,5 +192,101 @@ export const moveAllFormsOut = async (folderId: number): Promise<number> => {
     [folderId]
   );
 
+  return result.rowCount || 0;
+};
+
+/**
+ * Get the depth of a folder (1-based: root children are depth 1).
+ * Uses a recursive CTE to walk up the ancestor chain.
+ */
+export const getFolderDepth = async (folderId: number): Promise<number> => {
+  const result = await pool.query(`
+    WITH RECURSIVE ancestors AS (
+      SELECT folder_id, parent_folder_id, 1 AS depth
+      FROM acc_form_folder WHERE folder_id = $1
+      UNION ALL
+      SELECT f.folder_id, f.parent_folder_id, a.depth + 1
+      FROM acc_form_folder f
+      JOIN ancestors a ON f.folder_id = a.parent_folder_id
+    )
+    SELECT MAX(depth) AS current_depth FROM ancestors
+  `, [folderId]);
+  return parseInt(result.rows[0]?.current_depth) || 0;
+};
+
+/**
+ * Move a folder to a new parent. Validates depth limit and circular refs.
+ * parentFolderId=null moves the folder to root.
+ */
+export const moveFolder = async (
+  folderId: number,
+  parentFolderId: number | null
+): Promise<FormFolder | null> => {
+  logger.info('Moving folder', { folderId, parentFolderId });
+
+  if (parentFolderId === folderId) {
+    throw new Error('A folder cannot be its own parent.');
+  }
+
+  // Prevent circular reference: target parent must not be a descendant of this folder
+  if (parentFolderId) {
+    const descCheck = await pool.query(`
+      WITH RECURSIVE descendants AS (
+        SELECT folder_id FROM acc_form_folder WHERE parent_folder_id = $1
+        UNION ALL
+        SELECT f.folder_id FROM acc_form_folder f
+        JOIN descendants d ON f.parent_folder_id = d.folder_id
+      )
+      SELECT 1 FROM descendants WHERE folder_id = $2 LIMIT 1
+    `, [folderId, parentFolderId]);
+    if (descCheck.rows.length > 0) {
+      throw new Error('Cannot move a folder into one of its own descendants.');
+    }
+
+    // Validate depth: target parent depth + this folder's subtree depth must be <= 4
+    const parentDepth = await getFolderDepth(parentFolderId);
+    const subtreeDepth = await getSubtreeDepth(folderId);
+    if (parentDepth + subtreeDepth > 4) {
+      throw new Error(`Move would exceed the maximum folder depth (4 levels). Parent is at level ${parentDepth}, subtree is ${subtreeDepth} levels deep.`);
+    }
+  }
+
+  await pool.query(
+    `UPDATE acc_form_folder SET parent_folder_id = $1, date_updated = NOW() WHERE folder_id = $2`,
+    [parentFolderId, folderId]
+  );
+
+  return getFolderById(folderId);
+};
+
+/**
+ * Get the maximum depth of a folder's subtree (1 = no children, 2 = has children, etc.)
+ */
+export const getSubtreeDepth = async (folderId: number): Promise<number> => {
+  const result = await pool.query(`
+    WITH RECURSIVE subtree AS (
+      SELECT folder_id, 1 AS depth FROM acc_form_folder WHERE folder_id = $1
+      UNION ALL
+      SELECT f.folder_id, s.depth + 1
+      FROM acc_form_folder f
+      JOIN subtree s ON f.parent_folder_id = s.folder_id
+    )
+    SELECT MAX(depth) AS max_depth FROM subtree
+  `, [folderId]);
+  return parseInt(result.rows[0]?.max_depth) || 1;
+};
+
+/**
+ * Move all subfolders of a folder to its parent (or root if parent is null).
+ * Used before deleting a non-empty folder.
+ */
+export const moveChildrenToParent = async (folderId: number): Promise<number> => {
+  const folder = await getFolderById(folderId);
+  const targetParent = folder?.parent_folder_id || null;
+
+  const result = await pool.query(
+    `UPDATE acc_form_folder SET parent_folder_id = $1, date_updated = NOW() WHERE parent_folder_id = $2`,
+    [targetParent, folderId]
+  );
   return result.rowCount || 0;
 };

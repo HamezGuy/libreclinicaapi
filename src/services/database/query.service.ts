@@ -169,7 +169,9 @@ export const getQueries = async (
         ss.study_subject_id,
         ss.label as subject_label,
         s.name as study_name,
-        (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count
+        (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count,
+        dn.severity,
+        dn.due_date
       FROM discrepancy_note dn
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
@@ -359,12 +361,14 @@ export const createQuery = async (
     entityId: number;
     studyId: number;
     studySubjectId?: number;
-    subjectId?: number; // Alias for studySubjectId (frontend compatibility)
+    subjectId?: number;
     description: string;
     detailedNotes?: string;
     typeId?: number;
-    queryType?: string; // Frontend sends this as string
-    assignedUserId?: number; // User to assign the query to
+    queryType?: string;
+    assignedUserId?: number;
+    severity?: string;
+    dueDate?: string | null;
   },
   userId: number
 ): Promise<{ success: true; queryId: number; message: string }> => {
@@ -462,9 +466,11 @@ export const createQuery = async (
       INSERT INTO discrepancy_note (
         description, detailed_notes, discrepancy_note_type_id,
         resolution_status_id, study_id, entity_type,
-        owner_id, assigned_user_id, date_created
+        owner_id, assigned_user_id, date_created,
+        severity, due_date
       ) VALUES (
-        $1, $2, $3, 1, $4, $5, $6, $7, NOW()
+        $1, $2, $3, 1, $4, $5, $6, $7, NOW(),
+        $8, $9
       )
       RETURNING discrepancy_note_id
     `;
@@ -476,7 +482,9 @@ export const createQuery = async (
       data.studyId,
       data.entityType,
       userId,
-      resolvedAssignedUserId  // Workflow-resolved or explicitly provided
+      resolvedAssignedUserId,
+      data.severity || 'minor',
+      data.dueDate || null  // Workflow-resolved or explicitly provided
     ]);
 
     const queryId = noteResult.rows[0].discrepancy_note_id;
@@ -858,11 +866,21 @@ export const addQueryResponse = async (
             }
           }
 
-          // 1. Update the actual item_data value
+          // Detect if this is a structured field (table/question_table) where the
+          // real data lives in patient_event_form.form_data JSONB, not item_data.
+          const isStructuredField = old_value === '__STRUCTURED_DATA__';
+          let correctedValueForItemData = data.correctedValue;
+
+          if (isStructuredField) {
+            // Keep the marker in item_data — the real update goes to JSONB below
+            correctedValueForItemData = '__STRUCTURED_DATA__';
+          }
+
+          // 1. Update item_data value (marker preserved for structured fields)
           await client.query(`
             UPDATE item_data SET value = $1, date_updated = NOW(), update_id = $2
             WHERE item_data_id = $3
-          `, [data.correctedValue, userId, item_data_id]);
+          `, [correctedValueForItemData, userId, item_data_id]);
 
           // 2. Write audit trail for the data correction
           const correctionReason = (data.correctionReason || 'Query resolution data correction') + lockNote;
@@ -905,7 +923,21 @@ export const addQueryResponse = async (
           // 4. Sync corrected value into patient_event_form JSONB snapshot.
           //    Try both the technical fieldName and display name to ensure the
           //    JSONB key matches regardless of how the form was originally saved.
+          //    For table/question_table fields, the correctedValue is JSON (array
+          //    or object) — store as native JSONB, not double-escaped string.
           if (event_crf_id) {
+            let jsonbLiteral: string;
+            try {
+              const parsed = JSON.parse(data.correctedValue);
+              if (typeof parsed === 'object' && parsed !== null) {
+                jsonbLiteral = data.correctedValue;
+              } else {
+                jsonbLiteral = JSON.stringify(data.correctedValue);
+              }
+            } catch {
+              jsonbLiteral = JSON.stringify(data.correctedValue);
+            }
+
             const keysToTry = [technicalFieldName, field_name].filter(Boolean) as string[];
             for (const key of keysToTry) {
               try {
@@ -913,12 +945,12 @@ export const addQueryResponse = async (
                   UPDATE patient_event_form
                   SET form_data = jsonb_set(
                         COALESCE(form_data, '{}'::jsonb),
-                        $1::text[], to_jsonb($2::text)
+                        $1::text[], $2::jsonb
                       ),
                       date_updated = NOW()
                   WHERE event_crf_id = $3
                     AND form_data ? $4
-                `, [[key], data.correctedValue, event_crf_id, key]);
+                `, [[key], jsonbLiteral, event_crf_id, key]);
                 if ((updateResult as any).rowCount > 0) {
                   logger.info('Synced correction to patient_event_form', { 
                     event_crf_id, key, queryId: parentQueryId 
@@ -931,8 +963,6 @@ export const addQueryResponse = async (
                 });
               }
             }
-            // Fallback: if no key matched (form_data doesn't contain either key),
-            // insert using the technical fieldName or display name
             if (keysToTry.length > 0) {
               try {
                 const fallbackKey = technicalFieldName || field_name;
@@ -940,12 +970,12 @@ export const addQueryResponse = async (
                   UPDATE patient_event_form
                   SET form_data = jsonb_set(
                         COALESCE(form_data, '{}'::jsonb),
-                        $1::text[], to_jsonb($2::text)
+                        $1::text[], $2::jsonb
                       ),
                       date_updated = NOW()
                   WHERE event_crf_id = $3
                     AND NOT (form_data ? $4)
-                `, [[fallbackKey], data.correctedValue, event_crf_id, fallbackKey]);
+                `, [[fallbackKey], jsonbLiteral, event_crf_id, fallbackKey]);
               } catch { /* non-blocking */ }
             }
           }
@@ -1528,24 +1558,53 @@ export const getFormQueries = async (eventCrfId: number, callerUserId?: number):
         dn.discrepancy_note_id,
         dn.description,
         dn.detailed_notes,
+        dn.discrepancy_note_type_id,
         dnt.name as type_name,
+        dn.resolution_status_id,
         dnst.name as status_name,
+        dn.severity,
+        dn.due_date,
+        dn.entity_type,
         dn.date_created,
         u1.user_name as created_by,
         u2.user_name as assigned_to,
-        (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count
+        dn.assigned_user_id,
+        (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count,
+        didm.column_name as field_name,
+        i.name as item_name,
+        i.item_id as item_id,
+        i.description as item_description
       FROM discrepancy_note dn
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
       LEFT JOIN user_account u1 ON dn.owner_id = u1.user_id
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
-      INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
-      WHERE decm.event_crf_id = $1
-        AND dn.parent_dn_id IS NULL${orgFilter}
+      LEFT JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
+      LEFT JOIN dn_item_data_map didm ON dn.discrepancy_note_id = didm.discrepancy_note_id
+      LEFT JOIN item_data id2 ON didm.item_data_id = id2.item_data_id
+      LEFT JOIN item i ON id2.item_id = i.item_id
+      WHERE dn.parent_dn_id IS NULL
+        AND (decm.event_crf_id = $1 OR id2.event_crf_id = $1)${orgFilter}
       ORDER BY dn.date_created DESC
     `;
 
     const result = await pool.query(query, params);
+
+    // Post-process: resolve fieldName from extended_properties if column_name is missing
+    for (const row of result.rows) {
+      if (!row.field_name && row.item_description) {
+        try {
+          if (row.item_description.includes('---EXTENDED_PROPS---')) {
+            const json = row.item_description.split('---EXTENDED_PROPS---')[1]?.trim();
+            if (json) {
+              const ext = JSON.parse(json);
+              if (ext.fieldName) row.field_name = ext.fieldName;
+            }
+          }
+        } catch { /* ignore parse errors */ }
+      }
+    }
+
     return result.rows;
   } catch (error: any) {
     logger.error('Get form queries error', { error: error.message });
@@ -1855,6 +1914,9 @@ export const getMyAssignedQueries = async (userId: number, studyId?: number): Pr
         dn.discrepancy_note_id,
         dn.description,
         dn.date_created,
+        dn.severity,
+        dn.due_date,
+        dn.discrepancy_note_type_id,
         dnt.name as type_name,
         dnst.name as status_name,
         ss.label as subject_label,

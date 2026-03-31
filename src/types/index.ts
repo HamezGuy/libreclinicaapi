@@ -386,9 +386,18 @@ export interface QueryCreateRequest {
   queryType: 'Query' | 'Failed Validation Check' | 'Annotation' | 'Reason for Change';
   studyId: number;
   subjectId?: number;
+  assignedUserId?: number;
+  severity?: 'minor' | 'major' | 'critical';
+  dueDate?: string | null;
+  eventCrfId?: number;
+  itemId?: number;
+  itemDataId?: number;
+  fieldName?: string;
+  fieldPath?: string;
+  columnName?: string;
 }
 
-export interface QueryResponse {
+export interface QueryCreateResponse {
   success: boolean;
   queryId?: number;
   message?: string;
@@ -398,6 +407,9 @@ export interface QueryListQuery {
   studyId?: number;
   subjectId?: number;
   status?: 'New' | 'Updated' | 'Resolution Proposed' | 'Closed' | 'Not Applicable';
+  typeId?: number;
+  assignedUserId?: number;
+  search?: string;
   page?: number;
   limit?: number;
 }

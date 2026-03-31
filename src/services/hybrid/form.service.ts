@@ -33,6 +33,31 @@ function tryParseJson(str: string, fallback: any): any {
 }
 
 /**
+ * Ensure a PostgreSQL auto-increment sequence is at least as high as the current max ID.
+ * Prevents "duplicate key violates unique constraint" when the sequence drifts behind
+ * the actual data (e.g. after seed scripts insert explicit IDs).
+ */
+async function repairSequence(
+  client: any,
+  sequenceName: string,
+  tableName: string,
+  pkColumn: string
+): Promise<void> {
+  try {
+    await client.query(`
+      SELECT setval($1::regclass,
+        GREATEST(
+          (SELECT COALESCE(MAX(${pkColumn}), 0) FROM ${tableName}),
+          (SELECT last_value FROM ${sequenceName})
+        )
+      )
+    `, [sequenceName]);
+  } catch (err: any) {
+    logger.warn(`Failed to repair sequence ${sequenceName}`, { error: err.message });
+  }
+}
+
+/**
  * Save form data via SOAP (GxP compliant)
  * 
  * This function now applies validation rules before saving:
@@ -800,6 +825,42 @@ const saveFormDataDirect = async (
 
     await client.query('COMMIT');
 
+    // Associate orphaned file_uploads with this event_crf_id.
+    // Files uploaded before the form's first save have event_crf_id = NULL.
+    // Match by file_id values stored in item_data for file/image fields.
+    try {
+      const fileFieldValues = await pool.query(`
+        SELECT id.value FROM item_data id
+        INNER JOIN item i ON id.item_id = i.item_id
+        WHERE id.event_crf_id = $1 AND id.deleted = false
+          AND id.value IS NOT NULL AND id.value != ''
+          AND id.value != '__STRUCTURED_DATA__'
+          AND i.description LIKE '%"type"%'
+          AND (i.description LIKE '%"file"%' OR i.description LIKE '%"image"%')
+      `, [eventCrfId]);
+
+      const fileIds: string[] = [];
+      for (const row of fileFieldValues.rows) {
+        if (typeof row.value === 'string' && row.value.length > 0) {
+          for (const id of row.value.split(',')) {
+            const trimmed = id.trim();
+            if (trimmed) fileIds.push(trimmed);
+          }
+        }
+      }
+
+      if (fileIds.length > 0) {
+        await pool.query(`
+          UPDATE file_uploads
+          SET event_crf_id = $1, study_subject_id = $2
+          WHERE file_id = ANY($3::text[])
+            AND (event_crf_id IS NULL OR event_crf_id != $1)
+        `, [eventCrfId, request.subjectId, fileIds]);
+      }
+    } catch (fileAssocErr: any) {
+      logger.warn('Could not associate file_uploads with event_crf_id', { error: fileAssocErr.message });
+    }
+
     logger.info('Form data saved directly to database', {
       eventCrfId,
       savedCount,
@@ -1187,14 +1248,23 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       }));
       return {
         data: syntheticRows,
+        formData: jsonbData,
         lockStatus: lockInfo,
         source: 'patient_event_form'
       };
     }
 
     // Return data with lock status for UI to respect
+    // Also build a convenience `formData` map keyed by field_name for easy lookup
+    const formData: Record<string, any> = {};
+    for (const row of decryptedRows) {
+      const key = row.field_name || row.item_name;
+      if (key) formData[key] = row.value;
+    }
+
     return {
       data: decryptedRows,
+      formData,
       lockStatus: lockInfo
     };
   } catch (error: any) {
@@ -2458,6 +2528,13 @@ export const createForm = async (
     const hasCategoryColumn = columnCheck.rows.length > 0;
 
     // Insert CRF (conditionally include category column if it exists)
+    // Repair sequences to prevent duplicate key constraint violations
+    // from seed scripts that insert explicit IDs and hardcode setval()
+    await repairSequence(client, 'crf_crf_id_seq', 'crf', 'crf_id');
+    await repairSequence(client, 'crf_version_crf_version_id_seq', 'crf_version', 'crf_version_id');
+    await repairSequence(client, 'item_group_item_group_id_seq', 'item_group', 'item_group_id');
+    await repairSequence(client, 'item_item_id_seq', 'item', 'item_id');
+
     let crfResult;
     if (hasCategoryColumn) {
       crfResult = await client.query(`
@@ -3051,6 +3128,10 @@ export const updateForm = async (
     // Update fields if provided
     if (data.fields && data.fields.length > 0) {
       logger.info('Updating form fields', { crfId, fieldCount: data.fields.length });
+
+      // Repair sequences that might be out of sync from seed data
+      await repairSequence(client, 'item_group_item_group_id_seq', 'item_group', 'item_group_id');
+      await repairSequence(client, 'item_item_id_seq', 'item', 'item_id');
 
       // Get the latest version
       const versionResult = await client.query(`
@@ -4003,6 +4084,7 @@ export const createFormVersion = async (
     const newVersionOid = `${crfOid}_V${nextVersionNum}`;
 
     // 3. Create new version record
+    await repairSequence(client, 'crf_version_crf_version_id_seq', 'crf_version', 'crf_version_id');
     const newVersionResult = await client.query(`
       INSERT INTO crf_version (
         crf_id, name, description, revision_notes, status_id, owner_id, date_created, oc_oid
@@ -4319,6 +4401,7 @@ export const forkForm = async (
     }
 
     // 3. Create new CRF
+    await repairSequence(client, 'crf_crf_id_seq', 'crf', 'crf_id');
     const newCrfResult = await client.query(`
       INSERT INTO crf (
         name, description, status_id, owner_id, date_created, oc_oid, source_study_id
@@ -4355,6 +4438,7 @@ export const forkForm = async (
     const sourceVersionId = sourceVersion.crf_version_id;
 
     // 5. Create initial version for new CRF
+    await repairSequence(client, 'crf_version_crf_version_id_seq', 'crf_version', 'crf_version_id');
     const newVersionOid = `${newOid}_V1`;
     const newVersionResult = await client.query(`
       INSERT INTO crf_version (

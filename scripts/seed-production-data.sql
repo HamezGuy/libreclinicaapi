@@ -75,9 +75,18 @@ VALUES
   (5, 1, 'Week 8', 'Follow-up visit at 8 weeks', false, 'scheduled', 'Treatment', 1, 1, NOW(), 'SE_WEEK8', 5),
   (6, 1, 'Week 12 / End of Study', 'Final study visit at 12 weeks', false, 'scheduled', 'End of Study', 1, 1, NOW(), 'SE_WEEK12', 6),
   (7, 1, 'Unscheduled Visit', 'Unscheduled visit for adverse events or other reasons', true, 'unscheduled', 'Safety', 1, 1, NOW(), 'SE_UNSCHED', 7)
-ON CONFLICT (study_event_definition_id) DO NOTHING;
+ON CONFLICT (study_event_definition_id) DO UPDATE SET
+  schedule_day = EXCLUDED.schedule_day, min_day = EXCLUDED.min_day, max_day = EXCLUDED.max_day;
 
-SELECT setval('study_event_definition_study_event_definition_id_seq', 7);
+-- Set visit windows (schedule_day, min_day, max_day) for due-date calculations
+UPDATE study_event_definition SET schedule_day = 0,  min_day = 0,  max_day = 3  WHERE study_event_definition_id = 1;
+UPDATE study_event_definition SET schedule_day = 7,  min_day = 5,  max_day = 10 WHERE study_event_definition_id = 2;
+UPDATE study_event_definition SET schedule_day = 14, min_day = 12, max_day = 17 WHERE study_event_definition_id = 3;
+UPDATE study_event_definition SET schedule_day = 28, min_day = 25, max_day = 35 WHERE study_event_definition_id = 4;
+UPDATE study_event_definition SET schedule_day = 56, min_day = 50, max_day = 63 WHERE study_event_definition_id = 5;
+UPDATE study_event_definition SET schedule_day = 84, min_day = 78, max_day = 91 WHERE study_event_definition_id = 6;
+
+SELECT setval('study_event_definition_study_event_definition_id_seq', GREATEST(7, (SELECT COALESCE(MAX(study_event_definition_id), 0) FROM study_event_definition)));
 
 -- ============================================================================
 -- 5. CRFs (Case Report Forms)
@@ -97,7 +106,7 @@ VALUES
   (10, 1, 'End of Study', 'Study completion/discontinuation form', 1, NOW(), NOW(), 'F_EOS')
 ON CONFLICT (crf_id) DO NOTHING;
 
-SELECT setval('crf_crf_id_seq', 10);
+SELECT setval('crf_crf_id_seq', GREATEST(10, (SELECT COALESCE(MAX(crf_id), 0) FROM crf)));
 
 -- ============================================================================
 -- 6. CRF VERSIONS
@@ -117,7 +126,7 @@ VALUES
   (10, 10, 'v1.0', 'Initial version', 'Initial release', 1, 1, NOW(), NOW(), 'F_EOS_V1')
 ON CONFLICT (crf_version_id) DO NOTHING;
 
-SELECT setval('crf_version_crf_version_id_seq', 10);
+SELECT setval('crf_version_crf_version_id_seq', GREATEST(10, (SELECT COALESCE(MAX(crf_version_id), 0) FROM crf_version)));
 
 -- ============================================================================
 -- 7. EVENT DEFINITION CRFs (Link forms to events)
@@ -159,7 +168,7 @@ VALUES
   (28, 7, 1, 7, true, false, false, false, false, 1, NULL, NULL, 1, 7, 1, 1, NOW())
 ON CONFLICT (event_definition_crf_id) DO NOTHING;
 
-SELECT setval('event_definition_crf_event_definition_crf_id_seq', 28);
+SELECT setval('event_definition_crf_event_definition_crf_id_seq', GREATEST(28, (SELECT COALESCE(MAX(event_definition_crf_id), 0) FROM event_definition_crf)));
 
 -- ============================================================================
 -- 8. COMPLETION STATUS (add more statuses)
@@ -172,7 +181,7 @@ VALUES
   (4, 1, 'complete', 'Data entry complete')
 ON CONFLICT (completion_status_id) DO NOTHING;
 
-SELECT setval('completion_status_completion_status_id_seq', 4);
+SELECT setval('completion_status_completion_status_id_seq', GREATEST(4, (SELECT COALESCE(MAX(completion_status_id), 0) FROM completion_status)));
 
 -- ============================================================================
 -- 9. ITEM GROUPS
@@ -192,7 +201,7 @@ VALUES
   (10, 'End of Study', 10, 1, 1, NOW(), 'IG_EOS')
 ON CONFLICT (item_group_id) DO NOTHING;
 
-SELECT setval('item_group_item_group_id_seq', 10);
+SELECT setval('item_group_item_group_id_seq', GREATEST(10, (SELECT COALESCE(MAX(item_group_id), 0) FROM item_group)));
 
 -- ============================================================================
 -- 10. ITEMS (Form Fields)
@@ -226,7 +235,7 @@ VALUES
   (20, 'QOL_SCORE', 'Quality of Life Score', NULL, false, 6, NULL, 1, 1, NOW(), 'I_QOL')
 ON CONFLICT (item_id) DO NOTHING;
 
-SELECT setval('item_item_id_seq', 20);
+SELECT setval('item_item_id_seq', GREATEST(20, (SELECT COALESCE(MAX(item_id), 0) FROM item)));
 
 -- ============================================================================
 -- 11. SUBJECTS (Demographics table - 15 patients)
@@ -248,10 +257,16 @@ VALUES
   (12, 1, '1973-10-21', 'f', 'PID-012', NOW(), 1, true),
   (13, 1, '1965-03-09', 'm', 'PID-013', NOW(), 1, true),
   (14, 1, '1992-11-16', 'f', 'PID-014', NOW(), 1, true),
-  (15, 1, '1980-07-04', 'm', 'PID-015', NOW(), 1, true)
+  (15, 1, '1980-07-04', 'm', 'PID-015', NOW(), 1, true),
+  -- New test patients for overdue/in-progress/future scenarios
+  (101, 1, '1988-06-15', 'm', 'PID-101', NOW(), 1, true),
+  (102, 1, '1975-11-22', 'm', 'PID-102', NOW(), 1, true),
+  (103, 1, '1992-03-08', 'f', 'PID-103', NOW(), 1, true),
+  (104, 1, '1983-09-30', 'm', 'PID-104', NOW(), 1, true),
+  (105, 1, '1996-01-12', 'f', 'PID-105', NOW(), 1, true)
 ON CONFLICT (subject_id) DO NOTHING;
 
-SELECT setval('subject_subject_id_seq', 15);
+SELECT setval('subject_subject_id_seq', GREATEST(105, (SELECT COALESCE(MAX(subject_id), 0) FROM subject)));
 
 -- ============================================================================
 -- 12. STUDY SUBJECTS (Enrolled patients)
@@ -259,73 +274,128 @@ SELECT setval('subject_subject_id_seq', 15);
 
 INSERT INTO study_subject (study_subject_id, label, secondary_label, subject_id, study_id, status_id, enrollment_date, date_created, date_updated, owner_id, oc_oid)
 VALUES
-  (1, 'SS-001', 'John Smith', 1, 1, 1, '2024-01-15', NOW(), NOW(), 1, 'SS_SS001'),
-  (2, 'SS-002', 'Jane Doe', 2, 1, 1, '2024-01-18', NOW(), NOW(), 1, 'SS_SS002'),
-  (3, 'SS-003', 'Robert Johnson', 3, 1, 1, '2024-01-22', NOW(), NOW(), 1, 'SS_SS003'),
-  (4, 'SS-004', 'Emily Davis', 4, 1, 1, '2024-01-25', NOW(), NOW(), 1, 'SS_SS004'),
-  (5, 'SS-005', 'William Brown', 5, 1, 1, '2024-02-01', NOW(), NOW(), 1, 'SS_SS005'),
-  (6, 'SS-006', 'Sarah Wilson', 6, 1, 1, '2024-02-05', NOW(), NOW(), 1, 'SS_SS006'),
-  (7, 'SS-007', 'Michael Taylor', 7, 1, 1, '2024-02-10', NOW(), NOW(), 1, 'SS_SS007'),
-  (8, 'SS-008', 'Jennifer Anderson', 8, 1, 1, '2024-02-15', NOW(), NOW(), 1, 'SS_SS008'),
-  (9, 'SS-009', 'David Martinez', 9, 1, 1, '2024-02-20', NOW(), NOW(), 1, 'SS_SS009'),
-  (10, 'SS-010', 'Lisa Thompson', 10, 1, 1, '2024-02-25', NOW(), NOW(), 1, 'SS_SS010'),
-  (11, 'SS-011', 'James Garcia', 11, 1, 1, '2024-03-01', NOW(), NOW(), 1, 'SS_SS011'),
-  (12, 'SS-012', 'Patricia Robinson', 12, 1, 1, '2024-03-05', NOW(), NOW(), 1, 'SS_SS012'),
-  (13, 'SS-013', 'Richard Clark', 13, 1, 1, '2024-03-10', NOW(), NOW(), 1, 'SS_SS013'),
-  (14, 'SS-014', 'Linda Lewis', 14, 1, 1, '2024-03-15', NOW(), NOW(), 1, 'SS_SS014'),
-  (15, 'SS-015', 'Thomas Walker', 15, 1, 1, '2024-03-20', NOW(), NOW(), 1, 'SS_SS015')
+  -- Original patients with dates relative to NOW so tasks aren't all 2-years overdue
+  (1, 'SS-001', 'John Smith', 1, 1, 1, CURRENT_DATE - INTERVAL '120 days', NOW(), NOW(), 1, 'SS_SS001'),
+  (2, 'SS-002', 'Jane Doe', 2, 1, 1, CURRENT_DATE - INTERVAL '90 days', NOW(), NOW(), 1, 'SS_SS002'),
+  (3, 'SS-003', 'Robert Johnson', 3, 1, 1, CURRENT_DATE - INTERVAL '60 days', NOW(), NOW(), 1, 'SS_SS003'),
+  (4, 'SS-004', 'Emily Davis', 4, 1, 1, CURRENT_DATE - INTERVAL '45 days', NOW(), NOW(), 1, 'SS_SS004'),
+  (5, 'SS-005', 'William Brown', 5, 1, 1, CURRENT_DATE - INTERVAL '30 days', NOW(), NOW(), 1, 'SS_SS005'),
+  (6, 'SS-006', 'Sarah Wilson', 6, 1, 1, CURRENT_DATE - INTERVAL '25 days', NOW(), NOW(), 1, 'SS_SS006'),
+  (7, 'SS-007', 'Michael Taylor', 7, 1, 1, CURRENT_DATE - INTERVAL '20 days', NOW(), NOW(), 1, 'SS_SS007'),
+  (8, 'SS-008', 'Jennifer Anderson', 8, 1, 1, CURRENT_DATE - INTERVAL '15 days', NOW(), NOW(), 1, 'SS_SS008'),
+  (9, 'SS-009', 'David Martinez', 9, 1, 1, CURRENT_DATE - INTERVAL '10 days', NOW(), NOW(), 1, 'SS_SS009'),
+  (10, 'SS-010', 'Lisa Thompson', 10, 1, 1, CURRENT_DATE - INTERVAL '5 days', NOW(), NOW(), 1, 'SS_SS010'),
+  (11, 'SS-011', 'James Garcia', 11, 1, 1, CURRENT_DATE - INTERVAL '3 days', NOW(), NOW(), 1, 'SS_SS011'),
+  (12, 'SS-012', 'Patricia Robinson', 12, 1, 1, CURRENT_DATE - INTERVAL '2 days', NOW(), NOW(), 1, 'SS_SS012'),
+  (13, 'SS-013', 'Richard Clark', 13, 1, 1, CURRENT_DATE - INTERVAL '1 day', NOW(), NOW(), 1, 'SS_SS013'),
+  (14, 'SS-014', 'Linda Lewis', 14, 1, 1, CURRENT_DATE, NOW(), NOW(), 1, 'SS_SS014'),
+  (15, 'SS-015', 'Thomas Walker', 15, 1, 1, CURRENT_DATE, NOW(), NOW(), 1, 'SS_SS015'),
+  -- New test patients with strategic enrollment for overdue/in-progress/future mix
+  -- SS-101: Enrolled 10 wks ago → Screening→Week4 done, Week8 OVERDUE, Week12 future
+  (101, 'SS-101', 'Alice Rivera',    101, 1, 1, CURRENT_DATE - INTERVAL '70 days', NOW(), NOW(), 1, 'SS_SS101'),
+  -- SS-102: Enrolled 5 wks ago → Screening→Week2 done, Week4 IN-PROGRESS, rest future
+  (102, 'SS-102', 'Ben Okafor',      102, 1, 1, CURRENT_DATE - INTERVAL '35 days', NOW(), NOW(), 1, 'SS_SS102'),
+  -- SS-103: Enrolled 3 wks ago → Screening+Baseline done, Week2 IN-PROGRESS, rest future
+  (103, 'SS-103', 'Clara Zhang',     103, 1, 1, CURRENT_DATE - INTERVAL '21 days', NOW(), NOW(), 1, 'SS_SS103'),
+  -- SS-104: Enrolled 1 wk ago → Screening done, Baseline IN-PROGRESS, rest future
+  (104, 'SS-104', 'David Kowalski',  104, 1, 1, CURRENT_DATE - INTERVAL '7 days',  NOW(), NOW(), 1, 'SS_SS104'),
+  -- SS-105: Enrolled today → Screening SCHEDULED, everything else future
+  (105, 'SS-105', 'Elena Petrov',    105, 1, 1, CURRENT_DATE,                       NOW(), NOW(), 1, 'SS_SS105')
 ON CONFLICT (study_subject_id) DO NOTHING;
 
-SELECT setval('study_subject_study_subject_id_seq', 15);
+SELECT setval('study_subject_study_subject_id_seq', GREATEST(105, (SELECT COALESCE(MAX(study_subject_id), 0) FROM study_subject)));
 
 -- ============================================================================
 -- 13. STUDY EVENTS (Visit instances for each patient)
 -- ============================================================================
 
--- Generate study events for all subjects (each gets Screening through Week 12)
+-- Generate study events for all subjects with dates relative to NOW
+-- subject_event_status_id: 1=scheduled, 3=data_entry_started, 4=completed
 INSERT INTO study_event (study_event_id, study_event_definition_id, study_subject_id, location, sample_ordinal, date_start, date_end, owner_id, status_id, subject_event_status_id, date_created)
 VALUES
-  -- Subject 1: All events completed
-  (1, 1, 1, 'Site 001', 1, '2024-01-15', '2024-01-15', 1, 1, 4, NOW()),
-  (2, 2, 1, 'Site 001', 1, '2024-01-22', '2024-01-22', 1, 1, 4, NOW()),
-  (3, 3, 1, 'Site 001', 1, '2024-02-05', '2024-02-05', 1, 1, 4, NOW()),
-  (4, 4, 1, 'Site 001', 1, '2024-02-19', '2024-02-19', 1, 1, 4, NOW()),
-  (5, 5, 1, 'Site 001', 1, '2024-03-18', '2024-03-18', 1, 1, 3, NOW()),
-  (6, 6, 1, 'Site 001', 1, '2024-04-15', NULL, 1, 1, 1, NOW()),
-  -- Subject 2: Through Week 4
-  (7, 1, 2, 'Site 001', 1, '2024-01-18', '2024-01-18', 1, 1, 4, NOW()),
-  (8, 2, 2, 'Site 001', 1, '2024-01-25', '2024-01-25', 1, 1, 4, NOW()),
-  (9, 3, 2, 'Site 001', 1, '2024-02-08', '2024-02-08', 1, 1, 4, NOW()),
-  (10, 4, 2, 'Site 001', 1, '2024-02-22', '2024-02-22', 1, 1, 3, NOW()),
-  (11, 5, 2, 'Site 001', 1, '2024-03-21', NULL, 1, 1, 1, NOW()),
-  (12, 6, 2, 'Site 001', 1, '2024-04-18', NULL, 1, 1, 1, NOW()),
-  -- Subject 3: Through Week 2
-  (13, 1, 3, 'Site 002', 1, '2024-01-22', '2024-01-22', 1, 1, 4, NOW()),
-  (14, 2, 3, 'Site 002', 1, '2024-01-29', '2024-01-29', 1, 1, 4, NOW()),
-  (15, 3, 3, 'Site 002', 1, '2024-02-12', '2024-02-12', 1, 1, 3, NOW()),
-  (16, 4, 3, 'Site 002', 1, '2024-02-26', NULL, 1, 1, 1, NOW()),
-  -- Subject 4: Screening and Baseline only
-  (17, 1, 4, 'Site 001', 1, '2024-01-25', '2024-01-25', 1, 1, 4, NOW()),
-  (18, 2, 4, 'Site 001', 1, '2024-02-01', '2024-02-01', 1, 1, 3, NOW()),
-  (19, 3, 4, 'Site 001', 1, '2024-02-15', NULL, 1, 1, 1, NOW()),
-  -- Subject 5-15: Screening done, some with Baseline
-  (20, 1, 5, 'Site 003', 1, '2024-02-01', '2024-02-01', 1, 1, 4, NOW()),
-  (21, 2, 5, 'Site 003', 1, '2024-02-08', '2024-02-08', 1, 1, 4, NOW()),
-  (22, 1, 6, 'Site 001', 1, '2024-02-05', '2024-02-05', 1, 1, 4, NOW()),
-  (23, 2, 6, 'Site 001', 1, '2024-02-12', NULL, 1, 1, 3, NOW()),
-  (24, 1, 7, 'Site 002', 1, '2024-02-10', '2024-02-10', 1, 1, 4, NOW()),
-  (25, 2, 7, 'Site 002', 1, '2024-02-17', NULL, 1, 1, 1, NOW()),
-  (26, 1, 8, 'Site 001', 1, '2024-02-15', '2024-02-15', 1, 1, 4, NOW()),
-  (27, 1, 9, 'Site 003', 1, '2024-02-20', '2024-02-20', 1, 1, 4, NOW()),
-  (28, 1, 10, 'Site 001', 1, '2024-02-25', '2024-02-25', 1, 1, 4, NOW()),
-  (29, 1, 11, 'Site 002', 1, '2024-03-01', '2024-03-01', 1, 1, 3, NOW()),
-  (30, 1, 12, 'Site 001', 1, '2024-03-05', NULL, 1, 1, 1, NOW()),
-  (31, 1, 13, 'Site 003', 1, '2024-03-10', NULL, 1, 1, 1, NOW()),
-  (32, 1, 14, 'Site 001', 1, '2024-03-15', NULL, 1, 1, 1, NOW()),
-  (33, 1, 15, 'Site 002', 1, '2024-03-20', NULL, 1, 1, 1, NOW())
+  -- Subject 1 (enrolled 120d ago): All events completed through Week 12
+  (1, 1, 1, 'Site 001', 1, CURRENT_DATE - INTERVAL '120 days', CURRENT_DATE - INTERVAL '120 days', 1, 1, 4, NOW()),
+  (2, 2, 1, 'Site 001', 1, CURRENT_DATE - INTERVAL '113 days', CURRENT_DATE - INTERVAL '113 days', 1, 1, 4, NOW()),
+  (3, 3, 1, 'Site 001', 1, CURRENT_DATE - INTERVAL '106 days', CURRENT_DATE - INTERVAL '106 days', 1, 1, 4, NOW()),
+  (4, 4, 1, 'Site 001', 1, CURRENT_DATE - INTERVAL '92 days',  CURRENT_DATE - INTERVAL '92 days',  1, 1, 4, NOW()),
+  (5, 5, 1, 'Site 001', 1, CURRENT_DATE - INTERVAL '64 days',  CURRENT_DATE - INTERVAL '64 days',  1, 1, 3, NOW()),
+  (6, 6, 1, 'Site 001', 1, CURRENT_DATE - INTERVAL '36 days',  NULL, 1, 1, 1, NOW()),
+  -- Subject 2 (enrolled 90d ago): Through Week 4
+  (7, 1, 2, 'Site 001', 1, CURRENT_DATE - INTERVAL '90 days', CURRENT_DATE - INTERVAL '90 days', 1, 1, 4, NOW()),
+  (8, 2, 2, 'Site 001', 1, CURRENT_DATE - INTERVAL '83 days', CURRENT_DATE - INTERVAL '83 days', 1, 1, 4, NOW()),
+  (9, 3, 2, 'Site 001', 1, CURRENT_DATE - INTERVAL '76 days', CURRENT_DATE - INTERVAL '76 days', 1, 1, 4, NOW()),
+  (10, 4, 2, 'Site 001', 1, CURRENT_DATE - INTERVAL '62 days', CURRENT_DATE - INTERVAL '62 days', 1, 1, 3, NOW()),
+  (11, 5, 2, 'Site 001', 1, CURRENT_DATE - INTERVAL '34 days', NULL, 1, 1, 1, NOW()),
+  (12, 6, 2, 'Site 001', 1, CURRENT_DATE - INTERVAL '6 days',  NULL, 1, 1, 1, NOW()),
+  -- Subject 3 (enrolled 60d ago): Through Week 2
+  (13, 1, 3, 'Site 002', 1, CURRENT_DATE - INTERVAL '60 days', CURRENT_DATE - INTERVAL '60 days', 1, 1, 4, NOW()),
+  (14, 2, 3, 'Site 002', 1, CURRENT_DATE - INTERVAL '53 days', CURRENT_DATE - INTERVAL '53 days', 1, 1, 4, NOW()),
+  (15, 3, 3, 'Site 002', 1, CURRENT_DATE - INTERVAL '46 days', CURRENT_DATE - INTERVAL '46 days', 1, 1, 3, NOW()),
+  (16, 4, 3, 'Site 002', 1, CURRENT_DATE - INTERVAL '32 days', NULL, 1, 1, 1, NOW()),
+  -- Subject 4 (enrolled 45d ago): Screening and Baseline done
+  (17, 1, 4, 'Site 001', 1, CURRENT_DATE - INTERVAL '45 days', CURRENT_DATE - INTERVAL '45 days', 1, 1, 4, NOW()),
+  (18, 2, 4, 'Site 001', 1, CURRENT_DATE - INTERVAL '38 days', CURRENT_DATE - INTERVAL '38 days', 1, 1, 3, NOW()),
+  (19, 3, 4, 'Site 001', 1, CURRENT_DATE - INTERVAL '31 days', NULL, 1, 1, 1, NOW()),
+  -- Subject 5-15: Screening done, some with Baseline (recent enrollments)
+  (20, 1, 5, 'Site 003', 1, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE - INTERVAL '30 days', 1, 1, 4, NOW()),
+  (21, 2, 5, 'Site 003', 1, CURRENT_DATE - INTERVAL '23 days', CURRENT_DATE - INTERVAL '23 days', 1, 1, 4, NOW()),
+  (22, 1, 6, 'Site 001', 1, CURRENT_DATE - INTERVAL '25 days', CURRENT_DATE - INTERVAL '25 days', 1, 1, 4, NOW()),
+  (23, 2, 6, 'Site 001', 1, CURRENT_DATE - INTERVAL '18 days', NULL, 1, 1, 3, NOW()),
+  (24, 1, 7, 'Site 002', 1, CURRENT_DATE - INTERVAL '20 days', CURRENT_DATE - INTERVAL '20 days', 1, 1, 4, NOW()),
+  (25, 2, 7, 'Site 002', 1, CURRENT_DATE - INTERVAL '13 days', NULL, 1, 1, 1, NOW()),
+  (26, 1, 8, 'Site 001', 1, CURRENT_DATE - INTERVAL '15 days', CURRENT_DATE - INTERVAL '15 days', 1, 1, 4, NOW()),
+  (27, 1, 9, 'Site 003', 1, CURRENT_DATE - INTERVAL '10 days', CURRENT_DATE - INTERVAL '10 days', 1, 1, 4, NOW()),
+  (28, 1, 10, 'Site 001', 1, CURRENT_DATE - INTERVAL '5 days', CURRENT_DATE - INTERVAL '5 days', 1, 1, 4, NOW()),
+  (29, 1, 11, 'Site 002', 1, CURRENT_DATE - INTERVAL '3 days', CURRENT_DATE - INTERVAL '3 days', 1, 1, 3, NOW()),
+  (30, 1, 12, 'Site 001', 1, CURRENT_DATE - INTERVAL '2 days', NULL, 1, 1, 1, NOW()),
+  (31, 1, 13, 'Site 003', 1, CURRENT_DATE - INTERVAL '1 day', NULL, 1, 1, 1, NOW()),
+  (32, 1, 14, 'Site 001', 1, CURRENT_DATE, NULL, 1, 1, 1, NOW()),
+  (33, 1, 15, 'Site 002', 1, CURRENT_DATE, NULL, 1, 1, 1, NOW()),
+
+  -- ═══ NEW PATIENTS: SS-101 through SS-105 ═══
+
+  -- SS-101 Alice Rivera (enrolled 70d ago): Screening→Week4 DONE, Week8 OVERDUE, Week12 future
+  (201, 1, 101, 'Site 001', 1, CURRENT_DATE - INTERVAL '70 days', CURRENT_DATE - INTERVAL '70 days', 1, 1, 4, NOW()),
+  (202, 2, 101, 'Site 001', 1, CURRENT_DATE - INTERVAL '63 days', CURRENT_DATE - INTERVAL '63 days', 1, 1, 4, NOW()),
+  (203, 3, 101, 'Site 001', 1, CURRENT_DATE - INTERVAL '56 days', CURRENT_DATE - INTERVAL '56 days', 1, 1, 4, NOW()),
+  (204, 4, 101, 'Site 001', 1, CURRENT_DATE - INTERVAL '42 days', CURRENT_DATE - INTERVAL '42 days', 1, 1, 4, NOW()),
+  (205, 5, 101, 'Site 001', 1, CURRENT_DATE - INTERVAL '14 days', NULL, 1, 1, 3, NOW()),  -- OVERDUE
+  (206, 6, 101, 'Site 001', 1, CURRENT_DATE + INTERVAL '14 days', NULL, 1, 1, 1, NOW()),  -- future
+
+  -- SS-102 Ben Okafor (enrolled 35d ago): Screening→Week2 DONE, Week4 IN-PROGRESS, rest future
+  (211, 1, 102, 'Site 002', 1, CURRENT_DATE - INTERVAL '35 days', CURRENT_DATE - INTERVAL '35 days', 1, 1, 4, NOW()),
+  (212, 2, 102, 'Site 002', 1, CURRENT_DATE - INTERVAL '28 days', CURRENT_DATE - INTERVAL '28 days', 1, 1, 4, NOW()),
+  (213, 3, 102, 'Site 002', 1, CURRENT_DATE - INTERVAL '21 days', CURRENT_DATE - INTERVAL '21 days', 1, 1, 4, NOW()),
+  (214, 4, 102, 'Site 002', 1, CURRENT_DATE - INTERVAL '7 days',  NULL, 1, 1, 3, NOW()),  -- in-progress
+  (215, 5, 102, 'Site 002', 1, CURRENT_DATE + INTERVAL '21 days', NULL, 1, 1, 1, NOW()),
+  (216, 6, 102, 'Site 002', 1, CURRENT_DATE + INTERVAL '49 days', NULL, 1, 1, 1, NOW()),
+
+  -- SS-103 Clara Zhang (enrolled 21d ago): Screening+Baseline DONE, Week2 IN-PROGRESS, rest future
+  (221, 1, 103, 'Site 001', 1, CURRENT_DATE - INTERVAL '21 days', CURRENT_DATE - INTERVAL '21 days', 1, 1, 4, NOW()),
+  (222, 2, 103, 'Site 001', 1, CURRENT_DATE - INTERVAL '14 days', CURRENT_DATE - INTERVAL '14 days', 1, 1, 4, NOW()),
+  (223, 3, 103, 'Site 001', 1, CURRENT_DATE - INTERVAL '7 days',  NULL, 1, 1, 3, NOW()),  -- in-progress
+  (224, 4, 103, 'Site 001', 1, CURRENT_DATE + INTERVAL '7 days',  NULL, 1, 1, 1, NOW()),
+  (225, 5, 103, 'Site 001', 1, CURRENT_DATE + INTERVAL '35 days', NULL, 1, 1, 1, NOW()),
+  (226, 6, 103, 'Site 001', 1, CURRENT_DATE + INTERVAL '63 days', NULL, 1, 1, 1, NOW()),
+
+  -- SS-104 David Kowalski (enrolled 7d ago): Screening DONE, Baseline IN-PROGRESS, rest future
+  (231, 1, 104, 'Site 003', 1, CURRENT_DATE - INTERVAL '7 days', CURRENT_DATE - INTERVAL '7 days', 1, 1, 4, NOW()),
+  (232, 2, 104, 'Site 003', 1, CURRENT_DATE, NULL, 1, 1, 3, NOW()),  -- in-progress (due today)
+  (233, 3, 104, 'Site 003', 1, CURRENT_DATE + INTERVAL '7 days',  NULL, 1, 1, 1, NOW()),
+  (234, 4, 104, 'Site 003', 1, CURRENT_DATE + INTERVAL '21 days', NULL, 1, 1, 1, NOW()),
+  (235, 5, 104, 'Site 003', 1, CURRENT_DATE + INTERVAL '49 days', NULL, 1, 1, 1, NOW()),
+  (236, 6, 104, 'Site 003', 1, CURRENT_DATE + INTERVAL '77 days', NULL, 1, 1, 1, NOW()),
+
+  -- SS-105 Elena Petrov (enrolled today): Screening SCHEDULED, everything else future
+  (241, 1, 105, 'Site 001', 1, CURRENT_DATE, NULL, 1, 1, 1, NOW()),
+  (242, 2, 105, 'Site 001', 1, CURRENT_DATE + INTERVAL '7 days',  NULL, 1, 1, 1, NOW()),
+  (243, 3, 105, 'Site 001', 1, CURRENT_DATE + INTERVAL '14 days', NULL, 1, 1, 1, NOW()),
+  (244, 4, 105, 'Site 001', 1, CURRENT_DATE + INTERVAL '28 days', NULL, 1, 1, 1, NOW()),
+  (245, 5, 105, 'Site 001', 1, CURRENT_DATE + INTERVAL '56 days', NULL, 1, 1, 1, NOW()),
+  (246, 6, 105, 'Site 001', 1, CURRENT_DATE + INTERVAL '84 days', NULL, 1, 1, 1, NOW())
 ON CONFLICT (study_event_id) DO NOTHING;
 
-SELECT setval('study_event_study_event_id_seq', 33);
+SELECT setval('study_event_study_event_id_seq', GREATEST(246, (SELECT COALESCE(MAX(study_event_id), 0) FROM study_event)));
 
 -- ============================================================================
 -- 14. EVENT CRFs (Form instances)
@@ -334,58 +404,86 @@ SELECT setval('study_event_study_event_id_seq', 33);
 INSERT INTO event_crf (event_crf_id, study_event_id, crf_version_id, study_subject_id, date_interviewed, interviewer_name, completion_status_id, status_id, owner_id, date_created, date_updated, annotations)
 VALUES
   -- Subject 1 Screening: Demographics, Med History, Vitals, Physical, Labs
-  (1, 1, 1, 1, '2024-01-15', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (2, 1, 3, 1, '2024-01-15', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (3, 1, 2, 1, '2024-01-15', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
-  (4, 1, 4, 1, '2024-01-15', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (5, 1, 5, 1, '2024-01-15', 'Lab Tech', 4, 1, 5, NOW(), NOW(), NULL),
+  (1, 1, 1, 1, CURRENT_DATE - INTERVAL '120 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (2, 1, 3, 1, CURRENT_DATE - INTERVAL '120 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (3, 1, 2, 1, CURRENT_DATE - INTERVAL '120 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (4, 1, 4, 1, CURRENT_DATE - INTERVAL '120 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (5, 1, 5, 1, CURRENT_DATE - INTERVAL '120 days', 'Lab Tech', 4, 1, 5, NOW(), NOW(), NULL),
   -- Subject 1 Baseline
-  (6, 2, 2, 1, '2024-01-22', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
-  (7, 2, 5, 1, '2024-01-22', 'Lab Tech', 4, 1, 5, NOW(), NOW(), NULL),
-  (8, 2, 9, 1, '2024-01-22', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (9, 2, 8, 1, '2024-01-22', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (6, 2, 2, 1, CURRENT_DATE - INTERVAL '113 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (7, 2, 5, 1, CURRENT_DATE - INTERVAL '113 days', 'Lab Tech', 4, 1, 5, NOW(), NOW(), NULL),
+  (8, 2, 9, 1, CURRENT_DATE - INTERVAL '113 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (9, 2, 8, 1, CURRENT_DATE - INTERVAL '113 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 1 Week 2
-  (10, 3, 2, 1, '2024-02-05', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
-  (11, 3, 8, 1, '2024-02-05', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (10, 3, 2, 1, CURRENT_DATE - INTERVAL '106 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (11, 3, 8, 1, CURRENT_DATE - INTERVAL '106 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 1 Week 4
-  (12, 4, 2, 1, '2024-02-19', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
-  (13, 4, 9, 1, '2024-02-19', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (12, 4, 2, 1, CURRENT_DATE - INTERVAL '92 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (13, 4, 9, 1, CURRENT_DATE - INTERVAL '92 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
   -- Subject 1 Week 8 (in progress)
-  (14, 5, 2, 1, '2024-03-18', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
+  (14, 5, 2, 1, CURRENT_DATE - INTERVAL '64 days', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
   -- Subject 2 Screening
-  (15, 7, 1, 2, '2024-01-18', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (16, 7, 3, 2, '2024-01-18', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (17, 7, 2, 2, '2024-01-18', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (15, 7, 1, 2, CURRENT_DATE - INTERVAL '90 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (16, 7, 3, 2, CURRENT_DATE - INTERVAL '90 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (17, 7, 2, 2, CURRENT_DATE - INTERVAL '90 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 2 Baseline
-  (18, 8, 2, 2, '2024-01-25', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
-  (19, 8, 5, 2, '2024-01-25', 'Lab Tech', 4, 1, 5, NOW(), NOW(), NULL),
+  (18, 8, 2, 2, CURRENT_DATE - INTERVAL '83 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (19, 8, 5, 2, CURRENT_DATE - INTERVAL '83 days', 'Lab Tech', 4, 1, 5, NOW(), NOW(), NULL),
   -- Subject 2 Week 2
-  (20, 9, 2, 2, '2024-02-08', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (20, 9, 2, 2, CURRENT_DATE - INTERVAL '76 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 2 Week 4 (in progress)
-  (21, 10, 2, 2, '2024-02-22', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
+  (21, 10, 2, 2, CURRENT_DATE - INTERVAL '62 days', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
   -- Subject 3 Screening
-  (22, 13, 1, 3, '2024-01-22', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (23, 13, 2, 3, '2024-01-22', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (22, 13, 1, 3, CURRENT_DATE - INTERVAL '60 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (23, 13, 2, 3, CURRENT_DATE - INTERVAL '60 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 3 Baseline
-  (24, 14, 2, 3, '2024-01-29', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (24, 14, 2, 3, CURRENT_DATE - INTERVAL '53 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 3 Week 2 (in progress)
-  (25, 15, 2, 3, '2024-02-12', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
+  (25, 15, 2, 3, CURRENT_DATE - INTERVAL '46 days', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
   -- Subject 4 Screening
-  (26, 17, 1, 4, '2024-01-25', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (27, 17, 2, 4, '2024-01-25', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (26, 17, 1, 4, CURRENT_DATE - INTERVAL '45 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (27, 17, 2, 4, CURRENT_DATE - INTERVAL '45 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
   -- Subject 4 Baseline (in progress)
-  (28, 18, 2, 4, '2024-02-01', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
+  (28, 18, 2, 4, CURRENT_DATE - INTERVAL '38 days', 'M. Chen', 3, 1, 3, NOW(), NOW(), NULL),
   -- Subjects 5-10 Screening forms
-  (29, 20, 1, 5, '2024-02-01', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (30, 20, 2, 5, '2024-02-01', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
-  (31, 22, 1, 6, '2024-02-05', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (32, 24, 1, 7, '2024-02-10', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (33, 26, 1, 8, '2024-02-15', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (34, 27, 1, 9, '2024-02-20', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
-  (35, 28, 1, 10, '2024-02-25', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL)
+  (29, 20, 1, 5, CURRENT_DATE - INTERVAL '30 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (30, 20, 2, 5, CURRENT_DATE - INTERVAL '30 days', 'M. Chen', 4, 1, 3, NOW(), NOW(), NULL),
+  (31, 22, 1, 6, CURRENT_DATE - INTERVAL '25 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (32, 24, 1, 7, CURRENT_DATE - INTERVAL '20 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (33, 26, 1, 8, CURRENT_DATE - INTERVAL '15 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (34, 27, 1, 9, CURRENT_DATE - INTERVAL '10 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+  (35, 28, 1, 10, CURRENT_DATE - INTERVAL '5 days', 'Dr. Johnson', 4, 1, 2, NOW(), NOW(), NULL),
+
+  -- ═══ NEW PATIENTS: form instances for in-progress/overdue visits ═══
+
+  -- SS-101 Week 8 (OVERDUE): Vitals in-progress, Labs done, 3 not started
+  (201, 205, 2, 101, CURRENT_DATE - INTERVAL '14 days', 'Dr. Johnson', 3, 1, 2, NOW(), NOW(), NULL),
+  (202, 205, 5, 101, CURRENT_DATE - INTERVAL '14 days', 'Lab Tech',    4, 1, 5, NOW(), NOW(), NULL),
+  (203, 205, 6, 101, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (204, 205, 7, 101, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (205, 205, 8, 101, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+
+  -- SS-102 Week 4 (in-progress): Vitals done, Conmeds in-progress, 3 not started
+  (211, 214, 2, 102, CURRENT_DATE - INTERVAL '5 days', 'Dr. Smith', 4, 1, 2, NOW(), NOW(), NULL),
+  (212, 214, 6, 102, CURRENT_DATE - INTERVAL '3 days', 'Dr. Smith', 3, 1, 2, NOW(), NOW(), NULL),
+  (213, 214, 7, 102, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (214, 214, 8, 102, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (215, 214, 9, 102, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+
+  -- SS-103 Week 2 (in-progress): Vitals in-progress, 3 not started
+  (221, 223, 2, 103, CURRENT_DATE - INTERVAL '5 days', 'Dr. Garcia', 3, 1, 2, NOW(), NOW(), NULL),
+  (222, 223, 6, 103, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (223, 223, 7, 103, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (224, 223, 8, 103, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+
+  -- SS-104 Baseline (in-progress): Vitals in-progress, 3 not started
+  (231, 232, 2, 104, CURRENT_DATE, 'Dr. Lee', 3, 1, 2, NOW(), NOW(), NULL),
+  (232, 232, 5, 104, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (233, 232, 9, 104, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL),
+  (234, 232, 8, 104, NULL, NULL, 2, 1, 2, NOW(), NOW(), NULL)
 ON CONFLICT (event_crf_id) DO NOTHING;
 
-SELECT setval('event_crf_event_crf_id_seq', 35);
+SELECT setval('event_crf_event_crf_id_seq', GREATEST(234, (SELECT COALESCE(MAX(event_crf_id), 0) FROM event_crf)));
 
 -- ============================================================================
 -- 15. ITEM DATA (Form field values)
@@ -468,7 +566,7 @@ VALUES
   (61, 2, 35, 1, 'Female', NOW(), NOW(), 2, 1)
 ON CONFLICT (item_data_id) DO NOTHING;
 
-SELECT setval('item_data_item_data_id_seq', 61);
+SELECT setval('item_data_item_data_id_seq', GREATEST(61, (SELECT COALESCE(MAX(item_data_id), 0) FROM item_data)));
 
 -- ============================================================================
 -- 16. DISCREPANCY NOTES (Queries)
@@ -498,7 +596,7 @@ VALUES
   (15, 'Data clarification needed', 6, 1, 'Height measurement seems unusual (195cm). Please verify.', NOW() - INTERVAL '2 days', 4, NULL, 'itemData', 1, 5)
 ON CONFLICT (discrepancy_note_id) DO NOTHING;
 
-SELECT setval('discrepancy_note_discrepancy_note_id_seq', 15);
+SELECT setval('discrepancy_note_discrepancy_note_id_seq', GREATEST(15, (SELECT COALESCE(MAX(discrepancy_note_id), 0) FROM discrepancy_note)));
 
 -- ============================================================================
 -- 17. DISCREPANCY NOTE MAPPINGS
@@ -546,7 +644,7 @@ VALUES
   (2, 'Site', 1, 1, NOW(), NOW(), 1, 'Optional', 2)
 ON CONFLICT (study_group_class_id) DO NOTHING;
 
-SELECT setval('study_group_class_study_group_class_id_seq', 2);
+SELECT setval('study_group_class_study_group_class_id_seq', GREATEST(2, (SELECT COALESCE(MAX(study_group_class_id), 0) FROM study_group_class)));
 
 -- ============================================================================
 -- 19. STUDY GROUPS
@@ -561,7 +659,7 @@ VALUES
   (5, 'Site 003 - LA', 'Los Angeles site subjects', 2)
 ON CONFLICT (study_group_id) DO NOTHING;
 
-SELECT setval('study_group_study_group_id_seq', 5);
+SELECT setval('study_group_study_group_id_seq', GREATEST(5, (SELECT COALESCE(MAX(study_group_id), 0) FROM study_group)));
 
 -- ============================================================================
 -- 20. SUBJECT GROUP MAPS (Randomization assignments)
@@ -589,7 +687,7 @@ VALUES
   (16, 2, 8, 3, 1, 1, NOW(), NULL)
 ON CONFLICT (subject_group_map_id) DO NOTHING;
 
-SELECT setval('subject_group_map_subject_group_map_id_seq', 16);
+SELECT setval('subject_group_map_subject_group_map_id_seq', GREATEST(16, (SELECT COALESCE(MAX(subject_group_map_id), 0) FROM subject_group_map)));
 
 -- ============================================================================
 -- 21. AUDIT LOG EVENTS (Sample audit trail)
@@ -606,7 +704,7 @@ VALUES
   (7, NOW() - INTERVAL '10 days', 'item_data', 2, 33, 'PAIN_SCORE', 'Value updated', 1, '5', '4')
 ON CONFLICT (audit_id) DO NOTHING;
 
-SELECT setval('audit_log_event_audit_id_seq', 7);
+SELECT setval('audit_log_event_audit_id_seq', GREATEST(7, (SELECT COALESCE(MAX(audit_id), 0) FROM audit_log_event)));
 
 -- ============================================================================
 -- 22. AUDIT USER LOGIN (Login history)
@@ -626,7 +724,7 @@ VALUES
   (10, 'monitor', 4, NOW() - INTERVAL '3 days', 1, 'Successful login', 1)
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('audit_user_login_id_seq', 10);
+SELECT setval('audit_user_login_id_seq', GREATEST(10, (SELECT COALESCE(MAX(id), 0) FROM audit_user_login)));
 
 -- ============================================================================
 -- COMMIT TRANSACTION
@@ -639,19 +737,26 @@ COMMIT;
 -- ============================================================================
 -- Users: 5 (root, investigator, coordinator, monitor, dataentry)
 -- Study: 1 (AccuraTrials Clinical Study) 
--- Study Event Definitions: 7 (Screening through EOS + Unscheduled)
+-- Study Event Definitions: 7 with visit windows (Day 0→84)
 -- CRFs: 10 (Demographics, Vitals, Labs, etc.)
 -- CRF Versions: 10
 -- Event Definition CRFs: 28 (forms linked to visits)
--- Subjects: 15 patients
--- Study Subjects: 15 enrolled patients
--- Study Events: 33 scheduled visits
--- Event CRFs: 35 form instances
+-- Subjects: 20 patients (15 original + 5 new)
+-- Study Subjects: 20 enrolled (all dates relative to CURRENT_DATE)
+-- Study Events: 63 visit instances
+-- Event CRFs: 54 form instances
 -- Item Data: 61 field values
 -- Discrepancy Notes: 15 queries (mix of open, updated, resolved, closed)
 -- Study Groups: 5 (treatment arms + sites)
 -- Subject Group Maps: 16 (randomization assignments)
 -- Audit Log Events: 7
 -- Login History: 10
+--
+-- Test patients for overdue/in-progress/future scenarios:
+--   SS-101 Alice Rivera    — 70d ago, Week 8 OVERDUE (3 incomplete forms)
+--   SS-102 Ben Okafor      — 35d ago, Week 4 IN-PROGRESS (3 incomplete)
+--   SS-103 Clara Zhang     — 21d ago, Week 2 IN-PROGRESS (3 incomplete)
+--   SS-104 David Kowalski  — 7d ago,  Baseline IN-PROGRESS (3 incomplete)
+--   SS-105 Elena Petrov    — today,   Screening SCHEDULED
 -- ============================================================================
 

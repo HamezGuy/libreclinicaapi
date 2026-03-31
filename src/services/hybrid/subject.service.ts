@@ -162,7 +162,6 @@ const createSubjectDirect = async (
     
     if (duplicateCheck.rows.length > 0) {
       await client.query('ROLLBACK');
-      client.release();
       logger.warn('Subject label already exists in study', { 
         label: request.studySubjectId, 
         studyId: request.studyId,
@@ -223,6 +222,7 @@ const createSubjectDirect = async (
       // Create new subject record
       // Try full schema first, fall back to minimal schema if columns don't exist
       // Use SAVEPOINT to handle schema differences without aborting the transaction
+      await repairSequence(client, 'subject_subject_id_seq', 'subject', 'subject_id');
       let subjectResult;
       await client.query('SAVEPOINT subject_insert');
       try {
@@ -283,12 +283,13 @@ const createSubjectDirect = async (
 
     // 2. Create study_subject record (enrollment table)
     // Includes: label, secondary_label, enrollment_date, time_zone, oc_oid
+    await repairSequence(client, 'study_subject_study_subject_id_seq', 'study_subject', 'study_subject_id');
     const studySubjectQuery = `
       INSERT INTO study_subject (
         label, secondary_label, subject_id, study_id, status_id, 
-        enrollment_date, time_zone, date_created, date_updated, owner_id, oc_oid
+        enrollment_date, screening_date, time_zone, date_created, date_updated, owner_id, oc_oid
       ) VALUES (
-        $1, $2, $3, $4, 1, $5, $6, NOW(), NOW(), $7, $8
+        $1, $2, $3, $4, 1, $5, $6, $7, NOW(), NOW(), $8, $9
       )
       RETURNING study_subject_id
     `;
@@ -302,12 +303,16 @@ const createSubjectDirect = async (
     // Handle timezone (defaults to empty string if not provided)
     const timeZone = request.timeZone || '';
 
+    const effectiveEnrollmentDate = request.enrollmentDate || request.screeningDate || formatIsoDate(new Date());
+    const effectiveScreeningDate = request.screeningDate || effectiveEnrollmentDate;
+
     const studySubjectResult = await client.query(studySubjectQuery, [
       request.studySubjectId,
       request.secondaryId || '',
       subjectId,
       request.studyId,
-      request.enrollmentDate || null,
+      effectiveEnrollmentDate,
+      effectiveScreeningDate,
       timeZone,
       userId,
       ocOid
@@ -360,7 +365,7 @@ const createSubjectDirect = async (
     // This implements the COPY PHASES TO PATIENT requirement
     let scheduledEventIds: number[] = [];
     let totalFormsCreated = 0;
-    const enrollmentDate = request.enrollmentDate || null;
+    const enrollmentDate = request.enrollmentDate || request.screeningDate || formatIsoDate(new Date());
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
     // Resolve to parent study for event definitions.
@@ -417,6 +422,7 @@ const createSubjectDirect = async (
           // Try full schema first; fall back to minimal schema if extra columns
           // (scheduled_date, is_unscheduled) don't exist in the production DB.
           let eventResult;
+          await repairSequence(client, 'study_event_study_event_id_seq', 'study_event', 'study_event_id');
           await client.query(`SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
           try {
             eventResult = await client.query(`
@@ -508,13 +514,15 @@ const createSubjectDirect = async (
               }
               
               // Create event_crf - the editable copy of the template for this patient
-              const ecResult = await client.query(`
+              await repairSequence(client, 'event_crf_event_crf_id_seq', 'event_crf', 'event_crf_id');
+              const ecResult = await insertWithRetry(client, `
                 INSERT INTO event_crf (
                   study_event_id, crf_version_id, study_subject_id,
                   completion_status_id, status_id, owner_id, date_created
                 ) VALUES ($1, $2, $3, 1, 1, $4, NOW())
                 RETURNING event_crf_id
-              `, [studyEventId, crfVersionId, studySubjectId, userId]);
+              `, [studyEventId, crfVersionId, studySubjectId, userId],
+              'event_crf_event_crf_id_seq', 'event_crf', 'event_crf_id');
               
               const eventCrfId = ecResult.rows[0].event_crf_id;
               phaseFormsCreated++;
@@ -639,8 +647,8 @@ const createSubjectDirect = async (
         label: request.studySubjectId,
         secondaryLabel: request.secondaryId || '',
         studyId: request.studyId,
-        enrollmentDate: request.enrollmentDate,
-        screeningDate: request.screeningDate || request.enrollmentDate,
+        enrollmentDate: effectiveEnrollmentDate,
+        screeningDate: request.screeningDate || effectiveEnrollmentDate,
         timeZone: timeZone,
         ocOid,
         
@@ -793,6 +801,7 @@ export const getSubjectList = async (
         ss.label,
         ss.secondary_label,
         ss.enrollment_date,
+        ss.screening_date,
         ss.status_id,
         st.name as status,
         s.gender,
@@ -895,18 +904,27 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
   logger.info('Getting subject details', { subjectId });
 
   try {
-    // Get subject basic info
+    // Get subject basic info (including study/site name via study table)
     const subjectQuery = `
       SELECT 
         ss.*,
         s.gender,
         s.date_of_birth,
         st.name as status_name,
-        u.user_name as created_by
+        u.user_name as created_by,
+        stdy.name as study_name,
+        stdy.parent_study_id,
+        CASE
+          WHEN stdy.parent_study_id IS NOT NULL THEN stdy.name
+          ELSE NULL
+        END as site_name,
+        COALESCE(parent_stdy.name, stdy.name) as parent_study_name
       FROM study_subject ss
       INNER JOIN subject s ON ss.subject_id = s.subject_id
       INNER JOIN status st ON ss.status_id = st.status_id
       LEFT JOIN user_account u ON ss.owner_id = u.user_id
+      LEFT JOIN study stdy ON ss.study_id = stdy.study_id
+      LEFT JOIN study parent_stdy ON stdy.parent_study_id = parent_stdy.study_id
       WHERE ss.study_subject_id = $1
     `;
 
@@ -1004,7 +1022,7 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
       },
       study: {
         studyId: subject.study_id,
-        name: '',  // Would need to join study table
+        name: subject.parent_study_name || subject.study_name || '',
         identifier: '',
         type: 'nongenetic',
         statusId: 1,
