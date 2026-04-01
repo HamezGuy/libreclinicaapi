@@ -10,8 +10,8 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Install ALL dependencies (need devDeps for tsc)
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json package-lock.json* ./
+RUN npm install
 
 # Copy source code and config
 COPY tsconfig.json ./
@@ -26,8 +26,8 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Install production dependencies only
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev
 
 # Copy compiled JS from builder stage
 COPY --from=builder /app/dist ./dist
