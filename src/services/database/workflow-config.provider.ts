@@ -246,16 +246,35 @@ export async function resolveDefaultAssignee(
       SELECT user_id FROM (
         SELECT ua.user_id,
           CASE
-            WHEN sur.role_name = 'Study Coordinator' THEN 1
-            WHEN sur.role_name = 'Clinical Research Coordinator' THEN 2
-            WHEN sur.role_name = 'Data Manager' THEN 3
-            ELSE 4
+            WHEN sur.role_name IN ('data_manager', 'Study Coordinator', 'study_coordinator', 'site_study_coordinator') THEN 1
+            WHEN sur.role_name IN ('coordinator', 'Clinical Research Coordinator', 'crc', 'ra', 'ra2', 'data_entry_person') THEN 2
+            WHEN sur.role_name IN ('Data Manager', 'director', 'study_director', 'site_study_director') THEN 3
+            WHEN sur.role_name IN ('investigator', 'Investigator', 'site_investigator') THEN 4
+            WHEN sur.role_name IN ('monitor', 'site_monitor') THEN 5
+            WHEN sur.role_name ILIKE '%coordinator%' THEN 6
+            WHEN sur.role_name ILIKE '%manager%' THEN 7
+            WHEN sur.role_name ILIKE '%monitor%' THEN 8
+            ELSE 9
           END as role_priority
         FROM user_account ua
         INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
         WHERE sur.study_id = $1
           AND sur.status_id = 1
-          AND sur.role_name IN ('Study Coordinator', 'Clinical Research Coordinator', 'Data Manager', 'coordinator')
+          AND ua.enabled = true
+          AND (
+            sur.role_name IN (
+              'admin', 'data_manager', 'coordinator', 'investigator', 'monitor',
+              'Study Coordinator', 'Clinical Research Coordinator', 'Data Manager',
+              'Investigator', 'site_monitor', 'site_investigator',
+              'study_coordinator', 'site_study_coordinator', 'director',
+              'study_director', 'site_study_director',
+              'crc', 'ra', 'ra2', 'data_entry_person',
+              'site_data_entry_person', 'site_data_entry_person2'
+            )
+            OR sur.role_name ILIKE '%coordinator%'
+            OR sur.role_name ILIKE '%manager%'
+            OR sur.role_name ILIKE '%monitor%'
+          )
         ORDER BY role_priority
         LIMIT 1
       ) ranked
@@ -268,6 +287,7 @@ export async function resolveDefaultAssignee(
       FROM user_account ua
       INNER JOIN study_user_role sur ON ua.user_name = sur.user_name
       WHERE sur.study_id = $1 AND sur.status_id = 1 AND ua.enabled = true
+      ORDER BY ua.user_id DESC
       LIMIT 1
     `, [studyId]);
 

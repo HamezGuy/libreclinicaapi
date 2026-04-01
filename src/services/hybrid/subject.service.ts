@@ -32,6 +32,48 @@ import * as workflowService from '../database/workflow.service';
 import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp } from '../../utils/date.util';
 import { getFormMetadata } from './form.service';
 
+async function repairSequence(
+  client: any,
+  sequenceName: string,
+  tableName: string,
+  pkColumn: string
+): Promise<void> {
+  try {
+    await client.query(`
+      SELECT setval($1::regclass,
+        GREATEST(
+          (SELECT COALESCE(MAX(${pkColumn}), 0) FROM ${tableName}),
+          (SELECT last_value FROM ${sequenceName})
+        )
+      )
+    `, [sequenceName]);
+  } catch (err: any) {
+    logger.warn(`repairSequence: could not sync ${sequenceName}`, { error: err.message });
+  }
+}
+
+async function insertWithRetry(
+  client: any,
+  query: string,
+  params: any[],
+  sequenceName: string,
+  tableName: string,
+  pkColumn: string,
+  maxRetries = 3
+): Promise<any> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.query(query, params);
+    } catch (err: any) {
+      if (err.code === '23505' && attempt < maxRetries) {
+        await repairSequence(client, sequenceName, tableName, pkColumn);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 /**
  * Request type for creating a subject
  * 
@@ -303,8 +345,8 @@ const createSubjectDirect = async (
     // Handle timezone (defaults to empty string if not provided)
     const timeZone = request.timeZone || '';
 
-    const effectiveEnrollmentDate = request.enrollmentDate || request.screeningDate || formatIsoDate(new Date());
-    const effectiveScreeningDate = request.screeningDate || effectiveEnrollmentDate;
+    const effectiveEnrollmentDate = request.enrollmentDate || null;
+    const effectiveScreeningDate = request.screeningDate || formatIsoDate(new Date());
 
     const studySubjectResult = await client.query(studySubjectQuery, [
       request.studySubjectId,
@@ -648,7 +690,7 @@ const createSubjectDirect = async (
         secondaryLabel: request.secondaryId || '',
         studyId: request.studyId,
         enrollmentDate: effectiveEnrollmentDate,
-        screeningDate: request.screeningDate || effectiveEnrollmentDate,
+        screeningDate: effectiveScreeningDate,
         timeZone: timeZone,
         ocOid,
         

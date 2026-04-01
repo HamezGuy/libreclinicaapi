@@ -15,7 +15,7 @@ const FIELD_TYPE_MAP: Record<string, string> = {
   'st': 'text', 'int': 'number', 'real': 'decimal', 'bl': 'yesno',
   'date': 'date', 'pdate': 'date', 'file': 'file',
   'string': 'text', 'varchar': 'text', 'integer': 'number', 'float': 'decimal',
-  'boolean': 'yesno',
+  'boolean': 'yesno', 'code': 'select', 'set': 'checkbox',
 
   // ── LibreClinica response_type names ──────────────────────────────────
   'radio': 'radio', 'radiobutton': 'radio', 'radio-button': 'radio',

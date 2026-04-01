@@ -55,6 +55,7 @@ router.post('/',
   controller.create
 );
 router.post('/:id/respond', 
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator', 'monitor'),
   validate({ params: commonSchemas.idParam, body: querySchemas.respond }), 
   requireSignatureFor(SignatureMeanings.QUERY_RESPOND),
   controller.respond
@@ -80,16 +81,16 @@ router.post('/:id/close-with-signature',
   controller.closeWithSignature
 );
 
-// Accept a proposed resolution (Monitor / CRO / PI / Admin only)
+// Accept a proposed resolution (Monitor / DM / PI / Admin only)
 router.post('/:id/accept-resolution',
-  requireRole('monitor', 'admin', 'investigator'),
+  requireRole('monitor', 'admin', 'investigator', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.acceptResolution }),
   controller.acceptResolution
 );
 
-// Reject a proposed resolution (Monitor / CRO / PI / Admin only)
+// Reject a proposed resolution (Monitor / DM / PI / Admin only)
 router.post('/:id/reject-resolution',
-  requireRole('monitor', 'admin', 'investigator'),
+  requireRole('monitor', 'admin', 'investigator', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.rejectResolution }),
   controller.rejectResolution
 );

@@ -27,6 +27,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'email_notifications', fn: createEmailTables },
     { name: 'subject_transfers', fn: createTransferTables },
     { name: 'econsent', fn: createConsentTables },
+    { name: 'econsent_nullable_version', fn: makeVersionIdNullable },
     { name: 'epro_patient_portal', fn: createEproTables },
     { name: 'rtsm_irt', fn: createRtsmTables },
     { name: 'organizations', fn: createOrganizationTables },
@@ -58,6 +59,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'screening_date_column', fn: createScreeningDateColumn },
     { name: 'widen_study_columns', fn: widenStudyColumns },
     { name: 'query_severity_column', fn: createQuerySeverityColumn },
+    { name: 'unlock_requests', fn: createUnlockRequestTable },
   ];
 
   let successCount = 0;
@@ -309,6 +311,16 @@ async function createConsentTables(pool: any): Promise<void> {
   }
 
   logger.info('eConsent tables verified');
+}
+
+// ============================================================================
+// eConsent — Make version_id nullable (for late consent entry without document)
+// ============================================================================
+async function makeVersionIdNullable(pool: any): Promise<void> {
+  await pool.query(`
+    ALTER TABLE acc_subject_consent ALTER COLUMN version_id DROP NOT NULL
+  `).catch(() => {});
+  logger.info('eConsent version_id nullable migration applied');
 }
 
 // ============================================================================
@@ -1912,4 +1924,35 @@ async function createQuerySeverityColumn(pool: any): Promise<void> {
   await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS severity VARCHAR(20) DEFAULT 'minor'`);
   await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS due_date DATE`);
   logger.info('severity and due_date columns verified on discrepancy_note');
+}
+
+// ============================================================================
+// Unlock Request Workflow (acc_unlock_request)
+// ============================================================================
+async function createUnlockRequestTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_unlock_request (
+      unlock_request_id   SERIAL PRIMARY KEY,
+      event_crf_id        INTEGER NOT NULL REFERENCES event_crf(event_crf_id) ON DELETE CASCADE,
+      study_subject_id    INTEGER REFERENCES study_subject(study_subject_id) ON DELETE SET NULL,
+      study_id            INTEGER REFERENCES study(study_id) ON DELETE SET NULL,
+      requested_by_id     INTEGER NOT NULL REFERENCES user_account(user_id),
+      requested_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reason              TEXT NOT NULL,
+      priority            VARCHAR(20) NOT NULL DEFAULT 'medium'
+                            CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+      status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled')),
+      reviewed_by_id      INTEGER REFERENCES user_account(user_id),
+      reviewed_at         TIMESTAMPTZ,
+      review_notes        TEXT
+    )
+  `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_unlock_request_event_crf ON acc_unlock_request(event_crf_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_unlock_request_status ON acc_unlock_request(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_unlock_request_study ON acc_unlock_request(study_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_unlock_request_requested_by ON acc_unlock_request(requested_by_id)`);
+
+  logger.info('Unlock request table verified');
 }

@@ -917,7 +917,7 @@ export const querySchemas = {
     // Valid response status transitions: 2=Updated, 3=Resolution Proposed, 4=Closed
     newStatusId: Joi.number().integer().valid(2, 3, 4).optional()
       .messages({ 'any.only': 'newStatusId for a response must be 2 (Updated), 3 (Resolution Proposed), or 4 (Closed)' }),
-    correctedValue: Joi.string().optional().allow('').max(100000),
+    correctedValue: Joi.any().optional(),
     correctionReason: Joi.string().optional().allow('').max(5000)
   }).or('description', 'response'),
 

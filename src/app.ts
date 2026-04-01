@@ -132,78 +132,51 @@ app.use(helmet({
 }));
 
 // CORS - Cross-Origin Resource Sharing
-// In production, nginx handles CORS as the primary layer.
-// The Express middleware is also enabled as a safety net to ensure
-// CORS headers are always present (e.g. when nginx returns an error
-// before reaching proxy_pass, or during direct API access).
-if (config.server.env !== 'production') {
-  const corsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      // Allow requests with no origin (like mobile apps or curl)
-      if (!origin) {
-        callback(null, true);
-        return;
+// Express is the SOLE CORS handler in all environments.
+// Nginx proxies requests (including OPTIONS preflight) without adding CORS headers.
+const corsOptions: cors.CorsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    const allowed = [
+      /^https:\/\/(www\.)?accuratrials\.com$/,
+      /^https:\/\/edc-real[a-z0-9-]*\.vercel\.app$/,
+      /^http:\/\/localhost:(3000|3001|4200)$/
+    ];
+
+    if (config.server.env !== 'production') {
+      const envOrigins = config.security.allowedOrigins.filter(o => o);
+      if (envOrigins.length > 0) {
+        const envPatterns = envOrigins.map(o => {
+          if (o.includes('*')) {
+            const pat = o.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^.]+');
+            return new RegExp(`^${pat}$`);
+          }
+          return new RegExp(`^${o.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+        });
+        allowed.push(...envPatterns);
       }
-      
-      // Check configured origins
-      const allowedOrigins = config.security.allowedOrigins.length > 0 
-        ? config.security.allowedOrigins 
-        : ['http://localhost:4200', 'http://localhost:3000', 'http://localhost:3001'];
-      
-      // Check for exact match or wildcard patterns
-      const isAllowed = allowedOrigins.some(allowed => {
-        if (allowed.includes('*')) {
-          const pattern = allowed
-            .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-            .replace(/\*/g, '[^.]+');
-          return new RegExp(`^${pattern}$`).test(origin);
-        }
-        return allowed === origin;
-      });
-      
-      if (isAllowed) {
-        callback(null, true);
-      } else {
-        logger.warn('CORS blocked request', { origin, allowedOrigins });
-        callback(new Error(`CORS policy: origin '${origin}' is not allowed`));
-      }
-    },
-    credentials: true,
-    optionsSuccessStatus: 200,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
-  };
-  app.use(cors(corsOptions));
-  logger.info('CORS middleware enabled (development mode)');
-} else {
-  // Production: Express is the sole CORS handler.
-  // Nginx proxies without adding CORS headers to avoid duplicates.
-  const productionCorsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-      const allowed = [
-        /^https:\/\/(www\.)?accuratrials\.com$/,
-        /^https:\/\/edc-real[a-z0-9-]*\.vercel\.app$/,
-        /^http:\/\/localhost:(3000|3001|4200)$/
-      ];
-      if (allowed.some(pattern => pattern.test(origin))) {
-        callback(null, true);
-      } else {
-        callback(null, false);
-      }
-    },
-    credentials: true,
-    optionsSuccessStatus: 200,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cache-Control', 'If-Modified-Since', 'Range'],
-    exposedHeaders: ['Content-Length', 'Content-Range']
-  };
-  app.use(cors(productionCorsOptions));
-  logger.info('CORS middleware enabled (production — primary CORS handler)');
-}
+    }
+
+    if (allowed.some(pattern => pattern.test(origin))) {
+      callback(null, true);
+    } else {
+      logger.warn('CORS blocked request', { origin, env: config.server.env });
+      callback(null, false);
+    }
+  },
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cache-Control', 'If-Modified-Since', 'Range'],
+  exposedHeaders: ['Content-Length', 'Content-Range'],
+  maxAge: 86400,
+};
+app.use(cors(corsOptions));
+logger.info(`CORS middleware enabled (${config.server.env})`);
 
 // ============================================================================
 // BODY PARSING

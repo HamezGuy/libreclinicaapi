@@ -18,6 +18,9 @@ import {
   BadRequestError,
   ForbiddenError,
 } from '../../middleware/errorHandler.middleware';
+import { buildFieldTypeInfo, serializeCorrectionForStorage, parseResponseSetOptions } from '../../utils/query-correction.helper';
+import { parseExtendedProps } from '../../utils/extended-props';
+import { resolveFieldType, isStructuredDataType } from '../../utils/field-type.utils';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -68,6 +71,19 @@ export const canEditQuery = async (
     const { owner_id, assigned_user_id } = result.rows[0];
 
     if (callerUserId === owner_id || callerUserId === assigned_user_id) {
+      return { allowed: true };
+    }
+
+    // Check if the caller is an additional assignee (added via manual "toss" /
+    // workflow multi-user routing).  These are child discrepancy_note records
+    // linked to the parent via parent_dn_id with their own assigned_user_id.
+    const additionalCheck = await pool.query(
+      `SELECT 1 FROM discrepancy_note
+       WHERE parent_dn_id = $1 AND assigned_user_id = $2
+       LIMIT 1`,
+      [queryId, callerUserId]
+    );
+    if (additionalCheck.rows.length > 0) {
       return { allowed: true };
     }
 
@@ -280,15 +296,23 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
           id.event_crf_id,
           i.name AS field_name,
           i.oc_oid AS field_oid,
+          i.description AS item_description,
+          i.item_data_type_id,
           dim.column_name,
           c.name AS form_name,
-          cv.name AS form_version
+          cv.name AS form_version,
+          rs.options_text,
+          rs.options_values,
+          rt.name AS response_type_name
         FROM dn_item_data_map dim
         INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
         INNER JOIN item i ON id.item_id = i.item_id
         LEFT JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
         LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
         LEFT JOIN crf c ON cv.crf_id = c.crf_id
+        LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = ec.crf_version_id
+        LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
+        LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
         WHERE dim.discrepancy_note_id = $1
         LIMIT 1
       `;
@@ -296,6 +320,30 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
 
       if (linkedResult.rows.length > 0) {
         const r = linkedResult.rows[0];
+
+        const fieldTypeInfo = buildFieldTypeInfo(
+          r.item_description,
+          r.item_data_type_id,
+          r.response_type_name,
+          r.options_text,
+          r.options_values
+        );
+
+        let resolvedCurrentValue: any = r.current_value;
+        if (fieldTypeInfo.isStructured && r.event_crf_id) {
+          const ext = parseExtendedProps(r.item_description);
+          const fieldKey = ext.fieldName || r.field_name;
+          try {
+            const jsonbResult = await pool.query(
+              `SELECT form_data->$1 AS val FROM patient_event_form WHERE event_crf_id = $2 LIMIT 1`,
+              [fieldKey, r.event_crf_id]
+            );
+            if (jsonbResult.rows.length > 0 && jsonbResult.rows[0].val != null) {
+              resolvedCurrentValue = jsonbResult.rows[0].val;
+            }
+          } catch { /* fall back to item_data.value */ }
+        }
+
         linkedItemData = {
           itemDataId: r.item_data_id,
           itemId: r.item_id,
@@ -303,9 +351,10 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
           fieldName: r.field_name,
           fieldOid: r.field_oid,
           columnName: r.column_name,
-          currentValue: r.current_value,
+          currentValue: resolvedCurrentValue,
           formName: r.form_name,
-          formVersion: r.form_version
+          formVersion: r.form_version,
+          fieldTypeInfo
         };
         linkedEventCrf = {
           eventCrfId: r.event_crf_id,
@@ -447,12 +496,25 @@ export const createQuery = async (
       }
     }
 
-    // If no workflow primary found, fall back to manual selection as primary
-    if (!resolvedAssignedUserId && data.assignedUserId) {
+    // If the user explicitly selected an assignee, honour that as primary.
+    // Workflow resolution only provides the primary if the user left it blank.
+    if (data.assignedUserId) {
       resolvedAssignedUserId = data.assignedUserId;
-    } else if (data.assignedUserId && data.assignedUserId !== resolvedAssignedUserId) {
-      // Manual selection is appended as additional recipient (deduped below)
-      workflowAdditionalIds = [...workflowAdditionalIds, data.assignedUserId];
+      workflowAdditionalIds = [...workflowAdditionalIds];
+    } else if (!resolvedAssignedUserId) {
+      // No manual selection AND no workflow match — leave unassigned (null)
+      // unless we fall through to the creator-fallback below.
+    }
+
+    // Ultimate fallback: if STILL no primary assignee AND the user did not
+    // explicitly choose "Leave unassigned" (assignedUserId === null means
+    // the field was left blank, vs undefined which means not provided),
+    // assign to the creator so the query is visible in "my assigned" views.
+    if (!resolvedAssignedUserId && data.assignedUserId === undefined) {
+      resolvedAssignedUserId = userId;
+      logger.info('No workflow or manual assignee resolved — defaulting to query creator', {
+        userId, studyId: data.studyId
+      });
     }
 
     // Deduplicate additional IDs and remove the primary so we don't double-notify
@@ -727,7 +789,7 @@ export const addQueryResponse = async (
     description: string;
     detailedNotes?: string;
     newStatusId?: number;
-    correctedValue?: string;
+    correctedValue?: any;
     correctionReason?: string;
   },
   userId: number
@@ -798,6 +860,41 @@ export const addQueryResponse = async (
       `, [newStatusId, parentQueryId]);
     }
 
+    // ── PING-PONG ASSIGNMENT ──
+    // Standard EDC pattern (Medidata Rave, Veeva Vault, Oracle InForm):
+    // When a user responds to a query, the assignment flips to the OTHER party.
+    // - If the responder IS the assignee → reassign to the query owner (creator)
+    // - If the responder IS the owner → reassign to the current assignee (no change)
+    // This ensures the query always points to whoever needs to act next.
+    // Skip reassignment when closing (status 4) — no further action needed.
+    if (newStatusId !== 4) {
+      const currentAssignee = parent.assigned_user_id;
+      const queryOwner = parent.owner_id;
+
+      if (userId === currentAssignee && queryOwner && queryOwner !== userId) {
+        await client.query(`
+          UPDATE discrepancy_note
+          SET assigned_user_id = $1
+          WHERE discrepancy_note_id = $2
+        `, [queryOwner, parentQueryId]);
+        logger.info('Ping-pong: reassigned query from responder to owner', {
+          queryId: parentQueryId, from: currentAssignee, to: queryOwner
+        });
+      } else if (userId === queryOwner && currentAssignee && currentAssignee !== userId) {
+        // Owner responded → flip back to assignee (already there, but log it)
+        logger.info('Owner responded — assignee unchanged', {
+          queryId: parentQueryId, assignee: currentAssignee
+        });
+      } else if (!currentAssignee && queryOwner && queryOwner !== userId) {
+        // Unassigned query — assign to owner
+        await client.query(`
+          UPDATE discrepancy_note
+          SET assigned_user_id = $1
+          WHERE discrepancy_note_id = $2
+        `, [queryOwner, parentQueryId]);
+      }
+    }
+
     // Log audit event for the response
     const statusNames: Record<number, string> = {
       1: 'New', 2: 'Updated', 3: 'Resolution Proposed', 4: 'Closed', 5: 'Not Applicable'
@@ -824,33 +921,43 @@ export const addQueryResponse = async (
     let correctionApplied = false;
 
     if (data.correctedValue !== undefined && data.correctedValue !== null && data.correctedValue !== '') {
+      logger.info('Data correction requested', { 
+        parentQueryId, correctedValueType: typeof data.correctedValue,
+        correctedValuePreview: JSON.stringify(data.correctedValue).substring(0, 100)
+      });
       try {
         const linkedData = await client.query(`
           SELECT dim.item_data_id, id.value AS old_value, id.event_crf_id,
-                 i.name AS field_name, i.item_id, i.description AS item_description
+                 i.name AS field_name, i.item_id, i.description AS item_description,
+                 i.item_data_type_id,
+                 rs.options_text, rs.options_values,
+                 rt.name AS response_type_name
           FROM dn_item_data_map dim
           INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
           INNER JOIN item i ON id.item_id = i.item_id
+          LEFT JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+          LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = ec.crf_version_id
+          LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
+          LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
           WHERE dim.discrepancy_note_id = $1
           LIMIT 1
         `, [parentQueryId]);
 
-        if (linkedData.rows.length > 0) {
-          const { item_data_id, old_value, event_crf_id, field_name, item_id, item_description } = linkedData.rows[0];
+        logger.info('Linked data lookup result', { 
+          parentQueryId, rowCount: linkedData.rows.length,
+          firstRow: linkedData.rows[0] ? { item_data_id: linkedData.rows[0].item_data_id, field_name: linkedData.rows[0].field_name } : null
+        });
 
-          // Resolve the technical fieldName from extended_props for JSONB sync.
-          // The patient_event_form.form_data may be keyed by the technical name
-          // (e.g., "heart_rate") rather than the display name (e.g., "Heart Rate").
-          let technicalFieldName: string | null = null;
-          if (item_description?.includes('---EXTENDED_PROPS---')) {
-            try {
-              const json = item_description.split('---EXTENDED_PROPS---')[1]?.trim();
-              if (json) {
-                const ext = JSON.parse(json);
-                if (ext.fieldName) technicalFieldName = ext.fieldName;
-              }
-            } catch { /* ignore parse errors */ }
-          }
+        if (linkedData.rows.length > 0) {
+          const { item_data_id, old_value, event_crf_id, field_name, item_id, item_description,
+                  item_data_type_id, options_text, options_values, response_type_name } = linkedData.rows[0];
+
+          const ext = parseExtendedProps(item_description);
+          const technicalFieldName: string | null = ext.fieldName || null;
+
+          const fieldInfo = buildFieldTypeInfo(
+            item_description, item_data_type_id, response_type_name, options_text, options_values
+          );
 
           // Check lock/freeze status — query-driven corrections are ALLOWED on
           // locked/frozen forms (EDC standard) but we log an explicit audit entry
@@ -866,23 +973,18 @@ export const addQueryResponse = async (
             }
           }
 
-          // Detect if this is a structured field (table/question_table) where the
-          // real data lives in patient_event_form.form_data JSONB, not item_data.
-          const isStructuredField = old_value === '__STRUCTURED_DATA__';
-          let correctedValueForItemData = data.correctedValue;
-
-          if (isStructuredField) {
-            // Keep the marker in item_data — the real update goes to JSONB below
-            correctedValueForItemData = '__STRUCTURED_DATA__';
-          }
+          // Type-aware serialization via helper
+          const serialized = serializeCorrectionForStorage(fieldInfo.canonicalType, data.correctedValue);
 
           // 1. Update item_data value (marker preserved for structured fields)
           await client.query(`
             UPDATE item_data SET value = $1, date_updated = NOW(), update_id = $2
             WHERE item_data_id = $3
-          `, [correctedValueForItemData, userId, item_data_id]);
+          `, [serialized.itemDataValue, userId, item_data_id]);
 
           // 2. Write audit trail for the data correction
+          const auditNewValue = typeof data.correctedValue === 'object'
+            ? JSON.stringify(data.correctedValue) : String(data.correctedValue);
           const correctionReason = (data.correctionReason || 'Query resolution data correction') + lockNote;
           await client.query(`
             INSERT INTO audit_log_event (
@@ -894,12 +996,11 @@ export const addQueryResponse = async (
                WHERE name ILIKE '%updated%' LIMIT 1),
               $5, $6)
           `, [
-            userId, item_data_id, old_value, data.correctedValue,
+            userId, item_data_id, old_value, auditNewValue,
             event_crf_id, correctionReason
           ]);
 
-          // 3. Write audit trail for the query-driven correction (separate entry
-          //    on discrepancy_note table for the full query audit history)
+          // 3. Write audit trail for the query-driven correction
           await client.query(`
             INSERT INTO audit_log_event (
               audit_date, audit_table, user_id, entity_id, entity_name,
@@ -916,27 +1017,13 @@ export const addQueryResponse = async (
           `, [
             userId, parentQueryId,
             `Field: ${field_name}, Value: ${old_value}`,
-            `Field: ${field_name}, Corrected Value: ${data.correctedValue}`,
+            `Field: ${field_name}, Corrected Value: ${auditNewValue}`,
             correctionReason
           ]);
 
           // 4. Sync corrected value into patient_event_form JSONB snapshot.
-          //    Try both the technical fieldName and display name to ensure the
-          //    JSONB key matches regardless of how the form was originally saved.
-          //    For table/question_table fields, the correctedValue is JSON (array
-          //    or object) — store as native JSONB, not double-escaped string.
           if (event_crf_id) {
-            let jsonbLiteral: string;
-            try {
-              const parsed = JSON.parse(data.correctedValue);
-              if (typeof parsed === 'object' && parsed !== null) {
-                jsonbLiteral = data.correctedValue;
-              } else {
-                jsonbLiteral = JSON.stringify(data.correctedValue);
-              }
-            } catch {
-              jsonbLiteral = JSON.stringify(data.correctedValue);
-            }
+            const jsonbLiteral = JSON.stringify(serialized.jsonbValue);
 
             const keysToTry = [technicalFieldName, field_name].filter(Boolean) as string[];
             for (const key of keysToTry) {
@@ -983,8 +1070,8 @@ export const addQueryResponse = async (
           correctionApplied = true;
           logger.info('Data correction applied via query resolution', {
             queryId: parentQueryId, item_data_id, field_name,
-            technicalFieldName,
-            oldValue: old_value, newValue: data.correctedValue
+            technicalFieldName, canonicalType: fieldInfo.canonicalType,
+            oldValue: old_value, newValue: auditNewValue
           });
         } else {
           logger.warn('correctedValue provided but no linked item_data found for query', {
@@ -1659,6 +1746,21 @@ export const reassignQuery = async (
 
     await client.query('COMMIT');
 
+    // Notify the new assignee (fire-and-forget)
+    try {
+      const descResult = await pool.query(
+        `SELECT description, study_id FROM discrepancy_note WHERE discrepancy_note_id = $1`,
+        [queryId]
+      );
+      const desc = descResult.rows[0]?.description || 'Query reassigned to you';
+      const studyId = descResult.rows[0]?.study_id;
+      await notificationService.notifyQueryAssigned(
+        assignedUserId, desc, queryId, studyId
+      );
+    } catch (notifErr: any) {
+      logger.warn('Failed to send reassignment notification', { error: notifErr.message });
+    }
+
     return { success: true, message: 'Query reassigned successfully' };
   } catch (error: any) {
     await client.query('ROLLBACK').catch((rbErr: any) =>
@@ -1826,6 +1928,7 @@ export const getQueryThread = async (queryId: number, callerUserId?: number): Pr
         t.thread_level = 0                                              -- always include root
         OR t.description != t.root_description                         -- real response: different text
         OR t.date_created > t.root_created + INTERVAL '30 seconds'    -- or created much later (human-typed)
+        OR t.owner_id != (SELECT owner_id FROM discrepancy_note WHERE discrepancy_note_id = $1)  -- different author than root = real response
       ORDER BY t.date_created ASC, t.thread_level ASC
     `;
 

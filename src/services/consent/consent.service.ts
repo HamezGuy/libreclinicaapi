@@ -446,6 +446,32 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
 
     await client.query('COMMIT');
 
+    // Fire-and-forget: notify study admins/monitors about consent event
+    try {
+      const { notifyConsentEvent } = await import('../database/notification.service');
+      const subjectLabel = `Subject ${consent.studySubjectId}`;
+      const studyRow = await pool.query(
+        `SELECT ss.study_id FROM study_subject ss WHERE ss.study_subject_id = $1 LIMIT 1`,
+        [consent.studySubjectId]
+      );
+      const studyId = studyRow.rows[0]?.study_id;
+      if (studyId) {
+        const monitors = await pool.query(
+          `SELECT DISTINCT ua.user_id FROM user_account ua
+           JOIN study_user_role sur ON sur.user_name = ua.user_name
+           WHERE sur.study_id = $1 AND sur.role_name IN ('coordinator', 'monitor', 'director')
+           AND ua.user_id != $2`,
+          [studyId, consent.consentedBy]
+        );
+        const monitorIds = monitors.rows.map((r: any) => r.user_id);
+        if (monitorIds.length > 0) {
+          await notifyConsentEvent(monitorIds, 'recorded', subjectLabel, studyId, consentId);
+        }
+      }
+    } catch (notifError: any) {
+      logger.warn('Failed to send consent notification (non-blocking)', { error: notifError.message });
+    }
+
     return (await getSubjectConsentById(consentId))!;
   } catch (error: any) {
     await client.query('ROLLBACK');

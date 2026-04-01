@@ -1261,7 +1261,7 @@ export function toStudySubject(row: any): StudySubject {
     subjectId: row.subject_id,
     studyId: row.study_id,
     enrollmentDate: row.enrollment_date,
-    screeningDate: row.screening_date ?? row.screeningDate ?? row.enrollment_date,
+    screeningDate: row.screening_date ?? row.screeningDate,
     enrollmentStatus: row.enrollment_status ?? row.enrollmentStatus ?? (statusId === 1 ? 'enrolled' : (statusId === 5 ? 'screen_failure' : 'screening')),
     oid: row.oc_oid,
     statusId: statusId,
@@ -1278,6 +1278,39 @@ export function toStudySubject(row: any): StudySubject {
     siteName: row.site_name,
     timeZone: row.time_zone
   };
+}
+
+/**
+ * Get the enrollment date for display. Returns the formatted date or 'N/A' if null/undefined.
+ */
+export function getEnrollmentDateDisplay(subject: StudySubject | null | undefined): string {
+  if (!subject?.enrollmentDate) return 'N/A';
+  try {
+    const d = typeof subject.enrollmentDate === 'string' ? new Date(subject.enrollmentDate) : subject.enrollmentDate;
+    if (isNaN(d.getTime())) return 'N/A';
+    const year = d.getFullYear();
+    const month = d.getMonth() + 1;
+    const day = d.getDate();
+    return `${year}-${month < 10 ? '0' : ''}${month}-${day < 10 ? '0' : ''}${day}`;
+  } catch {
+    return 'N/A';
+  }
+}
+
+/**
+ * Get the enrollment date value, preserving null.
+ */
+export function getEnrollmentDate(subject: StudySubject | null | undefined): Date | null {
+  if (!subject?.enrollmentDate) return null;
+  const d = new Date(subject.enrollmentDate);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Set the enrollment date on a subject. Accepts Date, ISO string, or null to clear.
+ */
+export function setEnrollmentDate(subject: StudySubject, date: Date | string | null | undefined): void {
+  subject.enrollmentDate = date ?? undefined;
 }
 
 /**

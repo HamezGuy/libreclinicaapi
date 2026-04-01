@@ -258,6 +258,62 @@ export const notifyFormSDVRequired = async (
   );
 };
 
+/** Notify when a form is locked. */
+export const notifyFormLocked = async (
+  userIds: number[],
+  formName: string,
+  eventCrfId: number,
+  studyId: number,
+  subjectLabel: string,
+  lockedByName: string
+) => {
+  await notifyUsers(userIds, 'form_locked',
+    `Form locked: ${formName}`,
+    `Form "${formName}" for patient ${subjectLabel} was locked by ${lockedByName}.`,
+    { entityType: 'event_crf', entityId: eventCrfId, studyId }
+  );
+};
+
+/** Notify when a form requires an electronic signature. */
+export const notifyFormSignatureRequired = async (
+  userIds: number[],
+  formName: string,
+  eventCrfId: number,
+  studyId: number,
+  subjectLabel: string
+) => {
+  await notifyUsers(userIds, 'form_signature_required',
+    `Signature required: ${formName}`,
+    `Form "${formName}" for patient ${subjectLabel} requires your electronic signature.`,
+    { entityType: 'event_crf', entityId: eventCrfId, studyId }
+  );
+};
+
+/** Notify about consent events (recording, withdrawal, re-consent). */
+export const notifyConsentEvent = async (
+  userIds: number[],
+  action: 'recorded' | 'withdrawn' | 'reconsent_needed',
+  subjectLabel: string,
+  studyId: number,
+  consentId?: number
+) => {
+  const titles: Record<string, string> = {
+    recorded: `Consent recorded: ${subjectLabel}`,
+    withdrawn: `Consent withdrawn: ${subjectLabel}`,
+    reconsent_needed: `Re-consent required: ${subjectLabel}`,
+  };
+  const messages: Record<string, string> = {
+    recorded: `Informed consent has been successfully recorded for patient ${subjectLabel}.`,
+    withdrawn: `Informed consent has been withdrawn for patient ${subjectLabel}. Data entry may be restricted.`,
+    reconsent_needed: `Patient ${subjectLabel} requires re-consent due to a protocol or document version change.`,
+  };
+  await notifyUsers(userIds, 'general',
+    titles[action] || `Consent event: ${subjectLabel}`,
+    messages[action] || `A consent event occurred for patient ${subjectLabel}.`,
+    { entityType: 'acc_subject_consent', entityId: consentId, studyId }
+  );
+};
+
 export default {
   createNotification,
   notifyUsers,
@@ -269,5 +325,8 @@ export default {
   notifyQueryClosed,
   notifyResolutionProposed,
   notifyResolutionRejected,
-  notifyFormSDVRequired
+  notifyFormSDVRequired,
+  notifyFormLocked,
+  notifyFormSignatureRequired,
+  notifyConsentEvent,
 };

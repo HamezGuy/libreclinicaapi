@@ -4,6 +4,9 @@ set -e
 DOMAIN="api.accuratrials.com"
 EMAIL="admin@accuratrials.com"
 
+# Ensure we have the latest CORS configuration
+echo "Using updated nginx-prod.conf with www.accuratrials.com support"
+
 # Detect Docker Compose command
 if docker compose version >/dev/null 2>&1; then
     DOCKER_COMPOSE="docker compose"

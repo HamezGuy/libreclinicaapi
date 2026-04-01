@@ -1448,7 +1448,7 @@ export const getSubjectProgressMatrix = async (
         label: row.label,
         siteName: row.site_name || 'Main Study',
         siteId: row.site_id || studyId,
-        enrollmentDate: row.enrollment_date ? formatDate(row.enrollment_date) : formatDate(row.date_created),
+        enrollmentDate: row.enrollment_date ? formatDate(row.enrollment_date) : null,
         status: row.status || 'available',
         currentVisit: row.current_visit || null,
         totalForms,

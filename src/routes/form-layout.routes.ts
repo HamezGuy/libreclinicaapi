@@ -116,7 +116,7 @@ router.get('/:crfVersionId/render', asyncHandler(async (req: Request, res: Respo
  * Save form layout configuration (admin only)
  */
 router.post('/', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
-  const { crfVersionId, items } = req.body;
+  const { crfVersionId, fields: items } = req.body;
   const user = (req as any).user;
 
   if (!crfVersionId || !items || !Array.isArray(items)) {
