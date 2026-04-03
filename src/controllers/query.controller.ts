@@ -230,11 +230,24 @@ export const bulkReassign = asyncHandler(async (req: Request, res: Response) => 
   res.json({ success: result.success, reassigned: result.reassigned, failed: result.failed, errors: result.errors });
 });
 
+export const subjectCounts = asyncHandler(async (req: Request, res: Response) => {
+  const { studyId } = req.query;
+  if (!studyId) throw new BadRequestError('studyId is required');
+  const data = await queryService.getQueryCountsBySubject(parseInt(studyId as string), userId(req));
+  res.json({ success: true, data });
+});
+
+export const formQueryStatusByEvent = asyncHandler(async (req: Request, res: Response) => {
+  const data = await queryService.getFormQueryStatusByEvent(intParam(req, 'studyEventId'), userId(req));
+  res.json({ success: true, data });
+});
+
 export default {
   list, get, create, respond, updateStatus, closeWithSignature,
   acceptResolution, rejectResolution,
   getAuditTrail, stats, getQueryTypes, getResolutionStatuses,
   getFormQueries, getFieldQueries, getQueriesByField, getFormFieldQueryCounts,
   reassign, countByStatus, countByType, getThread, getOverdue, getMyAssigned,
-  reopenQuery, bulkUpdateStatus, bulkClose, bulkReassign
+  reopenQuery, bulkUpdateStatus, bulkClose, bulkReassign,
+  subjectCounts, formQueryStatusByEvent
 };

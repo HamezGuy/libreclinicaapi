@@ -60,6 +60,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'widen_study_columns', fn: widenStudyColumns },
     { name: 'query_severity_column', fn: createQuerySeverityColumn },
     { name: 'unlock_requests', fn: createUnlockRequestTable },
+    { name: 'econsent_extended_columns', fn: addEconsentExtendedColumns },
   ];
 
   let successCount = 0;
@@ -1955,4 +1956,31 @@ async function createUnlockRequestTable(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_unlock_request_requested_by ON acc_unlock_request(requested_by_id)`);
 
   logger.info('Unlock request table verified');
+}
+
+// ============================================================================
+// eConsent — Extended columns for Part 11 metadata, scanned consent, signatures
+// ============================================================================
+async function addEconsentExtendedColumns(pool: any): Promise<void> {
+  const columns = [
+    { col: 'scanned_consent_file_ids', type: 'JSONB' },
+    { col: 'is_scanned_consent', type: 'BOOLEAN DEFAULT false' },
+    { col: 'subject_signature_id', type: 'INTEGER' },
+    { col: 'witness_signature_id', type: 'INTEGER' },
+    { col: 'lar_signature_id', type: 'INTEGER' },
+    { col: 'investigator_signature_id', type: 'INTEGER' },
+    { col: 'content_hash', type: 'VARCHAR(128)' },
+    { col: 'device_info', type: 'JSONB' },
+    { col: 'page_view_records', type: 'JSONB' },
+    { col: 'consent_form_data', type: 'JSONB' },
+    { col: 'template_id', type: 'VARCHAR(255)' },
+  ];
+
+  for (const { col, type } of columns) {
+    await pool.query(
+      `ALTER TABLE acc_subject_consent ADD COLUMN IF NOT EXISTS ${col} ${type}`
+    ).catch(() => {});
+  }
+
+  logger.info('eConsent extended columns verified');
 }

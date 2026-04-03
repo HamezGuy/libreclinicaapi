@@ -29,6 +29,12 @@ router.get('/count-by-type', controller.countByType);
 router.get('/overdue', controller.getOverdue);
 router.get('/my-assigned', controller.getMyAssigned);
 
+// Per-subject query counts (open + overdue) for patient table
+router.get('/subject-counts', controller.subjectCounts);
+
+// Per-form query status for all forms in a study event
+router.get('/event/:studyEventId/form-query-status', controller.formQueryStatusByEvent);
+
 // Form-specific queries (no signature required for reading)
 router.get('/form/:eventCrfId', controller.getFormQueries);
 

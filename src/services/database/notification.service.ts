@@ -173,7 +173,8 @@ export const notifyQueryResponse = async (
   ownerUserId: number,
   queryDescription: string,
   queryId: number,
-  responderName: string
+  responderName: string,
+  studyId?: number
 ) => {
   await createNotification({
     userId: ownerUserId,
@@ -181,7 +182,8 @@ export const notifyQueryResponse = async (
     title: `Query response from ${responderName}`,
     message: queryDescription.substring(0, 200),
     entityType: 'discrepancy_note',
-    entityId: queryId
+    entityId: queryId,
+    studyId
   });
 };
 

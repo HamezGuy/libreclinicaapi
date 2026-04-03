@@ -162,6 +162,34 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
       params.push(updates.secondaryLabel);
     }
 
+    if (updates.enrollmentDate !== undefined) {
+      updateFields.push(`enrollment_date = $${paramIndex++}`);
+      params.push(updates.enrollmentDate || null);
+    }
+
+    if (updates.screeningDate !== undefined) {
+      updateFields.push(`screening_date = $${paramIndex++}`);
+      params.push(updates.screeningDate || null);
+    }
+
+    if (updates.personId !== undefined) {
+      updateFields.push(`unique_identifier = $${paramIndex++}`);
+      params.push(updates.personId || null);
+    }
+
+    if (updates.enrollmentStatus !== undefined) {
+      const statusMap: Record<string, number> = {
+        'enrolled': 1,
+        'screening': 4,
+        'screen_failure': 5,
+      };
+      const statusId = statusMap[updates.enrollmentStatus];
+      if (statusId !== undefined) {
+        updateFields.push(`status_id = $${paramIndex++}`);
+        params.push(statusId);
+      }
+    }
+
     if (updateFields.length > 0) {
       updateFields.push(`date_updated = NOW()`);
       updateFields.push(`update_id = $${paramIndex++}`);
@@ -195,7 +223,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
 
         if (updates.gender) {
           subjectUpdates.push(`gender = $${subjectParamIndex++}`);
-          subjectParams.push(updates.gender === 'male' ? 'm' : updates.gender === 'female' ? 'f' : '');
+          subjectParams.push(updates.gender === 'male' ? 'm' : updates.gender === 'female' ? 'f' : updates.gender);
         }
 
         if (subjectUpdates.length > 0) {

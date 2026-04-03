@@ -1568,9 +1568,9 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         // Options
         options,
         
-        // Layout
+        // Layout — ordinal is 1-based in DB; order is 0-based for the frontend
         ordinal: item.ordinal,
-        order: item.ordinal,
+        order: item.ordinal != null ? item.ordinal - 1 : undefined,
         section: item.section_name,
         section_id: item.section_id,
         group_name: item.group_name,
@@ -2755,7 +2755,8 @@ export const createForm = async (
 
         const itemId = itemResult.rows[0].item_id;
 
-        // Link item to item_group via item_group_metadata
+        // Compute 1-based ordinal: use explicit order (even if 0), else fall back to loop position
+        const fieldOrdinal = (field.order != null) ? Number(field.order) + 1 : (i + 1);
         await client.query(`
           INSERT INTO item_group_metadata (
             item_group_id, crf_version_id, item_id, ordinal, 
@@ -2767,7 +2768,7 @@ export const createForm = async (
           itemGroupId,
           crfVersionId,
           itemId,
-          field.order || (i + 1)
+          fieldOrdinal
         ]);
 
         // Create response_set for fields with options (select, radio, checkbox)
@@ -2872,7 +2873,7 @@ export const createForm = async (
           crfVersionId,
           resolveSectionId(field.section),
           responseSetId,
-          field.order || (i + 1),
+          fieldOrdinal,
           field.placeholder || '',
           field.required || field.isRequired || false,
           field.defaultValue !== undefined ? String(field.defaultValue) : null,
@@ -3306,6 +3307,9 @@ export const updateForm = async (
         const fieldItemId = field.id ? parseInt(String(field.id), 10) : NaN;
         const isNewField = isNaN(fieldItemId) && !field.itemId;
 
+        // Compute 1-based ordinal: use explicit order (even if 0), else fall back to loop position
+        const fieldOrdinal = (field.order != null) ? Number(field.order) + 1 : (i + 1);
+
         if (field.type === 'table' && isNewField) {
           if (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0) {
             throw new Error(
@@ -3375,7 +3379,7 @@ export const updateForm = async (
             ) VALUES (
               $1, $2, $3, $4, true, false
             )
-          `, [itemGroupId, crfVersionId, itemId, field.order || (i + 1)]);
+          `, [itemGroupId, crfVersionId, itemId, fieldOrdinal]);
         }
 
         // Handle response set - ALWAYS create one for every field
@@ -3457,6 +3461,13 @@ export const updateForm = async (
           widthDecimal = `${field.min ?? ''},${field.max ?? ''}`;
         }
 
+
+        // Keep item_group_metadata.ordinal in sync so COALESCE(ifm.ordinal, igm.ordinal) is consistent
+        await client.query(`
+          UPDATE item_group_metadata SET ordinal = $1
+          WHERE item_id = $2 AND crf_version_id = $3
+        `, [fieldOrdinal, itemId, crfVersionId]);
+
         // Update or create item_form_metadata
         const existingMetaResult = await client.query(`
           SELECT 1 FROM item_form_metadata WHERE item_id = $1 AND crf_version_id = $2
@@ -3473,7 +3484,7 @@ export const updateForm = async (
                 column_number = $10, section_id = $11
             WHERE item_id = $12 AND crf_version_id = $13
           `, [
-            responseSetId, field.order || (i + 1), field.placeholder || '',
+            responseSetId, fieldOrdinal, field.placeholder || '',
             field.required || field.isRequired || false,
             field.defaultValue !== undefined ? String(field.defaultValue) : null,
             regexpPattern, regexpErrorMsg,
@@ -3491,7 +3502,7 @@ export const updateForm = async (
               column_number
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           `, [
-            itemId, crfVersionId, resolveSectionId(field.section), responseSetId, field.order || (i + 1),
+            itemId, crfVersionId, resolveSectionId(field.section), responseSetId, fieldOrdinal,
             field.placeholder || '', field.required || field.isRequired || false,
             field.defaultValue !== undefined ? String(field.defaultValue) : null,
             regexpPattern, regexpErrorMsg,

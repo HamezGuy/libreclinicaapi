@@ -168,6 +168,17 @@ export interface SubjectConsent {
   consentedByName?: string;
   dateCreated: Date;
   dateUpdated: Date;
+
+  // Extended Part 11 fields
+  isScannedConsent?: boolean;
+  scannedConsentFileIds?: string[];
+  subjectSignatureId?: number;
+  witnessSignatureId?: number;
+  larSignatureId?: number;
+  investigatorSignatureId?: number;
+  contentHash?: string;
+  deviceInfo?: any;
+  templateId?: string;
 }
 
 export interface SubjectConsentCreate {

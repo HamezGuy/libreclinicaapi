@@ -354,66 +354,89 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
       ? consent.versionId
       : null;
 
-    // Insert consent record with full Part 11 metadata
-    const query = `
-      INSERT INTO acc_subject_consent (
-        study_subject_id, version_id, consent_type, consent_status,
-        subject_name, subject_signature_data, subject_signed_at,
-        subject_ip_address, subject_user_agent,
-        witness_name, witness_relationship, witness_signature_data, witness_signed_at,
-        lar_name, lar_relationship, lar_signature_data, lar_signed_at, lar_reason,
-        presented_at, time_spent_reading, pages_viewed, acknowledgments_checked,
-        questions_asked, consented_by,
-        scanned_consent_file_ids, is_scanned_consent,
-        subject_signature_id, witness_signature_id, lar_signature_id, investigator_signature_id,
-        content_hash, device_info, page_view_records, consent_form_data, template_id,
-        date_created, date_updated
-      ) VALUES (
-        $1, $2, $3, 'consented',
-        $4, $5, CURRENT_TIMESTAMP, $6, $7,
-        $8, $9, $10, CASE WHEN $8 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
-        $11, $12, $13, CASE WHEN $11 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END, $14,
-        CURRENT_TIMESTAMP, $15, $16, $17, $18, $19,
-        $20, $21,
-        $22, $23, $24, $25,
-        $26, $27, $28, $29, $30,
-        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-      RETURNING consent_id
-    `;
+    // Check which extended columns exist (they may not if migration hasn't run)
+    const colCheck = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'acc_subject_consent'
+        AND column_name IN (
+          'scanned_consent_file_ids','is_scanned_consent',
+          'subject_signature_id','witness_signature_id','lar_signature_id','investigator_signature_id',
+          'content_hash','device_info','page_view_records','consent_form_data','template_id'
+        )
+    `);
+    const existingCols = new Set(colCheck.rows.map((r: any) => r.column_name));
 
-    const result = await client.query(query, [
+    // Build column lists dynamically
+    const columns: string[] = [
+      'study_subject_id', 'version_id', 'consent_type', 'consent_status',
+      'subject_name', 'subject_signature_data', 'subject_signed_at',
+      'subject_ip_address', 'subject_user_agent',
+      'witness_name', 'witness_relationship', 'witness_signature_data', 'witness_signed_at',
+      'lar_name', 'lar_relationship', 'lar_signature_data', 'lar_signed_at', 'lar_reason',
+      'presented_at', 'time_spent_reading', 'pages_viewed', 'acknowledgments_checked',
+      'questions_asked', 'consented_by',
+      'date_created', 'date_updated'
+    ];
+
+    const values: any[] = [
       consent.studySubjectId,
       effectiveVersionId,
       consent.consentType || 'subject',
-      consent.subjectName,
+      'consented',
+      consent.subjectName || '',
       JSON.stringify(consent.subjectSignatureData),
+      new Date(),
       consent.subjectIpAddress || null,
       consent.subjectUserAgent || null,
       consent.witnessName || null,
       consent.witnessRelationship || null,
       consent.witnessSignatureData ? JSON.stringify(consent.witnessSignatureData) : null,
+      consent.witnessName ? new Date() : null,
       consent.larName || null,
       consent.larRelationship || null,
       consent.larSignatureData ? JSON.stringify(consent.larSignatureData) : null,
+      consent.larName ? new Date() : null,
       consent.larReason || null,
-      consent.timeSpentReading,
-      JSON.stringify(consent.pagesViewed),
-      JSON.stringify(consent.acknowledgementsChecked),
+      new Date(),
+      consent.timeSpentReading || 0,
+      JSON.stringify(consent.pagesViewed || []),
+      JSON.stringify(consent.acknowledgementsChecked || []),
       consent.questionsAsked || null,
       consent.consentedBy,
-      consent.scannedConsentFileIds ? JSON.stringify(consent.scannedConsentFileIds) : null,
-      consent.isScannedConsent || false,
-      consent.subjectSignatureId || null,
-      consent.witnessSignatureId || null,
-      consent.larSignatureId || null,
-      consent.investigatorSignatureId || null,
-      consent.contentHash || null,
-      consent.deviceInfo ? JSON.stringify(consent.deviceInfo) : null,
-      consent.pageViewRecords ? JSON.stringify(consent.pageViewRecords) : null,
-      consent.formData ? JSON.stringify(consent.formData) : null,
-      consent.templateId || null
-    ]);
+      new Date(),
+      new Date()
+    ];
+
+    // Add extended columns if they exist
+    const extendedFields: Array<{ col: string; value: any }> = [
+      { col: 'scanned_consent_file_ids', value: consent.scannedConsentFileIds ? JSON.stringify(consent.scannedConsentFileIds) : null },
+      { col: 'is_scanned_consent', value: consent.isScannedConsent || false },
+      { col: 'subject_signature_id', value: consent.subjectSignatureId || null },
+      { col: 'witness_signature_id', value: consent.witnessSignatureId || null },
+      { col: 'lar_signature_id', value: consent.larSignatureId || null },
+      { col: 'investigator_signature_id', value: consent.investigatorSignatureId || null },
+      { col: 'content_hash', value: consent.contentHash || null },
+      { col: 'device_info', value: consent.deviceInfo ? JSON.stringify(consent.deviceInfo) : null },
+      { col: 'page_view_records', value: consent.pageViewRecords ? JSON.stringify(consent.pageViewRecords) : null },
+      { col: 'consent_form_data', value: consent.formData ? JSON.stringify(consent.formData) : null },
+      { col: 'template_id', value: consent.templateId || null },
+    ];
+
+    for (const ef of extendedFields) {
+      if (existingCols.has(ef.col)) {
+        columns.push(ef.col);
+        values.push(ef.value);
+      }
+    }
+
+    const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
+    const query = `
+      INSERT INTO acc_subject_consent (${columns.join(', ')})
+      VALUES (${placeholders})
+      RETURNING consent_id
+    `;
+
+    const result = await client.query(query, values);
 
     const consentId = result.rows[0].consent_id;
 
@@ -927,7 +950,16 @@ function mapRowToSubjectConsent(row: any): SubjectConsent {
     consentedBy: row.consented_by,
     consentedByName: row.consented_by_name,
     dateCreated: row.date_created,
-    dateUpdated: row.date_updated
+    dateUpdated: row.date_updated,
+    isScannedConsent: row.is_scanned_consent,
+    scannedConsentFileIds: row.scanned_consent_file_ids,
+    subjectSignatureId: row.subject_signature_id,
+    witnessSignatureId: row.witness_signature_id,
+    larSignatureId: row.lar_signature_id,
+    investigatorSignatureId: row.investigator_signature_id,
+    contentHash: row.content_hash,
+    deviceInfo: row.device_info,
+    templateId: row.template_id,
   };
 }
 

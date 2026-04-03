@@ -228,6 +228,16 @@ router.post('/subjects/:studySubjectId/consent',
       const studySubjectId = parseInt(req.params.studySubjectId);
       const userId = (req as any).user?.userId;
       
+      if (!userId) {
+        res.status(401).json({ success: false, message: 'User authentication required to record consent' });
+        return;
+      }
+
+      if (isNaN(studySubjectId) || studySubjectId <= 0) {
+        res.status(400).json({ success: false, message: 'Invalid study subject ID' });
+        return;
+      }
+
       const consent = await recordConsent({
         ...req.body,
         studySubjectId,
@@ -238,7 +248,12 @@ router.post('/subjects/:studySubjectId/consent',
 
       res.json({ success: true, data: consent });
     } catch (error: any) {
-      logger.error('Error recording consent', { error: error.message });
+      logger.error('Error recording consent', { 
+        error: error.message,
+        stack: error.stack,
+        studySubjectId: req.params.studySubjectId,
+        bodyKeys: Object.keys(req.body || {})
+      });
       res.status(400).json({ success: false, message: error.message });
     }
   }

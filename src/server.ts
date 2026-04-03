@@ -208,8 +208,12 @@ async function startServer() {
     // Initialize backup scheduler (21 CFR Part 11 compliant automated backups)
     await initializeBackupScheduler();
 
-    // Start Express server
-    const server = app.listen(PORT, HOST, () => {
+    // Start Express server with increased header size for large auth tokens / consent payloads
+    const http = await import('http');
+    const server = http.createServer({ maxHeaderSize: 64 * 1024 }, app);
+    server.headersTimeout = 120000;
+    server.requestTimeout = 300000;
+    server.listen(PORT, HOST, () => {
       logger.info(` LibreClinica API started successfully`, {
         port: PORT,
         host: HOST,
@@ -289,5 +293,4 @@ async function startServer() {
 
 // Start the server
 startServer();
-
 

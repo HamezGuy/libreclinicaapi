@@ -42,6 +42,31 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
 };
 
 /**
+ * Get all users who have participated in a query thread.
+ * Includes: owner, current assignee, and anyone who added a child response.
+ * Used to notify all stakeholders when a query is responded to or closed.
+ */
+const getQueryParticipants = async (queryId: number): Promise<number[]> => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT u_id FROM (
+        SELECT owner_id AS u_id FROM discrepancy_note WHERE discrepancy_note_id = $1
+        UNION
+        SELECT assigned_user_id AS u_id FROM discrepancy_note WHERE discrepancy_note_id = $1
+        UNION
+        SELECT owner_id AS u_id FROM discrepancy_note WHERE parent_dn_id = $1
+        UNION
+        SELECT assigned_user_id AS u_id FROM discrepancy_note WHERE parent_dn_id = $1
+      ) sub WHERE u_id IS NOT NULL
+    `, [queryId]);
+    return result.rows.map((r: any) => r.u_id);
+  } catch (error: any) {
+    logger.warn('Failed to get query participants', { error: error.message, queryId });
+    return [];
+  }
+};
+
+/**
  * Check if a caller can edit (respond to, close, update status) a query.
  * Allowed editors:
  *   - The assigned user
@@ -299,7 +324,9 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
           i.description AS item_description,
           i.item_data_type_id,
           dim.column_name,
+          c.crf_id,
           c.name AS form_name,
+          cv.crf_version_id,
           cv.name AS form_version,
           rs.options_text,
           rs.options_values,
@@ -348,6 +375,8 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
           itemDataId: r.item_data_id,
           itemId: r.item_id,
           eventCrfId: r.event_crf_id,
+          crfId: r.crf_id,
+          crfVersionId: r.crf_version_id,
           fieldName: r.field_name,
           fieldOid: r.field_oid,
           columnName: r.column_name,
@@ -358,6 +387,8 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
         };
         linkedEventCrf = {
           eventCrfId: r.event_crf_id,
+          crfId: r.crf_id,
+          crfVersionId: r.crf_version_id,
           formName: r.form_name,
           formVersion: r.form_version
         };
@@ -366,6 +397,7 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
         // Check event_crf-level linkage (no field-level correction possible)
         const ecrfLink = await pool.query(
           `SELECT decm.event_crf_id, decm.column_name,
+                  c.crf_id, cv.crf_version_id,
                   c.name AS form_name, cv.name AS form_version
            FROM dn_event_crf_map decm
            LEFT JOIN event_crf ec ON decm.event_crf_id = ec.event_crf_id
@@ -377,6 +409,8 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
         if (ecrfLink.rows.length > 0) {
           linkedEventCrf = {
             eventCrfId: ecrfLink.rows[0].event_crf_id,
+            crfId: ecrfLink.rows[0].crf_id,
+            crfVersionId: ecrfLink.rows[0].crf_version_id,
             columnName: ecrfLink.rows[0].column_name,
             formName: ecrfLink.rows[0].form_name,
             formVersion: ecrfLink.rows[0].form_version
@@ -1101,15 +1135,13 @@ export const addQueryResponse = async (
       }
     } catch { /* ignore */ }
 
-    // Fire-and-forget: notify relevant parties based on the new status
+    // Fire-and-forget: notify all query participants based on the new status.
+    // Participants include the owner, current assignee, and anyone who previously responded.
     try {
-      const ownerUserId = parent.owner_id;
-      const assignedUserId = parent.assigned_user_id;
+      const participants = await getQueryParticipants(parentQueryId);
 
       if (newStatusId === 4) {
-        // Closed — notify owner and assigned user (skip self)
-        const toNotify = [...new Set([ownerUserId, assignedUserId].filter(Boolean))];
-        for (const uid of toNotify) {
+        for (const uid of participants) {
           if (uid !== userId) {
             await notificationService.notifyQueryClosed(
               uid, safeDescription, parentQueryId, responderName, parent.study_id
@@ -1117,23 +1149,20 @@ export const addQueryResponse = async (
           }
         }
       } else if (newStatusId === 3) {
-        // Resolution proposed — notify owner
-        if (ownerUserId && ownerUserId !== userId) {
-          await notificationService.notifyResolutionProposed(
-            ownerUserId, safeDescription, parentQueryId, responderName, parent.study_id
-          );
+        for (const uid of participants) {
+          if (uid !== userId) {
+            await notificationService.notifyResolutionProposed(
+              uid, safeDescription, parentQueryId, responderName, parent.study_id
+            );
+          }
         }
       } else {
-        // Updated — notify owner and assigned user of the response
-        if (ownerUserId && ownerUserId !== userId) {
-          await notificationService.notifyQueryResponse(
-            ownerUserId, safeDescription, parentQueryId, responderName
-          );
-        }
-        if (assignedUserId && assignedUserId !== userId && assignedUserId !== ownerUserId) {
-          await notificationService.notifyQueryResponse(
-            assignedUserId, safeDescription, parentQueryId, responderName
-          );
+        for (const uid of participants) {
+          if (uid !== userId) {
+            await notificationService.notifyQueryResponse(
+              uid, safeDescription, parentQueryId, responderName, parent.study_id
+            );
+          }
         }
       }
     } catch (notifErr: any) {
@@ -1246,6 +1275,54 @@ export const updateQueryStatus = async (
     await client.query('COMMIT');
 
     logger.info('Query status updated successfully', { queryId, oldStatusId, newStatusId: statusId });
+
+    // Fire-and-forget: notify all query participants about the status change
+    try {
+      let userName = 'A user';
+      const userRow = await pool.query(
+        `SELECT first_name, last_name FROM user_account WHERE user_id = $1`, [userId]
+      );
+      if (userRow.rows[0]) {
+        userName = `${userRow.rows[0].first_name} ${userRow.rows[0].last_name}`.trim();
+      }
+
+      const qInfo = await pool.query(
+        `SELECT study_id, description FROM discrepancy_note WHERE discrepancy_note_id = $1`, [queryId]
+      );
+      const studyId = qInfo.rows[0]?.study_id;
+      const description = qInfo.rows[0]?.description || 'Query';
+      const participants = await getQueryParticipants(queryId);
+
+      if (statusId === 4) {
+        for (const uid of participants) {
+          if (uid !== userId) {
+            await notificationService.notifyQueryClosed(uid, description, queryId, userName, studyId);
+          }
+        }
+      } else if (statusId === 1 && oldStatusId === 4) {
+        for (const uid of participants) {
+          if (uid !== userId) {
+            await notificationService.createNotification({
+              userId: uid,
+              type: 'query_reopened',
+              title: `Query reopened by ${userName}`,
+              message: description.substring(0, 200),
+              entityType: 'discrepancy_note',
+              entityId: queryId,
+              studyId,
+            });
+          }
+        }
+      } else if (statusId === 3) {
+        for (const uid of participants) {
+          if (uid !== userId) {
+            await notificationService.notifyResolutionProposed(uid, description, queryId, userName, studyId);
+          }
+        }
+      }
+    } catch (notifErr: any) {
+      logger.warn('Failed to send status change notification', { error: notifErr.message });
+    }
 
     return { success: true, message: `Query ${actionName.toLowerCase()} successfully` };
   } catch (error: any) {
@@ -1439,6 +1516,25 @@ export const closeQueryWithSignatureVerified = async (
     }
 
     logger.info('Query closed with signature successfully', { queryId, userId, userName: user.user_name });
+
+    // Fire-and-forget: notify all query participants about the closure
+    try {
+      const closerName = `${user.first_name} ${user.last_name}`.trim();
+      const participants = await getQueryParticipants(queryId);
+      const qStudy = await pool.query(
+        `SELECT study_id, description FROM discrepancy_note WHERE discrepancy_note_id = $1`, [queryId]
+      );
+      const studyId = qStudy.rows[0]?.study_id;
+      const description = qStudy.rows[0]?.description || 'Query';
+
+      for (const uid of participants) {
+        if (uid !== userId) {
+          await notificationService.notifyQueryClosed(uid, description, queryId, closerName, studyId);
+        }
+      }
+    } catch (notifErr: any) {
+      logger.warn('Failed to send signed closure notification', { error: notifErr.message });
+    }
 
     return {
       success: true,
@@ -2309,10 +2405,10 @@ export const acceptResolution = async (
 
     await client.query('COMMIT');
 
-    // Notify proposer and owner
+    // Notify all query participants about the closure
     try {
-      const toNotify = [...new Set([q.owner_id, q.assigned_user_id].filter(Boolean))];
-      for (const uid of toNotify) {
+      const participants = await getQueryParticipants(queryId);
+      for (const uid of participants) {
         if (uid !== userId) {
           await notificationService.notifyQueryClosed(uid, q.description, queryId, userName, q.study_id);
         }
@@ -2415,10 +2511,10 @@ export const rejectResolution = async (
 
     await client.query('COMMIT');
 
-    // Notify the person who proposed the resolution (owner and/or assigned user)
+    // Notify all query participants about the rejection
     try {
-      const toNotify = [...new Set([q.owner_id, q.assigned_user_id].filter(Boolean))];
-      for (const uid of toNotify) {
+      const participants = await getQueryParticipants(queryId);
+      for (const uid of participants) {
         if (uid !== userId) {
           await notificationService.notifyResolutionRejected(uid, q.description, queryId, userName, reason, q.study_id);
         }
@@ -2561,6 +2657,160 @@ export const bulkReassignQueries = async (
   return { success: failed === 0, reassigned, failed, errors };
 };
 
+/**
+ * Get open and overdue query counts grouped by study_subject_id for a study.
+ *
+ * Single-pass approach: scans discrepancy_note once and resolves the owning
+ * subject through three LEFT JOIN paths with priority via COALESCE.
+ * LATERAL + LIMIT 1 prevents row multiplication when a note maps to multiple
+ * item_data rows.
+ */
+export const getQueryCountsBySubject = async (
+  studyId: number,
+  callerUserId?: number
+): Promise<{ studySubjectId: number; openCount: number; overdueCount: number }[]> => {
+  logger.info('Getting query counts by subject', { studyId, callerUserId });
+  try {
+    const orgFilter = callerUserId ? await getOrgMemberUserIds(callerUserId) : null;
+    let orgClause = '';
+    const params: any[] = [studyId];
+    if (orgFilter) {
+      orgClause = `AND dn.owner_id = ANY($2::int[])`;
+      params.push(orgFilter);
+    }
+
+    const sql = `
+      WITH note_subjects AS (
+        SELECT DISTINCT ON (dn.discrepancy_note_id)
+          dn.discrepancy_note_id,
+          dn.resolution_status_id,
+          dn.due_date,
+          COALESCE(
+            dssm.study_subject_id,
+            ec_item.study_subject_id,
+            ec_form.study_subject_id
+          ) AS study_subject_id
+        FROM discrepancy_note dn
+        LEFT JOIN dn_study_subject_map dssm
+          ON dn.discrepancy_note_id = dssm.discrepancy_note_id
+        LEFT JOIN LATERAL (
+          SELECT ec.study_subject_id
+          FROM dn_item_data_map didm
+          INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
+          INNER JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+          WHERE didm.discrepancy_note_id = dn.discrepancy_note_id
+          LIMIT 1
+        ) ec_item ON true
+        LEFT JOIN LATERAL (
+          SELECT ec.study_subject_id
+          FROM dn_event_crf_map decm
+          INNER JOIN event_crf ec ON decm.event_crf_id = ec.event_crf_id
+          WHERE decm.discrepancy_note_id = dn.discrepancy_note_id
+          LIMIT 1
+        ) ec_form ON true
+        WHERE dn.parent_dn_id IS NULL
+          AND dn.study_id = $1
+          ${orgClause}
+        ORDER BY dn.discrepancy_note_id
+      )
+      SELECT
+        study_subject_id,
+        COUNT(*) FILTER (WHERE resolution_status_id NOT IN (4, 5))::int AS open_count,
+        COUNT(*) FILTER (
+          WHERE resolution_status_id NOT IN (4, 5)
+            AND due_date IS NOT NULL
+            AND due_date < NOW()
+        )::int AS overdue_count
+      FROM note_subjects
+      WHERE study_subject_id IS NOT NULL
+      GROUP BY study_subject_id
+    `;
+
+    const result = await pool.query(sql, params);
+    return result.rows.map((r: any) => ({
+      studySubjectId: r.study_subject_id,
+      openCount: r.open_count || 0,
+      overdueCount: r.overdue_count || 0
+    }));
+  } catch (error: any) {
+    logger.error('Error getting query counts by subject', { error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Get per-form (eventCrfId) open and overdue query counts for all forms in a study event.
+ */
+export const getFormQueryStatusByEvent = async (
+  studyEventId: number,
+  callerUserId?: number
+): Promise<{ eventCrfId: number; openCount: number; overdueCount: number }[]> => {
+  logger.info('Getting form query status by event', { studyEventId, callerUserId });
+  try {
+    const orgFilter = callerUserId ? await getOrgMemberUserIds(callerUserId) : null;
+    let orgClause = '';
+    const params: any[] = [studyEventId];
+    if (orgFilter) {
+      orgClause = `AND dn.owner_id = ANY($2::int[])`;
+      params.push(orgFilter);
+    }
+
+    const sql = `
+      SELECT
+        event_crf_id,
+        SUM(open_count)::int AS open_count,
+        SUM(overdue_count)::int AS overdue_count
+      FROM (
+        SELECT
+          id.event_crf_id,
+          COUNT(*) FILTER (WHERE dn.resolution_status_id NOT IN (4, 5))::int AS open_count,
+          COUNT(*) FILTER (
+            WHERE dn.resolution_status_id NOT IN (4, 5)
+              AND dn.due_date IS NOT NULL
+              AND dn.due_date < NOW()
+          )::int AS overdue_count
+        FROM event_crf ec
+        INNER JOIN item_data id ON ec.event_crf_id = id.event_crf_id
+        INNER JOIN dn_item_data_map didm ON id.item_data_id = didm.item_data_id
+        INNER JOIN discrepancy_note dn ON didm.discrepancy_note_id = dn.discrepancy_note_id
+        WHERE ec.study_event_id = $1
+          AND dn.parent_dn_id IS NULL
+          ${orgClause}
+        GROUP BY id.event_crf_id
+
+        UNION ALL
+
+        SELECT
+          decm.event_crf_id,
+          COUNT(*) FILTER (WHERE dn.resolution_status_id NOT IN (4, 5))::int AS open_count,
+          COUNT(*) FILTER (
+            WHERE dn.resolution_status_id NOT IN (4, 5)
+              AND dn.due_date IS NOT NULL
+              AND dn.due_date < NOW()
+          )::int AS overdue_count
+        FROM dn_event_crf_map decm
+        INNER JOIN event_crf ec ON decm.event_crf_id = ec.event_crf_id
+        INNER JOIN discrepancy_note dn ON decm.discrepancy_note_id = dn.discrepancy_note_id
+        WHERE ec.study_event_id = $1
+          AND dn.parent_dn_id IS NULL
+          ${orgClause}
+        GROUP BY decm.event_crf_id
+      ) combined
+      GROUP BY event_crf_id
+    `;
+
+    const result = await pool.query(sql, params);
+    return result.rows.map((r: any) => ({
+      eventCrfId: r.event_crf_id,
+      openCount: r.open_count || 0,
+      overdueCount: r.overdue_count || 0
+    }));
+  } catch (error: any) {
+    logger.error('Error getting form query status by event', { error: error.message });
+    throw error;
+  }
+};
+
 export default {
   getQueries,
   getQueryById,
@@ -2588,5 +2838,7 @@ export default {
   reopenQuery,
   bulkUpdateStatus,
   bulkCloseQueries,
-  bulkReassignQueries
+  bulkReassignQueries,
+  getQueryCountsBySubject,
+  getFormQueryStatusByEvent
 };

@@ -241,6 +241,11 @@ export const subjectSchemas = {
       Joi.date().iso(),
       Joi.string().isoDate()
     ).optional(),
+    screeningDate: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate()
+    ).optional(),
+    enrollmentStatus: Joi.string().valid('enrolled', 'screening', 'screen_failure').optional(),
     // Electronic signature
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
