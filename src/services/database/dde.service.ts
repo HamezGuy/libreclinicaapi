@@ -19,6 +19,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { stripExtendedProps } from '../../utils/extended-props';
+import { updateFormQueryCounts } from './query.service';
 
 // ============================================================================
 // Types
@@ -488,6 +489,11 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
       `, [eventCrfId]);
     }
 
+    // Update denormalized query counts on patient_event_form
+    if (discrepancies > 0) {
+      await updateFormQueryCounts(client, eventCrfId);
+    }
+
     await client.query('COMMIT');
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -604,6 +610,11 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
         resolution.adjudicationNotes || `DDE resolved as ${resolution.resolution}`,
         disc.event_crf_id
       ]);
+    }
+
+    // Update denormalized query counts on patient_event_form
+    if (disc.event_crf_id) {
+      await updateFormQueryCounts(client, disc.event_crf_id);
     }
 
     await client.query('COMMIT');

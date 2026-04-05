@@ -14,7 +14,7 @@ import { config } from '../../config/environment';
 import * as dataSoap from '../soap/dataSoap.service';
 import {
   FormDataRequest, ApiResponse,
-  FormFieldOption, ValidationRule, ShowWhenCondition, FormLinkDefinition,
+  FormFieldOption, FieldValidationRule, ShowWhenCondition, FormLinkDefinition,
   TableColumnDefinition, TableRowDefinition, TableSettings,
   InlineFieldDefinition, InlineGroupSettings,
   CriteriaItem, CriteriaListSettings,
@@ -30,6 +30,81 @@ import { resolveFieldType, isStructuredDataType } from '../../utils/field-type.u
 /** Attempt to parse a JSON string; return fallback on failure. */
 function tryParseJson(str: string, fallback: any): any {
   try { return JSON.parse(str); } catch { return fallback; }
+}
+
+/**
+ * Normalize a showWhen/hideWhen/requiredWhen value to always be an array.
+ * Extended props may store a single condition object; the frontend expects arrays.
+ * Filters out malformed conditions (missing fieldId or operator) so the frontend
+ * skip-logic evaluator never encounters empty operators.
+ */
+function normalizeToArray(value: any, fallback: any[] = []): any[] {
+  if (!value) return fallback;
+
+  let arr: any[];
+  if (Array.isArray(value)) {
+    arr = value.length > 0 ? value : fallback;
+  } else if (typeof value === 'object' && value.fieldId) {
+    arr = [value];
+  } else {
+    console.warn('[normalizeToArray] Unrecognized condition format — returning fallback:', value);
+    return fallback;
+  }
+
+  return arr.filter((c: any) => c && c.fieldId && c.operator);
+}
+
+/** Remove keys whose value is undefined so they don't overwrite existing data during merge. */
+function stripUndefined(obj: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Strip Angular deduplication suffixes from a field name to get the canonical name.
+ * The frontend appends _<itemId>, _<fieldId>, or _dup<N> to resolve name collisions.
+ * Only strip when the base name actually matches an item in the map.
+ */
+function stripDedupSuffix(fieldName: string, itemMap: Map<string, number>): string {
+  const patterns = [/_dup\d+$/, /_\d+$/, /_[a-z0-9]{6,9}$/];
+  for (const pat of patterns) {
+    const stripped = fieldName.replace(pat, '');
+    if (stripped !== fieldName) {
+      if (itemMap.has(stripped.toLowerCase()) || itemMap.has(stripped)) {
+        return stripped;
+      }
+    }
+  }
+  return fieldName;
+}
+
+/**
+ * Ensure every option in a field's options array has a unique stored value.
+ * If duplicates are found, reassign the conflicting values to the next
+ * available integer so radio/select/checkbox bindings never collide.
+ */
+function deduplicateOptionValues(options: FormFieldOption[]): FormFieldOption[] {
+  if (!options || options.length === 0) return options;
+  const seen = new Set<string>();
+  let maxNumeric = 0;
+  for (const opt of options) {
+    const n = parseInt(opt.value, 10);
+    if (!isNaN(n) && n > maxNumeric) maxNumeric = n;
+  }
+  return options.map(opt => {
+    if (!seen.has(opt.value)) {
+      seen.add(opt.value);
+      return opt;
+    }
+    maxNumeric++;
+    const newVal = String(maxNumeric);
+    seen.add(newVal);
+    logger.warn('Deduplicated option value collision', { label: opt.label, oldValue: opt.value, newValue: newVal });
+    return { ...opt, value: newVal };
+  });
 }
 
 /**
@@ -479,29 +554,32 @@ const saveFormDataDirect = async (
 
     // Get item mappings for the resolved CRF version
     // Include description to extract technical fieldName from extended_properties
+    // Include ALL items (even show_item=false) because branching logic can
+    // reveal hidden fields at runtime — their data must still be saveable.
     const itemsResult = await client.query(`
       SELECT i.item_id, i.name, i.oc_oid, i.description
       FROM item i
       INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
       LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
       WHERE igm.crf_version_id = $1
-        AND (ifm.show_item IS DISTINCT FROM false)
     `, [resolvedVersionId]);
 
     const itemMap = new Map<string, number>();
     const itemTypeMap = new Map<number, string>();
     for (const item of itemsResult.rows) {
+      // Primary: map by item_id (numeric as string) so frontend can send the id directly
+      itemMap.set(String(item.item_id), item.item_id);
       // Map by display label (item.name in DB)
-      itemMap.set(item.name.toLowerCase(), item.item_id);
+      if (!itemMap.has(item.name.toLowerCase())) {
+        itemMap.set(item.name.toLowerCase(), item.item_id);
+      }
       // Map by OID
       if (item.oc_oid) {
         itemMap.set(item.oc_oid.toLowerCase(), item.item_id);
       }
       // Map by technical fieldName from extended_properties
-      // This is critical: the frontend uses fieldName as the form control key,
-      // but item.name stores the display label (which is different)
       const extProps = parseExtendedProps(item.description);
-      if (extProps.fieldName) {
+      if (extProps.fieldName && !itemMap.has(extProps.fieldName.toLowerCase())) {
         itemMap.set(extProps.fieldName.toLowerCase(), item.item_id);
       }
       // Store the canonical field type so the save loop can distinguish
@@ -540,13 +618,27 @@ const saveFormDataDirect = async (
       let itemId = itemMap.get(fieldName.toLowerCase()) ?? itemMap.get(fieldName);
 
       if (!itemId) {
-        // Strip Angular deduplication suffix: the frontend appends exactly 6 random base-36
-        // chars (Math.random().toString(36).substr(2, 6)) when two fields share the same name.
-        // Using exactly {6} avoids truncating legitimate field names that end with short words
-        // like _type (4), _date (4), _level (5), _site (4).
-        const stripped = fieldName.replace(/_[a-z0-9]{6}$/, '');
-        if (stripped !== fieldName) {
-          itemId = itemMap.get(stripped.toLowerCase()) ?? itemMap.get(stripped);
+        // Strip Angular deduplication suffix. The frontend now uses deterministic
+        // suffixes: _<itemId>, _<fieldId>, or _dup<N>.
+        // Try multiple stripping patterns in priority order:
+        //   1. _dup<digits> suffix (e.g., "pain_level_dup3")
+        //   2. _<numeric itemId> suffix (e.g., "pain_level_2142")
+        //   3. _<alphanumeric id> suffix only if the base matches an item
+        // This is safer than the old approach of blindly stripping any 6-char suffix.
+        const patterns = [
+          /_dup\d+$/,             // _dup0, _dup1, etc.
+          /_\d+$/,                // _2142 (itemId suffix)
+          /_[a-z0-9]{6,9}$/,     // legacy random suffix (6-9 chars)
+        ];
+        for (const pat of patterns) {
+          const stripped = fieldName.replace(pat, '');
+          if (stripped !== fieldName) {
+            const matchedId = itemMap.get(stripped.toLowerCase()) ?? itemMap.get(stripped);
+            if (matchedId) {
+              itemId = matchedId;
+              break;
+            }
+          }
         }
       }
 
@@ -559,14 +651,30 @@ const saveFormDataDirect = async (
       // Determine if this field is a structured type (table, question_table, etc.)
       // whose data belongs in form_data JSONB, not in item_data.value.
       const fieldType = itemTypeMap.get(itemId) || '';
-      const isStructured = isStructuredDataType(fieldType);
+      let isStructured = isStructuredDataType(fieldType);
+
+      // Fallback: if the type metadata is missing from extended_properties but
+      // the value itself is a non-trivial array or object, treat it as structured.
+      // This catches cases where the item.description lacks a `type` field but
+      // the frontend correctly sent a native array (table) or nested object
+      // (question_table, criteria_list, inline_group).
+      if (!isStructured && value !== null && typeof value === 'object') {
+        if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+          isStructured = true;
+        } else if (!Array.isArray(value) && Object.keys(value).length > 0) {
+          const firstVal = Object.values(value)[0];
+          if (firstVal !== null && typeof firstVal === 'object' && !Array.isArray(firstVal)) {
+            isStructured = true;
+          }
+        }
+      }
 
       if (isStructured) {
         // ── STRUCTURED FIELDS: source of truth is form_data JSONB ──
         // Collect the native value (array or object) for the JSONB upsert below.
         // Also store a lightweight marker in item_data so the audit trail and
         // completion checks know this field has data.
-        const canonical = fieldName.replace(/_[a-z0-9]{6}$/, '');
+        const canonical = stripDedupSuffix(fieldName, itemMap);
         const nativeValue = (typeof value === 'string') ? tryParseJson(value, value) : value;
         structuredFieldData[canonical] = nativeValue;
 
@@ -885,7 +993,7 @@ const saveFormDataDirect = async (
       // Add scalar fields, de-duplicating the key suffix and parsing
       // any remaining JSON-string edge cases from legacy clients.
       for (const [fieldName, value] of Object.entries(formData)) {
-        const canonical = fieldName.replace(/_[a-z0-9]{6}$/, '');
+        const canonical = stripDedupSuffix(fieldName, itemMap);
         // Skip if already populated by structuredFieldData
         if (canonical in canonicalFormData) continue;
 
@@ -913,7 +1021,7 @@ const saveFormDataDirect = async (
         try {
           const crfIdForSnapshot = request.crfId;
           if (crfIdForSnapshot) {
-            const metadata = await getFormMetadata(crfIdForSnapshot);
+            const metadata = await getFormMetadata(crfIdForSnapshot, { includeHidden: true });
             if (metadata?.items?.length) {
               formStructureJson = JSON.stringify({
                 crfId: crfIdForSnapshot,
@@ -1147,9 +1255,11 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       FROM item_data id
       INNER JOIN item i ON id.item_id = i.item_id
       LEFT JOIN user_account u ON id.owner_id = u.user_id
+      LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+        AND ifm.crf_version_id = (SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1)
       WHERE id.event_crf_id = $1
         AND id.deleted = false
-      ORDER BY i.name
+      ORDER BY COALESCE(ifm.ordinal, id.ordinal, i.item_id)
     `;
 
     const result = await pool.query(query, [eventCrfId]);
@@ -1276,7 +1386,7 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
 /**
  * Get form metadata with all field properties
  */
-export const getFormMetadata = async (crfId: number): Promise<any> => {
+export const getFormMetadata = async (crfId: number, options?: { includeHidden?: boolean }): Promise<any> => {
   logger.info('Getting form metadata', { crfId });
 
   try {
@@ -1344,7 +1454,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         i.phi_status,
         idt.name as data_type,
         idt.code as data_type_code,
-        igm.ordinal,
+        COALESCE(ifm.ordinal, igm.ordinal) as ordinal,
         ig.name as group_name,
         -- Additional metadata from item_form_metadata
         ifm.required,
@@ -1371,7 +1481,7 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
       LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
       LEFT JOIN section s ON ifm.section_id = s.section_id
       WHERE igm.crf_version_id = $1
-        AND (ifm.show_item IS DISTINCT FROM false)
+        ${options?.includeHidden ? '' : 'AND (ifm.show_item IS DISTINCT FROM false)'}
       ORDER BY COALESCE(ifm.ordinal, igm.ordinal)
     `;
     const itemsResult = await pool.query(itemsQuery, [versionId]);
@@ -1415,11 +1525,18 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         // Not JSON - legacy plain text message, default to equals
       }
       
+      const controlFieldId = scd.control_field_name || scd.control_item_name;
+      if (!controlFieldId) {
+        console.warn(`[SCD] scd_item_metadata row ${scd.scd_item_metadata_id ?? '?'} has no control field name — skipping.`);
+        continue;
+      }
+
       conditions.push({
-        fieldId: scd.control_field_name || scd.control_item_name,
+        fieldId: controlFieldId,
         operator,
         value: scd.option_value,
-        message
+        message,
+        logicalOperator: 'OR'
       });
       scdByItemId.set(scd.target_item_id, conditions);
     }
@@ -1467,19 +1584,23 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
 
     // Parse items with all properties including extended props
     const items = itemsResult.rows.map(item => {
-      // Parse options — supports both newline-delimited (new) and comma-delimited (legacy)
+      // Parse options — supports newline-delimited (new), pipe-delimited (LibreClinica native), and comma-delimited (legacy)
       let options = null;
       if (item.options_text && item.options_values) {
-        // Use newline as primary delimiter; fall back to comma only for legacy data
-        const delimiter = item.options_text.includes('\n') ? '\n' : ',';
+        const delimiter = item.options_text.includes('\n') ? '\n'
+          : item.options_text.includes('|') ? '|'
+          : ',';
         const labels = item.options_text.split(delimiter);
-        const values = item.options_values.split(delimiter);
+        const valDelimiter = item.options_values.includes('\n') ? '\n'
+          : item.options_values.includes('|') ? '|'
+          : ',';
+        const values = item.options_values.split(valDelimiter);
         options = labels
           .map((label: string, idx: number) => ({
             label: label.trim(),
             value: values[idx]?.trim() || label.trim()
           }))
-          .filter(opt => opt.label !== ''); // Remove empty entries from trailing delimiters
+          .filter(opt => opt.label !== '');
       }
       
       // Parse description for help text and extended properties
@@ -1552,9 +1673,10 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         helpText: helpText,
         placeholder: item.placeholder || '',
         
-        // State
-        required: item.required || false,
-        readonly: extendedProps.readonly || false,
+        // State — use explicit boolean coercion so NULL DB values and
+        // extended-prop fallbacks always produce a reliable true/false.
+        required: item.required === true || extendedProps.required === true,
+        readonly: extendedProps.readonly === true,
         hidden: item.show_item === false,
         
         // Value
@@ -1568,9 +1690,9 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         // Options
         options,
         
-        // Layout — ordinal is 1-based in DB; order is 0-based for the frontend
+        // Layout — ordinal is 1-based in DB. The frontend uses the array index
+        // as the canonical order; do NOT send a separate 'order' field.
         ordinal: item.ordinal,
-        order: item.ordinal != null ? item.ordinal - 1 : undefined,
         section: item.section_name,
         section_id: item.section_id,
         group_name: item.group_name,
@@ -1586,12 +1708,14 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         max,
         format: extendedProps.format,
         
-        // PHI and Compliance
-        isPhiField: item.phi_status || extendedProps.isPhiField || false,
-        phi_status: item.phi_status,
+        // PHI and Compliance — explicit boolean coercion prevents NULL
+        // DB columns (original LibreClinica schema has no DEFAULT) from
+        // silently dropping the flag via falsy || chaining.
+        isPhiField: item.phi_status === true || extendedProps.isPhiField === true,
+        phi_status: item.phi_status === true,
         phiClassification: extendedProps.phiClassification,
-        auditRequired: extendedProps.auditRequired || false,
-        criticalDataPoint: extendedProps.criticalDataPoint || false,
+        auditRequired: extendedProps.auditRequired === true,
+        criticalDataPoint: extendedProps.criticalDataPoint === true,
         auditTrail: extendedProps.auditTrail,
         
         // Linked/Nested
@@ -1611,11 +1735,11 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         
         // Conditional Logic / Branching
         // Use extendedProps as primary source (preserves all operators), fall back to SCD (equals-only)
-        showWhen: (extendedProps.showWhen && extendedProps.showWhen.length > 0) 
-          ? extendedProps.showWhen 
-          : (scdByItemId.get(item.item_id) || []),
-        hideWhen: extendedProps.hideWhen || [],
-        requiredWhen: extendedProps.requiredWhen,
+        // Always normalize to array — extendedProps may store a single object when
+        // the form was created with one condition; the frontend expects an array.
+        showWhen: normalizeToArray(extendedProps.showWhen, scdByItemId.get(item.item_id) || []),
+        hideWhen: normalizeToArray(extendedProps.hideWhen),
+        requiredWhen: normalizeToArray(extendedProps.requiredWhen),
         conditionalLogic: extendedProps.conditionalLogic,
         visibilityConditions: extendedProps.visibilityConditions,
         // Flag to indicate if using LibreClinica native SCD
@@ -1633,13 +1757,19 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         
         // Table field properties — normalize column keys so every column
         // has a stable `key` even if old data was serialized without one.
+        // Also ensure every table row has a stable `id`.
         tableColumns: Array.isArray(extendedProps.tableColumns)
-          ? extendedProps.tableColumns.map((col: any) => ({
+          ? extendedProps.tableColumns.map((col: any, idx: number) => ({
               ...col,
-              key: col.key || col.name || (col.id ? String(col.id).substring(0, 32) : `col_${Math.random().toString(36).substr(2, 8)}`)
+              key: col.key || col.name || (col.id ? String(col.id).substring(0, 32) : `col_${idx}`)
             }))
           : extendedProps.tableColumns,
-        tableRows: extendedProps.tableRows,
+        tableRows: Array.isArray(extendedProps.tableRows)
+          ? extendedProps.tableRows.map((row: any, idx: number) => ({
+              ...row,
+              id: row.id || `row_${idx}`
+            }))
+          : extendedProps.tableRows,
         tableSettings: extendedProps.tableSettings,
         
         // Inline group field properties
@@ -1650,8 +1780,26 @@ export const getFormMetadata = async (crfId: number): Promise<any> => {
         criteriaItems: extendedProps.criteriaItems,
         criteriaListSettings: extendedProps.criteriaListSettings,
         
-        // Question table field properties
-        questionRows: extendedProps.questionRows,
+        // Question table field properties — normalize row and column IDs so
+        // every row has a stable `id` and every answerColumn has a stable `id`.
+        // Missing IDs cause value collisions in the frontend data model.
+        questionRows: Array.isArray(extendedProps.questionRows)
+          ? extendedProps.questionRows.map((row: any, rIdx: number) => {
+              const usedColIds = new Set<string>();
+              return {
+                ...row,
+                id: row.id || `qrow_${rIdx}`,
+                answerColumns: Array.isArray(row.answerColumns)
+                  ? row.answerColumns.map((col: any, cIdx: number) => {
+                      let colId = col.id || (col.header ? col.header.replace(/\s+/g, '_').toLowerCase() : `ans_${cIdx}`);
+                      if (usedColIds.has(colId)) colId = `${colId}_${cIdx}`;
+                      usedColIds.add(colId);
+                      return { ...col, id: colId };
+                    })
+                  : row.answerColumns
+              };
+            })
+          : extendedProps.questionRows,
         questionTableSettings: extendedProps.questionTableSettings,
         
         // Static content / Section header
@@ -1946,6 +2094,7 @@ export const getStudyForms = async (studyId: number): Promise<any[]> => {
  */
 export const getAllForms = async (userId?: number): Promise<any[]> => {
   logger.info('Getting all forms', { userId });
+  console.log(`[getAllForms] Called with userId=${userId}`);
 
   try {
     // Check if category column exists in crf table
@@ -2004,7 +2153,7 @@ export const getAllForms = async (userId?: number): Promise<any[]> => {
         c.date_created,
         c.date_updated,
         (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id) as version_count,
-        (SELECT MAX(revision_notes) FROM crf_version WHERE crf_id = c.crf_id) as latest_version
+        (SELECT name FROM crf_version WHERE crf_id = c.crf_id ORDER BY crf_version_id DESC LIMIT 1) as latest_version
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN study st ON c.source_study_id = st.study_id
@@ -2014,6 +2163,9 @@ export const getAllForms = async (userId?: number): Promise<any[]> => {
     `;
 
     const result = await pool.query(query, params);
+    console.log(`[getAllForms] Query returned ${result.rows.length} forms for userId=${userId}`, 
+      result.rows.map((r: any) => ({ crf_id: r.crf_id, name: r.name, status_id: r.status_id }))
+    );
     logger.info('Forms retrieved', { count: result.rows.length, userId });
     return result.rows;
   } catch (error: any) {
@@ -2167,7 +2319,7 @@ interface FormField {
   isHidden?: boolean;
   
   // Validation
-  validationRules?: ValidationRule[];
+  validationRules?: FieldValidationRule[];
   
   // Options (for select, radio, checkbox)
   options?: FormFieldOption[];
@@ -2289,8 +2441,13 @@ const serializeExtendedProperties = (field: FormField): string => {
     // The DB item.name stores the display label; this preserves the technical ID for formulas, etc.
     fieldName: field.name,
     
-    // PHI and Compliance
-    isPhiField: field.isPhiField,
+    // Required flag — also stored in item_form_metadata.required DB column,
+    // but duplicated here as a safety net so round-trips never lose it.
+    // Use === true to ensure we store a clean boolean, never a truthy string.
+    required: field.required === true || field.isRequired === true,
+    
+    // PHI and Compliance — explicit boolean so the safety net is reliable
+    isPhiField: field.isPhiField === true,
     phiClassification: field.phiClassification,
     auditRequired: field.auditRequired,
     linkedFormIds: field.linkedFormIds,
@@ -2674,6 +2831,10 @@ export const createForm = async (
       // Create each field as an item with full metadata
       for (let i = 0; i < data.fields.length; i++) {
         const field = data.fields[i];
+        // Deduplicate option values to prevent radio/select binding collisions
+        if (field.options && field.options.length > 0) {
+          field.options = deduplicateOptionValues(field.options);
+        }
         // Normalize field type ONCE via the single source of truth so every
         // downstream function (mapFieldTypeToDataType, serializeExtendedProperties,
         // mapFieldTypeToResponseType) always receives a canonical type.
@@ -2747,7 +2908,7 @@ export const createForm = async (
           field.label || field.name || `Field ${i + 1}`,
           description,
           field.unit || '', // Clinical units
-          field.isPhiField || false, // PHI status
+          field.isPhiField === true, // PHI status — explicit boolean, never NULL
           dataTypeId,
           userId,
           itemOid
@@ -2755,8 +2916,8 @@ export const createForm = async (
 
         const itemId = itemResult.rows[0].item_id;
 
-        // Compute 1-based ordinal: use explicit order (even if 0), else fall back to loop position
-        const fieldOrdinal = (field.order != null) ? Number(field.order) + 1 : (i + 1);
+        // Ordinal is purely positional — the array order IS the visual order.
+        const fieldOrdinal = i + 1;
         await client.query(`
           INSERT INTO item_group_metadata (
             item_group_id, crf_version_id, item_id, ordinal, 
@@ -2875,7 +3036,7 @@ export const createForm = async (
           responseSetId,
           fieldOrdinal,
           field.placeholder || '',
-          field.required || field.isRequired || false,
+          field.required === true || field.isRequired === true,
           field.defaultValue !== undefined ? String(field.defaultValue) : null,
           regexpPattern,
           regexpErrorMsg,
@@ -3004,12 +3165,34 @@ export const createForm = async (
     }
 
     await client.query('COMMIT');
+    console.log(`[createForm] COMMIT completed for crfId=${crfId}, name="${data.name}"`);
 
     logger.info('Form template created successfully', { 
       crfId, 
       name: data.name,
       fieldCount: data.fields?.length || 0
     });
+
+    // Post-COMMIT verification: confirm the form is queryable via a fresh connection
+    // before returning to the caller. This closes the race window where the frontend
+    // fires GET /api/forms before the committed row is visible on a new connection.
+    let verified = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const verifyResult = await pool.query(
+        `SELECT crf_id, status_id, name FROM crf WHERE crf_id = $1`,
+        [crfId]
+      );
+      if (verifyResult.rows.length > 0) {
+        console.log(`[createForm] Post-COMMIT verification PASSED on attempt ${attempt} — crfId=${crfId} is visible`);
+        verified = true;
+        break;
+      }
+      console.warn(`[createForm] Post-COMMIT verification attempt ${attempt} FAILED — crfId=${crfId} not yet visible, retrying...`);
+      await new Promise(resolve => setTimeout(resolve, 150 * attempt));
+    }
+    if (!verified) {
+      console.error(`[createForm] Post-COMMIT verification FAILED after 3 attempts — crfId=${crfId} may not appear in listings immediately`);
+    }
 
     // Track document creation in audit trail (21 CFR Part 11)
     try {
@@ -3055,6 +3238,7 @@ export const updateForm = async (
     status?: 'draft' | 'published' | 'archived';
     fields?: FormField[];
     category?: string;
+    version?: string;
   },
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
@@ -3108,6 +3292,22 @@ export const updateForm = async (
         logger.info('Updating form category', { crfId, category: data.category });
       } else {
         logger.info('Skipping category update - column does not exist', { crfId });
+      }
+    }
+
+    // Update version name in crf_version if provided
+    if (data.version) {
+      try {
+        await client.query(`
+          UPDATE crf_version SET name = $1
+          WHERE crf_version_id = (
+            SELECT crf_version_id FROM crf_version
+            WHERE crf_id = $2 ORDER BY crf_version_id DESC LIMIT 1
+          )
+        `, [data.version, crfId]);
+        logger.info('Updated crf_version name', { crfId, version: data.version });
+      } catch (versionErr: any) {
+        logger.warn('Could not update crf_version name', { error: versionErr.message });
       }
     }
 
@@ -3275,17 +3475,17 @@ export const updateForm = async (
       // Include ALL items (even soft-deleted ones) so re-adding a field doesn't create
       // a duplicate item row — if a field was deleted and re-added we can un-hide it.
       const existingItemsResult = await client.query(`
-        SELECT i.item_id, i.name, i.oc_oid,
-               ifm.show_item
+        SELECT i.item_id, i.name, i.oc_oid, i.description, i.phi_status, i.units,
+               ifm.show_item, ifm.required
         FROM item i
         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
         LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
         WHERE igm.crf_version_id = $1
       `, [crfVersionId]);
 
-      // Primary lookup by item_id (stable), fallback by name (for brand-new fields)
+      // Primary lookup by item_id (stable). No name-based fallback — fields with
+      // the same label must not collide. If a field has no valid item_id it is new.
       const existingItemsById = new Map(existingItemsResult.rows.map(row => [row.item_id, row]));
-      const existingItemsByName = new Map(existingItemsResult.rows.map(row => [row.name, row]));
 
       // Get CRF OID for generating item OIDs
       const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
@@ -3297,6 +3497,10 @@ export const updateForm = async (
       // Process each field
       for (let i = 0; i < data.fields.length; i++) {
         const field = data.fields[i];
+        // Deduplicate option values to prevent radio/select binding collisions
+        if (field.options && field.options.length > 0) {
+          field.options = deduplicateOptionValues(field.options);
+        }
         // Normalize field type via the single source of truth before any save
         field.type = resolveFieldType(field.type);
         const fieldName = field.label || field.name || `Field ${i + 1}`;
@@ -3307,8 +3511,9 @@ export const updateForm = async (
         const fieldItemId = field.id ? parseInt(String(field.id), 10) : NaN;
         const isNewField = isNaN(fieldItemId) && !field.itemId;
 
-        // Compute 1-based ordinal: use explicit order (even if 0), else fall back to loop position
-        const fieldOrdinal = (field.order != null) ? Number(field.order) + 1 : (i + 1);
+        // Ordinal is purely positional — the array order the frontend sent IS the visual order.
+        // Never trust field.order; always use the loop index.
+        const fieldOrdinal = i + 1;
 
         if (field.type === 'table' && isNewField) {
           if (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0) {
@@ -3328,16 +3533,72 @@ export const updateForm = async (
           );
         }
 
-        // Match by item_id first (stable), then fall back to name (for legacy data)
-        // fieldItemId is already defined above (for isNewField check) — reuse it
+        // Match by item_id only — name-based matching causes corruption when
+        // two fields share the same label. No valid item_id = genuinely new field.
         let existingItem = !isNaN(fieldItemId) ? existingItemsById.get(fieldItemId) : undefined;
-        if (!existingItem) {
-          existingItem = existingItemsByName.get(fieldName);
-        }
         
+        // When a partial update (e.g. branching-config) omits `required`, preserve
+        // the existing DB value instead of defaulting to false.
+        // Detect partial updates: if the payload is missing most extended properties
+        // (e.g. only has id/name/label/type/required/showWhen), treat it as partial
+        // so we merge with existing DB data instead of overwriting.
+        const hasExtendedProps = field.helpText !== undefined || field.isPhiField !== undefined 
+          || field.calculationFormula !== undefined || field.tableColumns !== undefined 
+          || field.width !== undefined || field.staticContent !== undefined
+          || field.allowedFileTypes !== undefined || field.customAttributes !== undefined;
+        const isPartialUpdate = !hasExtendedProps && existingItem?.description;
+        let resolvedRequired: boolean;
+        if (isPartialUpdate && existingItem && field.required === undefined && field.isRequired === undefined) {
+          resolvedRequired = existingItem.required === true;
+        } else {
+          resolvedRequired = field.required === true || field.isRequired === true;
+        }
+        // Stamp the resolved value back onto the field object so
+        // serializeExtendedProperties also picks it up.
+        field.required = resolvedRequired;
+
+        // For partial updates, preserve the existing description/helpText when not provided.
+        // This prevents branching-config saves (which only send id/name/label/type/showWhen)
+        // from wiping out extended props like table columns, validation, etc.
+        // However, if the field TYPE has changed, do a full overwrite (no merge)
+        // to avoid carrying stale type-specific properties (e.g. old dropdown options
+        // persisting after switching to text).
+        let mergedField: any = field;
+        let preservedHelpText = '';
+        if (isPartialUpdate && existingItem?.description) {
+          const existingExtended = parseExtendedProps(existingItem.description);
+          const storedType = existingExtended?.type;
+          const typeChanged = storedType && storedType !== field.type;
+
+          if (typeChanged) {
+            // Type changed — full overwrite, don't merge old type-specific props
+            preservedHelpText = stripExtendedProps(existingItem.description);
+            mergedField = field;
+          } else {
+            preservedHelpText = stripExtendedProps(existingItem.description);
+            if (existingExtended && Object.keys(existingExtended).length > 0) {
+              mergedField = { ...existingExtended, ...stripUndefined(field) };
+            }
+          }
+        } else if (!isPartialUpdate && existingItem?.description) {
+          // Full update (all fields provided) — still merge to preserve any props
+          // not included in the payload, but let incoming values take precedence.
+          const existingExtended = parseExtendedProps(existingItem.description);
+          const storedType = existingExtended?.type;
+          if (storedType && storedType !== field.type) {
+            // Type changed — full overwrite
+            preservedHelpText = stripExtendedProps(existingItem.description);
+            mergedField = field;
+          } else if (existingExtended && Object.keys(existingExtended).length > 0) {
+            // Same type — merge existing props under incoming values
+            preservedHelpText = stripExtendedProps(existingItem.description);
+            mergedField = { ...existingExtended, ...stripUndefined(field) };
+          }
+        }
+
         // Serialize extended properties
-        const extendedProps = serializeExtendedProperties(field);
-        let description = field.helpText || field.description || '';
+        const extendedProps = serializeExtendedProperties(mergedField);
+        let description = mergedField.helpText || mergedField.description || preservedHelpText || '';
         if (extendedProps) {
           description = description ? `${description}\n---EXTENDED_PROPS---\n${extendedProps}` : `---EXTENDED_PROPS---\n${extendedProps}`;
         }
@@ -3348,11 +3609,13 @@ export const updateForm = async (
 
         if (existingItem) {
           // Update existing item — also update the name in case the label changed
+          // Preserve phi_status if not explicitly provided (partial update)
+          const resolvedPhi = field.isPhiField !== undefined ? (field.isPhiField === true) : existingItem.phi_status;
           await client.query(`
             UPDATE item
             SET name = $1, description = $2, units = $3, phi_status = $4, item_data_type_id = $5, date_updated = NOW()
             WHERE item_id = $6
-          `, [fieldName, description, field.unit || '', field.isPhiField || false, dataTypeId, existingItem.item_id]);
+          `, [fieldName, description, field.unit !== undefined ? (field.unit || '') : (existingItem.units || ''), resolvedPhi, dataTypeId, existingItem.item_id]);
           itemId = existingItem.item_id;
           matchedItemIds.add(itemId); // Mark as still present
         } else {
@@ -3368,7 +3631,7 @@ export const updateForm = async (
               $1, $2, $3, $4, $5, 1, $6, NOW(), $7
             )
             RETURNING item_id
-          `, [fieldName, description, field.unit || '', field.isPhiField || false, dataTypeId, userId, itemOid]);
+          `, [fieldName, description, field.unit || '', field.isPhiField === true, dataTypeId, userId, itemOid]);
           itemId = newItemResult.rows[0].item_id;
           matchedItemIds.add(itemId);
 
@@ -3393,9 +3656,29 @@ export const updateForm = async (
         `, [itemId, crfVersionId]);
 
         if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].response_set_id) {
-          // Update existing response set
+          // Decide whether to write, clear, or preserve options.
+          //
+          // Key distinction in JSON payloads:
+          //   field.options = undefined  → key was omitted → PRESERVE existing options
+          //   field.options = []         → explicitly emptied → CLEAR options
+          //   field.options = [{...}]    → new values → WRITE them
+          //
+          // Additionally, when the type changes FROM an option type TO a non-option type,
+          // always clear stale options regardless of what was sent.
+          const optionTypes = ['select', 'radio', 'checkbox', 'combobox', 'yesno'];
+          const fieldNeedsOptions = optionTypes.includes(field.type);
+          let storedType: string | undefined;
+          if (existingItem?.description) {
+            const ep = parseExtendedProps(existingItem.description);
+            storedType = ep?.type;
+          }
+          const typeChangedAwayFromOptions = storedType
+            && optionTypes.includes(storedType)
+            && !fieldNeedsOptions;
+          const optionsWereExplicitlySent = Array.isArray(field.options);
+
           if (field.options && field.options.length > 0) {
-            // Use newline delimiter to avoid breaking labels that contain commas
+            // Case 1: New options provided — write them
             const optionsText = field.options.map((o: any) => o.label).join('\n');
             const optionsValues = field.options.map((o: any) => o.value).join('\n');
             await client.query(`
@@ -3403,6 +3686,29 @@ export const updateForm = async (
               SET options_text = $1, options_values = $2, response_type_id = $3
               WHERE response_set_id = $4
             `, [optionsText, optionsValues, responseTypeId, existingRsResult.rows[0].response_set_id]);
+          } else if (typeChangedAwayFromOptions) {
+            // Case 2: Type changed from option-type to non-option-type — clear stale options
+            await client.query(`
+              UPDATE response_set
+              SET options_text = NULL, options_values = NULL, response_type_id = $1
+              WHERE response_set_id = $2
+            `, [responseTypeId, existingRsResult.rows[0].response_set_id]);
+          } else if (optionsWereExplicitlySent && field.options.length === 0) {
+            // Case 3: Caller explicitly sent options:[] — clear options
+            // This covers: user deleted all options from a dropdown, or non-option type cleanup
+            await client.query(`
+              UPDATE response_set
+              SET options_text = NULL, options_values = NULL, response_type_id = $1
+              WHERE response_set_id = $2
+            `, [responseTypeId, existingRsResult.rows[0].response_set_id]);
+          } else {
+            // Case 4: Options key was omitted (undefined) — preserve existing options,
+            // only update the response_type_id
+            await client.query(`
+              UPDATE response_set
+              SET response_type_id = $1
+              WHERE response_set_id = $2
+            `, [responseTypeId, existingRsResult.rows[0].response_set_id]);
           }
           responseSetId = existingRsResult.rows[0].response_set_id;
         } else {
@@ -3485,7 +3791,7 @@ export const updateForm = async (
             WHERE item_id = $12 AND crf_version_id = $13
           `, [
             responseSetId, fieldOrdinal, field.placeholder || '',
-            field.required || field.isRequired || false,
+            resolvedRequired,
             field.defaultValue !== undefined ? String(field.defaultValue) : null,
             regexpPattern, regexpErrorMsg,
             field.hidden !== true && field.isHidden !== true,
@@ -3503,7 +3809,7 @@ export const updateForm = async (
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           `, [
             itemId, crfVersionId, resolveSectionId(field.section), responseSetId, fieldOrdinal,
-            field.placeholder || '', field.required || field.isRequired || false,
+            field.placeholder || '', resolvedRequired,
             field.defaultValue !== undefined ? String(field.defaultValue) : null,
             regexpPattern, regexpErrorMsg,
             field.hidden !== true && field.isHidden !== true,
@@ -3528,6 +3834,69 @@ export const updateForm = async (
       // ========================================
       // SCD (Skip Logic) - Delete old and recreate
       // ========================================
+
+      // Pre-fill showWhen from existing SCD records for fields that don't have it,
+      // so partial updates (e.g. saving just field values) don't wipe branching rules.
+      const existingScdResult = await client.query(`
+        SELECT 
+          scd.scd_item_form_metadata_id AS target_ifm_id,
+          scd.control_item_form_metadata_id AS control_ifm_id,
+          scd.control_item_name,
+          scd.option_value,
+          scd.message,
+          target_item.item_id AS target_item_id,
+          target_item.name AS target_item_name,
+          control_item.item_id AS control_item_id
+        FROM scd_item_metadata scd
+        INNER JOIN item_form_metadata target_ifm ON scd.scd_item_form_metadata_id = target_ifm.item_form_metadata_id
+        INNER JOIN item target_item ON target_ifm.item_id = target_item.item_id
+        LEFT JOIN item_form_metadata control_ifm ON scd.control_item_form_metadata_id = control_ifm.item_form_metadata_id
+        LEFT JOIN item control_item ON control_ifm.item_id = control_item.item_id
+        WHERE target_ifm.crf_version_id = $1
+      `, [crfVersionId]);
+
+      // Build a map: target_item_id -> showWhen conditions from existing DB
+      const existingScdMap = new Map<number, any[]>();
+      for (const row of existingScdResult.rows) {
+        const conditions = existingScdMap.get(row.target_item_id) || [];
+        let operator = 'equals';
+        let message = '';
+        try {
+          const parsed = JSON.parse(row.message || '{}');
+          operator = parsed.operator || 'equals';
+          message = parsed.message || '';
+        } catch { /* not JSON, ignore */ }
+        conditions.push({
+          fieldId: row.control_item_name,
+          value: row.option_value || '',
+          operator,
+          message
+        });
+        existingScdMap.set(row.target_item_id, conditions);
+      }
+
+      // For each incoming field missing showWhen, restore from existing DB
+      for (const field of data.fields) {
+        if (!field.showWhen || !Array.isArray(field.showWhen) || field.showWhen.length === 0) {
+          const fieldItemId = field.itemId || (field.id ? parseInt(String(field.id), 10) : NaN);
+          if (!isNaN(fieldItemId) && existingScdMap.has(fieldItemId)) {
+            field.showWhen = existingScdMap.get(fieldItemId);
+          } else {
+            // Try matching by name/label
+            const fieldName = field.label || field.name || '';
+            for (const [targetId, conditions] of existingScdMap) {
+              const matchingExisting = Array.from(existingItemsById.values()).find(
+                (ei: any) => ei.item_id === targetId && (ei.name === fieldName || ei.name === fieldName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''))
+              );
+              if (matchingExisting) {
+                field.showWhen = conditions;
+                break;
+              }
+            }
+          }
+        }
+      }
+
       // Delete all existing SCD records for this CRF version
       await client.query(`
         DELETE FROM scd_item_metadata 

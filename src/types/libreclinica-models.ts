@@ -808,6 +808,9 @@ export interface PatientEventForm {
   isFrozen: boolean;
   sdvStatus: boolean;
   ordinal: number;
+  openQueryCount: number;
+  overdueQueryCount: number;
+  closedQueryCount: number;
   dateCreated?: Date | string;
   dateUpdated?: Date | string;
   createdBy?: number;
@@ -833,6 +836,9 @@ export function toPatientEventForm(row: any): PatientEventForm {
     isFrozen: row.is_frozen || false,
     sdvStatus: row.sdv_status || false,
     ordinal: row.ordinal || 1,
+    openQueryCount: parseInt(row.open_query_count) || 0,
+    overdueQueryCount: parseInt(row.overdue_query_count) || 0,
+    closedQueryCount: parseInt(row.closed_query_count) || 0,
     dateCreated: row.date_created,
     dateUpdated: row.date_updated,
     createdBy: row.created_by,
@@ -979,6 +985,7 @@ export interface DiscrepancyNote {
   // Classification
   discrepancyNoteTypeId: number;  // Query, Failed Validation, Annotation, Reason for Change
   resolutionStatusId: number;     // New, Updated, Resolved, Closed
+  generationType?: QueryGenerationType;  // 'manual' or 'automatic'
   
   // Relationships
   entityType: string;  // 'itemData', 'eventCrf', 'studySubject', 'studyEvent'
@@ -1022,6 +1029,21 @@ export const DISCREPANCY_NOTE_TYPE_MAP: Record<number, DiscrepancyNoteType> = {
   2: 'Annotation',
   3: 'Query',
   4: 'Reason for Change'
+};
+
+/**
+ * QueryGenerationType — whether a query was created manually by a user
+ * or automatically by the system (validation rules, edit checks).
+ *
+ * Stored in discrepancy_note.generation_type (custom column added by AccuraTrial).
+ * Other EDCs (Rave, Clinical One, OpenClinica) distinguish these internally but
+ * do not expose a formal enum. We surface it for filtering, audit, and reporting.
+ */
+export type QueryGenerationType = 'manual' | 'automatic';
+
+export const QUERY_GENERATION_TYPE_MAP: Record<string, QueryGenerationType> = {
+  manual: 'manual',
+  automatic: 'automatic'
 };
 
 /**
@@ -1262,7 +1284,7 @@ export function toStudySubject(row: any): StudySubject {
     studyId: row.study_id,
     enrollmentDate: row.enrollment_date,
     screeningDate: row.screening_date ?? row.screeningDate,
-    enrollmentStatus: row.enrollment_status ?? row.enrollmentStatus ?? (statusId === 1 ? 'enrolled' : (statusId === 5 ? 'screen_failure' : 'screening')),
+    enrollmentStatus: row.enrollment_status ?? row.enrollmentStatus ?? (row.enrollment_date ? 'enrolled' : (statusId === 5 ? 'screen_failure' : 'screening')),
     oid: row.oc_oid,
     statusId: statusId,
     status: getStatusFromId(statusId),

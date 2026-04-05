@@ -204,7 +204,7 @@ export const deleteRule = async (req: Request, res: Response, next: NextFunction
       });
     }
 
-    res.json(result);
+    res.status(result.success ? 200 : 404).json(result);
   } catch (error) {
     logger.error('Delete validation rule error:', error);
     next(error);
@@ -298,6 +298,7 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
       formatType: rule.formatType,
       operator: rule.operator,
       compareFieldPath: rule.compareFieldPath,
+      compareValue: rule.compareValue,
       customExpression: rule.customExpression,
       dateCreated: new Date(),
       createdBy: 0

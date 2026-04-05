@@ -547,10 +547,10 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
     return;
   }
 
-  const { firstName, lastName, email, phone, institutionalAffiliation, timeZone, secondaryRole } = req.body;
+  const { firstName, lastName, email, phone, institutionalAffiliation, timeZone, secondaryRole, username } = req.body;
 
   // Validate at least one field is provided
-  if (!firstName && !lastName && !email && !phone && institutionalAffiliation === undefined && !timeZone && secondaryRole === undefined) {
+  if (!firstName && !lastName && !email && !phone && institutionalAffiliation === undefined && !timeZone && secondaryRole === undefined && !username) {
     res.status(400).json({
       success: false,
       message: 'At least one field to update is required'
@@ -565,6 +565,24 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
       message: 'Invalid email format'
     });
     return;
+  }
+
+  // Validate username format if provided
+  if (username !== undefined) {
+    if (typeof username !== 'string' || username.length < 3 || username.length > 50) {
+      res.status(400).json({
+        success: false,
+        message: 'Username must be between 3 and 50 characters'
+      });
+      return;
+    }
+    if (!/^[a-zA-Z0-9._-]+$/.test(username)) {
+      res.status(400).json({
+        success: false,
+        message: 'Username can only contain letters, numbers, dots, hyphens, and underscores'
+      });
+      return;
+    }
   }
 
   const { pool } = await import('../config/database');
@@ -586,6 +604,23 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
     if (lastName !== undefined) {
       updates.push(`last_name = $${paramIndex++}`);
       params.push(lastName);
+    }
+
+    if (username !== undefined) {
+      const usernameCheck = await client.query(
+        'SELECT user_id FROM user_account WHERE user_name = $1 AND user_id != $2',
+        [username, user.userId]
+      );
+      if (usernameCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          success: false,
+          message: 'Username is already taken'
+        });
+        return;
+      }
+      updates.push(`user_name = $${paramIndex++}`);
+      params.push(username);
     }
 
     if (email !== undefined) {
@@ -658,21 +693,19 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
         audit_date,
         entity_id,
         entity_name,
-        user_account_id,
+        user_id,
         audit_table,
         reason_for_change,
         old_value,
-        new_value,
-        details
+        new_value
       ) VALUES (
         44, NOW(), $1, 'Profile Updated', $2, 'user_account', 
-        'User updated their profile', '', $3, $4
+        'User updated their profile', '', $3
       )
     `, [
       user.userId,
       user.userId,
-      JSON.stringify(result.rows[0]),
-      `Profile updated from ${ipAddress}`
+      JSON.stringify(result.rows[0])
     ]);
 
     await client.query('COMMIT');
@@ -710,6 +743,116 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
   }
 });
 
+/**
+ * Change password (self-service)
+ * POST /api/auth/change-password
+ *
+ * 21 CFR Part 11 §11.300 - Password Controls
+ */
+export const changePassword = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const ipAddress = req.ip || 'unknown';
+
+  if (!user) {
+    res.status(401).json({ success: false, message: 'Authentication required' });
+    return;
+  }
+
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ success: false, message: 'Current password and new password are required' });
+    return;
+  }
+
+  if (newPassword.length < 8) {
+    res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
+    return;
+  }
+
+  if (!/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+    res.status(400).json({
+      success: false,
+      message: 'New password must contain at least one uppercase letter, one lowercase letter, and one number'
+    });
+    return;
+  }
+
+  const { pool } = await import('../config/database');
+  const { verifyAndUpgrade, hashPasswordMD5, hashPasswordBcrypt } = await import('../utils/password.util');
+
+  const userResult = await pool.query(
+    `SELECT u.user_id, u.passwd, uae.bcrypt_passwd
+     FROM user_account u
+     LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
+     WHERE u.user_id = $1`,
+    [user.userId]
+  );
+
+  if (userResult.rows.length === 0) {
+    res.status(404).json({ success: false, message: 'User not found' });
+    return;
+  }
+
+  const dbUser = userResult.rows[0];
+
+  const verification = await verifyAndUpgrade(
+    currentPassword,
+    dbUser.passwd,
+    dbUser.bcrypt_passwd
+  );
+
+  if (!verification.valid) {
+    res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const md5Hash = hashPasswordMD5(newPassword);
+    const bcryptHash = await hashPasswordBcrypt(newPassword);
+
+    await client.query(
+      `UPDATE user_account SET passwd = $1, passwd_timestamp = NOW(), date_updated = NOW() WHERE user_id = $2`,
+      [md5Hash, user.userId]
+    );
+
+    await client.query(
+      `INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
+       VALUES ($1, $2, NOW(), 2)
+       ON CONFLICT (user_id) DO UPDATE SET
+         bcrypt_passwd = EXCLUDED.bcrypt_passwd,
+         passwd_upgraded_at = NOW(),
+         password_version = 2`,
+      [user.userId, bcryptHash]
+    );
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_log_event_type_id, audit_date, entity_id, entity_name,
+        user_id, audit_table, reason_for_change, old_value, new_value
+      ) VALUES (
+        44, NOW(), $1, 'Password Changed', $2, 'user_account',
+        'User changed their password', '', ''
+      )
+    `, [user.userId, user.userId]);
+
+    await client.query('COMMIT');
+
+    logger.info('Password changed', { userId: user.userId });
+
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Password change error', { error: error.message, userId: user.userId });
+    res.status(500).json({ success: false, message: 'Failed to change password' });
+  } finally {
+    client.release();
+  }
+});
+
 export default {
   login,
   googleLogin,
@@ -719,6 +862,7 @@ export default {
   generateCaptureToken,
   validateCaptureToken,
   getProfile,
-  updateProfile
+  updateProfile,
+  changePassword
 };
 

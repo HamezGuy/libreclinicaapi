@@ -193,9 +193,10 @@ const createSubjectDirect = async (
     await client.query('BEGIN');
 
     // 0. Pre-check: Verify subject label doesn't already exist in this study
+    // Exclude archived statuses: 5=Removed, 6=Auto-Deleted, 7=Withdrawn
     const duplicateCheckQuery = `
       SELECT study_subject_id, label FROM study_subject 
-      WHERE study_id = $1 AND label = $2 AND status_id != 5
+      WHERE study_id = $1 AND label = $2 AND status_id NOT IN (5, 6, 7)
     `;
     const duplicateCheck = await client.query(duplicateCheckQuery, [
       request.studyId, 
@@ -812,7 +813,8 @@ export const getSubjectList = async (
     logger.info('📋 Using database fallback for subject list');
     
     const conditions: string[] = [
-      '(ss.study_id = $1 OR ss.study_id IN (SELECT study_id FROM study WHERE parent_study_id = $1))'
+      '(ss.study_id = $1 OR ss.study_id IN (SELECT study_id FROM study WHERE parent_study_id = $1))',
+      'ss.status_id NOT IN (5, 7)'
     ];
     const params: any[] = [studyId];
     let paramIndex = 2;
@@ -839,18 +841,24 @@ export const getSubjectList = async (
     const dataQuery = `
       SELECT 
         ss.study_subject_id,
+        ss.subject_id,
         ss.study_id,
         ss.label,
         ss.secondary_label,
         ss.enrollment_date,
         ss.screening_date,
         ss.status_id,
+        ss.oc_oid,
+        ss.owner_id,
         st.name as status,
         s.gender,
         s.date_of_birth,
+        s.unique_identifier,
         ss.date_created,
         ss.date_updated,
         u.user_name as created_by,
+        stdy.name as study_name,
+        CASE WHEN stdy.parent_study_id IS NOT NULL THEN stdy.name ELSE NULL END as site_name,
         (
           SELECT COUNT(*)
           FROM study_event se
@@ -858,10 +866,29 @@ export const getSubjectList = async (
         ) as total_events,
         (
           SELECT COUNT(*)
+          FROM study_event se_ce
+          INNER JOIN subject_event_status sest ON se_ce.subject_event_status_id = sest.subject_event_status_id
+          WHERE se_ce.study_subject_id = ss.study_subject_id
+            AND sest.name IN ('completed', 'stopped')
+        ) as completed_events,
+        (
+          SELECT COUNT(*)
           FROM event_crf ec
           INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
           WHERE se.study_subject_id = ss.study_subject_id
             AND ec.status_id NOT IN (5, 7)
+        ) + (
+          SELECT COUNT(*)
+          FROM study_event se_af
+          INNER JOIN event_definition_crf edc_af ON edc_af.study_event_definition_id = se_af.study_event_definition_id AND edc_af.status_id = 1
+          WHERE se_af.study_subject_id = ss.study_subject_id
+            AND NOT EXISTS (
+              SELECT 1 FROM event_crf ec_af
+              INNER JOIN crf_version cv_af ON ec_af.crf_version_id = cv_af.crf_version_id
+              WHERE ec_af.study_event_id = se_af.study_event_id
+                AND cv_af.crf_id = edc_af.crf_id
+                AND ec_af.status_id NOT IN (5, 7)
+            )
         ) as total_forms,
         (
           SELECT COUNT(*)
@@ -871,26 +898,8 @@ export const getSubjectList = async (
             AND ec.completion_status_id >= 4
             AND ec.status_id NOT IN (5, 7)
         ) as completed_forms,
-        (
-          SELECT sed_cur.name
-          FROM study_event se_cur
-          INNER JOIN study_event_definition sed_cur ON se_cur.study_event_definition_id = sed_cur.study_event_definition_id
-          WHERE se_cur.study_subject_id = ss.study_subject_id
-            AND NOT EXISTS (
-              SELECT 1 FROM event_crf ec_check 
-              INNER JOIN study_event se_check ON ec_check.study_event_id = se_check.study_event_id
-              WHERE se_check.study_event_id = se_cur.study_event_id
-                AND ec_check.completion_status_id >= 4
-                AND ec_check.status_id NOT IN (5, 7)
-              HAVING COUNT(*) >= (
-                SELECT COUNT(*) FROM event_definition_crf edc_check 
-                WHERE edc_check.study_event_definition_id = sed_cur.study_event_definition_id
-                  AND edc_check.status_id = 1
-              )
-            )
-          ORDER BY COALESCE(se_cur.scheduled_date, se_cur.date_start, se_cur.date_created) ASC, sed_cur.ordinal ASC
-          LIMIT 1
-        ) as current_visit_name,
+        cur_visit.visit_name as current_visit_name,
+        cur_visit.visit_event_id as current_visit_event_id,
         (
           SELECT COUNT(*)
           FROM study_event se_od
@@ -909,11 +918,88 @@ export const getSubjectList = async (
                 )
             )
         ) as overdue_forms,
+        (
+          SELECT COALESCE(json_agg(row_to_json(cvf) ORDER BY cvf."ordinal"), '[]'::json)
+          FROM (
+            -- Started forms (have event_crf row)
+            SELECT
+              c_cv.crf_id AS "crfId",
+              c_cv.name AS "crfName",
+              ec_cv.event_crf_id AS "eventCrfId",
+              se_cv.study_event_id AS "studyEventId",
+              COALESCE(cs_cv.name, 'not_started') AS "completionStatus",
+              COALESCE(pef_cv.open_query_count, 0)::int AS "openQueryCount",
+              COALESCE(pef_cv.closed_query_count, 0)::int AS "closedQueryCount",
+              sed_cv.name AS "visitName",
+              COALESCE(edc_cv.ordinal, 1) AS "ordinal"
+            FROM event_crf ec_cv
+            INNER JOIN study_event se_cv ON ec_cv.study_event_id = se_cv.study_event_id
+            INNER JOIN study_event_definition sed_cv ON se_cv.study_event_definition_id = sed_cv.study_event_definition_id
+            INNER JOIN crf_version cv_cv ON ec_cv.crf_version_id = cv_cv.crf_version_id
+            INNER JOIN crf c_cv ON cv_cv.crf_id = c_cv.crf_id
+            LEFT JOIN completion_status cs_cv ON ec_cv.completion_status_id = cs_cv.completion_status_id
+            LEFT JOIN event_definition_crf edc_cv ON edc_cv.study_event_definition_id = sed_cv.study_event_definition_id AND edc_cv.crf_id = c_cv.crf_id
+            LEFT JOIN patient_event_form pef_cv ON pef_cv.event_crf_id = ec_cv.event_crf_id
+            WHERE se_cv.study_subject_id = ss.study_subject_id
+              AND ec_cv.status_id NOT IN (5, 7)
+              AND se_cv.study_event_id = cur_visit.visit_event_id
+
+            UNION ALL
+
+            -- Not-yet-started forms (assigned via event_definition_crf but no event_crf yet)
+            SELECT
+              c_ns.crf_id AS "crfId",
+              c_ns.name AS "crfName",
+              NULL::int AS "eventCrfId",
+              se_ns.study_event_id AS "studyEventId",
+              'not_started' AS "completionStatus",
+              0 AS "openQueryCount",
+              0 AS "closedQueryCount",
+              sed_ns.name AS "visitName",
+              COALESCE(edc_ns.ordinal, 1) AS "ordinal"
+            FROM study_event se_ns
+            INNER JOIN study_event_definition sed_ns ON se_ns.study_event_definition_id = sed_ns.study_event_definition_id
+            INNER JOIN event_definition_crf edc_ns ON edc_ns.study_event_definition_id = sed_ns.study_event_definition_id AND edc_ns.status_id = 1
+            INNER JOIN crf c_ns ON edc_ns.crf_id = c_ns.crf_id
+            WHERE se_ns.study_subject_id = ss.study_subject_id
+              AND se_ns.study_event_id = cur_visit.visit_event_id
+              AND NOT EXISTS (
+                SELECT 1 FROM event_crf ec_ns
+                INNER JOIN crf_version cv_ns ON ec_ns.crf_version_id = cv_ns.crf_version_id
+                WHERE ec_ns.study_event_id = se_ns.study_event_id
+                  AND cv_ns.crf_id = edc_ns.crf_id
+                  AND ec_ns.status_id NOT IN (5, 7)
+              )
+          ) cvf
+        ) as current_visit_forms,
         'DATABASE' as source
       FROM study_subject ss
       INNER JOIN subject s ON ss.subject_id = s.subject_id
       INNER JOIN status st ON ss.status_id = st.status_id
       LEFT JOIN user_account u ON ss.owner_id = u.user_id
+      LEFT JOIN study stdy ON ss.study_id = stdy.study_id
+      LEFT JOIN LATERAL (
+        SELECT
+          sed_lv.name AS visit_name,
+          se_lv.study_event_id AS visit_event_id
+        FROM study_event se_lv
+        INNER JOIN study_event_definition sed_lv ON se_lv.study_event_definition_id = sed_lv.study_event_definition_id
+        WHERE se_lv.study_subject_id = ss.study_subject_id
+          AND NOT EXISTS (
+            SELECT 1 FROM event_crf ec_lv
+            INNER JOIN study_event se_lv2 ON ec_lv.study_event_id = se_lv2.study_event_id
+            WHERE se_lv2.study_event_id = se_lv.study_event_id
+              AND ec_lv.completion_status_id >= 4
+              AND ec_lv.status_id NOT IN (5, 7)
+            HAVING COUNT(*) >= (
+              SELECT COUNT(*) FROM event_definition_crf edc_lv
+              WHERE edc_lv.study_event_definition_id = sed_lv.study_event_definition_id
+                AND edc_lv.status_id = 1
+            )
+          )
+        ORDER BY sed_lv.ordinal ASC, COALESCE(se_lv.scheduled_date, se_lv.date_start, se_lv.date_created) ASC
+        LIMIT 1
+      ) cur_visit ON true
       WHERE ${whereClause}
       ORDER BY ss.enrollment_date DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -923,9 +1009,19 @@ export const getSubjectList = async (
 
     const dataResult = await pool.query(dataQuery, params);
 
+    const mappedData = dataResult.rows.map((row: any) => ({
+      ...row,
+      open_query_count: parseInt(row.open_query_count) || 0,
+      overdue_query_count: parseInt(row.overdue_query_count) || 0,
+      closed_query_count: parseInt(row.closed_query_count) || 0,
+      current_visit_event_id: row.current_visit_event_id ? parseInt(row.current_visit_event_id) : null,
+      current_visit_forms: Array.isArray(row.current_visit_forms) ? row.current_visit_forms : (row.current_visit_forms || []),
+      all_forms_with_open_queries: Array.isArray(row.all_forms_with_open_queries) ? row.all_forms_with_open_queries : (row.all_forms_with_open_queries || []),
+    }));
+
     return {
       success: true,
-      data: dataResult.rows,
+      data: mappedData,
       pagination: {
         page,
         limit,
@@ -1110,6 +1206,7 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
 
 /**
  * Get subject progress/completion statistics
+ * Uses denormalized query counts from patient_event_form for speed.
  */
 export const getSubjectProgress = async (subjectId: number): Promise<SubjectProgress | null> => {
   logger.info('Getting subject progress', { subjectId });
@@ -1121,16 +1218,16 @@ export const getSubjectProgress = async (subjectId: number): Promise<SubjectProg
         COUNT(DISTINCT CASE WHEN sest.name IN ('completed', 'stopped') THEN se.study_event_id END) as completed_events,
         COUNT(DISTINCT ec.event_crf_id) as total_forms,
         COUNT(DISTINCT CASE WHEN cs.name IN ('complete', 'signed') THEN ec.event_crf_id END) as completed_forms,
-        COUNT(DISTINCT CASE WHEN dn.resolution_status_id IN (
-          SELECT resolution_status_id FROM resolution_status WHERE name NOT IN ('Closed', 'Not Applicable')
-        ) THEN dn.discrepancy_note_id END) as open_queries
+        COALESCE((
+          SELECT SUM(pef.open_query_count)
+          FROM patient_event_form pef
+          WHERE pef.study_subject_id = $1
+        ), 0)::int as open_queries
       FROM study_subject ss
       LEFT JOIN study_event se ON ss.study_subject_id = se.study_subject_id
       LEFT JOIN subject_event_status sest ON se.subject_event_status_id = sest.subject_event_status_id
       LEFT JOIN event_crf ec ON se.study_event_id = ec.study_event_id
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
-      LEFT JOIN dn_study_subject_map dnm ON ss.study_subject_id = dnm.study_subject_id
-      LEFT JOIN discrepancy_note dn ON dnm.discrepancy_note_id = dn.discrepancy_note_id
       WHERE ss.study_subject_id = $1
       GROUP BY ss.study_subject_id
     `;
@@ -1258,6 +1355,72 @@ async function enrichSubjectsWithStats(soapSubjects: any, studyId: number): Prom
     return subjects;
   }
 }
+
+/**
+ * Get aggregated query counts for a batch of subjects (by studySubjectIds).
+ * Single efficient query - designed to be called per-page.
+ */
+export const getQueryCountsForSubjects = async (studySubjectIds: number[]): Promise<Record<number, { openQueryCount: number; overdueQueryCount: number; closedQueryCount: number }>> => {
+  if (!studySubjectIds.length) return {};
+  
+  const result = await pool.query(`
+    SELECT
+      pef.study_subject_id,
+      COALESCE(SUM(pef.open_query_count), 0)::int AS open_query_count,
+      COALESCE(SUM(pef.overdue_query_count), 0)::int AS overdue_query_count,
+      COALESCE(SUM(pef.closed_query_count), 0)::int AS closed_query_count
+    FROM patient_event_form pef
+    WHERE pef.study_subject_id = ANY($1)
+    GROUP BY pef.study_subject_id
+  `, [studySubjectIds]);
+
+  const counts: Record<number, { openQueryCount: number; overdueQueryCount: number; closedQueryCount: number }> = {};
+  for (const row of result.rows) {
+    counts[row.study_subject_id] = {
+      openQueryCount: row.open_query_count,
+      overdueQueryCount: row.overdue_query_count,
+      closedQueryCount: row.closed_query_count
+    };
+  }
+  return counts;
+};
+
+/**
+ * Get all forms with queries for a batch of subjects.
+ * Returns forms across ALL visits that have any query activity.
+ * Single efficient query - designed to be called per-page.
+ */
+export const getFormsWithQueriesForSubjects = async (studySubjectIds: number[]): Promise<Record<number, any[]>> => {
+  if (!studySubjectIds.length) return {};
+
+  const result = await pool.query(`
+    SELECT
+      pef.study_subject_id,
+      json_agg(json_build_object(
+        'crfId', pef.crf_id,
+        'crfName', pef.form_name,
+        'eventCrfId', pef.event_crf_id,
+        'studyEventId', pef.study_event_id,
+        'completionStatus', pef.completion_status,
+        'openQueryCount', COALESCE(pef.open_query_count, 0),
+        'overdueQueryCount', COALESCE(pef.overdue_query_count, 0),
+        'closedQueryCount', COALESCE(pef.closed_query_count, 0),
+        'visitName', sed.name
+      ) ORDER BY sed.ordinal, pef.ordinal) AS forms
+    FROM patient_event_form pef
+    INNER JOIN study_event se ON pef.study_event_id = se.study_event_id
+    INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    WHERE pef.study_subject_id = ANY($1)
+      AND (pef.open_query_count > 0 OR pef.overdue_query_count > 0 OR pef.closed_query_count > 0)
+    GROUP BY pef.study_subject_id
+  `, [studySubjectIds]);
+
+  const formsMap: Record<number, any[]> = {};
+  for (const row of result.rows) {
+    formsMap[row.study_subject_id] = row.forms || [];
+  }
+  return formsMap;
+};
 
 export default {
   createSubject,

@@ -18,10 +18,11 @@ import { logger } from '../../config/logger';
 import { Parser as FormulaParser } from 'hot-formula-parser';
 import { resolveQueryAssignee } from './workflow-config.provider';
 import { parseExtendedProps } from '../../utils/extended-props';
+import { updateFormQueryCounts } from './query.service';
 
 /**
  * Helper: get org member user IDs for the caller.
- * Returns null if the caller has no org membership (root admin sees all).
+ * Returns [callerUserId] if the caller has no org membership (only see own data).
  */
 const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
   const orgCheck = await pool.query(
@@ -29,7 +30,7 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
     [callerUserId]
   );
   const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
-  if (callerOrgIds.length === 0) return null;
+  if (callerOrgIds.length === 0) return [callerUserId];
 
   const memberCheck = await pool.query(
     `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
@@ -45,7 +46,7 @@ export interface ValidationRule {
   itemId?: number;
   name: string;
   description: string;
-  ruleType: 'range' | 'format' | 'required' | 'consistency' | 'business_logic' | 'cross_form' | 'formula';
+  ruleType: 'range' | 'format' | 'required' | 'consistency' | 'business_logic' | 'cross_form' | 'formula' | 'value_match' | 'pattern_match';
   fieldPath: string;
   severity: 'error' | 'warning';
   errorMessage: string;
@@ -57,6 +58,7 @@ export interface ValidationRule {
   formatType?: string;
   operator?: string;
   compareFieldPath?: string;
+  compareValue?: string;
   customExpression?: string;
   /** Blood pressure per-component validation limits (stored in bp_systolic_min/max, bp_diastolic_min/max) */
   bpSystolicMin?: number;
@@ -67,6 +69,17 @@ export interface ValidationRule {
   dateUpdated?: Date;
   createdBy: number;
   updatedBy?: number;
+
+  /** Cell-level targeting for table/question_table fields (stored as JSONB) */
+  tableCellTarget?: {
+    tableFieldPath: string;
+    columnId: string;
+    columnType: string;
+    rowIndex?: number;
+    rowId?: string;
+    allRows: boolean;
+    displayPath: string;
+  } | null;
 }
 
 export interface CreateValidationRuleRequest {
@@ -86,12 +99,24 @@ export interface CreateValidationRuleRequest {
   formatType?: string;
   operator?: string;
   compareFieldPath?: string;
+  compareValue?: string;
   customExpression?: string;
   /** Blood pressure per-component range limits (stored in bp_systolic_min/max, bp_diastolic_min/max) */
   bpSystolicMin?: number;
   bpSystolicMax?: number;
   bpDiastolicMin?: number;
   bpDiastolicMax?: number;
+
+  /** Cell-level targeting for table/question_table fields (stored as JSONB) */
+  tableCellTarget?: {
+    tableFieldPath: string;
+    columnId: string;
+    columnType: string;
+    rowIndex?: number;
+    rowId?: string;
+    allRows: boolean;
+    displayPath: string;
+  } | null;
 }
 
 /**
@@ -167,6 +192,8 @@ export const initializeValidationRulesTable = async (): Promise<boolean> => {
       { name: 'operator', type: 'VARCHAR(20)' },
       { name: 'compare_field_path', type: 'VARCHAR(255)' },
       { name: 'custom_expression', type: 'TEXT' },
+      { name: 'compare_value', type: 'TEXT' },
+      { name: 'table_cell_target', type: 'JSONB' },
     ];
     for (const col of columnsToEnsure) {
       try {
@@ -228,6 +255,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         vr.format_type,
         vr.operator,
         vr.compare_field_path,
+        vr.compare_value,
         vr.custom_expression,
         vr.bp_systolic_min,
         vr.bp_systolic_max,
@@ -236,7 +264,8 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         vr.date_created,
         vr.date_updated,
         vr.owner_id as created_by,
-        vr.update_id as updated_by
+        vr.update_id as updated_by,
+        vr.table_cell_target
       FROM validation_rules vr
       WHERE vr.crf_id = $1
       ORDER BY vr.name
@@ -281,6 +310,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         END as pattern,
         NULL as operator,
         NULL as compare_field_path,
+        NULL as compare_value,
         NULL as custom_expression,
         cv.date_created,
         NULL as date_updated,
@@ -568,6 +598,7 @@ export const getRuleById = async (ruleId: number, callerUserId?: number): Promis
         format_type,
         operator,
         compare_field_path,
+        compare_value,
         custom_expression,
         bp_systolic_min,
         bp_systolic_max,
@@ -576,7 +607,8 @@ export const getRuleById = async (ruleId: number, callerUserId?: number): Promis
         date_created,
         date_updated,
         owner_id as created_by,
-        update_id as updated_by
+        update_id as updated_by,
+        table_cell_target
       FROM validation_rules 
       WHERE validation_rule_id = $1
     `;
@@ -623,13 +655,16 @@ export const createRule = async (
         crf_id, crf_version_id, item_id, name, description, rule_type,
         field_path, severity, error_message, warning_message, active,
         min_value, max_value, pattern, format_type, operator, compare_field_path,
-        custom_expression,
+        compare_value, custom_expression,
         bp_systolic_min, bp_systolic_max, bp_diastolic_min, bp_diastolic_max,
+        table_cell_target,
         date_created, owner_id
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true,
-                $11, $12, $13, $14, $15, $16, $17,
-                $18, $19, $20, $21,
-                CURRENT_TIMESTAMP, $22)
+                $11, $12, $13, $14, $15, $16,
+                $17, $18,
+                $19, $20, $21, $22,
+                $23,
+                CURRENT_TIMESTAMP, $24)
       RETURNING validation_rule_id
     `;
 
@@ -653,12 +688,13 @@ export const createRule = async (
       rule.formatType || null,
       rule.operator || null,
       rule.compareFieldPath || null,
+      rule.compareValue || null,
       rule.customExpression || null,
-      // Blood pressure per-component limits (db columns: bp_systolic_min/max, bp_diastolic_min/max)
       rule.bpSystolicMin ?? null,
       rule.bpSystolicMax ?? null,
       rule.bpDiastolicMin ?? null,
       rule.bpDiastolicMax ?? null,
+      rule.tableCellTarget ? JSON.stringify(rule.tableCellTarget) : null,
       userId
     ]);
 
@@ -712,21 +748,23 @@ export const updateRule = async (
         field_path = COALESCE($4, field_path),
         severity = COALESCE($5, severity),
         error_message = COALESCE($6, error_message),
-        warning_message = COALESCE($7, warning_message),
-        min_value = COALESCE($8, min_value),
-        max_value = COALESCE($9, max_value),
-        pattern = COALESCE($10, pattern),
-        format_type = COALESCE($11, format_type),
-        operator = COALESCE($12, operator),
-        compare_field_path = COALESCE($13, compare_field_path),
-        custom_expression = COALESCE($14, custom_expression),
-        bp_systolic_min = COALESCE($15, bp_systolic_min),
-        bp_systolic_max = COALESCE($16, bp_systolic_max),
-        bp_diastolic_min = COALESCE($17, bp_diastolic_min),
-        bp_diastolic_max = COALESCE($18, bp_diastolic_max),
+        warning_message = $7,
+        min_value = $8,
+        max_value = $9,
+        pattern = $10,
+        format_type = $11,
+        operator = $12,
+        compare_field_path = $13,
+        compare_value = $14,
+        custom_expression = $15,
+        bp_systolic_min = $16,
+        bp_systolic_max = $17,
+        bp_diastolic_min = $18,
+        bp_diastolic_max = $19,
+        table_cell_target = COALESCE($20, table_cell_target),
         date_updated = CURRENT_TIMESTAMP,
-        update_id = $19
-      WHERE validation_rule_id = $20
+        update_id = $21
+      WHERE validation_rule_id = $22
     `;
 
     await client.query(updateQuery, [
@@ -743,11 +781,13 @@ export const updateRule = async (
       updates.formatType ?? null,
       updates.operator ?? null,
       updates.compareFieldPath ?? null,
+      updates.compareValue ?? null,
       updates.customExpression ?? null,
       updates.bpSystolicMin ?? null,
       updates.bpSystolicMax ?? null,
       updates.bpDiastolicMin ?? null,
       updates.bpDiastolicMax ?? null,
+      updates.tableCellTarget ? JSON.stringify(updates.tableCellTarget) : null,
       userId,
       ruleId
     ]);
@@ -769,15 +809,24 @@ export const updateRule = async (
  */
 export const toggleRule = async (
   ruleId: number,
-  active: boolean,
+  active: boolean | undefined,
   userId: number
 ): Promise<{ success: boolean }> => {
   try {
-    await pool.query(`
-      UPDATE validation_rules 
-      SET active = $1, date_updated = CURRENT_TIMESTAMP, update_id = $2
-      WHERE validation_rule_id = $3
-    `, [active, userId, ruleId]);
+    if (active === undefined || active === null) {
+      // No explicit state provided — flip the current value
+      await pool.query(`
+        UPDATE validation_rules 
+        SET active = NOT active, date_updated = CURRENT_TIMESTAMP, update_id = $1
+        WHERE validation_rule_id = $2
+      `, [userId, ruleId]);
+    } else {
+      await pool.query(`
+        UPDATE validation_rules 
+        SET active = $1, date_updated = CURRENT_TIMESTAMP, update_id = $2
+        WHERE validation_rule_id = $3
+      `, [active, userId, ruleId]);
+    }
 
     return { success: true };
   } catch (error: any) {
@@ -796,7 +845,10 @@ export const deleteRule = async (
   logger.info('Deleting validation rule', { ruleId, userId });
 
   try {
-    await pool.query(`DELETE FROM validation_rules WHERE validation_rule_id = $1`, [ruleId]);
+    const result = await pool.query(`DELETE FROM validation_rules WHERE validation_rule_id = $1`, [ruleId]);
+    if (result.rowCount === 0) {
+      return { success: false, message: 'Rule not found' };
+    }
     return { success: true };
   } catch (error: any) {
     logger.error('Delete validation rule error', { error: error.message });
@@ -1628,8 +1680,9 @@ async function createValidationQuery(params: {
         owner_id,
         assigned_user_id,
         date_created,
-        entity_type
-      ) VALUES ($1, $2, $3, 1, $4, $5, $6, CURRENT_TIMESTAMP, 'itemData')
+        entity_type,
+        generation_type
+      ) VALUES ($1, $2, $3, 1, $4, $5, $6, CURRENT_TIMESTAMP, 'itemData', 'automatic')
       RETURNING discrepancy_note_id
     `, [description, detailedNotes, noteTypeId, params.studyId, params.userId, assignedUserId]);
 
@@ -1703,6 +1756,50 @@ async function createValidationQuery(params: {
       });
     }
 
+    // Create a workflow task for tracking this automatic query
+    if (assignedUserId) {
+      try {
+        const taskTableCheck = await client.query(`
+          SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_workflow_tasks') as exists
+        `);
+        if (taskTableCheck.rows[0].exists) {
+          await client.query(`
+            INSERT INTO acc_workflow_tasks (
+              task_type, title, description, status, priority,
+              entity_type, entity_id, event_crf_id, study_id,
+              assigned_to_user_ids, created_by, metadata
+            ) VALUES ('query', $1, $2, 'pending', $3, 'discrepancy_note', $4, $5, $6, $7, $8, $9)
+          `, [
+            description,
+            `Auto-query on field "${params.fieldPath}": ${params.errorMessage}`,
+            isWarning ? 'low' : 'medium',
+            queryId,
+            params.eventCrfId || null,
+            params.studyId,
+            [assignedUserId],
+            params.userId,
+            JSON.stringify({
+              generationType: 'automatic',
+              ruleName: params.ruleName,
+              fieldPath: params.fieldPath,
+              severity: params.severity || 'error',
+              itemDataId: itemDataId || null
+            })
+          ]);
+          logger.info('Created workflow task for automatic validation query', { queryId, assignedUserId });
+        }
+      } catch (taskError: any) {
+        logger.warn('Workflow task creation for validation query failed (non-blocking)', {
+          queryId, error: taskError.message
+        });
+      }
+    }
+
+    // Update denormalized query counts on patient_event_form
+    if (params.eventCrfId) {
+      await updateFormQueryCounts(client, params.eventCrfId);
+    }
+
     await client.query('COMMIT');
 
     logger.info('Created validation query', { 
@@ -1769,6 +1866,7 @@ async function findItemDataId(
           LOWER(i.name) = LOWER($2) 
           OR LOWER(i.oc_oid) = LOWER($2)
           OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2)
+          OR i.description ILIKE '%"fieldName":"' || LOWER($2) || '"%'
         )
         AND id.deleted = false
       LIMIT 1
@@ -1817,9 +1915,9 @@ function applyRule(
   const isJsonValue = typeof value === 'string' &&
     (value.startsWith('[') || value.startsWith('{'));
 
-  // Detect file upload IDs (comma-separated UUIDs or numeric IDs)
+  // Detect file upload IDs (UUID format with hyphens like "550e8400-e29b-41d4-a716-446655440000")
   const isFileIds = typeof value === 'string' &&
-    /^[a-f0-9\-]{8,}(,[a-f0-9\-]{8,})*$/i.test(value);
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(,[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})*$/i.test(value);
 
   // Handle array values (in case value comes as actual array)
   if (Array.isArray(value)) {
@@ -1832,8 +1930,8 @@ function applyRule(
     }
   }
 
-  // JSON-encoded values (tables, repeating groups) — only 'required' applies
-  if (isJsonValue && rule.ruleType !== 'required') {
+  // JSON-encoded values (tables, repeating groups) — only 'required' and 'value_match' apply
+  if (isJsonValue && rule.ruleType !== 'required' && rule.ruleType !== 'value_match') {
     return { valid: true };
   }
 
@@ -1901,8 +1999,13 @@ function applyRule(
       if (!resolvedPattern) return { valid: true };
       // Skip format/regex validation for multi-value (checkbox/multi-select) fields
       if (isMultiValue) return { valid: true };
-      // Yes/No values have a fixed format — regex patterns don't apply
-      if (isYesNo) return { valid: true };
+      // Yes/No values: only skip for numeric/date format checks, not all patterns
+      if (isYesNo) {
+        const numericDateFormats = ['positive_number', 'integer_only', 'decimal_2dp', 'numbers_only',
+          'date_mmddyyyy', 'date_ddmmyyyy', 'date_iso', 'time_24h', 'time_12h'];
+        const ft = rule.formatType || '';
+        if (!ft || numericDateFormats.includes(ft)) return { valid: true };
+      }
       // Blood pressure composites: the combined "120/80" string won't match numeric
       // patterns designed for single values. Validate each component independently
       // against the original pattern, or pass if the pattern is purely numeric.
@@ -1929,13 +2032,52 @@ function applyRule(
       try {
         const regex = new RegExp(resolvedPattern);
         return { valid: regex.test(String(value)) };
-      } catch {
-        return { valid: true }; // Invalid regex = no validation
+      } catch (regexErr: any) {
+        logger.error('Invalid regex pattern in validation rule', {
+          pattern: resolvedPattern,
+          ruleName: rule.name,
+          ruleId: rule.id,
+          error: regexErr.message
+        });
+        return { valid: false, message: `Invalid regex pattern: ${regexErr.message}` };
       }
 
     case 'consistency':
-      const compareValue = getNestedValue(allData, rule.compareFieldPath || '');
-      return { valid: compareValues(value, compareValue, rule.operator || '==') };
+      let compareTarget: any;
+      if (rule.compareValue !== undefined && rule.compareValue !== null && rule.compareValue !== '') {
+        compareTarget = rule.compareValue;
+        if (!isNaN(Number(value)) && !isNaN(Number(compareTarget))) {
+          compareTarget = Number(compareTarget);
+          value = Number(value);
+        }
+      } else {
+        compareTarget = getNestedValue(allData, rule.compareFieldPath || '');
+      }
+      return { valid: compareValues(value, compareTarget, rule.operator || '==') };
+
+    case 'value_match':
+      if (!rule.compareValue) return { valid: true };
+      const targetValues = rule.compareValue.split('||').map((v: string) => v.trim().toLowerCase().replace(/\s+/g, ''));
+      const rawFieldVal = String(value).trim().toLowerCase().replace(/\s+/g, '');
+      const selectedValues = rawFieldVal.includes(',')
+        ? rawFieldVal.split(',').map((v: string) => v.trim())
+        : [rawFieldVal];
+      const vmMatched = selectedValues.some((sv: string) => targetValues.includes(sv));
+      return { valid: !vmMatched };
+
+    case 'pattern_match':
+      if (!rule.pattern) return { valid: true };
+      try {
+        const pmRegex = new RegExp(rule.pattern, 'i');
+        const pmStrVal = String(value).trim();
+        const pmValuesToCheck = pmStrVal.includes(',')
+          ? pmStrVal.split(',').map((v: string) => v.trim())
+          : [pmStrVal];
+        const pmMatched = pmValuesToCheck.some((v: string) => pmRegex.test(v));
+        return { valid: !pmMatched };
+      } catch {
+        return { valid: true };
+      }
 
     case 'formula':
       // Excel formula validation using hot-formula-parser
@@ -1957,11 +2099,15 @@ function applyRule(
           return formulaResult;
         }
         try {
-          // Fall back to JS evaluation
           const evalFn = new Function('value', 'data', `return ${rule.customExpression}`);
           return { valid: Boolean(evalFn(value, allData)) };
-        } catch {
-          return { valid: true };
+        } catch (jsErr: any) {
+          logger.error('Business logic JS evaluation error', {
+            expression: rule.customExpression,
+            ruleName: rule.name,
+            error: jsErr.message
+          });
+          return { valid: false, message: `Expression error: ${jsErr.message}` };
         }
       }
       return { valid: true };
@@ -2029,24 +2175,36 @@ function evaluateExcelFormula(
 
     // Hook into the parser's variable resolution
     parser.on('callVariable', function(name: string, done: (val: any) => void) {
+      // Handle TRUE/FALSE as boolean constants (parser treats them as variable names)
+      if (name === 'TRUE' || name === 'true') { done(true); return; }
+      if (name === 'FALSE' || name === 'false') { done(false); return; }
+
+      let raw: any;
       // Check the var map first (for {fieldName} references)
       const mappedName = varMap[name];
       if (mappedName !== undefined) {
-        const val = fieldValues[mappedName] ?? fieldValues[mappedName.toLowerCase()];
-        done(val !== undefined && val !== null && val !== '' ? val : '');
+        raw = fieldValues[mappedName] ?? fieldValues[mappedName.toLowerCase()];
+      } else {
+        raw = fieldValues[name] ?? fieldValues[name.toLowerCase()];
+      }
+      if (raw === undefined || raw === null || raw === '') {
+        done('');
         return;
       }
-      // Direct field name lookup
-      const val = fieldValues[name] ?? fieldValues[name.toLowerCase()];
-      done(val !== undefined && val !== null && val !== '' ? val : '');
+      // Auto-cast numeric strings so ISNUMBER() and arithmetic work correctly
+      if (typeof raw === 'string' && raw !== '' && !isNaN(Number(raw)) && raw.trim() !== '') {
+        done(Number(raw));
+        return;
+      }
+      done(raw);
     });
 
     // Parse and evaluate the formula
     const result = parser.parse(processedFormula);
 
     if (result.error) {
-      logger.warn('Excel formula parse error', { formula, error: result.error });
-      return { valid: true }; // Don't fail validation on formula errors
+      logger.error('Excel formula parse error', { formula, processedFormula, error: result.error });
+      return { valid: false };
     }
 
     // The formula should return a boolean (TRUE/FALSE)
@@ -2066,8 +2224,8 @@ function evaluateExcelFormula(
     // Any non-null result is considered valid
     return { valid: result.result != null };
   } catch (error: any) {
-    logger.warn('Excel formula evaluation error', { formula, error: error.message });
-    return { valid: true }; // Don't fail validation on errors
+    logger.error('Excel formula evaluation error', { formula, error: error.message });
+    return { valid: false };
   }
 }
 
@@ -2075,6 +2233,14 @@ function evaluateExcelFormula(
  * Compare two values with an operator
  */
 function compareValues(a: any, b: any, operator: string): boolean {
+  // Auto-cast numeric strings to numbers for correct comparison
+  if (typeof a === 'string' && typeof b === 'string' && a !== '' && b !== '') {
+    if (!isNaN(Number(a)) && !isNaN(Number(b))) {
+      a = Number(a);
+      b = Number(b);
+    }
+  }
+
   const aIsDate = a instanceof Date || (typeof a === 'string' && a.length > 4 && !isNaN(Date.parse(a)) && isNaN(Number(a)));
   const bIsDate = b instanceof Date || (typeof b === 'string' && b.length > 4 && !isNaN(Date.parse(b)) && isNaN(Number(b)));
   if (aIsDate && bIsDate) {
@@ -2126,6 +2292,7 @@ function mapDbRowToRule(row: any): ValidationRule {
     formatType: row.format_type || undefined,
     operator: row.operator,
     compareFieldPath: row.compare_field_path,
+    compareValue: row.compare_value || undefined,
     customExpression: row.custom_expression,
     // Blood pressure per-component limits
     bpSystolicMin: row.bp_systolic_min != null ? Number(row.bp_systolic_min) : undefined,
@@ -2135,7 +2302,8 @@ function mapDbRowToRule(row: any): ValidationRule {
     dateCreated: row.date_created,
     dateUpdated: row.date_updated,
     createdBy: row.created_by || row.owner_id,
-    updatedBy: row.updated_by || row.update_id
+    updatedBy: row.updated_by || row.update_id,
+    tableCellTarget: row.table_cell_target || null
   };
 }
 

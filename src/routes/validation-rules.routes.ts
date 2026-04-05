@@ -18,6 +18,7 @@ import { Router } from 'express';
 import Joi from 'joi';
 import * as controller from '../controllers/validation-rules.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { FORMAT_TYPE_REGISTRY } from '../services/database/validation-rules.service';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireSignatureFor } from '../middleware/part11.middleware';
 import { validate, validationRuleSchemas } from '../middleware/validation.middleware';
@@ -70,9 +71,7 @@ router.put('/field-required',
 // /:ruleId would shadow any static path segment like /format-types.
 router.get('/format-types', (_req, res) => {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const formatTypes = require('../../config/format-types.json');
-    res.json({ success: true, data: formatTypes });
+    res.json({ success: true, data: FORMAT_TYPE_REGISTRY });
   } catch {
     res.status(500).json({ success: false, message: 'Failed to load format types' });
   }

@@ -164,8 +164,9 @@ export interface FieldValidationConstraint {
   message?: string;
 }
 
-/** @deprecated Use FieldValidationConstraint instead */
-export type ValidationRule = FieldValidationConstraint;
+/** @deprecated Use FieldValidationConstraint instead. Do NOT confuse with the
+ *  full ValidationRule interface in services/database/validation-rules.service.ts. */
+export type FieldValidationRule = FieldValidationConstraint;
 
 /** Cross-field validation (like Medidata Rave edit checks) */
 export interface EditCheck {
@@ -384,6 +385,7 @@ export interface QueryCreateRequest {
   description: string;
   detailedNotes?: string;
   queryType: 'Query' | 'Failed Validation Check' | 'Annotation' | 'Reason for Change';
+  generationType?: 'manual' | 'automatic';
   studyId: number;
   subjectId?: number;
   assignedUserId?: number;

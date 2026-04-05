@@ -147,18 +147,16 @@ const corsOptions: cors.CorsOptions = {
       /^http:\/\/localhost:(3000|3001|4200)$/
     ];
 
-    if (config.server.env !== 'production') {
-      const envOrigins = config.security.allowedOrigins.filter(o => o);
-      if (envOrigins.length > 0) {
-        const envPatterns = envOrigins.map(o => {
-          if (o.includes('*')) {
-            const pat = o.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^.]+');
-            return new RegExp(`^${pat}$`);
-          }
-          return new RegExp(`^${o.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-        });
-        allowed.push(...envPatterns);
-      }
+    const envOrigins = config.security.allowedOrigins.filter(o => o);
+    if (envOrigins.length > 0) {
+      const envPatterns = envOrigins.map(o => {
+        if (o.includes('*')) {
+          const pat = o.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^.]+');
+          return new RegExp(`^${pat}$`);
+        }
+        return new RegExp(`^${o.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+      });
+      allowed.push(...envPatterns);
     }
 
     if (allowed.some(pattern => pattern.test(origin))) {

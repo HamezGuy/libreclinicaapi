@@ -640,3 +640,29 @@ export default {
   getForms 
 };
 
+export const getQueryCounts = asyncHandler(async (req: Request, res: Response) => {
+  const { studySubjectIds } = req.body;
+  
+  if (!Array.isArray(studySubjectIds) || studySubjectIds.length === 0) {
+    res.status(400).json({ success: false, message: 'studySubjectIds array is required' });
+    return;
+  }
+
+  const ids = studySubjectIds.map((id: any) => parseInt(id)).filter((id: number) => !isNaN(id));
+  const counts = await subjectService.getQueryCountsForSubjects(ids);
+  res.json({ success: true, data: counts });
+});
+
+export const getFormsWithQueries = asyncHandler(async (req: Request, res: Response) => {
+  const { studySubjectIds } = req.body;
+  
+  if (!Array.isArray(studySubjectIds) || studySubjectIds.length === 0) {
+    res.status(400).json({ success: false, message: 'studySubjectIds array is required' });
+    return;
+  }
+
+  const ids = studySubjectIds.map((id: any) => parseInt(id)).filter((id: number) => !isNaN(id));
+  const forms = await subjectService.getFormsWithQueriesForSubjects(ids);
+  res.json({ success: true, data: forms });
+});
+

@@ -1,19 +1,25 @@
 import { resolveFieldType, isStructuredDataType } from './field-type.utils';
 import { parseExtendedProps } from './extended-props';
+import {
+  TableColumnDefinition, TableSettings,
+  QuestionRow, QuestionTableSettings,
+  CriteriaItem, CriteriaListSettings,
+  InlineFieldDefinition, InlineGroupSettings
+} from '../types/index';
 
 const STRUCTURED_MARKER = '__STRUCTURED_DATA__';
 
 export interface FieldTypeInfo {
   canonicalType: string;
   options?: { label: string; value: string }[];
-  tableColumns?: any[];
-  tableSettings?: any;
-  questionRows?: any[];
-  questionTableSettings?: any;
-  criteriaItems?: any[];
-  criteriaListSettings?: any;
-  inlineFields?: any[];
-  inlineGroupSettings?: any;
+  tableColumns?: TableColumnDefinition[];
+  tableSettings?: TableSettings;
+  questionRows?: QuestionRow[];
+  questionTableSettings?: QuestionTableSettings;
+  criteriaItems?: CriteriaItem[];
+  criteriaListSettings?: CriteriaListSettings;
+  inlineFields?: InlineFieldDefinition[];
+  inlineGroupSettings?: InlineGroupSettings;
   isStructured: boolean;
 }
 
@@ -23,15 +29,31 @@ export interface SerializedCorrection {
 }
 
 /**
- * Parse pipe-delimited response_set options into label/value pairs.
+ * Split an options string by the correct delimiter.
+ * LibreClinica response_set uses pipe (|) in legacy CRF imports and
+ * newline (\n) when options are stored from the form builder.
+ * We detect which delimiter is present and split accordingly.
+ * If the string contains pipes, we split on pipe (takes precedence);
+ * otherwise we split on newline; otherwise we return the string as a single entry.
+ */
+function splitOptions(raw: string): string[] {
+  if (raw.includes('|')) return raw.split('|').map(s => s.trim()).filter(Boolean);
+  if (raw.includes('\n')) return raw.split('\n').map(s => s.trim()).filter(Boolean);
+  if (raw.includes(',')) return raw.split(',').map(s => s.trim()).filter(Boolean);
+  return [raw.trim()].filter(Boolean);
+}
+
+/**
+ * Parse response_set options into label/value pairs.
+ * Supports pipe-delimited, newline-delimited, and comma-delimited formats.
  */
 export function parseResponseSetOptions(
   optionsText: string | null | undefined,
   optionsValues: string | null | undefined
 ): { label: string; value: string }[] {
   if (!optionsText || !optionsValues) return [];
-  const labels = optionsText.split('|').map(s => s.trim());
-  const values = optionsValues.split('|').map(s => s.trim());
+  const labels = splitOptions(optionsText);
+  const values = splitOptions(optionsValues);
   const result: { label: string; value: string }[] = [];
   for (let i = 0; i < Math.max(labels.length, values.length); i++) {
     result.push({

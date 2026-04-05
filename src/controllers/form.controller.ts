@@ -7,6 +7,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as formService from '../services/hybrid/form.service';
+import * as templateBundleService from '../services/hybrid/template-bundle.service';
 import { trackDocumentAccess, trackUserAction } from '../services/database/audit.service';
 
 export const saveData = asyncHandler(async (req: Request, res: Response) => {
@@ -111,7 +112,9 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
+  console.log(`[form.controller.list] Listing forms for userId=${user?.userId}`);
   const result = await formService.getAllForms(user?.userId);
+  console.log(`[form.controller.list] Returning ${result.length} forms`);
   
   res.json({ 
     success: true, 
@@ -156,18 +159,21 @@ export const getByStudy = asyncHandler(async (req: Request, res: Response) => {
  */
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
+  console.log(`[form.controller.create] Starting form creation for user=${user.userId}, name="${req.body.name}"`);
 
   const result = await formService.createForm(req.body, user.userId);
+  console.log(`[form.controller.create] createForm returned:`, { success: result.success, crfId: result.crfId, message: result.message });
 
   if (result.success) {
-    await trackUserAction({
+    trackUserAction({
       userId: user.userId,
       username: user.username || user.userName,
       action: 'FORM_CREATED',
       entityType: 'crf',
       entityId: result.crfId,
       details: `Created form: ${req.body.name}`
-    });
+    }).catch(err => console.error('[form.controller.create] Audit tracking failed (non-blocking):', err));
+    console.log(`[form.controller.create] Audit tracked, returning 201 with crfId=${result.crfId}`);
   }
 
   res.status(result.success ? 201 : 400).json(result);
@@ -183,14 +189,14 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
   const result = await formService.updateForm(parseInt(id), req.body, user.userId);
 
   if (result.success) {
-    await trackUserAction({
+    trackUserAction({
       userId: user.userId,
       username: user.username || user.userName,
       action: 'FORM_UPDATED',
       entityType: 'crf',
       entityId: parseInt(id),
       details: `Updated form: ${req.body.name || id}`
-    });
+    }).catch(err => console.error('[form.controller.update] Audit tracking failed (non-blocking):', err));
   }
 
   res.status(result.success ? 200 : 400).json(result);
@@ -208,14 +214,14 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
   const result = await formService.archiveForm(parseInt(id), user.userId, 'Archived via delete operation');
 
   if (result.success) {
-    await trackUserAction({
+    trackUserAction({
       userId: user.userId,
       username: user.username || user.userName,
       action: 'FORM_ARCHIVED',
       entityType: 'crf',
       entityId: parseInt(id),
       details: `Archived form ID: ${id} (21 CFR Part 11 compliance - no permanent deletion)`
-    });
+    }).catch(err => console.error('[form.controller.remove] Audit tracking failed (non-blocking):', err));
   }
 
   res.status(result.success ? 200 : 400).json(result);
@@ -540,6 +546,65 @@ export const markComplete = asyncHandler(async (req: Request, res: Response) => 
   res.json(result);
 });
 
+// ============================================================================
+// TEMPLATE BUNDLE EXPORT/IMPORT
+// ============================================================================
+
+export const exportBundle = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { crfIds } = req.body;
+
+  if (!Array.isArray(crfIds) || crfIds.length === 0) {
+    res.status(400).json({ success: false, message: 'crfIds must be a non-empty array of CRF IDs' });
+    return;
+  }
+
+  const bundle = await templateBundleService.exportBundle(
+    crfIds.map((id: any) => parseInt(id)),
+    user.username || user.userName || 'unknown'
+  );
+
+  trackUserAction({
+    userId: user.userId,
+    username: user.username || user.userName,
+    action: 'TEMPLATE_BUNDLE_EXPORTED',
+    entityType: 'crf',
+    entityId: crfIds[0],
+    details: `Exported ${bundle.forms.length} form(s) as template bundle`
+  }).catch(() => {});
+
+  res.json({ success: true, data: bundle });
+});
+
+export const importBundle = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { bundle, targetStudyId } = req.body;
+
+  if (!bundle || !targetStudyId) {
+    res.status(400).json({ success: false, message: 'bundle and targetStudyId are required' });
+    return;
+  }
+
+  const result = await templateBundleService.importBundle(
+    bundle,
+    parseInt(targetStudyId),
+    user.userId
+  );
+
+  if (result.success) {
+    trackUserAction({
+      userId: user.userId,
+      username: user.username || user.userName,
+      action: 'TEMPLATE_BUNDLE_IMPORTED',
+      entityType: 'study',
+      entityId: targetStudyId,
+      details: `Imported ${result.createdForms.length} form(s) from template bundle`
+    }).catch(() => {});
+  }
+
+  res.status(result.success ? 201 : 400).json(result);
+});
+
 export default { 
   saveData, getData, getMetadata, getStatus, 
   list, get, getByStudy, 
@@ -553,6 +618,8 @@ export default {
   // Mark form complete (prerequisite for data lock)
   markComplete,
   // Reference data
-  getNullValueTypes, getMeasurementUnits
+  getNullValueTypes, getMeasurementUnits,
+  // Template bundle export/import
+  exportBundle, importBundle
 };
 

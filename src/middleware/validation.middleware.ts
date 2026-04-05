@@ -431,7 +431,7 @@ export const validationRuleSchemas = {
     itemId: Joi.number().integer().positive().optional(),
     fieldPath: Joi.string().required().max(255),
     ruleType: Joi.string().valid(
-      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula'
+      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula', 'value_match', 'pattern_match'
     ).required(),
     severity: Joi.string().valid('error', 'warning').required(),
     errorMessage: Joi.string().required().max(1000),
@@ -449,6 +449,7 @@ export const validationRuleSchemas = {
     // Consistency / cross-form rule
     operator: Joi.string().optional().max(64).allow(''),
     compareFieldPath: Joi.string().optional().max(255).allow(''),
+    compareValue: Joi.string().optional().max(1000).allow('', null),
     // Formula rule
     customExpression: Joi.string().optional().max(5000).allow(''),
     // Blood pressure per-component limits
@@ -464,13 +465,23 @@ export const validationRuleSchemas = {
     // Extra fields the UI may send (accepted, not required)
     crfVersionId: Joi.number().integer().positive().optional(),
     itemOid: Joi.string().optional().max(255).allow(''),
+    // Table cell targeting for table/question_table validation rules
+    tableCellTarget: Joi.object({
+      tableFieldPath: Joi.string().required().max(255),
+      columnId: Joi.string().required().max(255),
+      columnType: Joi.string().required().max(50),
+      rowIndex: Joi.number().integer().optional().allow(null),
+      rowId: Joi.string().optional().max(255).allow('', null),
+      allRows: Joi.boolean().required(),
+      displayPath: Joi.string().optional().max(500).allow(''),
+    }).optional().allow(null),
   }),
 
   // PUT /api/validation-rules/:ruleId — update a rule (all fields optional)
   update: Joi.object({
     fieldPath: Joi.string().optional().max(255),
     ruleType: Joi.string().valid(
-      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula'
+      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula', 'value_match', 'pattern_match'
     ).optional(),
     severity: Joi.string().valid('error', 'warning').optional(),
     errorMessage: Joi.string().optional().max(1000),
@@ -483,6 +494,7 @@ export const validationRuleSchemas = {
     formatType: Joi.string().optional().max(100).allow('', null),
     operator: Joi.string().optional().max(64).allow('', null),
     compareFieldPath: Joi.string().optional().max(255).allow('', null),
+    compareValue: Joi.string().optional().max(1000).allow('', null),
     customExpression: Joi.string().optional().max(5000).allow('', null),
     bpSystolicMin: Joi.number().optional().allow(null),
     bpSystolicMax: Joi.number().optional().allow(null),
@@ -492,6 +504,15 @@ export const validationRuleSchemas = {
     signaturePassword: Joi.string().optional(),
     signatureUsername: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500),
+    tableCellTarget: Joi.object({
+      tableFieldPath: Joi.string().required().max(255),
+      columnId: Joi.string().required().max(255),
+      columnType: Joi.string().required().max(50),
+      rowIndex: Joi.number().integer().optional().allow(null),
+      rowId: Joi.string().optional().max(255).allow('', null),
+      allRows: Joi.boolean().required(),
+      displayPath: Joi.string().optional().max(500).allow(''),
+    }).optional().allow(null),
   }),
 
   // POST /api/validation-rules/validate/:crfId — validate all fields for a CRF
@@ -525,6 +546,16 @@ export const validationRuleSchemas = {
     subjectId: Joi.number().integer().positive().optional(),
     itemDataId: Joi.number().integer().positive().optional(),
     operationType: Joi.string().optional().valid('create', 'insert', 'update', 'delete'),
+    cellPath: Joi.string().optional().max(500).allow('', null),
+    tableCellTarget: Joi.object({
+      tableFieldPath: Joi.string().required().max(255),
+      columnId: Joi.string().required().max(255),
+      columnType: Joi.string().required().max(50),
+      rowIndex: Joi.number().integer().optional().allow(null),
+      rowId: Joi.string().optional().max(255).allow('', null),
+      allRows: Joi.boolean().required(),
+      displayPath: Joi.string().optional().max(500).allow(''),
+    }).optional().allow(null),
   }),
 };
 

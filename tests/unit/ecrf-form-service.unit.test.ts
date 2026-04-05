@@ -153,15 +153,15 @@ describe('evaluateShowWhen — operator coverage', () => {
       }
     }
 
-    // Chain with AND/OR based on logicalOperator of previous condition
+    // Chain with AND/OR based on logicalOperator of previous condition (default: OR)
     let result = evaluateSingle(conditions[0]);
     for (let i = 1; i < conditions.length; i++) {
       const prev = conditions[i - 1];
       const curr = conditions[i];
-      if (prev.logicalOperator === 'OR') {
-        result = result || evaluateSingle(curr);
-      } else {
+      if (prev.logicalOperator === 'AND') {
         result = result && evaluateSingle(curr);
+      } else {
+        result = result || evaluateSingle(curr);
       }
     }
     return result;

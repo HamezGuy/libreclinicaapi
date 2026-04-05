@@ -59,8 +59,11 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'screening_date_column', fn: createScreeningDateColumn },
     { name: 'widen_study_columns', fn: widenStudyColumns },
     { name: 'query_severity_column', fn: createQuerySeverityColumn },
+    { name: 'query_generation_type_column', fn: createQueryGenerationTypeColumn },
     { name: 'unlock_requests', fn: createUnlockRequestTable },
     { name: 'econsent_extended_columns', fn: addEconsentExtendedColumns },
+    { name: 'patient_event_form_query_counts', fn: addPatientEventFormQueryCounts },
+    { name: 'fix_null_phi_required_columns', fn: fixNullPhiRequiredColumns },
   ];
 
   let successCount = 0;
@@ -1350,6 +1353,8 @@ async function createValidationRulesTable(pool: any): Promise<void> {
     { name: 'bp_systolic_max', type: 'NUMERIC' },
     { name: 'bp_diastolic_min', type: 'NUMERIC' },
     { name: 'bp_diastolic_max', type: 'NUMERIC' },
+    // Literal compare value for consistency rules and value_match triggers
+    { name: 'compare_value', type: 'TEXT' },
   ];
   for (const col of columnsToAdd) {
     try {
@@ -1927,6 +1932,16 @@ async function createQuerySeverityColumn(pool: any): Promise<void> {
   logger.info('severity and due_date columns verified on discrepancy_note');
 }
 
+async function createQueryGenerationTypeColumn(pool: any): Promise<void> {
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS generation_type VARCHAR(20) DEFAULT 'manual'`);
+  // Backfill: mark existing Failed Validation Check queries (type_id=1) as automatic
+  await pool.query(`
+    UPDATE discrepancy_note SET generation_type = 'automatic'
+    WHERE discrepancy_note_type_id = 1 AND (generation_type IS NULL OR generation_type = 'manual')
+  `);
+  logger.info('generation_type column verified on discrepancy_note');
+}
+
 // ============================================================================
 // Unlock Request Workflow (acc_unlock_request)
 // ============================================================================
@@ -1983,4 +1998,107 @@ async function addEconsentExtendedColumns(pool: any): Promise<void> {
   }
 
   logger.info('eConsent extended columns verified');
+}
+
+// ============================================================================
+// patient_event_form — denormalized query counts for fast patient list loading
+// ============================================================================
+async function addPatientEventFormQueryCounts(pool: any): Promise<void> {
+  const columns = [
+    { col: 'open_query_count', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { col: 'overdue_query_count', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { col: 'closed_query_count', type: 'INTEGER NOT NULL DEFAULT 0' },
+  ];
+
+  for (const { col, type } of columns) {
+    await pool.query(
+      `ALTER TABLE patient_event_form ADD COLUMN IF NOT EXISTS ${col} ${type}`
+    ).catch(() => {});
+  }
+
+  // Backfill from discrepancy_note via dn_item_data_map + dn_event_crf_map
+  try {
+    await pool.query(`
+      UPDATE patient_event_form pef
+      SET
+        open_query_count = COALESCE(sub.open_count, 0),
+        overdue_query_count = COALESCE(sub.overdue_count, 0),
+        closed_query_count = COALESCE(sub.closed_count, 0)
+      FROM (
+        SELECT
+          ec_id AS event_crf_id,
+          COUNT(*) FILTER (WHERE resolution_status_id NOT IN (4, 5)) AS open_count,
+          COUNT(*) FILTER (WHERE resolution_status_id NOT IN (4, 5) AND due_date IS NOT NULL AND due_date < NOW()) AS overdue_count,
+          COUNT(*) FILTER (WHERE resolution_status_id IN (4, 5)) AS closed_count
+        FROM (
+          SELECT DISTINCT dn.discrepancy_note_id, dn.resolution_status_id, dn.due_date, id.event_crf_id AS ec_id
+          FROM discrepancy_note dn
+          INNER JOIN dn_item_data_map didm ON dn.discrepancy_note_id = didm.discrepancy_note_id
+          INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
+          WHERE dn.parent_dn_id IS NULL
+          UNION
+          SELECT DISTINCT dn.discrepancy_note_id, dn.resolution_status_id, dn.due_date, decm.event_crf_id AS ec_id
+          FROM discrepancy_note dn
+          INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
+          WHERE dn.parent_dn_id IS NULL
+        ) all_notes
+        GROUP BY ec_id
+      ) sub
+      WHERE pef.event_crf_id = sub.event_crf_id
+    `);
+    logger.info('patient_event_form query counts backfilled');
+  } catch (e: any) {
+    logger.warn('patient_event_form query counts backfill skipped:', e.message);
+  }
+
+  logger.info('patient_event_form query count columns verified');
+}
+
+// ============================================================================
+// Fix NULL phi_status and required columns
+//
+// The original LibreClinica schema defines item.phi_status as BOOLEAN (no
+// DEFAULT) and item_form_metadata.required as BOOLEAN (no DEFAULT). Items
+// created through legacy or edge-case code paths can have NULL in these
+// columns. When the || OR-chaining in getFormMetadata evaluates NULL, the
+// flag silently falls to false. This migration:
+//   1. Backfills NULL → false for both columns
+//   2. Adds DEFAULT false so future inserts never produce NULL
+// ============================================================================
+async function fixNullPhiRequiredColumns(pool: any): Promise<void> {
+  try {
+    const phiResult = await pool.query(
+      `UPDATE item SET phi_status = false WHERE phi_status IS NULL`
+    );
+    if (phiResult.rowCount > 0) {
+      logger.info(`Backfilled ${phiResult.rowCount} item rows with NULL phi_status → false`);
+    }
+  } catch (e: any) {
+    logger.warn('phi_status backfill skipped:', e.message);
+  }
+
+  try {
+    const reqResult = await pool.query(
+      `UPDATE item_form_metadata SET required = false WHERE required IS NULL`
+    );
+    if (reqResult.rowCount > 0) {
+      logger.info(`Backfilled ${reqResult.rowCount} item_form_metadata rows with NULL required → false`);
+    }
+  } catch (e: any) {
+    logger.warn('required backfill skipped:', e.message);
+  }
+
+  try {
+    await pool.query(`ALTER TABLE item ALTER COLUMN phi_status SET DEFAULT false`);
+  } catch (e: any) {
+    logger.warn('Could not set DEFAULT on item.phi_status:', e.message);
+  }
+
+  try {
+    await pool.query(`ALTER TABLE item_form_metadata ALTER COLUMN required SET DEFAULT false`);
+  } catch (e: any) {
+    logger.warn('Could not set DEFAULT on item_form_metadata.required:', e.message);
+  }
+
+  logger.info('NULL phi_status / required column fix verified');
 }

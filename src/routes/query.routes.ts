@@ -1,6 +1,14 @@
 /**
  * Query Routes
  * 
+ * Role restrictions aligned with industry-standard EDC practices
+ * (Medidata Rave, Oracle Clinical One, OpenClinica, Castor EDC):
+ *
+ *   RAISE queries:   Monitor, Data Manager, Admin
+ *   RESPOND:         All clinical roles (CRC, Investigator, Monitor, DM, Admin, Viewer/Sponsor)
+ *   CLOSE / ACCEPT:  Monitor, Data Manager, Admin  (site staff cannot self-close)
+ *   RE-QUERY:        Monitor, Data Manager, Admin  (send answered query back for clarification)
+ *
  * 21 CFR Part 11 Compliance:
  * - Query creation requires electronic signature (§11.50)
  * - Query responses require electronic signature (§11.50)
@@ -19,7 +27,10 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
-// List and statistics (no signature required)
+// ═══════════════════════════════════════════════════════════════════
+// READ OPERATIONS (no role restriction beyond auth)
+// ═══════════════════════════════════════════════════════════════════
+
 router.get('/', validate({ query: querySchemas.list }), controller.list);
 router.get('/stats', controller.stats);
 router.get('/types', controller.getQueryTypes);
@@ -28,77 +39,85 @@ router.get('/count-by-status', controller.countByStatus);
 router.get('/count-by-type', controller.countByType);
 router.get('/overdue', controller.getOverdue);
 router.get('/my-assigned', controller.getMyAssigned);
-
-// Per-subject query counts (open + overdue) for patient table
 router.get('/subject-counts', controller.subjectCounts);
-
-// Per-form query status for all forms in a study event
+router.get('/subject/:studySubjectId/form-query-counts', controller.formQueryCountsBySubject);
 router.get('/event/:studyEventId/form-query-status', controller.formQueryStatusByEvent);
-
-// Form-specific queries (no signature required for reading)
 router.get('/form/:eventCrfId', controller.getFormQueries);
-
-// Field-specific queries (no signature required for reading)
-// Get queries for a specific item_data_id
 router.get('/item-data/:itemDataId', controller.getFieldQueries);
-
-// Get queries by form and field name
 router.get('/form/:eventCrfId/field/:fieldName', controller.getQueriesByField);
-
-// Get open query counts for all fields in a form (for efficient UI rendering)
 router.get('/form/:eventCrfId/field-counts', controller.getFormFieldQueryCounts);
 
-// Single query operations (no signature required for reading)
+// Preview who will receive a query before creating it (must be before /:id)
+router.get('/resolve-recipients', controller.resolveRecipients);
+
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/thread', validate({ params: commonSchemas.idParam }), controller.getThread);
 router.get('/:id/audit-trail', validate({ params: commonSchemas.idParam }), controller.getAuditTrail);
 
-// Create and update operations (signature required per §11.50)
+// ═══════════════════════════════════════════════════════════════════
+// WRITE OPERATIONS — role-restricted per EDC industry standards
+// ═══════════════════════════════════════════════════════════════════
+
+// Create query: Monitor / DM / Admin only (site staff respond, not raise)
 router.post('/', 
-  requireRole('admin', 'data_manager', 'coordinator', 'investigator', 'monitor'), 
+  requireRole('admin', 'data_manager', 'monitor'), 
   validate({ body: querySchemas.create }), 
   requireSignatureFor(SignatureMeanings.QUERY_CREATE),
   controller.create
 );
+
+// Respond to query: all clinical roles including Viewer/Sponsor
 router.post('/:id/respond', 
-  requireRole('admin', 'data_manager', 'coordinator', 'investigator', 'monitor'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator', 'monitor', 'viewer'),
   validate({ params: commonSchemas.idParam, body: querySchemas.respond }), 
   requireSignatureFor(SignatureMeanings.QUERY_RESPOND),
   controller.respond
 );
+
+// Update status: Monitor / DM / Admin only
 router.put('/:id/status', 
   requireRole('monitor', 'data_manager', 'admin'), 
   validate({ params: commonSchemas.idParam, body: querySchemas.updateStatus }), 
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.updateStatus
 );
+
+// Reassign: Monitor / DM / Admin (monitors can reassign queries they raised)
 router.put('/:id/reassign', 
-  requireRole('data_manager', 'admin'),
+  requireRole('data_manager', 'admin', 'monitor'),
   validate({ params: commonSchemas.idParam, body: querySchemas.reassign }),
   requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.reassign
 );
 
-// Close with electronic signature (21 CFR Part 11 compliant)
+// Close with e-signature: Monitor / DM / Admin only (PI cannot self-close)
 router.post('/:id/close-with-signature', 
-  requireRole('monitor', 'data_manager', 'admin', 'investigator'), 
+  requireRole('monitor', 'data_manager', 'admin'), 
   validate({ params: commonSchemas.idParam, body: querySchemas.closeWithSignature }),
   requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.closeWithSignature
 );
 
-// Accept a proposed resolution (Monitor / DM / PI / Admin only)
+// Accept resolution: Monitor / DM / Admin only (PI cannot self-approve corrections)
 router.post('/:id/accept-resolution',
-  requireRole('monitor', 'admin', 'investigator', 'data_manager'),
+  requireRole('monitor', 'admin', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.acceptResolution }),
   controller.acceptResolution
 );
 
-// Reject a proposed resolution (Monitor / DM / PI / Admin only)
+// Reject resolution: Monitor / DM / Admin only
 router.post('/:id/reject-resolution',
-  requireRole('monitor', 'admin', 'investigator', 'data_manager'),
+  requireRole('monitor', 'admin', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.rejectResolution }),
   controller.rejectResolution
+);
+
+// Re-query: send an answered query back for further clarification (Monitor / DM / Admin)
+router.post('/:id/requery',
+  requireRole('monitor', 'data_manager', 'admin'),
+  validate({ params: commonSchemas.idParam, body: querySchemas.respond }),
+  requireSignatureFor('I am returning this query for further clarification'),
+  controller.requery
 );
 
 // Reopen a closed query
@@ -110,10 +129,9 @@ router.put('/:id/reopen',
 );
 
 // ═══════════════════════════════════════════════════════════════════
-// BULK OPERATIONS
+// BULK OPERATIONS — Monitor / DM / Admin only
 // ═══════════════════════════════════════════════════════════════════
 
-// Bulk update status (e.g., mass close)
 router.post('/bulk/status',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: querySchemas.bulkStatus }),
@@ -121,7 +139,6 @@ router.post('/bulk/status',
   controller.bulkUpdateStatus
 );
 
-// Bulk close queries
 router.post('/bulk/close',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: querySchemas.bulkClose }),
@@ -129,9 +146,8 @@ router.post('/bulk/close',
   controller.bulkClose
 );
 
-// Bulk reassign queries
 router.post('/bulk/reassign',
-  requireRole('data_manager', 'admin'),
+  requireRole('data_manager', 'admin', 'monitor'),
   validate({ body: querySchemas.bulkReassign }),
   requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.bulkReassign

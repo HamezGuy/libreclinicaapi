@@ -94,6 +94,7 @@ class TestDatabase {
       'dn_event_crf_map',
       'dn_study_subject_map',
       'dn_study_event_map',
+      'patient_event_form',
       'item_data',
       'event_crf',
       'study_event',
@@ -140,6 +141,7 @@ class TestDatabase {
       'study_event_study_event_id_seq',
       'event_crf_event_crf_id_seq',
       'item_data_item_data_id_seq',
+      'patient_event_form_patient_event_form_id_seq',
       'acc_randomization_config_config_id_seq',
       'acc_randomization_list_list_entry_id_seq',
       'subject_subject_id_seq',
@@ -263,6 +265,17 @@ class TestDatabase {
           (7, 'signed'),
           (8, 'locked')
         ON CONFLICT (subject_event_status_id) DO NOTHING
+      `);
+
+      // 7b. Ensure completion_status lookup exists
+      await this.pool.query(`
+        INSERT INTO completion_status (completion_status_id, status_id, name, description) VALUES
+          (1, 1, 'initial_data_entry', 'Initial Data Entry'),
+          (2, 1, 'data_entry_started', 'Data Entry Started'),
+          (3, 1, 'double_data_entry', 'Double Data Entry'),
+          (4, 1, 'complete', 'Complete'),
+          (5, 1, 'signed', 'Signed')
+        ON CONFLICT (completion_status_id) DO NOTHING
       `);
 
       // 8. Create root user with MD5 password 'root' = 63a9f0ea7bb98050796b649e85481845

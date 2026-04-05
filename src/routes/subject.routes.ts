@@ -106,7 +106,7 @@ router.get('/check-label/:studyId/:label', async (req: Request, res: Response) =
       WHERE (study_id = $1 OR study_id IN (
         SELECT study_id FROM study WHERE parent_study_id = $1
       ))
-      AND label = $2 AND status_id != 5
+      AND label = $2 AND status_id NOT IN (5, 6, 7)
       LIMIT 1
     `;
     const result = await pool.query(query, [studyId, label]);
@@ -130,6 +130,19 @@ router.get('/check-label/:studyId/:label', async (req: Request, res: Response) =
 
 // Read operations (no signature required)
 router.get('/', validate({ query: subjectSchemas.list }), controller.list);
+
+/**
+ * POST /api/subjects/query-counts
+ * Get aggregated query counts for a batch of subjects (per-page optimization)
+ */
+router.post('/query-counts', controller.getQueryCounts);
+
+/**
+ * POST /api/subjects/forms-with-queries
+ * Get all forms with queries for a batch of subjects (per-page optimization)
+ */
+router.post('/forms-with-queries', controller.getFormsWithQueries);
+
 router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.get('/:id/progress', validate({ params: commonSchemas.idParam }), controller.getProgress);
 router.get('/:id/events', validate({ params: commonSchemas.idParam }), controller.getEvents);
@@ -150,15 +163,15 @@ router.put('/:id',
   controller.update
 );
 router.put('/:id/status', 
-  requireRole('data_manager', 'coordinator', 'investigator'), 
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'), 
   validate({ params: commonSchemas.idParam, body: subjectSchemas.updateStatus }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_WITHDRAW),
   controller.updateStatus
 );
 
-// Delete operation - require admin role (soft delete) + signature
+// Delete operation - soft delete (sets status to removed) + signature
 router.delete('/:id', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_DELETE),
   controller.remove

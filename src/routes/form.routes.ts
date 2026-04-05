@@ -184,6 +184,16 @@ router.put('/workflow-config/:crfId',
 // registered before the generic /:id route so Express matches them first.
 router.get('/', controller.list);
 router.get('/by-study', controller.getByStudy);
+
+// Template bundle export/import (must be before /:id to avoid parameter matching)
+router.post('/export-bundle',
+  requireRole('admin', 'data_manager'),
+  controller.exportBundle
+);
+router.post('/import-bundle',
+  requireRole('admin', 'data_manager'),
+  controller.importBundle
+);
 // /data and /status routes are registered later but also benefit from specificity order
 router.get('/:crfId/metadata', controller.getMetadata);          // Must be before /:id
 router.get('/:id/versions', validate({ params: commonSchemas.idParam }), controller.getVersions); // Must be before /:id

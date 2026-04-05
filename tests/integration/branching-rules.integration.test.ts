@@ -5,7 +5,7 @@
  *   1. showWhen conditions are saved via PUT /api/forms/:id (form update)
  *   2. showWhen conditions are returned in GET /api/forms/:id/metadata
  *   3. formLinks (branch-to-another-form) are saved and retrieved
- *   4. Multiple conditions (AND logic) persist correctly
+ *   4. Multiple conditions with explicit logicalOperator persist correctly
  *   5. Complex operator types (equals, greaterThan, between, is_empty)
  *   6. Branching does NOT affect all fields — only targeted fields
  *   7. initializeFieldVisibility logic verified via metadata content
@@ -208,10 +208,10 @@ describe('Branching Rules Integration', () => {
   });
 
   // ==========================================================================
-  // 3. Multiple conditions (AND)
+  // 3. Multiple conditions (with explicit AND)
   // ==========================================================================
 
-  describe('Multiple AND conditions', () => {
+  describe('Multiple conditions with explicit logicalOperator', () => {
     let crfId: number;
 
     beforeAll(async () => {

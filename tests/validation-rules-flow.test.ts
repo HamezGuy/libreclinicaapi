@@ -21,7 +21,7 @@ interface ValidationRule {
   id: number;
   crfId: number;
   name: string;
-  ruleType: 'required' | 'range' | 'format' | 'consistency' | 'formula' | 'business_logic';
+  ruleType: 'required' | 'range' | 'format' | 'consistency' | 'formula' | 'business_logic' | 'value_match' | 'pattern_match';
   fieldPath: string;
   severity: 'error' | 'warning';
   errorMessage: string;
@@ -33,6 +33,7 @@ interface ValidationRule {
   formatType?: string;
   operator?: string;
   compareFieldPath?: string;
+  compareValue?: string;
   customExpression?: string;
   itemId?: number;
 }

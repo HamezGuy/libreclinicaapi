@@ -73,7 +73,7 @@ export const getStudyEvents = async (studyId: number): Promise<any[]> => {
         s.name as status_name,
         sed.oc_oid,
         (SELECT COUNT(*) FROM study_event se WHERE se.study_event_definition_id = sed.study_event_definition_id AND se.status_id NOT IN (5, 7)) as usage_count,
-        (SELECT COUNT(*) FROM event_definition_crf edc WHERE edc.study_event_definition_id = sed.study_event_definition_id AND edc.status_id NOT IN (5, 7)) as crf_count
+        (SELECT COUNT(*) FROM event_definition_crf edc INNER JOIN crf c ON edc.crf_id = c.crf_id WHERE edc.study_event_definition_id = sed.study_event_definition_id AND edc.status_id NOT IN (5, 7) AND c.status_id NOT IN (5, 7)) as crf_count
       FROM study_event_definition sed
       INNER JOIN status s ON sed.status_id = s.status_id
       WHERE sed.study_id = $1 AND sed.status_id NOT IN (5, 7)
@@ -147,7 +147,7 @@ export const getSubjectEvents = async (studySubjectId: number): Promise<any[]> =
           (SELECT COUNT(*) FROM event_definition_crf edc2
            INNER JOIN crf c2 ON edc2.crf_id = c2.crf_id
            WHERE edc2.study_event_definition_id = sed.study_event_definition_id
-             AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
+             AND edc2.status_id NOT IN (5, 7) AND c2.status_id NOT IN (5, 7)),
           (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
         ) as crf_count,
         (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 4 AND ec.status_id NOT IN (5, 7)) as completed_crf_count,
@@ -208,15 +208,17 @@ export const getEventCRFs = async (eventDefinitionId: number): Promise<any[]> =>
         edc.required_crf,
         edc.double_entry,
         edc.hide_crf,
+        edc.electronic_signature,
         edc.ordinal,
         edc.default_version_id,
-        cv.name as default_version_name
+        cv.name as default_version_name,
+        edc.status_id as assignment_status_id
       FROM event_definition_crf edc
       INNER JOIN crf c ON edc.crf_id = c.crf_id
       LEFT JOIN crf_version cv ON edc.default_version_id = cv.crf_version_id
       WHERE edc.study_event_definition_id = $1
-        AND edc.status_id = 1
-        AND c.status_id NOT IN (5, 6, 7)
+        AND edc.status_id NOT IN (5, 7)
+        AND c.status_id NOT IN (5, 7)
       ORDER BY edc.ordinal
     `;
 
@@ -342,8 +344,8 @@ export const getVisitForms = async (studyEventId: number): Promise<any[]> => {
         )
       LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       WHERE edc.study_event_definition_id = (SELECT study_event_definition_id FROM visit_info)
-        AND edc.status_id = 1
-        AND c.status_id NOT IN (5, 6, 7)
+        AND edc.status_id NOT IN (5, 7)
+        AND c.status_id NOT IN (5, 7)
       ORDER BY edc.ordinal, c.name
     `;
 
@@ -1543,7 +1545,9 @@ const createPatientFormSnapshot = async (
   // Reuse getFormMetadata — the same function the /api/forms/:id/metadata
   // endpoint calls. This returns items in the full DTO format (60+ properties)
   // including type, showWhen, tableColumns, calculationFormula, unit, etc.
-  const metadata = await getFormMetadata(crfId);
+  // includeHidden: true ensures branching-controlled fields are in the snapshot
+  // even if they're hidden by default — runtime logic decides visibility.
+  const metadata = await getFormMetadata(crfId, { includeHidden: true });
 
   if (!metadata || !metadata.items || metadata.items.length === 0) {
     logger.warn('getFormMetadata returned no items for snapshot', { crfId, crfVersionId });

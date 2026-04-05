@@ -8678,5 +8678,33 @@ ALTER TABLE ONLY public.study_parameter_value
 -- PostgreSQL database dump complete
 --
 
+-- patient_event_form (added by migration, included here for test completeness)
+CREATE TABLE IF NOT EXISTS patient_event_form (
+    patient_event_form_id SERIAL PRIMARY KEY,
+    study_event_id INTEGER NOT NULL,
+    event_crf_id INTEGER,
+    crf_id INTEGER NOT NULL,
+    crf_version_id INTEGER NOT NULL,
+    study_subject_id INTEGER NOT NULL,
+    form_name VARCHAR(255) NOT NULL,
+    form_structure JSONB NOT NULL DEFAULT '{}',
+    form_data JSONB NOT NULL DEFAULT '{}',
+    completion_status VARCHAR(30) NOT NULL DEFAULT 'not_started',
+    is_locked BOOLEAN NOT NULL DEFAULT false,
+    is_frozen BOOLEAN NOT NULL DEFAULT false,
+    sdv_status BOOLEAN NOT NULL DEFAULT false,
+    ordinal INTEGER DEFAULT 1,
+    open_query_count INTEGER NOT NULL DEFAULT 0,
+    overdue_query_count INTEGER NOT NULL DEFAULT 0,
+    closed_query_count INTEGER NOT NULL DEFAULT 0,
+    date_created TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    date_updated TIMESTAMP WITH TIME ZONE,
+    created_by INTEGER,
+    updated_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pef_study_event ON patient_event_form(study_event_id);
+CREATE INDEX IF NOT EXISTS idx_pef_subject ON patient_event_form(study_subject_id);
+CREATE INDEX IF NOT EXISTS idx_pef_event_crf ON patient_event_form(event_crf_id);
+
 \unrestrict YTxmaFFkDkeeLPmIi1QrgYtaBtjcOaueSfngdv3WsgpQW8RiTaGx7txJZHhDS3S
 

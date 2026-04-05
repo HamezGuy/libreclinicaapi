@@ -237,9 +237,48 @@ export const subjectCounts = asyncHandler(async (req: Request, res: Response) =>
   res.json({ success: true, data });
 });
 
+export const formQueryCountsBySubject = asyncHandler(async (req: Request, res: Response) => {
+  const data = await queryService.getFormQueryCountsBySubject(intParam(req, 'studySubjectId'));
+  res.json({ success: true, data });
+});
+
 export const formQueryStatusByEvent = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getFormQueryStatusByEvent(intParam(req, 'studyEventId'), userId(req));
   res.json({ success: true, data });
+});
+
+/**
+ * Preview who will receive a query before creating it.
+ * Returns all resolved recipients (workflow config + default role-based).
+ */
+export const resolveRecipients = asyncHandler(async (req: Request, res: Response) => {
+  const { eventCrfId, studyId } = req.query;
+  const data = await queryService.resolveQueryRecipients(
+    eventCrfId ? parseInt(eventCrfId as string) : undefined,
+    studyId ? parseInt(studyId as string) : undefined
+  );
+  res.json({ success: true, data });
+});
+
+/**
+ * Re-query: return an answered query to the respondent for further clarification.
+ * Sets status back to New (1) and adds the re-query message to the thread.
+ */
+export const requery = asyncHandler(async (req: Request, res: Response) => {
+  const qId = intParam(req, 'id');
+  const { description, detailedNotes } = req.body;
+
+  if (!description?.trim()) {
+    throw new BadRequestError('A re-query message is required');
+  }
+
+  await assertCanEdit(req, qId);
+
+  const result = await queryService.requeryQuery(qId, userId(req), {
+    description: description.trim(),
+    detailedNotes: detailedNotes || ''
+  });
+  res.json({ success: true, ...result });
 });
 
 export default {
@@ -249,5 +288,5 @@ export default {
   getFormQueries, getFieldQueries, getQueriesByField, getFormFieldQueryCounts,
   reassign, countByStatus, countByType, getThread, getOverdue, getMyAssigned,
   reopenQuery, bulkUpdateStatus, bulkClose, bulkReassign,
-  subjectCounts, formQueryStatusByEvent
+  subjectCounts, formQueryCountsBySubject, formQueryStatusByEvent, resolveRecipients, requery
 };

@@ -56,6 +56,10 @@ const storage = multer.diskStorage({
   }
 });
 
+// Canonical uploads directory — all file path resolution goes through this helper
+const UPLOADS_DIR = path.join(__dirname, '../../uploads');
+const resolveFilePath = (storedName: string): string => path.join(UPLOADS_DIR, storedName);
+
 const upload = multer({
   storage,
   limits: {
@@ -75,13 +79,16 @@ const upload = multer({
       'text/plain',
       'text/csv',
       'application/dicom',
-      'application/octet-stream'
+      'application/octet-stream',
+      'application/zip',
+      'application/x-zip-compressed',
+      'application/x-zip'
     ];
 
     const allowedExtensions = [
       '.jpg', '.jpeg', '.png', '.gif', '.bmp',
       '.pdf', '.doc', '.docx', '.xls', '.xlsx',
-      '.txt', '.csv', '.dcm'
+      '.txt', '.csv', '.dcm', '.zip'
     ];
 
     const ext = path.extname(file.originalname).toLowerCase();
@@ -124,17 +131,13 @@ router.post('/', authMiddleware, upload.single('file'), async (req: Request, res
     // Generate unique ID
     const fileId = crypto.randomBytes(16).toString('hex');
     
-    // Insert into database (crf_version_media if applicable, or custom file_uploads table)
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       
-      // Check if crf_version_media table exists and insert there
       let crfVersionMediaId: number | null = null;
       
       if (crfVersionId) {
-        // Insert into LibreClinica's crf_version_media table
-        // Table structure: crf_version_media_id, crf_version_id, name, path
         const mediaResult = await client.query(`
           INSERT INTO crf_version_media (
             crf_version_id, name, path
@@ -143,12 +146,13 @@ router.post('/', authMiddleware, upload.single('file'), async (req: Request, res
         `, [
           crfVersionId,
           file.originalname,
-          file.path
+          file.filename
         ]);
         crfVersionMediaId = mediaResult.rows[0]?.crf_version_media_id;
       }
       
-      // Also insert into file_uploads table for tracking
+      // Store only the filename (stored_name) — never the absolute path.
+      // The resolveFilePath() helper derives the full disk path at runtime.
       const { eventCrfId, studySubjectId, consentId } = req.body;
       await client.query(`
         INSERT INTO file_uploads (
@@ -162,7 +166,7 @@ router.post('/', authMiddleware, upload.single('file'), async (req: Request, res
         fileId,
         file.originalname,
         file.filename,
-        file.path,
+        file.filename,
         file.mimetype,
         file.size,
         fileHash,
@@ -212,7 +216,7 @@ router.post('/', authMiddleware, upload.single('file'), async (req: Request, res
  * Upload multiple files
  * POST /api/files/batch
  */
-router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Request, res: Response) => {
+router.post('/batch', authMiddleware, upload.array('files', 20), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
@@ -242,7 +246,7 @@ router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Req
           `, [
             crfVersionId,
             file.originalname,
-            file.path
+            file.filename
           ]);
           crfVersionMediaId = mediaResult.rows[0]?.crf_version_media_id;
         }
@@ -259,7 +263,7 @@ router.post('/batch', authMiddleware, upload.array('files', 10), async (req: Req
           fileId,
           file.originalname,
           file.filename,
-          file.path,
+          file.filename,
           file.mimetype,
           file.size,
           fileHash,
@@ -358,7 +362,7 @@ router.get('/:id/download', authMiddleware, async (req: Request, res: Response) 
     const { id } = req.params;
     
     const result = await pool.query(`
-      SELECT file_path, original_name, mime_type
+      SELECT stored_name, original_name, mime_type, file_path
       FROM file_uploads
       WHERE file_id = $1 AND deleted_at IS NULL
     `, [id]);
@@ -369,14 +373,25 @@ router.get('/:id/download', authMiddleware, async (req: Request, res: Response) 
     
     const file = result.rows[0];
     
-    if (!fs.existsSync(file.file_path)) {
+    // Resolve file location: prefer stored_name (just filename), fall back to file_path
+    // for backwards compatibility with records that stored absolute paths.
+    const storedName = file.stored_name || file.file_path;
+    let diskPath: string;
+    if (path.isAbsolute(storedName)) {
+      diskPath = storedName;
+    } else {
+      diskPath = resolveFilePath(storedName);
+    }
+    
+    if (!fs.existsSync(diskPath)) {
+      logger.warn('File not found on disk', { fileId: id, diskPath, storedName });
       return res.status(404).json({ success: false, message: 'File not found on disk' });
     }
     
     res.setHeader('Content-Type', file.mime_type);
-    res.setHeader('Content-Disposition', `attachment; filename="${file.original_name}"`);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.original_name)}"`);
     
-    const stream = fs.createReadStream(file.file_path);
+    const stream = fs.createReadStream(diskPath);
     stream.pipe(res);
     
   } catch (error: any) {
@@ -394,7 +409,7 @@ router.get('/:id/thumbnail', authMiddleware, async (req: Request, res: Response)
     const { id } = req.params;
     
     const result = await pool.query(`
-      SELECT file_path, mime_type
+      SELECT stored_name, file_path, mime_type
       FROM file_uploads
       WHERE file_id = $1 AND deleted_at IS NULL AND mime_type LIKE 'image/%'
     `, [id]);
@@ -404,15 +419,17 @@ router.get('/:id/thumbnail', authMiddleware, async (req: Request, res: Response)
     }
     
     const file = result.rows[0];
+    const storedName = file.stored_name || file.file_path;
+    const diskPath = path.isAbsolute(storedName) ? storedName : resolveFilePath(storedName);
     
-    if (!fs.existsSync(file.file_path)) {
+    if (!fs.existsSync(diskPath)) {
+      logger.warn('Thumbnail file not found on disk', { fileId: id, diskPath });
       return res.status(404).json({ success: false, message: 'File not found on disk' });
     }
     
-    // For now, just return the original image
-    // In production, you'd want to generate an actual thumbnail
     res.setHeader('Content-Type', file.mime_type);
-    const stream = fs.createReadStream(file.file_path);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    const stream = fs.createReadStream(diskPath);
     stream.pipe(res);
     
   } catch (error: any) {
@@ -569,7 +586,7 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
     const { id } = req.params;
     
     const result = await pool.query(`
-      SELECT file_path, crf_version_media_id
+      SELECT stored_name, file_path, crf_version_media_id
       FROM file_uploads
       WHERE file_id = $1 AND deleted_at IS NULL
     `, [id]);
@@ -598,8 +615,10 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
       await client.query('COMMIT');
       
       // Delete physical file
-      if (fs.existsSync(file.file_path)) {
-        fs.unlinkSync(file.file_path);
+      const storedName = file.stored_name || file.file_path;
+      const diskPath = path.isAbsolute(storedName) ? storedName : resolveFilePath(storedName);
+      if (fs.existsSync(diskPath)) {
+        fs.unlinkSync(diskPath);
       }
       
       logger.info('File deleted', { fileId: id });

@@ -41,6 +41,7 @@ router.post('/logout', authMiddleware, controller.logout);
 // Profile management (self-service)
 router.get('/profile', authMiddleware, controller.getProfile);
 router.put('/profile', authMiddleware, controller.updateProfile);
+router.post('/change-password', authMiddleware, controller.changePassword);
 
 // Capture token generation (requires auth)
 router.post('/capture-token', authMiddleware, controller.generateCaptureToken);

@@ -231,11 +231,18 @@ export async function resolveAllQueryAssignees(
 /**
  * Find a default user to assign queries to based on study roles.
  *
- * Priority:
- *   1. Study Coordinator
- *   2. Clinical Research Coordinator
- *   3. Data Manager
- *   4. Any active study user (fallback)
+ * In clinical trials, queries flow: Monitor/CRA raises → Site responds → Monitor closes.
+ * For automatically generated queries (validation failures), the query needs to go to
+ * the site user who can investigate and correct the data. For manual queries raised by
+ * monitors, the query goes to the site coordinator/investigator.
+ *
+ * Priority (site-side respondent):
+ *   1. Site coordinator / CRC (they do day-to-day data management)
+ *   2. Data entry person / RA (they entered the data)
+ *   3. Investigator (PI signs off, may need to clarify clinical data)
+ *   4. Data Manager (escalation if no site staff found)
+ *   5. Monitor (fallback — typically monitors raise, not receive queries)
+ *   6. Any active study user (absolute fallback)
  */
 export async function resolveDefaultAssignee(
   studyId: number,
@@ -246,10 +253,10 @@ export async function resolveDefaultAssignee(
       SELECT user_id FROM (
         SELECT ua.user_id,
           CASE
-            WHEN sur.role_name IN ('data_manager', 'Study Coordinator', 'study_coordinator', 'site_study_coordinator') THEN 1
-            WHEN sur.role_name IN ('coordinator', 'Clinical Research Coordinator', 'crc', 'ra', 'ra2', 'data_entry_person') THEN 2
-            WHEN sur.role_name IN ('Data Manager', 'director', 'study_director', 'site_study_director') THEN 3
-            WHEN sur.role_name IN ('investigator', 'Investigator', 'site_investigator') THEN 4
+            WHEN sur.role_name IN ('coordinator', 'Clinical Research Coordinator', 'crc', 'study_coordinator', 'site_study_coordinator', 'Study Coordinator') THEN 1
+            WHEN sur.role_name IN ('data_entry_person', 'site_data_entry_person', 'site_data_entry_person2', 'ra', 'ra2') THEN 2
+            WHEN sur.role_name IN ('investigator', 'Investigator', 'site_investigator') THEN 3
+            WHEN sur.role_name IN ('data_manager', 'Data Manager', 'director', 'study_director', 'site_study_director') THEN 4
             WHEN sur.role_name IN ('monitor', 'site_monitor') THEN 5
             WHEN sur.role_name ILIKE '%coordinator%' THEN 6
             WHEN sur.role_name ILIKE '%manager%' THEN 7

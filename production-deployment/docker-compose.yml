@@ -129,6 +129,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    volumes:
+      - api_uploads:/app/uploads
     networks:
       - lc_network
 
@@ -168,6 +170,7 @@ services:
 volumes:
   db_data:
   core_data:
+  api_uploads:
 
 networks:
   lc_network:

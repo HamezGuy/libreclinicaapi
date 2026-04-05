@@ -23,8 +23,72 @@ import { parseExtendedProps } from '../../utils/extended-props';
 import { resolveFieldType, isStructuredDataType } from '../../utils/field-type.utils';
 
 /**
+ * Recalculate and update the denormalized query counts on patient_event_form
+ * for a given event_crf_id. Call this inside the same transaction as any
+ * query mutation (create, status change, close, reopen) to keep the counts
+ * consistent without extra round-trips.
+ *
+ * Resolves notes linked via dn_item_data_map (field-level) and
+ * dn_event_crf_map (form-level), counting only root notes (parent_dn_id IS NULL).
+ */
+export const updateFormQueryCounts = async (client: any, eventCrfId: number | null | undefined): Promise<void> => {
+  if (!eventCrfId) return;
+  try {
+    await client.query(`
+      UPDATE patient_event_form pef
+      SET
+        open_query_count   = COALESCE(sub.open_count, 0),
+        overdue_query_count = COALESCE(sub.overdue_count, 0),
+        closed_query_count = COALESCE(sub.closed_count, 0)
+      FROM (
+        SELECT
+          COUNT(*) FILTER (WHERE resolution_status_id NOT IN (4, 5))::int AS open_count,
+          COUNT(*) FILTER (WHERE resolution_status_id NOT IN (4, 5)
+                           AND due_date IS NOT NULL AND due_date < NOW())::int AS overdue_count,
+          COUNT(*) FILTER (WHERE resolution_status_id IN (4, 5))::int AS closed_count
+        FROM (
+          SELECT DISTINCT dn.discrepancy_note_id, dn.resolution_status_id, dn.due_date
+          FROM discrepancy_note dn
+          INNER JOIN dn_item_data_map didm ON dn.discrepancy_note_id = didm.discrepancy_note_id
+          INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
+          WHERE id.event_crf_id = $1 AND dn.parent_dn_id IS NULL
+          UNION
+          SELECT DISTINCT dn.discrepancy_note_id, dn.resolution_status_id, dn.due_date
+          FROM discrepancy_note dn
+          INNER JOIN dn_event_crf_map decm ON dn.discrepancy_note_id = decm.discrepancy_note_id
+          WHERE decm.event_crf_id = $1 AND dn.parent_dn_id IS NULL
+        ) all_notes
+      ) sub
+      WHERE pef.event_crf_id = $1
+    `, [eventCrfId]);
+  } catch (e: any) {
+    logger.warn('updateFormQueryCounts failed (non-blocking)', { eventCrfId, error: e.message });
+  }
+};
+
+/**
+ * Resolve the event_crf_id(s) linked to a discrepancy_note.
+ * Checks both dn_item_data_map and dn_event_crf_map paths.
+ */
+const resolveEventCrfIdsForQuery = async (client: any, queryId: number): Promise<number[]> => {
+  const result = await client.query(`
+    SELECT DISTINCT ec_id FROM (
+      SELECT id.event_crf_id AS ec_id
+      FROM dn_item_data_map didm
+      INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
+      WHERE didm.discrepancy_note_id = $1
+      UNION
+      SELECT decm.event_crf_id AS ec_id
+      FROM dn_event_crf_map decm
+      WHERE decm.discrepancy_note_id = $1
+    ) t WHERE ec_id IS NOT NULL
+  `, [queryId]);
+  return result.rows.map((r: any) => r.ec_id);
+};
+
+/**
  * Helper: get org member user IDs for the caller.
- * Returns null if the caller has no org membership (root admin sees all).
+ * Returns [callerUserId] if the caller has no org membership (only see own data).
  */
 const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
   const orgCheck = await pool.query(
@@ -32,7 +96,7 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
     [callerUserId]
   );
   const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
-  if (callerOrgIds.length === 0) return null; // No org = super-admin, see all
+  if (callerOrgIds.length === 0) return [callerUserId];
 
   const memberCheck = await pool.query(
     `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
@@ -212,7 +276,8 @@ export const getQueries = async (
         s.name as study_name,
         (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count,
         dn.severity,
-        dn.due_date
+        dn.due_date,
+        dn.generation_type
       FROM discrepancy_note dn
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
       INNER JOIN resolution_status dnst ON dn.resolution_status_id = dnst.resolution_status_id
@@ -530,11 +595,19 @@ export const createQuery = async (
       }
     }
 
-    // If the user explicitly selected an assignee, honour that as primary.
-    // Workflow resolution only provides the primary if the user left it blank.
+    // If the user explicitly selected an assignee, use that as primary ONLY if
+    // no workflow-configured assignee was resolved. When the workflow config
+    // provides a primary, the manual selection becomes an additional recipient
+    // so workflow routing is always respected (matching how other EDCs work —
+    // the monitor raises a query and the workflow decides who should respond).
     if (data.assignedUserId) {
-      resolvedAssignedUserId = data.assignedUserId;
-      workflowAdditionalIds = [...workflowAdditionalIds];
+      if (!resolvedAssignedUserId) {
+        resolvedAssignedUserId = data.assignedUserId;
+      } else if (resolvedAssignedUserId !== data.assignedUserId) {
+        if (!workflowAdditionalIds.includes(data.assignedUserId)) {
+          workflowAdditionalIds = [...workflowAdditionalIds, data.assignedUserId];
+        }
+      }
     } else if (!resolvedAssignedUserId) {
       // No manual selection AND no workflow match — leave unassigned (null)
       // unless we fall through to the creator-fallback below.
@@ -557,16 +630,20 @@ export const createQuery = async (
     );
     (data as any)._additionalAssigneeIds = uniqueAdditionalIds;
 
+    // Resolve generation type: manual queries from the controller are always 'manual'.
+    // Automatic queries created by validation-rules.service use 'automatic'.
+    const generationType = (data as any).generationType || 'manual';
+
     // Insert discrepancy note (main record) with resolved assignment
     const insertNoteQuery = `
       INSERT INTO discrepancy_note (
         description, detailed_notes, discrepancy_note_type_id,
         resolution_status_id, study_id, entity_type,
         owner_id, assigned_user_id, date_created,
-        severity, due_date
+        severity, due_date, generation_type
       ) VALUES (
         $1, $2, $3, 1, $4, $5, $6, $7, NOW(),
-        $8, $9
+        $8, $9, $10
       )
       RETURNING discrepancy_note_id
     `;
@@ -580,7 +657,8 @@ export const createQuery = async (
       userId,
       resolvedAssignedUserId,
       data.severity || 'minor',
-      data.dueDate || null  // Workflow-resolved or explicitly provided
+      data.dueDate || null,
+      generationType
     ]);
 
     const queryId = noteResult.rows[0].discrepancy_note_id;
@@ -686,8 +764,9 @@ export const createQuery = async (
 
         if (itemDataLookup.rows.length === 0) {
           throw new BadRequestError(
-            'Cannot create field-level query: this field has no saved data yet. ' +
-            'Please save the form first, then create the query.'
+            `Cannot create field-level query: no item_data row found for item_id=${itemId} ` +
+            `on event_crf_id=${eventCrfId}. The form must be saved before creating a query. ` +
+            `If the form was saved, this field may not have been included in the save payload.`
           );
         }
 
@@ -777,6 +856,60 @@ export const createQuery = async (
       )
     `, [userId, queryId, data.description]);
 
+    // Create a workflow task for tracking this query
+    if (resolvedAssignedUserId) {
+      try {
+        const taskTableCheck = await client.query(`
+          SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_workflow_tasks') as exists
+        `);
+        if (taskTableCheck.rows[0].exists) {
+          const allQueryAssigneeIds = [resolvedAssignedUserId, ...uniqueAdditionalIds];
+          await client.query(`
+            INSERT INTO acc_workflow_tasks (
+              task_type, title, description, status, priority,
+              entity_type, entity_id, event_crf_id, study_id,
+              assigned_to_user_ids, created_by, metadata
+            ) VALUES ('query', $1, $2, 'pending', $3, 'discrepancy_note', $4, $5, $6, $7, $8, $9)
+          `, [
+            `Query: ${data.description.substring(0, 100)}`,
+            data.description,
+            data.severity === 'critical' ? 'high' : data.severity === 'major' ? 'medium' : 'low',
+            queryId,
+            (data as any).eventCrfId || null,
+            data.studyId,
+            allQueryAssigneeIds,
+            userId,
+            JSON.stringify({
+              generationType,
+              queryType: data.queryType || 'Query',
+              severity: data.severity || 'minor',
+              entityType: data.entityType
+            })
+          ]);
+          logger.info('Created workflow task for query', { queryId, assignees: allQueryAssigneeIds });
+        }
+      } catch (taskError: any) {
+        logger.warn('Workflow task creation for query failed (non-blocking)', {
+          queryId, error: taskError.message
+        });
+      }
+    }
+
+    // Update denormalized query counts on patient_event_form
+    const eventCrfIdForCounts = (data.entityType === 'eventCrf')
+      ? resolvedEntityId
+      : (data as any).eventCrfId || null;
+    if (eventCrfIdForCounts) {
+      await updateFormQueryCounts(client, eventCrfIdForCounts);
+    } else if (data.entityType === 'itemData' && resolvedEntityId) {
+      const ecLookup = await client.query(
+        'SELECT event_crf_id FROM item_data WHERE item_data_id = $1', [resolvedEntityId]
+      );
+      if (ecLookup.rows.length > 0) {
+        await updateFormQueryCounts(client, ecLookup.rows[0].event_crf_id);
+      }
+    }
+
     await client.query('COMMIT');
 
     logger.info('Query created successfully', { queryId });
@@ -842,6 +975,9 @@ export const addQueryResponse = async (
   try {
     await client.query('BEGIN');
     txStarted = true;
+
+    // Advisory lock prevents concurrent responses to the same query from racing
+    await client.query('SELECT pg_advisory_xact_lock($1)', [parentQueryId]);
 
     // Get parent query details
     const parentResult = await client.query(
@@ -1118,6 +1254,12 @@ export const addQueryResponse = async (
       }
     }
 
+    // Update denormalized query counts on patient_event_form
+    const ecIdsResp = await resolveEventCrfIdsForQuery(client, parentQueryId);
+    for (const ecId of ecIdsResp) {
+      await updateFormQueryCounts(client, ecId);
+    }
+
     await client.query('COMMIT');
 
     logger.info('Query response added successfully', {
@@ -1213,6 +1355,8 @@ export const updateQueryStatus = async (
     await client.query('BEGIN');
     txStarted = true;
 
+    await client.query('SELECT pg_advisory_xact_lock($1)', [queryId]);
+
     // Get current status for audit
     const currentResult = await client.query(
       `SELECT resolution_status_id, description FROM discrepancy_note WHERE discrepancy_note_id = $1`,
@@ -1271,6 +1415,12 @@ export const updateQueryStatus = async (
       `Status: ${statusNames[statusId] || statusId}${options?.signature ? ' (Signed)' : ''}`,
       options?.reason || `Status changed from ${statusNames[oldStatusId]} to ${statusNames[statusId]}`
     ]);
+
+    // Update denormalized query counts on patient_event_form
+    const ecIds = await resolveEventCrfIdsForQuery(client, queryId);
+    for (const ecId of ecIds) {
+      await updateFormQueryCounts(client, ecId);
+    }
 
     await client.query('COMMIT');
 
@@ -1402,10 +1552,13 @@ export const closeQueryWithSignature = async (
       } catch { /* non-blocking */ }
     }
 
-    return closeQueryWithSignatureVerified(queryId, userId, {
+    const result = await closeQueryWithSignatureVerified(queryId, userId, {
       reason: data.reason,
       meaning: data.meaning
     }, client, user);
+
+    await client.query('COMMIT');
+    return result;
   } catch (error: any) {
     await client.query('ROLLBACK').catch((rbErr: any) =>
       logger.warn('ROLLBACK failed in closeQueryWithSignature', { rbErr: rbErr.message })
@@ -1468,6 +1621,16 @@ export const closeQueryWithSignatureVerified = async (
 
     const oldStatusId = queryResult.rows[0].resolution_status_id;
 
+    if (oldStatusId === 4) {
+      if (!existingClient) {
+        await client.query('COMMIT');
+      }
+      return {
+        success: true as const,
+        message: 'Query is already closed'
+      };
+    }
+
     // Update query to Closed status (4)
     await client.query(`
       UPDATE discrepancy_note
@@ -1511,11 +1674,34 @@ export const closeQueryWithSignatureVerified = async (
       `${data.reason}. Signature meaning: ${data.meaning || 'Query resolved'}`
     ]);
 
+    // Update denormalized query counts on patient_event_form
+    const ecIds = await resolveEventCrfIdsForQuery(client, queryId);
+    for (const ecId of ecIds) {
+      await updateFormQueryCounts(client, ecId);
+    }
+
     if (!existingClient) {
       await client.query('COMMIT');
     }
 
     logger.info('Query closed with signature successfully', { queryId, userId, userName: user.user_name });
+
+    // Complete the associated workflow task when the query is closed
+    try {
+      const taskTableCheck = await pool.query(
+        `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_workflow_tasks') as exists`
+      );
+      if (taskTableCheck.rows[0].exists) {
+        await pool.query(`
+          UPDATE acc_workflow_tasks
+          SET status = 'completed', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
+              metadata = metadata || $2
+          WHERE entity_type = 'discrepancy_note' AND entity_id = $3 AND status IN ('pending', 'in_progress')
+        `, [userId, JSON.stringify({ closedWithSignature: true, closedBy: userId }), queryId]);
+      }
+    } catch (taskErr: any) {
+      logger.warn('Failed to complete workflow task on query close', { queryId, error: taskErr.message });
+    }
 
     // Fire-and-forget: notify all query participants about the closure
     try {
@@ -2403,7 +2589,30 @@ export const acceptResolution = async (
       )
     `, [userId, queryId, `Status: Closed (Accepted by ${userName})`, reason]);
 
+    // Update denormalized query counts on patient_event_form
+    const ecIdsAccept = await resolveEventCrfIdsForQuery(client, queryId);
+    for (const ecId of ecIdsAccept) {
+      await updateFormQueryCounts(client, ecId);
+    }
+
     await client.query('COMMIT');
+
+    // Complete the associated workflow task when the query is closed
+    try {
+      const taskTableCheck = await pool.query(
+        `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_workflow_tasks') as exists`
+      );
+      if (taskTableCheck.rows[0].exists) {
+        await pool.query(`
+          UPDATE acc_workflow_tasks
+          SET status = 'completed', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
+              metadata = metadata || $2
+          WHERE entity_type = 'discrepancy_note' AND entity_id = $3 AND status IN ('pending', 'in_progress')
+        `, [userId, JSON.stringify({ resolutionAccepted: true, acceptedBy: userId }), queryId]);
+      }
+    } catch (taskErr: any) {
+      logger.warn('Failed to complete workflow task on resolution accept', { queryId, error: taskErr.message });
+    }
 
     // Notify all query participants about the closure
     try {
@@ -2508,6 +2717,12 @@ export const rejectResolution = async (
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1)
       )
     `, [userId, queryId, `Status: New (Rejected by ${userName})`, reason]);
+
+    // Update denormalized query counts on patient_event_form
+    const ecIdsReject = await resolveEventCrfIdsForQuery(client, queryId);
+    for (const ecId of ecIdsReject) {
+      await updateFormQueryCounts(client, ecId);
+    }
 
     await client.query('COMMIT');
 
@@ -2668,7 +2883,7 @@ export const bulkReassignQueries = async (
 export const getQueryCountsBySubject = async (
   studyId: number,
   callerUserId?: number
-): Promise<{ studySubjectId: number; openCount: number; overdueCount: number }[]> => {
+): Promise<{ studySubjectId: number; openCount: number; overdueCount: number; closedCount: number }[]> => {
   logger.info('Getting query counts by subject', { studyId, callerUserId });
   try {
     const orgFilter = callerUserId ? await getOrgMemberUserIds(callerUserId) : null;
@@ -2720,7 +2935,8 @@ export const getQueryCountsBySubject = async (
           WHERE resolution_status_id NOT IN (4, 5)
             AND due_date IS NOT NULL
             AND due_date < NOW()
-        )::int AS overdue_count
+        )::int AS overdue_count,
+        COUNT(*) FILTER (WHERE resolution_status_id IN (4, 5))::int AS closed_count
       FROM note_subjects
       WHERE study_subject_id IS NOT NULL
       GROUP BY study_subject_id
@@ -2730,10 +2946,49 @@ export const getQueryCountsBySubject = async (
     return result.rows.map((r: any) => ({
       studySubjectId: r.study_subject_id,
       openCount: r.open_count || 0,
-      overdueCount: r.overdue_count || 0
+      overdueCount: r.overdue_count || 0,
+      closedCount: r.closed_count || 0
     }));
   } catch (error: any) {
     logger.error('Error getting query counts by subject', { error: error.message });
+    throw error;
+  }
+};
+
+/**
+ * Get per-form query counts for ALL forms belonging to a study subject.
+ * Uses event_crf as the authoritative source of forms, LEFT JOINs to
+ * patient_event_form for denormalized query counts. Works for both
+ * legacy patients (no patient_event_form rows) and current patients.
+ */
+export const getFormQueryCountsBySubject = async (
+  studySubjectId: number
+): Promise<{ eventCrfId: number; studyEventId: number; openCount: number; overdueCount: number; closedCount: number }[]> => {
+  logger.info('Getting form query counts by subject', { studySubjectId });
+  try {
+    const sql = `
+      SELECT
+        ec.event_crf_id,
+        se.study_event_id,
+        COALESCE(pef.open_query_count, 0)::int AS open_count,
+        COALESCE(pef.overdue_query_count, 0)::int AS overdue_count,
+        COALESCE(pef.closed_query_count, 0)::int AS closed_count
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      LEFT JOIN patient_event_form pef ON pef.event_crf_id = ec.event_crf_id
+      WHERE se.study_subject_id = $1
+        AND ec.status_id NOT IN (5, 7)
+    `;
+    const result = await pool.query(sql, [studySubjectId]);
+    return result.rows.map((r: any) => ({
+      eventCrfId: r.event_crf_id,
+      studyEventId: r.study_event_id,
+      openCount: r.open_count || 0,
+      overdueCount: r.overdue_count || 0,
+      closedCount: r.closed_count || 0
+    }));
+  } catch (error: any) {
+    logger.error('Error getting form query counts by subject', { error: error.message });
     throw error;
   }
 };
@@ -2744,7 +2999,7 @@ export const getQueryCountsBySubject = async (
 export const getFormQueryStatusByEvent = async (
   studyEventId: number,
   callerUserId?: number
-): Promise<{ eventCrfId: number; openCount: number; overdueCount: number }[]> => {
+): Promise<{ eventCrfId: number; openCount: number; overdueCount: number; closedCount: number }[]> => {
   logger.info('Getting form query status by event', { studyEventId, callerUserId });
   try {
     const orgFilter = callerUserId ? await getOrgMemberUserIds(callerUserId) : null;
@@ -2759,7 +3014,8 @@ export const getFormQueryStatusByEvent = async (
       SELECT
         event_crf_id,
         SUM(open_count)::int AS open_count,
-        SUM(overdue_count)::int AS overdue_count
+        SUM(overdue_count)::int AS overdue_count,
+        SUM(closed_count)::int AS closed_count
       FROM (
         SELECT
           id.event_crf_id,
@@ -2768,7 +3024,8 @@ export const getFormQueryStatusByEvent = async (
             WHERE dn.resolution_status_id NOT IN (4, 5)
               AND dn.due_date IS NOT NULL
               AND dn.due_date < NOW()
-          )::int AS overdue_count
+          )::int AS overdue_count,
+          COUNT(*) FILTER (WHERE dn.resolution_status_id IN (4, 5))::int AS closed_count
         FROM event_crf ec
         INNER JOIN item_data id ON ec.event_crf_id = id.event_crf_id
         INNER JOIN dn_item_data_map didm ON id.item_data_id = didm.item_data_id
@@ -2787,7 +3044,8 @@ export const getFormQueryStatusByEvent = async (
             WHERE dn.resolution_status_id NOT IN (4, 5)
               AND dn.due_date IS NOT NULL
               AND dn.due_date < NOW()
-          )::int AS overdue_count
+          )::int AS overdue_count,
+          COUNT(*) FILTER (WHERE dn.resolution_status_id IN (4, 5))::int AS closed_count
         FROM dn_event_crf_map decm
         INNER JOIN event_crf ec ON decm.event_crf_id = ec.event_crf_id
         INNER JOIN discrepancy_note dn ON decm.discrepancy_note_id = dn.discrepancy_note_id
@@ -2803,11 +3061,177 @@ export const getFormQueryStatusByEvent = async (
     return result.rows.map((r: any) => ({
       eventCrfId: r.event_crf_id,
       openCount: r.open_count || 0,
-      overdueCount: r.overdue_count || 0
+      overdueCount: r.overdue_count || 0,
+      closedCount: r.closed_count || 0
     }));
   } catch (error: any) {
     logger.error('Error getting form query status by event', { error: error.message });
     throw error;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// RESOLVE RECIPIENTS (preview who will receive a query)
+// ═══════════════════════════════════════════════════════════════════
+
+export const resolveQueryRecipients = async (
+  eventCrfId?: number,
+  studyId?: number
+): Promise<{ recipients: { userId: number; userName: string; fullName: string; roleName: string; source: string }[] }> => {
+  try {
+    const assignees = await resolveAllQueryAssignees(undefined, studyId, eventCrfId);
+    const allIds = [
+      ...(assignees.primaryUserId ? [assignees.primaryUserId] : []),
+      ...assignees.additionalUserIds
+    ];
+
+    if (allIds.length === 0) {
+      return { recipients: [] };
+    }
+
+    const userResult = await pool.query(`
+      SELECT ua.user_id, ua.user_name, ua.first_name, ua.last_name,
+             COALESCE(uae.platform_role, sur.role_name, 'unknown') as role_name
+      FROM user_account ua
+      LEFT JOIN user_account_extended uae ON ua.user_id = uae.user_id
+      LEFT JOIN LATERAL (
+        SELECT sur2.role_name FROM study_user_role sur2
+        WHERE sur2.user_name = ua.user_name AND sur2.status_id = 1
+        ${studyId ? 'AND sur2.study_id = ' + parseInt(String(studyId)) : ''}
+        LIMIT 1
+      ) sur ON true
+      WHERE ua.user_id = ANY($1)
+    `, [allIds]);
+
+    const recipients = userResult.rows.map((r: any) => ({
+      userId: r.user_id,
+      userName: r.user_name,
+      fullName: `${r.first_name} ${r.last_name}`.trim(),
+      roleName: r.role_name || 'unknown',
+      source: r.user_id === assignees.primaryUserId ? 'primary' : 'additional'
+    }));
+
+    return { recipients };
+  } catch (error: any) {
+    logger.warn('resolveQueryRecipients failed', { error: error.message });
+    return { recipients: [] };
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// RE-QUERY (return answered query for further clarification)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Re-query: takes an answered query (Updated or Resolution Proposed)
+ * and sends it back to the respondent with a new message.
+ * Sets status to New (1) so the respondent must re-investigate.
+ *
+ * This is the EDC equivalent of Rave's "re-query" or Clinical One's "re-open":
+ * the monitor is saying "your answer is insufficient, please clarify further."
+ */
+export const requeryQuery = async (
+  queryId: number,
+  userId: number,
+  data: { description: string; detailedNotes?: string }
+): Promise<{ success: true; message: string }> => {
+  logger.info('Re-querying', { queryId, userId });
+
+  const client = await pool.connect();
+  let txStarted = false;
+  try {
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const qResult = await client.query(
+      `SELECT resolution_status_id, description, study_id, assigned_user_id, owner_id
+       FROM discrepancy_note WHERE discrepancy_note_id = $1 AND parent_dn_id IS NULL`,
+      [queryId]
+    );
+    if (qResult.rows.length === 0) {
+      throw new NotFoundError('Query not found');
+    }
+    const q = qResult.rows[0];
+
+    if (q.resolution_status_id !== 2 && q.resolution_status_id !== 3) {
+      throw new ConflictError(
+        'Re-query is only available for queries in "Updated" or "Resolution Proposed" status. ' +
+        'Use "Reopen" for closed queries.'
+      );
+    }
+
+    // Add re-query message as a child discrepancy_note
+    await client.query(`
+      INSERT INTO discrepancy_note (
+        parent_dn_id, description, detailed_notes,
+        discrepancy_note_type_id, resolution_status_id,
+        study_id, entity_type, owner_id, date_created
+      )
+      SELECT
+        $1, $2, $3, 3, 1, study_id, entity_type, $4, NOW()
+      FROM discrepancy_note WHERE discrepancy_note_id = $1
+    `, [queryId, `[RE-QUERY] ${data.description}`, data.detailedNotes || '', userId]);
+
+    // Set parent status back to New (1)
+    await client.query(
+      `UPDATE discrepancy_note SET resolution_status_id = 1 WHERE discrepancy_note_id = $1`,
+      [queryId]
+    );
+
+    // Audit trail
+    const userResult = await client.query(
+      `SELECT first_name, last_name FROM user_account WHERE user_id = $1`, [userId]
+    );
+    const userName = userResult.rows.length > 0
+      ? `${userResult.rows[0].first_name} ${userResult.rows[0].last_name}`.trim()
+      : 'Unknown';
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change, audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Re-Query Issued',
+        $3, 'Status: New (Re-queried)', $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%update%' LIMIT 1)
+      )
+    `, [
+      userId, queryId,
+      `Status: ${q.resolution_status_id === 3 ? 'Resolution Proposed' : 'Updated'}`,
+      `Re-queried by ${userName}: ${data.description}`
+    ]);
+
+    // Update denormalized query counts on patient_event_form
+    const ecIdsRequery = await resolveEventCrfIdsForQuery(client, queryId);
+    for (const ecId of ecIdsRequery) {
+      await updateFormQueryCounts(client, ecId);
+    }
+
+    await client.query('COMMIT');
+
+    // Notify the assigned user about the re-query
+    try {
+      if (q.assigned_user_id && q.assigned_user_id !== userId) {
+        await notificationService.notifyQueryAssigned(
+          q.assigned_user_id,
+          `[RE-QUERY] ${data.description}`,
+          queryId,
+          q.study_id
+        );
+      }
+    } catch { /* non-blocking */ }
+
+    return { success: true, message: 'Query returned for further clarification' };
+  } catch (error: any) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch((rbErr: any) =>
+        logger.warn('ROLLBACK failed in requeryQuery', { rbErr: rbErr.message })
+      );
+    }
+    logger.error('Re-query error', { error: error.message });
+    throw error;
+  } finally {
+    client.release();
   }
 };
 
@@ -2840,5 +3264,7 @@ export default {
   bulkCloseQueries,
   bulkReassignQueries,
   getQueryCountsBySubject,
-  getFormQueryStatusByEvent
+  getFormQueryStatusByEvent,
+  resolveQueryRecipients,
+  requeryQuery
 };

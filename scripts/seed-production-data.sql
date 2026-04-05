@@ -760,3 +760,73 @@ COMMIT;
 --   SS-105 Elena Petrov    — today,   Screening SCHEDULED
 -- ============================================================================
 
+-- ============================================================================
+-- VALIDATION RULES (sample rules for all data types)
+-- References "CRUD Test - All Field Types" form (CRF 211) if it exists.
+-- Demonstrates: value_match, pattern_match, range, consistency, format
+-- ============================================================================
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'validation_rules') THEN
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, compare_value, date_created, owner_id)
+    SELECT 211, 2133, 'YesNo: Yes Trigger', 'Triggers review query when Yes is selected', 'value_match', 'Yes/No', 'warning', '"Yes" answer requires review', true, 'Yes', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'YesNo: Yes Trigger');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, compare_value, date_created, owner_id)
+    SELECT 211, 2130, 'Select: Option 2 Trigger', 'Triggers query when Option 2 is selected', 'value_match', 'Select Dropdown', 'warning', 'Option 2 selected - requires review', true, 'Option 2', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Select: Option 2 Trigger');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, pattern, date_created, owner_id)
+    SELECT 211, 2130, 'Select: Pattern Trigger', 'Triggers on selection matching pattern', 'pattern_match', 'Select Dropdown', 'warning', 'Selection matches flagged pattern', true, '^Option [23]$', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Select: Pattern Trigger');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, compare_value, date_created, owner_id)
+    SELECT 211, 2132, 'Checkbox: Flagged Options', 'Triggers when Option 1 or 3 is checked', 'value_match', 'Checkbox', 'warning', 'Flagged checkbox option(s) selected', true, 'Option 1||Option 3', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Checkbox: Flagged Options');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, compare_value, date_created, owner_id)
+    SELECT 211, 2131, 'Radio: Option 3 Trigger', 'Triggers when Option 3 is selected', 'value_match', 'Radio Group', 'warning', 'Radio Option 3 triggers review query', true, 'Option 3', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Radio: Option 3 Trigger');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, min_value, max_value, date_created, owner_id)
+    SELECT 211, 2125, 'Number: Range 1-100', 'Blocks save if outside range', 'range', 'Number Field', 'error', 'Number must be between 1 and 100', true, 1, 100, NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Number: Range 1-100');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, operator, compare_value, date_created, owner_id)
+    SELECT 211, 2125, 'Number: GT Zero', 'Warns if not greater than 0', 'consistency', 'Number Field', 'warning', 'Number should be greater than 0', true, '>', '0', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Number: GT Zero');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, operator, compare_value, date_created, owner_id)
+    SELECT 211, 2126, 'Decimal: LTE 999.99', 'Warns if decimal exceeds limit', 'consistency', 'Decimal Field', 'warning', 'Decimal should be <= 999.99', true, '<=', '999.99', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Decimal: LTE 999.99');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, pattern, date_created, owner_id)
+    SELECT 211, 2124, 'Text: Adverse Keyword', 'Flags text with adverse/serious', 'pattern_match', 'Text Field', 'warning', 'Text contains flagged keyword', true, 'adverse|serious', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Text: Adverse Keyword');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, compare_value, date_created, owner_id)
+    SELECT 211, 2124, 'Text: Screen Failure', 'Triggers on exact match "screen failure"', 'value_match', 'Text Field', 'warning', '"Screen Failure" triggers query', true, 'screen failure', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Text: Screen Failure');
+
+    INSERT INTO validation_rules (crf_id, item_id, name, description, rule_type, field_path, severity, error_message, active, format_type, date_created, owner_id)
+    SELECT 211, 2134, 'Email: Format Check', 'Blocks save on invalid email', 'format', 'Email', 'error', 'Invalid email address format', true, 'email', NOW(), 1
+    WHERE EXISTS (SELECT 1 FROM crf WHERE crf_id = 211)
+    AND NOT EXISTS (SELECT 1 FROM validation_rules WHERE crf_id = 211 AND name = 'Email: Format Check');
+
+    RAISE NOTICE 'Seeded 11 validation rules for CRF 211 (CRUD Test - All Field Types)';
+  END IF;
+END $$;
+
+COMMIT;

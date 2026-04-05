@@ -29,6 +29,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { parseDateLocal } from '../../utils/date.util';
+import { updateFormQueryCounts } from './query.service';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -39,7 +40,7 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
     `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
     [callerUserId]
   );
-  if (orgCheck.rows.length === 0) return null; // No org = root admin, sees all
+  if (orgCheck.rows.length === 0) return [callerUserId]; // No org = only see own tasks
   const orgIds = orgCheck.rows.map((r: any) => r.organization_id);
   const members = await pool.query(
     `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
@@ -1443,6 +1444,28 @@ export async function completeTask(
         await writeTaskAuditLog(userId, 'discrepancy_note', sourceId,
           reason || 'Query closed via task completion',
           `resolution_status_id=${oldStatusId}`, 'resolution_status_id=4');
+
+        // Update denormalized query counts on patient_event_form
+        try {
+          const ecIds = await pool.query(`
+            SELECT DISTINCT ec_id FROM (
+              SELECT id.event_crf_id AS ec_id FROM dn_item_data_map didm
+              INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
+              WHERE didm.discrepancy_note_id = $1
+              UNION
+              SELECT decm.event_crf_id AS ec_id FROM dn_event_crf_map decm
+              WHERE decm.discrepancy_note_id = $1
+            ) t WHERE ec_id IS NOT NULL
+          `, [sourceId]);
+          const client = await pool.connect();
+          try {
+            for (const row of ecIds.rows) {
+              await updateFormQueryCounts(client, row.ec_id);
+            }
+          } finally { client.release(); }
+        } catch (e: any) {
+          logger.warn('Failed to update form query counts after task completion', { error: e.message });
+        }
         break;
       }
 
