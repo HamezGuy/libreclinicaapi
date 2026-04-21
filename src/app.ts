@@ -88,6 +88,8 @@ import formLayoutRoutes from './routes/form-layout.routes';
 import permissionRoutes from './routes/permission.routes';
 // Form Folder organization (visual-only, acc_form_folder tables)
 import formFolderRoutes from './routes/form-folder.routes';
+// TODO: Re-enable when Protocol-to-eCRF AI pipeline is production-ready
+// import protocolParseRoutes from './routes/protocol-parse.routes';
 
 // ============================================================================
 // FEATURE FLAGS FOR CUSTOM TABLE EXTENSIONS
@@ -122,6 +124,9 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       scriptSrc: ["'self'"],
       imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'https://api.accuratrials.com', 'https:'],
+      formAction: ["'self'"],
+      frameAncestors: ["'none'"],
     },
   },
   hsts: {
@@ -307,6 +312,8 @@ app.use('/api/sites', siteRoutes);
 app.use('/api/form-layout', formLayoutRoutes);
 // Per-user custom permission overrides (à la carte permissions)
 app.use('/api/permissions', permissionRoutes);
+// TODO: Re-enable when Protocol-to-eCRF AI pipeline is production-ready
+// app.use('/api/protocol-parse', protocolParseRoutes);
 
 // ============================================================================
 // CONDITIONAL ROUTES - Require custom acc_* tables

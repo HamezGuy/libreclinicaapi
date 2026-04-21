@@ -358,8 +358,8 @@ function validateBundle(bundle: any): string[] {
 }
 
 /** Build name-to-new-ID map after fields are created.
- *  Maps refKey, field name, AND label to the new numeric item_id string
- *  so remapCondition can resolve any reference style.
+ *  Maps refKey, field name, AND label to the new numeric item_id string.
+ *  Used for SCD records and anywhere a numeric item_id is needed.
  */
 function buildNameToIdMap(
   fields: ExportedField[],
@@ -379,12 +379,36 @@ function buildNameToIdMap(
   return map;
 }
 
+/** Build name-to-field-name map after fields are created.
+ *  Maps refKey, label, AND numeric item_id to the field's canonical name.
+ *  Used for showWhen/hideWhen/requiredWhen conditions and validation rules
+ *  because the frontend skip-logic system resolves condition.fieldId by
+ *  field name (the branching-config dropdown binds to field.name).
+ */
+function buildNameToFieldNameMap(
+  fields: ExportedField[],
+  newItemIds: number[]
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (let i = 0; i < fields.length; i++) {
+    const ef = fields[i];
+    const fieldName = ef.name || ef.label || ef.refKey;
+    // refKey (primary) → field name
+    map.set(ef.refKey, fieldName);
+    // label → field name
+    if (ef.label && ef.label !== fieldName) map.set(ef.label, fieldName);
+    // numeric item_id → field name (so cross-references work)
+    map.set(String(newItemIds[i]), fieldName);
+  }
+  return map;
+}
+
 function remapCondition(
   cond: ExportedCondition,
-  nameToId: Map<string, string>
+  nameToFieldName: Map<string, string>
 ): any {
   return {
-    fieldId: nameToId.get(cond.fieldRef) || cond.fieldRef,
+    fieldId: nameToFieldName.get(cond.fieldRef) || cond.fieldRef,
     operator: cond.operator,
     value: cond.value,
     value2: cond.value2,
@@ -395,10 +419,10 @@ function remapCondition(
 
 function remapConditions(
   conditions: ExportedCondition[] | undefined,
-  nameToId: Map<string, string>
+  nameToFieldName: Map<string, string>
 ): any[] | undefined {
   if (!conditions || conditions.length === 0) return undefined;
-  return conditions.map(c => remapCondition(c, nameToId));
+  return conditions.map(c => remapCondition(c, nameToFieldName));
 }
 
 /**
@@ -562,7 +586,7 @@ export async function importBundle(
           [
             ef.label || ef.name || `Field ${i + 1}`,
             description,
-            ef.unit || '',
+            ef.unit || getDefaultClinicalUnit(fieldType) || '',
             ef.isPhiField === true,
             dataTypeId,
             userId,
@@ -613,8 +637,12 @@ export async function importBundle(
 
       // ── PASS 2 for this form: Remap ID references ────────────────
       const nameToId = buildNameToIdMap(form.fields, newItemIds);
+      const nameToFieldName = buildNameToFieldNameMap(form.fields, newItemIds);
 
       // Update extended props with remapped showWhen/hideWhen/requiredWhen/dependsOn
+      // Conditions use field NAMES (not numeric IDs) because the frontend
+      // branching-config dropdown binds to field.name and the skip-logic
+      // evaluator resolves condition.fieldId via buildFormDataWithNameLookup.
       for (let i = 0; i < form.fields.length; i++) {
         const ef = form.fields[i];
         const itemId = newItemIds[i];
@@ -633,11 +661,11 @@ export async function importBundle(
           try { parsed = JSON.parse(desc.substring(idx + marker.length).trim()); } catch { parsed = {}; }
         }
 
-        if (ef.showWhen) parsed.showWhen = remapConditions(ef.showWhen, nameToId);
-        if (ef.hideWhen) parsed.hideWhen = remapConditions(ef.hideWhen, nameToId);
-        if (ef.requiredWhen) parsed.requiredWhen = remapConditions(ef.requiredWhen, nameToId);
+        if (ef.showWhen) parsed.showWhen = remapConditions(ef.showWhen, nameToFieldName);
+        if (ef.hideWhen) parsed.hideWhen = remapConditions(ef.hideWhen, nameToFieldName);
+        if (ef.requiredWhen) parsed.requiredWhen = remapConditions(ef.requiredWhen, nameToFieldName);
         if (ef.dependsOnRefs) {
-          parsed.dependsOn = ef.dependsOnRefs.map(ref => nameToId.get(ref) || ref);
+          parsed.dependsOn = ef.dependsOnRefs.map(ref => nameToFieldName.get(ref) || ref);
         }
 
         const newDesc = baseDesc
@@ -688,20 +716,29 @@ export async function importBundle(
 
       // Create validation rules
       for (const rule of (form.validationRuleRecords || [])) {
-        const fieldPath = nameToId.get(rule.fieldRef) || rule.fieldRef;
-        const compareFieldPath = rule.compareFieldRef ? (nameToId.get(rule.compareFieldRef) || rule.compareFieldRef) : null;
+        // Resolve fieldPath to the canonical field NAME (not numeric ID) so the
+        // frontend's priority 2-5 name-based matching works reliably.
+        const fieldPath = nameToFieldName.get(rule.fieldRef) || rule.fieldRef;
+        const compareFieldPath = rule.compareFieldRef
+          ? (nameToFieldName.get(rule.compareFieldRef) || rule.compareFieldRef)
+          : null;
+        // Resolve item_id for priority-1 matching in the frontend
+        const ruleItemId = nameToId.get(rule.fieldRef)
+          ? parseInt(nameToId.get(rule.fieldRef)!)
+          : null;
         try {
           await client.query(
             `INSERT INTO validation_rules (
-               crf_id,crf_version_id,name,description,rule_type,field_path,
+               crf_id,crf_version_id,item_id,name,description,rule_type,field_path,
                severity,error_message,warning_message,active,
                min_value,max_value,pattern,format_type,operator,
                compare_field_path,compare_value,custom_expression,
                bp_systolic_min,bp_systolic_max,bp_diastolic_min,bp_diastolic_max,
                table_cell_target,date_created,owner_id
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW(),$24)`,
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW(),$25)`,
             [
-              newCrfId, newCrfVersionId, rule.name || '', rule.description || '',
+              newCrfId, newCrfVersionId, ruleItemId,
+              rule.name || '', rule.description || '',
               rule.ruleType, fieldPath, rule.severity || 'error',
               rule.errorMessage, rule.warningMessage || null, rule.active !== false,
               rule.minValue ?? null, rule.maxValue ?? null,
@@ -769,7 +806,7 @@ export async function importBundle(
     }
 
     // ── PASS 3: Resolve cross-form links across all forms ──────────
-    // We need the per-form nameToId maps, so rebuild them from DB
+    // We need the per-form maps, so rebuild them from DB
     for (const created of createdForms) {
       const form = bundle.forms.find(f => f.refKey === created.refKey);
       if (!form?.formLinks?.length) continue;
@@ -784,8 +821,13 @@ export async function importBundle(
 
       // Map field refKeys to new item IDs by position (fields were inserted in order)
       const nameToId = new Map<string, string>();
+      const nameToFieldName = new Map<string, string>();
       for (let i = 0; i < form.fields.length && i < itemRows.rows.length; i++) {
-        nameToId.set(form.fields[i].refKey, String(itemRows.rows[i].item_id));
+        const ef = form.fields[i];
+        nameToId.set(ef.refKey, String(itemRows.rows[i].item_id));
+        const fieldName = ef.name || ef.label || ef.refKey;
+        nameToFieldName.set(ef.refKey, fieldName);
+        if (ef.label && ef.label !== fieldName) nameToFieldName.set(ef.label, fieldName);
       }
 
       for (const link of form.formLinks) {
@@ -820,13 +862,13 @@ export async function importBundle(
           description: link.description,
           targetFormId: targetCrfId,
           targetFormName: form.name,
-          triggerConditions: remapConditions(link.triggerConditions, nameToId) || [],
+          triggerConditions: remapConditions(link.triggerConditions, nameToFieldName) || [],
           linkType: link.linkType || 'modal',
           required: link.required || false,
           autoOpen: link.autoOpen || false,
           prefillFields: link.prefillFields?.map(pf => ({
-            sourceFieldId: nameToId.get(pf.sourceFieldRef) || pf.sourceFieldRef,
-            targetFieldId: nameToId.get(pf.targetFieldRef) || pf.targetFieldRef
+            sourceFieldId: nameToFieldName.get(pf.sourceFieldRef) || pf.sourceFieldRef,
+            targetFieldId: nameToFieldName.get(pf.targetFieldRef) || pf.targetFieldRef
           })),
           enabled: link.enabled !== false
         });
@@ -862,26 +904,80 @@ export async function importBundle(
 // HELPERS — field type mapping (mirrors form.service.ts logic)
 // ============================================================================
 
+/**
+ * Map canonical field type → LibreClinica item_data_type_id.
+ * Must match the authoritative mapping in form.service.ts (mapFieldTypeToDataType).
+ *
+ * item_data_type table (IDs 1–9 only in standard LibreClinica):
+ *   1=BL(Boolean) 2=INT 3=REAL 4=DATE 5=PDATE(ST) 6=FILE 7=BL 8=CODE 9=SET
+ *
+ * However, our production DB uses a different numbering (seeded from form.service.ts):
+ *   1=BL  5=ST  6=INT  7=REAL  9=DATE  11=FILE
+ */
 function mapTypeToDataTypeId(fieldType: string): number {
   const map: Record<string, number> = {
-    text: 9, number: 6, date: 9, time: 9, datetime: 9, textarea: 9,
-    select: 9, radio: 9, checkbox: 9, yesno: 9, combobox: 9,
-    file: 9, image: 9, barcode: 9,
-    email: 9, phone: 9, url: 9,
-    table: 12, inline_group: 12, blood_pressure: 12,
-    criteria_list: 12, question_table: 12,
-    section_header: 9, static_text: 9,
-    calculated: 8, group_calculation: 9
+    text: 5, textarea: 5, email: 5, phone: 5, address: 5,
+    patient_name: 5, patient_id: 5, ssn: 5, medical_record_number: 5,
+    medication: 5, diagnosis: 5, procedure: 5, lab_result: 5,
+    static_text: 5, section_header: 5, barcode: 5, qrcode: 5,
+    number: 6, heart_rate: 6, respiration_rate: 6,
+    decimal: 7, calculation: 7, age: 7, bsa: 7, egfr: 7, sum: 7, average: 7,
+    height: 7, weight: 7, temperature: 7, oxygen_saturation: 7, bmi: 7,
+    date: 9, datetime: 9, date_of_birth: 9, time: 5,
+    checkbox: 1, yesno: 5, radio: 5, select: 5, combobox: 5,
+    file: 11, image: 11, signature: 11,
+    table: 5, inline_group: 5, blood_pressure: 5,
+    criteria_list: 5, question_table: 5,
   };
-  return map[fieldType] || 9;
+  return map[fieldType?.toLowerCase()] || 5;
 }
 
+/**
+ * Map canonical field type → response_type_id.
+ * Must match form.service.ts (mapFieldTypeToResponseType):
+ *   1=text, 2=textarea, 3=checkbox, 4=file, 5=radio,
+ *   6=single-select, 7=multi-select, 8=calculation,
+ *   9=group-calculation, 10=instant-calculation/barcode
+ */
 function mapTypeToResponseTypeId(fieldType: string): number {
   const map: Record<string, number> = {
-    text: 1, textarea: 2, select: 3, radio: 5, checkbox: 6, yesno: 5,
-    combobox: 7, file: 8, calculation: 9, group_calculation: 10
+    text: 1, email: 1, phone: 1, address: 1,
+    patient_name: 1, patient_id: 1, ssn: 1,
+    medical_record_number: 1, medication: 1, diagnosis: 1,
+    procedure: 1, lab_result: 1, static_text: 1,
+    number: 1, decimal: 1, date: 1, datetime: 1, time: 1,
+    date_of_birth: 1, height: 1, weight: 1, temperature: 1,
+    heart_rate: 1, blood_pressure: 1, oxygen_saturation: 1,
+    respiration_rate: 1, table: 1, inline_group: 1,
+    criteria_list: 1, question_table: 1, section_header: 1,
+    combobox: 6,
+    textarea: 2,
+    checkbox: 3,
+    file: 4, image: 4, signature: 4,
+    radio: 5, yesno: 5,
+    select: 6,
+    calculation: 8, bmi: 8, bsa: 8, egfr: 8, age: 8,
+    sum: 9, average: 9,
+    barcode: 10, qrcode: 10,
   };
-  return map[fieldType] || 1;
+  return map[fieldType?.toLowerCase()] || 1;
+}
+
+/**
+ * Default clinical units for vital-sign field types.
+ */
+function getDefaultClinicalUnit(fieldType: string): string {
+  const defaults: Record<string, string> = {
+    height: 'cm',
+    weight: 'kg',
+    temperature: '°C',
+    heart_rate: 'bpm',
+    blood_pressure: 'mmHg',
+    oxygen_saturation: '%',
+    respiration_rate: 'breaths/min',
+    bmi: 'kg/m²',
+  };
+  return defaults[fieldType?.toLowerCase()] || '';
 }
 
 function buildExtendedProps(ef: ExportedField, fieldType: string): string | null {
@@ -919,12 +1015,11 @@ function buildExtendedProps(ef: ExportedField, fieldType: string): string | null
   if (ef.questionRows) props.questionRows = ef.questionRows;
   if (ef.questionTableSettings) props.questionTableSettings = ef.questionTableSettings;
 
-  // showWhen/hideWhen/requiredWhen/dependsOn are handled in pass 2 after remapping
-  // but we store placeholders so the structure exists
-  if (ef.showWhen) props.showWhen = ef.showWhen;
-  if (ef.hideWhen) props.hideWhen = ef.hideWhen;
-  if (ef.requiredWhen) props.requiredWhen = ef.requiredWhen;
-  if (ef.dependsOnRefs) props.dependsOn = ef.dependsOnRefs;
+  // showWhen/hideWhen/requiredWhen/dependsOn are remapped in Pass 2.
+  // Do NOT store placeholders here — the ExportedCondition format uses
+  // `fieldRef` (not `fieldId`), and if Pass 2 fails to update, the
+  // unreferenced `fieldRef` conditions would be filtered out by
+  // normalizeToArray (which requires `c.fieldId`), silently breaking branching.
 
   if (Object.keys(props).length <= 1) return null;
   return JSON.stringify(props);
