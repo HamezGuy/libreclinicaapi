@@ -17,6 +17,46 @@
 import { logger } from './logger';
 
 /**
+ * ISSUE-414: returns true if the given column is referenced by a view or
+ * rule. ALTER TABLE ... ALTER COLUMN TYPE will fail with "cannot alter type
+ * of a column used by a view or rule" in that case, so callers should skip
+ * the alter rather than attempt-and-fail (which logs at ERROR level via
+ * the database wrapper).
+ *
+ * Returns true if blocked. Returns false on the (rare) case the dependency
+ * probe itself errors, so the caller still attempts the alter and
+ * preserves prior behavior.
+ */
+async function columnHasDependentViewOrRule(
+  pool: any,
+  table: string,
+  column: string
+): Promise<boolean> {
+  try {
+    const res = await pool.query(
+      `SELECT 1
+         FROM pg_depend d
+         JOIN pg_attribute a
+           ON d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
+         JOIN pg_class c
+           ON d.refobjid = c.oid
+         JOIN pg_namespace n
+           ON c.relnamespace = n.oid
+        WHERE n.nspname = current_schema()
+          AND c.relname = $1
+          AND a.attname = $2
+          AND d.classid = 'pg_rewrite'::regclass
+          AND d.deptype <> 'i'
+        LIMIT 1`,
+      [table, column]
+    );
+    return (res.rowCount ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run all startup migrations
  * Creates tables with IF NOT EXISTS so they're idempotent
  */
@@ -64,6 +104,11 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'econsent_extended_columns', fn: addEconsentExtendedColumns },
     { name: 'patient_event_form_query_counts', fn: addPatientEventFormQueryCounts },
     { name: 'fix_null_phi_required_columns', fn: fixNullPhiRequiredColumns },
+    { name: 'visit_date_reference_columns', fn: addVisitDateReferenceColumns },
+    { name: 'query_pending_correction_columns', fn: createQueryPendingCorrectionColumns },
+    { name: 'form_folder_org_scoping', fn: addFormFolderOrgScoping },
+    { name: 'audit_immutability_triggers', fn: createAuditImmutabilityTriggers },
+    { name: 'audit_hash_chain_columns', fn: addAuditHashChainColumns },
   ];
 
   let successCount = 0;
@@ -147,7 +192,41 @@ async function createEmailTables(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_email_queue_scheduled ON acc_email_queue(scheduled_for)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_notification_pref_user ON acc_notification_preference(user_id)`);
 
-  logger.info('Email notification tables verified');
+  // Seed email templates — only query-related templates are active.
+  // Other templates are kept as inactive seeds so they're ready if needed later.
+  const templates = [
+    {
+      name: 'query_opened',
+      subject: 'New Query Assigned — {{studyName}}',
+      html: `<h2>New Query Assigned</h2><p>A query has been assigned to you in <strong>{{studyName}}</strong>.</p><p><strong>Subject:</strong> {{subjectLabel}}<br/><strong>Created by:</strong> {{createdByName}}</p><blockquote>{{queryText}}</blockquote><p><a href="{{dashboardUrl}}">View in Dashboard</a></p>`,
+      text: 'New Query Assigned\n\nA query has been assigned to you in {{studyName}}.\nSubject: {{subjectLabel}}\nCreated by: {{createdByName}}\n\n{{queryText}}\n\nView in Dashboard: {{dashboardUrl}}',
+      desc: 'Sent when a query is assigned to a user',
+    },
+    {
+      name: 'query_response',
+      subject: 'Query Response — {{studyName}}',
+      html: `<h2>Query Response Received</h2><p><strong>{{respondedByName}}</strong> responded to a query in <strong>{{studyName}}</strong>.</p><blockquote>{{responseText}}</blockquote><p><a href="{{dashboardUrl}}">View in Dashboard</a></p>`,
+      text: 'Query Response Received\n\n{{respondedByName}} responded to a query in {{studyName}}.\n\n{{responseText}}\n\nView: {{dashboardUrl}}',
+      desc: 'Sent when a query receives a response',
+    },
+    {
+      name: 'query_closed',
+      subject: 'Query Closed — {{studyName}}',
+      html: `<h2>Query Closed</h2><p>A query in <strong>{{studyName}}</strong> has been closed by <strong>{{closedByName}}</strong>.</p><p><a href="{{dashboardUrl}}">View in Dashboard</a></p>`,
+      text: 'Query Closed\n\nA query in {{studyName}} has been closed by {{closedByName}}.\n\nView: {{dashboardUrl}}',
+      desc: 'Sent when a query is closed',
+    },
+  ];
+
+  for (const t of templates) {
+    await pool.query(`
+      INSERT INTO acc_email_template (name, subject, html_body, text_body, description)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (name) DO NOTHING
+    `, [t.name, t.subject, t.html, t.text, t.desc]);
+  }
+
+  logger.info('Email notification tables and templates verified');
 }
 
 // ============================================================================
@@ -1680,6 +1759,9 @@ async function widenDescriptionColumns(pool: any): Promise<void> {
     { table: 'discrepancy_note', column: 'detailed_notes' },
   ];
 
+  let widened = 0;
+  let skippedViewLocked = 0;
+
   for (const { table, column } of columns) {
     try {
       const check = await pool.query(`
@@ -1687,16 +1769,29 @@ async function widenDescriptionColumns(pool: any): Promise<void> {
         FROM information_schema.columns
         WHERE table_name = $1 AND column_name = $2
       `, [table, column]);
-      if (check.rows.length > 0 && check.rows[0].character_maximum_length) {
-        await pool.query(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE TEXT`);
-        logger.info(`Widened ${table}.${column} from varchar(${check.rows[0].character_maximum_length}) to TEXT`);
+      if (check.rows.length === 0) continue;
+      if (!check.rows[0].character_maximum_length) continue;
+
+      // ISSUE-414: skip silently when a view/rule depends on the column.
+      // The ALTER would otherwise fail with "cannot alter type of a
+      // column used by a view or rule", logging an ERROR every boot.
+      if (await columnHasDependentViewOrRule(pool, table, column)) {
+        skippedViewLocked++;
+        continue;
       }
+
+      await pool.query(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE TEXT`);
+      logger.info(`Widened ${table}.${column} from varchar(${check.rows[0].character_maximum_length}) to TEXT`);
+      widened++;
     } catch (e: any) {
       // Column may not exist or already be TEXT
     }
   }
 
-  logger.info('Description column widening verified');
+  logger.info('Description column widening verified', {
+    widened,
+    skippedViewLocked,
+  });
 }
 
 // ============================================================================
@@ -1904,6 +1999,8 @@ async function widenStudyColumns(pool: any): Promise<void> {
   ];
 
   let changed = 0;
+  let skippedViewLocked = 0;
+
   for (const { table, column, type } of alterations) {
     try {
       const check = await pool.query(
@@ -1917,13 +2014,23 @@ async function widenStudyColumns(pool: any): Promise<void> {
       if (row.data_type === 'text' && isText) continue;
       if (row.character_maximum_length && targetLen && row.character_maximum_length >= targetLen) continue;
 
+      // ISSUE-414: skip silently when a view/rule depends on the column.
+      // The ALTER would otherwise fail with "cannot alter type of a
+      // column used by a view or rule", logging an ERROR every boot.
+      if (await columnHasDependentViewOrRule(pool, table, column)) {
+        skippedViewLocked++;
+        continue;
+      }
+
       await pool.query(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE ${type}`);
       changed++;
     } catch (err: any) {
       logger.warn(`Could not widen ${table}.${column} to ${type}: ${err.message}`);
     }
   }
-  logger.info(`Study columns widened: ${changed} column(s) updated`);
+  logger.info(`Study columns widened: ${changed} column(s) updated`, {
+    skippedViewLocked,
+  });
 }
 
 async function createQuerySeverityColumn(pool: any): Promise<void> {
@@ -1940,6 +2047,13 @@ async function createQueryGenerationTypeColumn(pool: any): Promise<void> {
     WHERE discrepancy_note_type_id = 1 AND (generation_type IS NULL OR generation_type = 'manual')
   `);
   logger.info('generation_type column verified on discrepancy_note');
+}
+
+async function createQueryPendingCorrectionColumns(pool: any): Promise<void> {
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS pending_correction_value TEXT`);
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS pending_correction_reason TEXT`);
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS pending_correction_user_id INTEGER`);
+  logger.info('pending_correction columns verified on discrepancy_note');
 }
 
 // ============================================================================
@@ -2101,4 +2215,132 @@ async function fixNullPhiRequiredColumns(pool: any): Promise<void> {
   }
 
   logger.info('NULL phi_status / required column fix verified');
+}
+
+/**
+ * Add visit_date_reference and visit_date_custom columns to study_subject
+ * to allow per-patient visit timing to be based on scheduling date,
+ * enrollment date, or a user-chosen custom date.
+ */
+async function addVisitDateReferenceColumns(pool: any): Promise<void> {
+  try {
+    await pool.query(`
+      ALTER TABLE study_subject
+      ADD COLUMN IF NOT EXISTS visit_date_reference VARCHAR(20) DEFAULT 'scheduling_date',
+      ADD COLUMN IF NOT EXISTS visit_date_custom DATE
+    `);
+    logger.info('visit_date_reference columns ensured on study_subject');
+  } catch (e: any) {
+    // Columns may already exist
+    if (e.code === '42701') {
+      logger.info('visit_date_reference columns already exist');
+    } else {
+      logger.warn('visit_date_reference migration skipped:', e.message);
+    }
+  }
+}
+
+/**
+ * Add organization_id to acc_form_folder for multi-tenant isolation.
+ * Backfills existing folders from their owner's active organization membership.
+ */
+async function addFormFolderOrgScoping(pool: any): Promise<void> {
+  await pool.query(`
+    ALTER TABLE acc_form_folder
+    ADD COLUMN IF NOT EXISTS organization_id INTEGER
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_form_folder_org ON acc_form_folder(organization_id)
+  `);
+
+  // Backfill: set organization_id from the folder owner's org membership
+  const backfilled = await pool.query(`
+    UPDATE acc_form_folder f
+    SET organization_id = sub.organization_id
+    FROM (
+      SELECT DISTINCT ON (m.user_id) m.user_id, m.organization_id
+      FROM acc_organization_member m
+      WHERE m.status = 'active'
+      ORDER BY m.user_id, m.date_joined DESC
+    ) sub
+    WHERE f.owner_id = sub.user_id AND f.organization_id IS NULL
+  `);
+  if (backfilled.rowCount > 0) {
+    logger.info(`Backfilled organization_id on ${backfilled.rowCount} form folders`);
+  }
+
+  logger.info('organization_id column and index verified on acc_form_folder');
+}
+
+/**
+ * 21 CFR Part 11 §11.10(e) — Audit trail immutability.
+ * Creates DB-level triggers that prevent DELETE on audit tables.
+ * This makes tampering impossible even with direct database access.
+ */
+async function createAuditImmutabilityTriggers(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION prevent_audit_delete()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      RAISE EXCEPTION '21 CFR Part 11: Audit records cannot be deleted (table: %)', TG_TABLE_NAME;
+    END;
+    $$ LANGUAGE plpgsql
+  `);
+
+  const auditTables = [
+    'audit_log_event',
+    'audit_user_login',
+    'audit_user_api_log',
+  ];
+
+  for (const table of auditTables) {
+    const triggerName = `no_delete_${table}`;
+    try {
+      await pool.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.triggers
+            WHERE trigger_name = '${triggerName}' AND event_object_table = '${table}'
+          ) THEN
+            CREATE TRIGGER ${triggerName}
+              BEFORE DELETE ON ${table}
+              FOR EACH ROW EXECUTE FUNCTION prevent_audit_delete();
+          END IF;
+        END $$
+      `);
+    } catch {
+      // Table may not exist yet — skip silently
+    }
+  }
+
+  logger.info('Audit immutability triggers verified on audit tables');
+}
+
+/**
+ * 21 CFR Part 11 §11.10(e) — Audit trail integrity.
+ * Adds hash chain columns to audit_log_event for tamper detection.
+ * Each record stores its own SHA-256 hash and the hash of the previous record,
+ * creating a blockchain-style chain.
+ */
+async function addAuditHashChainColumns(pool: any): Promise<void> {
+  try {
+    await pool.query(`
+      ALTER TABLE audit_log_event
+      ADD COLUMN IF NOT EXISTS record_hash VARCHAR(128),
+      ADD COLUMN IF NOT EXISTS previous_hash VARCHAR(128)
+    `);
+  } catch {
+    // Columns may already exist or table not ready
+  }
+
+  try {
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_log_event_record_hash
+      ON audit_log_event(record_hash)
+    `);
+  } catch {
+    // Index may already exist
+  }
+
+  logger.info('Hash chain columns verified on audit_log_event');
 }

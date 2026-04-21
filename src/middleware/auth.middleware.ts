@@ -46,25 +46,11 @@ export const authMiddleware = (
   try {
     const decoded = jwt.verify(token, config.jwt.secret) as any;
     
-    // Check token expiration (session timeout - §11.300)
-    const tokenAge = Date.now() - (decoded.iat * 1000);
-    const maxAge = config.part11.sessionTimeoutMinutes * 60 * 1000;
-    
-    if (tokenAge > maxAge) {
-      logger.warn('Token expired (session timeout)', { 
-        userId: decoded.userId,
-        tokenAge: Math.round(tokenAge / 1000 / 60),
-        maxAge: config.part11.sessionTimeoutMinutes
-      });
-      res.status(401).json({
-        success: false,
-        error: {
-          code: 'SESSION_EXPIRED',
-          message: 'Session has expired. Please log in again.'
-        }
-      });
-      return;
-    }
+    // Token expiration is handled by jwt.verify() using the JWT `exp` claim.
+    // Inactivity-based session timeout is enforced by the frontend's 20-minute
+    // idle timer (IdleTimeoutService). No server-side iat-based age check is
+    // needed — it caused a competing timeout that conflicted with the frontend
+    // idle system and triggered spurious 401s during background token refreshes.
     
     // Attach user to request (including role for permission checks)
     (req as AuthRequest).user = {

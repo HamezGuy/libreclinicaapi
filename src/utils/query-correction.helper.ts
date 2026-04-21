@@ -194,3 +194,74 @@ export function deserializeCorrectionForDisplay(
       return itemDataValue ?? jsonbValue ?? '';
   }
 }
+
+// ─── Cell Path Parsing (mirrors frontend table-cell-path.utils.ts) ─────────
+
+const DATA_TABLE_PATH_RE = /^(.+)\[(\d+|\*)\]\.(.+)$/;
+const QUESTION_TABLE_PATH_RE = /^([^.[]+)\.([^.]+)\.([^.]+)$/;
+
+export interface CellTypeInfo {
+  cellType: string;
+  cellOptions?: { label: string; value: string }[];
+  cellMin?: number;
+  cellMax?: number;
+}
+
+/**
+ * Parse a cellPath and extract the column key.
+ * Returns null if the string is not a valid cell path.
+ */
+export function parseCellPathColumnKey(cellPath: string | null | undefined): string | null {
+  if (!cellPath) return null;
+  const dtMatch = cellPath.match(DATA_TABLE_PATH_RE);
+  if (dtMatch) return dtMatch[3];
+  const qtMatch = cellPath.match(QUESTION_TABLE_PATH_RE);
+  if (qtMatch) return qtMatch[3];
+  return null;
+}
+
+/**
+ * Resolve the specific column type for a cell-level query from
+ * the parent field's FieldTypeInfo. Returns null if the cellPath
+ * is not a valid cell path or the column cannot be found.
+ */
+export function resolveCellTypeInfo(
+  cellPath: string | null | undefined,
+  parentFieldTypeInfo: FieldTypeInfo
+): CellTypeInfo | null {
+  const colKey = parseCellPathColumnKey(cellPath);
+  if (!colKey) return null;
+
+  // Check data table columns
+  if (parentFieldTypeInfo.tableColumns?.length) {
+    const col = parentFieldTypeInfo.tableColumns.find(
+      (c: any) => (c.id === colKey || c.name === colKey || c.key === colKey)
+    );
+    if (col) {
+      return {
+        cellType: col.type || 'text',
+        cellOptions: col.options,
+        cellMin: col.min,
+        cellMax: col.max,
+      };
+    }
+  }
+
+  // Check question table answer columns
+  if (parentFieldTypeInfo.questionRows?.length) {
+    const firstRow = parentFieldTypeInfo.questionRows[0];
+    const ansCol = (firstRow as any).answerColumns?.find(
+      (c: any) => c.id === colKey
+    );
+    if (ansCol) {
+      return {
+        cellType: ansCol.type || 'text',
+        cellOptions: ansCol.options,
+        cellMin: ansCol.min,
+        cellMax: ansCol.max,
+      };
+    }
+  }
+
+  return null;
+}

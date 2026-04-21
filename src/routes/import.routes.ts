@@ -10,8 +10,10 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import * as csvToOdm from '../services/import/csv-to-odm.service';
+import { buildOdmFromSubjectData } from '../services/import/odm-builder.service';
 import { getSoapClient } from '../services/soap/soapClient';
 import { logger } from '../config/logger';
+import type { ImportSubjectData } from '@accura-trial/shared-types';
 
 const router = Router();
 
@@ -195,11 +197,11 @@ router.post('/convert', upload.single('file'), asyncHandler(async (req: Request,
  * POST /api/import/execute
  * Execute import via LibreClinica SOAP
  */
-router.post('/execute', upload.single('file'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/execute', requireRole('admin', 'data_manager'), upload.single('file'), asyncHandler(async (req: Request, res: Response) => {
   const file = req.file;
   const { studyOID, metaDataVersionOID, mapping, odmXml: providedOdm } = req.body;
-  const userId = (req as any).user?.userId || 1;
-  const username = (req as any).user?.username || 'api';
+  const userId = (req as any).user?.userId;
+  const username = (req as any).user?.userName || (req as any).user?.username;
 
   let odmXml: string;
 
@@ -278,6 +280,125 @@ router.post('/execute', upload.single('file'), asyncHandler(async (req: Request,
     data: result.data
   });
 }));
+
+/**
+ * POST /api/import/from-json
+ *
+ * Import clinical data supplied as `ImportSubjectData[]` JSON (canonical
+ * `@accura-trial/shared-types` shape). Built primarily for the
+ * interop-middleware FHIR → EDC bridge, which prefers structured JSON
+ * over assembling ODM XML on the bridge side.
+ *
+ * Internally this route:
+ *   1. Validates the request shape
+ *   2. Builds ODM 1.3 XML via `buildOdmFromSubjectData` (the SHARED
+ *      builder used by the CSV path too — no parallel formats)
+ *   3. Submits the XML through the same `dataSoap.import` SOAP call as
+ *      `POST /api/import/execute`, attributed to the JWT-authenticated
+ *      caller (so 21 CFR Part 11 §11.10(e) audit and §11.50 signature
+ *      semantics are identical to every other write path)
+ *
+ * Optional body fields:
+ *   - signatureUsername / signaturePassword / signatureMeaning
+ *     Forwarded verbatim if present; the SOAP layer + part11 middleware
+ *     verify them using the existing libreclinicaapi flow.
+ *
+ * Returns: same shape as `/api/import/execute` so callers can swap.
+ */
+router.post(
+  '/from-json',
+  requireRole('admin', 'data_manager'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const userId = (req as any).user?.userId;
+    const username =
+      (req as any).user?.userName || (req as any).user?.username;
+
+    const {
+      studyOID,
+      metaDataVersionOID,
+      subjects,
+      fileOID,
+      creationDateTimeIso,
+    } = req.body as {
+      studyOID?: string;
+      metaDataVersionOID?: string;
+      subjects?: ImportSubjectData[];
+      fileOID?: string;
+      creationDateTimeIso?: string;
+    };
+
+    if (!studyOID || typeof studyOID !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'studyOID is required (string)',
+      });
+    }
+    if (!Array.isArray(subjects) || subjects.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'subjects (ImportSubjectData[]) is required and non-empty',
+      });
+    }
+
+    // Minimal structural validation: each subject must declare subjectOID
+    // and at least one studyEventData entry. Deeper validation is the
+    // SOAP layer's job; this just rejects obviously-bad payloads early.
+    const malformed = subjects.findIndex(
+      (s) =>
+        !s ||
+        typeof s.subjectOID !== 'string' ||
+        s.subjectOID.length === 0 ||
+        !Array.isArray(s.studyEventData),
+    );
+    if (malformed !== -1) {
+      return res.status(400).json({
+        success: false,
+        message: `subjects[${malformed}] is missing subjectOID or studyEventData`,
+      });
+    }
+
+    const odmXml = buildOdmFromSubjectData(subjects, {
+      studyOID,
+      metaDataVersionOID: metaDataVersionOID || 'v1.0.0',
+      fileOID,
+      creationDateTimeIso,
+    });
+
+    logger.info('Executing JSON import via LibreClinica SOAP', {
+      username,
+      subjectCount: subjects.length,
+      odmLength: odmXml.length,
+    });
+
+    const soapClient = getSoapClient();
+    const result = await soapClient.executeRequest({
+      serviceName: 'data',
+      methodName: 'import',
+      parameters: { odm: odmXml },
+      userId,
+      username,
+    });
+
+    if (!result.success) {
+      logger.error('JSON import failed', { error: result.error });
+      return res.status(500).json({
+        success: false,
+        message: result.error || 'Import failed',
+        soapFault: result.soapFault,
+      });
+    }
+
+    logger.info('JSON import successful', {
+      subjectCount: subjects.length,
+    });
+
+    res.json({
+      success: true,
+      message: 'Data imported successfully via LibreClinica',
+      data: result.data,
+    });
+  }),
+);
 
 /**
  * POST /api/import/auto-map

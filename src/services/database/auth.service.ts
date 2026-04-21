@@ -46,9 +46,17 @@ export const authenticateUser = async (
 ): Promise<ApiResponse<User>> => {
   logger.info('Authenticating user', { username, ipAddress });
 
-  // Demo mode - allow any credentials
+  // Demo mode - allow any credentials (NEVER in production)
   const isDemoMode = process.env.DEMO_MODE === 'true' || config.demoMode === true;
   
+  if (isDemoMode && process.env.NODE_ENV === 'production') {
+    logger.error('[21 CFR Part 11 VIOLATION] DEMO_MODE=true in production — authentication refused');
+    return {
+      success: false,
+      message: 'Demo mode is disabled in production environments'
+    };
+  }
+
   if (isDemoMode) {
     logger.info('Demo mode - authenticating with demo credentials', { username });
     

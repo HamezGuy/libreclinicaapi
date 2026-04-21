@@ -897,30 +897,144 @@ export const updateStudyEvent = async (
       params.push(data.referenceEventId);
     }
 
-    if (updates.length === 0) {
+    if (updates.length === 0 && !(data as any).crfAssignments) {
       return {
         success: false,
         message: 'No fields to update'
       };
     }
 
-    updates.push(`date_updated = NOW()`);
-    updates.push(`update_id = $${paramIndex++}`);
-    params.push(userId);
+    if (updates.length > 0) {
+      updates.push(`date_updated = NOW()`);
+      updates.push(`update_id = $${paramIndex++}`);
+      params.push(userId);
 
-    params.push(eventDefinitionId);
+      params.push(eventDefinitionId);
 
-    const updateQuery = `
-      UPDATE study_event_definition
-      SET ${updates.join(', ')}
-      WHERE study_event_definition_id = $${paramIndex}
-    `;
+      const updateQuery = `
+        UPDATE study_event_definition
+        SET ${updates.join(', ')}
+        WHERE study_event_definition_id = $${paramIndex}
+      `;
 
-    const updateResult = await client.query(updateQuery, params);
-    if (updateResult.rowCount === 0) {
-      await client.query('ROLLBACK');
-      client.release();
-      return { success: false, message: `Event definition ${eventDefinitionId} not found` };
+      const updateResult = await client.query(updateQuery, params);
+      if (updateResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        client.release();
+        return { success: false, message: `Event definition ${eventDefinitionId} not found` };
+      }
+    }
+
+    // When schedule_day changes, reschedule all existing patient visit instances
+    if (data.scheduleDay !== undefined) {
+      const newScheduleDay = data.scheduleDay;
+      if (newScheduleDay != null) {
+        // Get the study_id for this event definition to find all affected patients
+        const defRow = await client.query(
+          `SELECT study_id FROM study_event_definition WHERE study_event_definition_id = $1`,
+          [eventDefinitionId]
+        );
+        const studyId = defRow.rows[0]?.study_id;
+        if (studyId) {
+          // For each patient that has this visit scheduled, recalculate their scheduled_date
+          // based on their anchor date (enrollment_date, screening_date, or custom)
+          const affectedVisits = await client.query(`
+            SELECT se.study_event_id, ss.study_subject_id,
+                   ss.enrollment_date, ss.screening_date,
+                   ss.visit_date_reference, ss.visit_date_custom
+            FROM study_event se
+            JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+            WHERE se.study_event_definition_id = $1
+              AND COALESCE(se.is_unscheduled, false) = false
+          `, [eventDefinitionId]);
+
+          for (const visit of affectedVisits.rows) {
+            const ref = visit.visit_date_reference || 'scheduling_date';
+            let anchorStr: string | null = null;
+            if (ref === 'enrollment_date') {
+              anchorStr = visit.enrollment_date;
+            } else if (ref === 'custom_date') {
+              anchorStr = visit.visit_date_custom;
+            } else {
+              anchorStr = visit.screening_date || visit.enrollment_date;
+            }
+            if (anchorStr) {
+              const anchor = new Date(anchorStr);
+              if (!isNaN(anchor.getTime())) {
+                const visitDate = new Date(anchor.getTime());
+                visitDate.setDate(visitDate.getDate() + newScheduleDay);
+                const isoDate = visitDate.toISOString().substring(0, 10);
+                await client.query(
+                  `UPDATE study_event SET scheduled_date = $1::date WHERE study_event_id = $2`,
+                  [isoDate, visit.study_event_id]
+                );
+              }
+            }
+          }
+
+          logger.info('Rescheduled patient visits after schedule_day change', {
+            eventDefinitionId,
+            newScheduleDay,
+            affectedCount: affectedVisits.rows.length
+          });
+        }
+      }
+    }
+
+    // Handle CRF assignment changes if provided.
+    // This only modifies the TEMPLATE (event_definition_crf).
+    // Existing patient copies (event_crf, patient_event_form) are NOT modified —
+    // patients own their visit data independently.
+    const crfAssignments = (data as any).crfAssignments;
+    if (crfAssignments && Array.isArray(crfAssignments)) {
+      const defRow = await client.query(
+        `SELECT study_id FROM study_event_definition WHERE study_event_definition_id = $1`,
+        [eventDefinitionId]
+      );
+      const studyId = defRow.rows[0]?.study_id;
+
+      await client.query(`
+        UPDATE event_definition_crf SET status_id = 5, date_updated = NOW(), update_id = $1
+        WHERE study_event_definition_id = $2
+      `, [userId, eventDefinitionId]);
+
+      for (const crfAssign of crfAssignments) {
+        const crfId = crfAssign.crfId || crfAssign.crf_id;
+        if (!crfId) continue;
+
+        let defaultVersionId = crfAssign.crfVersionId || crfAssign.crf_version_id || null;
+        if (!defaultVersionId) {
+          const vr = await client.query(
+            `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
+            [crfId]
+          );
+          if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crf_version_id;
+        }
+
+        await client.query(`
+          INSERT INTO event_definition_crf (
+            study_event_definition_id, study_id, crf_id, required_crf,
+            double_entry, hide_crf, ordinal, status_id, owner_id, date_created,
+            default_version_id, electronic_signature
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9, $10)
+        `, [
+          eventDefinitionId,
+          studyId,
+          crfId,
+          crfAssign.required ?? crfAssign.required_crf ?? false,
+          crfAssign.doubleEntry ?? crfAssign.doubleDataEntry ?? crfAssign.double_entry ?? false,
+          crfAssign.hideCrf ?? crfAssign.hide_crf ?? false,
+          crfAssign.ordinal || 1,
+          userId,
+          defaultVersionId,
+          crfAssign.electronicSignature ?? crfAssign.electronic_signature ?? false
+        ]);
+      }
+
+      logger.info('CRF assignments updated for event', {
+        eventDefinitionId,
+        assignmentCount: crfAssignments.length
+      });
     }
 
     // Log audit event
@@ -1666,6 +1780,59 @@ export const assignFormToPatientVisit = async (
 };
 
 /**
+ * Remove a form from a specific patient visit instance (not the template).
+ * Soft-deletes the event_crf and removes the patient_event_form snapshot.
+ */
+export const removeFormFromPatientVisit = async (
+  studyEventId: number,
+  eventCrfId: number,
+  userId: number
+): Promise<{ success: boolean; message?: string }> => {
+  logger.info('Removing form from patient visit', { studyEventId, eventCrfId });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const check = await client.query(
+      `SELECT ec.event_crf_id, ec.study_event_id, ec.completion_status_id
+       FROM event_crf ec
+       WHERE ec.event_crf_id = $1 AND ec.study_event_id = $2 AND ec.status_id NOT IN (5, 7)`,
+      [eventCrfId, studyEventId]
+    );
+    if (check.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Form assignment not found on this visit' };
+    }
+
+    if (check.rows[0].completion_status_id >= 4) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Cannot remove a completed form' };
+    }
+
+    await client.query(
+      `UPDATE event_crf SET status_id = 5, date_updated = NOW() WHERE event_crf_id = $1`,
+      [eventCrfId]
+    );
+
+    await client.query(
+      `DELETE FROM patient_event_form WHERE event_crf_id = $1`,
+      [eventCrfId]
+    );
+
+    await client.query('COMMIT');
+
+    return { success: true, message: 'Form removed from patient visit' };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('Remove form from patient visit error', { error: error.message });
+    return { success: false, message: `Failed: ${error.message}` };
+  } finally {
+    client.release();
+  }
+};
+
+/**
  * Create an unscheduled visit on the fly for a patient.
  * Creates a study_event_definition (if name doesn't exist) + study_event + event_crfs.
  */
@@ -2359,6 +2526,7 @@ export default {
   bulkAssignCrfsToEvent,
   // Patient-specific visit/form operations
   assignFormToPatientVisit,
+  removeFormFromPatientVisit,
   createUnscheduledVisit,
   getPatientFormSnapshots,
   savePatientFormData,

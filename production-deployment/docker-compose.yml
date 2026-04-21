@@ -123,12 +123,30 @@ services:
       ENABLE_ECONSENT: "true"
       ENABLE_EPRO: "true"
       ENABLE_RTSM: "true"
+      # 21 CFR Part 11 §11.50 — strict signature on validation-rule writes.
+      # Set to "true" to require signaturePassword + signatureUsername on
+      # POST/PUT/PATCH/DELETE of /api/validation-rules. The frontend pops
+      # the e-sig modal automatically (see validation-rules-config).
+      STRICT_VALIDATION_RULE_SIGNATURES: ${STRICT_VALIDATION_RULE_SIGNATURES:-false}
+      # AI rule-compiler feature toggle and provider selection.
+      AI_COMPILER_ENABLED: ${AI_COMPILER_ENABLED:-false}
+      AI_COMPILER_PROVIDER: ${AI_COMPILER_PROVIDER:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-2024-11-20}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-pro}
+      AI_COMPILER_TEMPERATURE: ${AI_COMPILER_TEMPERATURE:-0}
+      AI_COMPILER_TIMEOUT_MS: ${AI_COMPILER_TIMEOUT_MS:-30000}
+      AI_COMPILER_MAX_FIELDS: ${AI_COMPILER_MAX_FIELDS:-500}
+      AI_COMPILER_MAX_DESCRIPTION_CHARS: ${AI_COMPILER_MAX_DESCRIPTION_CHARS:-4000}
+      AI_COMPILER_MAX_RULES_HARD_CAP: ${AI_COMPILER_MAX_RULES_HARD_CAP:-10}
+      AI_COMPILE_RATE_LIMIT_MAX: ${AI_COMPILE_RATE_LIMIT_MAX:-20}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 8
+      start_period: 60s
     volumes:
       - api_uploads:/app/uploads
     networks:

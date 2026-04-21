@@ -75,7 +75,7 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   }
 
   // Validate entity type
-  const validEntityTypes = ['event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock', 'consent'];
+  const validEntityTypes = ['event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock', 'consent', 'study'];
   if (!validEntityTypes.includes(entityType)) {
     res.status(400).json({
       success: false,

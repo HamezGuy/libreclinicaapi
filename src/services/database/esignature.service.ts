@@ -45,6 +45,7 @@ export type SignableEntityType =
   | 'study_subject'     // Subject enrollment
   | 'discrepancy_note'  // Query closure
   | 'data_lock'         // Data lock confirmation
+  | 'study'             // Study create/update
   | 'consent';          // eConsent signature
 
 export interface SignatureRequest {

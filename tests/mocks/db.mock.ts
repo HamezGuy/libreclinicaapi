@@ -196,7 +196,10 @@ async function initSchema(db: IMemoryDb) {
         update_id INTEGER,
         study_subject_id INTEGER,
         event_crf_id INTEGER,
-        item_data_id INTEGER
+        item_data_id INTEGER,
+        pending_correction_value TEXT,
+        pending_correction_reason TEXT,
+        pending_correction_user_id INTEGER
       );
 
       CREATE TABLE discrepancy_note_type (

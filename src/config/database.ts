@@ -50,7 +50,10 @@ class DatabaseConnection {
       logger.error('Unexpected database error', { error: err.message });
     });
     
-    // Test the connection immediately
+    // Test the connection asynchronously; failure is logged, not fatal.
+    // In production the server starts listening before this completes
+    // (see server.ts initializeDatabase), so a slow pool.connect won't
+    // block Docker health checks.
     this.testConnection();
   }
   

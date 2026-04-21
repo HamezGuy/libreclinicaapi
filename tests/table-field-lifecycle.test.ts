@@ -61,8 +61,8 @@ const SAMPLE_TABLE_FIELD = {
 describe('Table Field Serialization (Save Path)', () => {
 
   test('confirmSignature serializes table columns correctly', () => {
-    // Simulate what confirmSignature does with a table field
     const field = { ...SAMPLE_TABLE_FIELD };
+    const isTable = ['table', 'repeating', 'repeating-group', 'grid'].includes(field.type?.toLowerCase());
     
     const processed = {
       id: field.id,
@@ -71,7 +71,7 @@ describe('Table Field Serialization (Save Path)', () => {
       label: field.label,
       tableColumns: field.tableColumns?.length > 0 ? field.tableColumns : undefined,
       tableRows: field.tableRows?.length > 0 ? field.tableRows : undefined,
-      tableSettings: field.type === 'table' ? (field.tableSettings || {}) : undefined,
+      tableSettings: isTable ? (field.tableSettings || {}) : undefined,
     };
 
     expect(processed.tableColumns).toBeDefined();
@@ -394,7 +394,7 @@ describe('getTableColumns Resolution', () => {
     };
     
     const columns = field.tableColumns.map((col: any) => ({
-      key: col.name || col.id || col.key,
+      key: col.key || col.name || col.id,
       label: col.label || col.name || col.id,
       type: col.type || 'text',
     }));

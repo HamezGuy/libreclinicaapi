@@ -240,8 +240,8 @@ router.get('/kits', async (req: Request, res: Response, next: NextFunction) => {
 router.post('/kits', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { studyId, kitTypeId, kits } = req.body;
-    const userId = req.user?.userId || 1;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     const client = await pool.connect();
     try {
@@ -413,8 +413,8 @@ router.get('/shipments', async (req: Request, res: Response, next: NextFunction)
 router.post('/shipments', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { studyId, destinationSiteId, kitIds, shipDate, expectedDeliveryDate, trackingNumber } = req.body;
-    const userId = req.user?.userId || 1;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     const client = await pool.connect();
     try {
@@ -503,7 +503,7 @@ router.post('/shipments/:id/ship', async (req: Request, res: Response, next: Nex
   try {
     const { id } = req.params;
     const { trackingNumber } = req.body;
-    const userId = (req as any).user?.userId || 1;
+    const userId = (req as any).user?.userId;
 
     const result = await pool.query(`
       UPDATE acc_shipment 
@@ -538,8 +538,8 @@ router.post('/shipments/:id/confirm', async (req: Part11Request, res: Response, 
   try {
     const { id } = req.params;
     const { receivedKitIds, notes } = req.body;
-    const userId = req.user?.userId || 1;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     const client = await pool.connect();
     try {
@@ -640,8 +640,8 @@ router.post('/shipments/:id/confirm', async (req: Part11Request, res: Response, 
 router.post('/dispense', requireSignature, async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { kitId, subjectId, visitId, notes } = req.body;
-    const userId = req.user?.userId || 1;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     const client = await pool.connect();
     try {
@@ -805,7 +805,7 @@ router.get('/dispensations', async (req: Request, res: Response, next: NextFunct
 router.post('/temperature', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { siteId, storageUnit, temperature, humidity, notes, deviceId } = req.body;
-    const userId = (req as any).user?.userId || 1;
+    const userId = (req as any).user?.userId;
 
     // Check for temperature excursion (typical 2-8°C range for refrigerated storage)
     const isExcursion = temperature < 2 || temperature > 8;
@@ -1074,8 +1074,8 @@ router.post('/alerts', async (req: Part11Request, res: Response, next: NextFunct
       thresholdValue, 
       currentValue 
     } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     if (!studyId || !alertType || !message) {
       return res.status(400).json({
@@ -1142,8 +1142,8 @@ router.post('/alerts', async (req: Part11Request, res: Response, next: NextFunct
 router.post('/alerts/:id/acknowledge', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     // Get current status
     const currentResult = await pool.query(
@@ -1206,8 +1206,8 @@ router.post('/alerts/:id/resolve', async (req: Part11Request, res: Response, nex
   try {
     const { id } = req.params;
     const { notes } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     // Get current status
     const currentResult = await pool.query(
@@ -1327,8 +1327,8 @@ router.get('/alerts/summary', async (req: Request, res: Response, next: NextFunc
 router.post('/alerts/check-inventory', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { studyId } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     if (!studyId) {
       return res.status(400).json({ success: false, message: 'studyId is required' });
@@ -1425,8 +1425,8 @@ router.post('/alerts/check-inventory', async (req: Part11Request, res: Response,
 router.post('/alerts/check-expiry', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { studyId, daysAhead = 30 } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     if (!studyId) {
       return res.status(400).json({ success: false, message: 'studyId is required' });

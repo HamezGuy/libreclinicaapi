@@ -29,6 +29,7 @@ import crypto from 'crypto';
 import { pool } from '../config/database';
 import { logger } from '../config/logger';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import { initializeFileUploadsTable } from '../services/database/file-uploads.service';
 
 // Initialize table on module load
@@ -79,7 +80,6 @@ const upload = multer({
       'text/plain',
       'text/csv',
       'application/dicom',
-      'application/octet-stream',
       'application/zip',
       'application/x-zip-compressed',
       'application/x-zip'
@@ -581,7 +581,7 @@ router.get('/consent/:consentId', authMiddleware, async (req: Request, res: Resp
  * Delete file
  * DELETE /api/files/:id
  */
-router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     

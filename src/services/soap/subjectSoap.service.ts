@@ -109,9 +109,18 @@ export const createSubject = async (
   userId: number,
   username: string
 ): Promise<ApiResponse<SoapSubjectResponse>> => {
+  // Accept either `label` (canonical, matches shared-types + Joi) or the
+  // deprecated `studySubjectId` alias for backward compatibility.
+  const subjectLabel = request.label ?? request.studySubjectId ?? '';
+  if (!subjectLabel) {
+    return {
+      success: false,
+      message: 'Subject label is required (set `label` on the request).',
+    };
+  }
   logger.info('Creating subject via SOAP', {
     studyId: request.studyId,
-    studySubjectId: request.studySubjectId,
+    label: subjectLabel,
     userId,
     username
   });
@@ -127,11 +136,11 @@ export const createSubject = async (
     const bodyContent = `
       <v1:createRequest>
          <v1:studySubject>
-            <v1:label>${escapeXml(request.studySubjectId)}</v1:label>
+            <v1:label>${escapeXml(subjectLabel)}</v1:label>
             <v1:secondaryLabel>${escapeXml(request.secondaryId || '')}</v1:secondaryLabel>
             <v1:enrollmentDate>${request.enrollmentDate || todayIso()}</v1:enrollmentDate>
             <v1:subject>
-               <v1:uniqueIdentifier>${escapeXml(request.studySubjectId)}</v1:uniqueIdentifier>
+               <v1:uniqueIdentifier>${escapeXml(subjectLabel)}</v1:uniqueIdentifier>
                ${gender ? `<v1:gender>${gender}</v1:gender>` : ''}
                ${request.dateOfBirth ? `<v1:dateOfBirth>${request.dateOfBirth}</v1:dateOfBirth>` : ''}
             </v1:subject>
@@ -164,15 +173,15 @@ export const createSubject = async (
     
     if (result === 'Success') {
       logger.info('Subject created successfully via SOAP', {
-        studySubjectId: request.studySubjectId,
-        label
+        requestLabel: subjectLabel,
+        responseLabel: label,
       });
 
       return {
         success: true,
         data: {
           result: 'success',
-          label: label || request.studySubjectId
+          label: label || subjectLabel
         },
         message: 'Subject created successfully via SOAP'
       };
@@ -188,7 +197,7 @@ export const createSubject = async (
   } catch (error: any) {
     logger.error('Subject creation SOAP error', {
       error: error.message,
-      studySubjectId: request.studySubjectId
+      label: subjectLabel,
     });
 
     return {

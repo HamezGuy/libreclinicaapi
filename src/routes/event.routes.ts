@@ -126,6 +126,12 @@ router.post('/instance/:studyEventId/crfs',
   controller.assignFormToPatientVisit
 );
 
+// Remove form from a specific patient visit instance (does NOT modify template)
+router.delete('/instance/:studyEventId/crfs/:eventCrfId', 
+  requireRole('admin', 'data_manager', 'coordinator'),
+  controller.removeFormFromPatientVisit
+);
+
 // Create an unscheduled visit on the fly for a patient
 router.post('/unscheduled', 
   requireRole('admin', 'data_manager', 'coordinator', 'investigator'),

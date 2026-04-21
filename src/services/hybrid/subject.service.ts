@@ -18,6 +18,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
+import { randomUUID } from 'crypto';
 import * as subjectSoap from '../soap/subjectSoap.service';
 import { logAuditEvent, AuditEventType } from '../../middleware/audit.middleware';
 import { 
@@ -29,7 +30,7 @@ import {
   toStudySubject
 } from '../../types/libreclinica-models';
 import * as workflowService from '../database/workflow.service';
-import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp } from '../../utils/date.util';
+import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp, parseDateLocal } from '../../utils/date.util';
 import { getFormMetadata } from './form.service';
 
 async function repairSequence(
@@ -95,7 +96,7 @@ async function insertWithRetry(
 export interface SubjectCreateRequest {
   // === STUDY_SUBJECT TABLE FIELDS ===
   studyId: number;
-  studySubjectId: string;             // label column (varchar 30)
+  label: string;                      // study_subject.label — the ONE user-visible Subject ID (varchar 30)
   secondaryId?: string;               // secondary_label column (varchar 30)
   enrollmentDate?: string;            // enrollment_date column
   screeningDate?: string;             // screening enrollment date (app-level, not in LC schema)
@@ -189,6 +190,11 @@ const createSubjectDirect = async (
 
   const client = await pool.connect();
 
+  const subjectLabel = request.label?.trim() || '';
+  if (!subjectLabel) {
+    return { success: false, message: 'Subject ID (label) is required.' };
+  }
+
   try {
     await client.query('BEGIN');
 
@@ -200,19 +206,19 @@ const createSubjectDirect = async (
     `;
     const duplicateCheck = await client.query(duplicateCheckQuery, [
       request.studyId, 
-      request.studySubjectId
+      subjectLabel
     ]);
     
     if (duplicateCheck.rows.length > 0) {
       await client.query('ROLLBACK');
       logger.warn('Subject label already exists in study', { 
-        label: request.studySubjectId, 
+        label: subjectLabel, 
         studyId: request.studyId,
         existingId: duplicateCheck.rows[0].study_subject_id
       });
       return {
         success: false,
-        message: `Subject with ID "${request.studySubjectId}" already exists in this study. Please use a different Subject ID.`
+        message: `Subject with ID "${subjectLabel}" already exists in this study. Please use a different Subject ID.`
       };
     }
 
@@ -221,35 +227,15 @@ const createSubjectDirect = async (
     const gender = request.gender === 'Male' || request.gender === 'm' ? 'm' : 
                    request.gender === 'Female' || request.gender === 'f' ? 'f' : '';
     
-    // Use personId if provided for cross-study linking
-    // If not provided, generate a study-specific unique identifier to avoid conflicts
-    // The unique_identifier is used for cross-study patient linking in LibreClinica
-    let uniqueIdentifier: string;
-    if (request.personId && request.personId.trim()) {
-      uniqueIdentifier = request.personId.trim();
-    } else {
-      // Generate a unique identifier that includes studyId to prevent conflicts
-      // Format: studySubjectId-studyId (ensures uniqueness across studies)
-      uniqueIdentifier = `${request.studySubjectId}-S${request.studyId}`;
-    }
+    // unique_identifier uses a UUID to guarantee no cross-study collisions.
+    // The personId (if provided) is stored for display but the internal
+    // identifier is always a globally unique value per enrollment.
+    const personIdRaw = request.personId?.trim() || '';
+    const uniqueIdentifier = randomUUID();
     
-    // Check if subject with this unique_identifier already exists
-    // This handles cross-study linking when personId is provided
-    let existingSubjectId: number | null = null;
-    if (request.personId && request.personId.trim()) {
-      const existingSubjectQuery = `
-        SELECT subject_id FROM subject 
-        WHERE unique_identifier = $1 AND status_id = 1
-      `;
-      const existingResult = await client.query(existingSubjectQuery, [uniqueIdentifier]);
-      if (existingResult.rows.length > 0) {
-        existingSubjectId = existingResult.rows[0].subject_id;
-        logger.info('Found existing subject for cross-study linking', { 
-          uniqueIdentifier, 
-          subjectId: existingSubjectId 
-        });
-      }
-    }
+    // Cross-study linking is NOT performed automatically.
+    // Each study enrollment always creates its own subject row so that
+    // patients from different organizations/studies cannot interfere.
     
     // Handle family links (for genetic studies)
     const fatherId = request.fatherId && request.fatherId > 0 ? request.fatherId : null;
@@ -257,14 +243,9 @@ const createSubjectDirect = async (
     
     let subjectId: number;
     
-    // Use existing subject if found (cross-study linking)
-    if (existingSubjectId) {
-      subjectId = existingSubjectId;
-      logger.info('Using existing subject for new study enrollment', { subjectId, uniqueIdentifier });
-    } else {
-      // Create new subject record
-      // Try full schema first, fall back to minimal schema if columns don't exist
-      // Use SAVEPOINT to handle schema differences without aborting the transaction
+    {
+      // Always create a new subject row for each study enrollment.
+      // This guarantees patients are isolated per-study.
       await repairSequence(client, 'subject_subject_id_seq', 'subject', 'subject_id');
       let subjectResult;
       await client.query('SAVEPOINT subject_insert');
@@ -337,11 +318,9 @@ const createSubjectDirect = async (
       RETURNING study_subject_id
     `;
 
-    // Generate OC OID (OpenClinica Object ID)
-    // Include studyId and timestamp to ensure uniqueness across studies
-    const timestamp = Date.now().toString(36); // Base36 for compact representation
-    const cleanLabel = request.studySubjectId.replace(/[^a-zA-Z0-9]/g, '');
-    const ocOid = `SS_${request.studyId}_${cleanLabel}_${timestamp}`.substring(0, 40);
+    // oc_oid uses a UUID — guaranteed globally unique, no collision risk.
+    // Prefixed with SS_ to identify it as a StudySubject OID.
+    const ocOid = `SS_${randomUUID()}`.substring(0, 40);
     
     // Handle timezone (defaults to empty string if not provided)
     const timeZone = request.timeZone || '';
@@ -350,7 +329,7 @@ const createSubjectDirect = async (
     const effectiveScreeningDate = request.screeningDate || formatIsoDate(new Date());
 
     const studySubjectResult = await client.query(studySubjectQuery, [
-      request.studySubjectId,
+      subjectLabel,
       request.secondaryId || '',
       subjectId,
       request.studyId,
@@ -409,6 +388,12 @@ const createSubjectDirect = async (
     let scheduledEventIds: number[] = [];
     let totalFormsCreated = 0;
     const enrollmentDate = request.enrollmentDate || request.screeningDate || formatIsoDate(new Date());
+    logger.info('🗓️ Phase scheduling anchor date', {
+      studySubjectId,
+      requestEnrollmentDate: request.enrollmentDate ?? '(not provided)',
+      requestScreeningDate: request.screeningDate ?? '(not provided)',
+      resolvedAnchor: enrollmentDate
+    });
     const phaseDetails: { name: string; eventId: number; formsCreated: number }[] = [];
     
     // Resolve to parent study for event definitions.
@@ -433,7 +418,7 @@ const createSubjectDirect = async (
     if (eventDefsResult.rows.length > 0) {
       logger.info('🗓️ Auto-scheduling study phases for patient enrollment', { 
         studySubjectId, 
-        label: request.studySubjectId,
+        label: subjectLabel,
         phaseCount: eventDefsResult.rows.length,
         phases: eventDefsResult.rows.map((e: any) => e.name)
       });
@@ -447,13 +432,19 @@ const createSubjectDirect = async (
           // to be rolled back.
           await client.query(`SAVEPOINT ${spName}`);
 
-          // Use schedule_day from the event definition if configured,
-          // otherwise fall back to ordinal-based 7-day spacing
-          const daysOffset = eventDef.schedule_day != null
-            ? eventDef.schedule_day
-            : (eventDef.ordinal - 1) * 7;
-          const eventStartDate = new Date(enrollmentDate);
-          eventStartDate.setDate(eventStartDate.getDate() + daysOffset);
+          // Use schedule_day from the event definition to compute the due date.
+          // date_start = the anchor (enrollment/screening date) for all visits,
+          // scheduled_date (due date) = anchor + schedule_day offset.
+          if (eventDef.schedule_day == null) {
+            throw new Error(
+              `Visit "${eventDef.name}" (definition ${eventDef.study_event_definition_id}) has no schedule_day configured. ` +
+              `Set the number of days for this visit in the study event definitions before enrolling patients.`
+            );
+          }
+          const daysOffset = eventDef.schedule_day;
+          const anchorDate = parseDateLocal(enrollmentDate) || new Date();
+          const eventDueDate = new Date(anchorDate.getTime());
+          eventDueDate.setDate(eventDueDate.getDate() + daysOffset);
           
           // Resolve subject_event_status_id before the INSERT to avoid
           // a subquery failure inside the INSERT poisoning the transaction.
@@ -483,11 +474,11 @@ const createSubjectDirect = async (
               eventDef.study_event_definition_id,
               studySubjectId,
               request.scheduleEvent?.location || '',
-              formatIsoDate(eventStartDate),
-              formatIsoDate(eventStartDate),
+              formatIsoDate(anchorDate),
+              formatIsoDate(anchorDate),
               userId,
               sesId,
-              formatIsoDate(eventStartDate)
+              formatIsoDate(eventDueDate)
             ]);
             await client.query(`RELEASE SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
           } catch (insertErr: any) {
@@ -507,8 +498,8 @@ const createSubjectDirect = async (
                 eventDef.study_event_definition_id,
                 studySubjectId,
                 request.scheduleEvent?.location || '',
-                formatIsoDate(eventStartDate),
-                formatIsoDate(eventStartDate),
+                formatIsoDate(anchorDate),
+                formatIsoDate(anchorDate),
                 userId,
                 sesId
               ]);
@@ -624,7 +615,7 @@ const createSubjectDirect = async (
       
       logger.info('✅ Patient enrollment complete - phases and forms copied', { 
         studySubjectId,
-        label: request.studySubjectId, 
+        label: subjectLabel, 
         phasesScheduled: scheduledEventIds.length,
         totalFormsCreated,
         phaseDetails
@@ -646,7 +637,7 @@ const createSubjectDirect = async (
         entityName: 'study_subject',
         entityId: studySubjectId,
         newValue: JSON.stringify({
-          label: request.studySubjectId,
+          label: subjectLabel,
           studyId: request.studyId,
           enrollmentDate: request.enrollmentDate || null,
           gender: request.gender,
@@ -660,7 +651,7 @@ const createSubjectDirect = async (
     logger.info('Subject created successfully via direct database', { 
       subjectId, 
       studySubjectId, 
-      label: request.studySubjectId 
+      label: subjectLabel 
     });
 
     // AUTO-TRIGGER WORKFLOW: Create enrollment verification workflow
@@ -669,10 +660,10 @@ const createSubjectDirect = async (
       await workflowService.triggerSubjectEnrolledWorkflow(
         studySubjectId,
         request.studyId,
-        request.studySubjectId,
+        subjectLabel,
         userId
       );
-      logger.info('Auto-triggered enrollment verification workflow', { studySubjectId, label: request.studySubjectId });
+      logger.info('Auto-triggered enrollment verification workflow', { studySubjectId, label: subjectLabel });
     } catch (workflowError: any) {
       // Don't fail enrollment if workflow creation fails
       logger.warn('Failed to auto-create enrollment workflow', { error: workflowError.message });
@@ -687,7 +678,7 @@ const createSubjectDirect = async (
         studySubjectId,
         
         // Study Subject fields
-        label: request.studySubjectId,
+        label: subjectLabel,
         secondaryLabel: request.secondaryId || '',
         studyId: request.studyId,
         enrollmentDate: effectiveEnrollmentDate,
@@ -696,7 +687,7 @@ const createSubjectDirect = async (
         ocOid,
         
         // Subject demographics
-        personId: uniqueIdentifier,
+        personId: personIdRaw || uniqueIdentifier,
         gender: gender,
         dateOfBirth: request.dateOfBirth || null,
         
@@ -725,10 +716,18 @@ const createSubjectDirect = async (
     logger.error('Direct subject creation failed', { error: error.message });
     
     // Check for duplicate
-    if (error.code === '23505') { // Unique violation
+    if (error.code === '23505') {
+      const constraint = error.constraint || '';
+      if (constraint.includes('oc_oid') || constraint.includes('uniq_study_subject_oid')) {
+        logger.warn('OC OID collision — this is a transient uniqueness conflict, not a real duplicate subject', { constraint });
+        return {
+          success: false,
+          message: 'A temporary identifier conflict occurred. Please try again.'
+        };
+      }
       return {
         success: false,
-        message: 'Subject with this ID already exists in this study or another study'
+        message: `Subject with ID "${subjectLabel}" already exists in this study. Please use a different Subject ID.`
       };
     }
 
@@ -755,6 +754,7 @@ export const getSubjectList = async (
     status?: string;
     page?: number;
     limit?: number;
+    includeArchived?: boolean;
   },
   userId?: number,
   username?: string
@@ -762,7 +762,7 @@ export const getSubjectList = async (
   logger.info('Getting subject list (SOAP primary)', { studyId, filters, soapEnabled: config.libreclinica.soapEnabled });
 
   try {
-    const { status, page = 1, limit = 20 } = filters;
+    const { status, page = 1, limit = 20, includeArchived = false } = filters;
     const offset = (page - 1) * limit;
 
     // Try SOAP first for Part 11 compliance
@@ -781,10 +781,21 @@ export const getSubjectList = async (
           // Enrich with DB stats
           const enrichedSubjects = await enrichSubjectsWithStats(soapResult.data, studyId);
           
-          // Apply status filter if specified
+          // Filter out archived subjects unless explicitly requested
           let filteredSubjects = enrichedSubjects;
+          if (!includeArchived) {
+            const archivedStatuses = new Set(['removed', 'auto-removed', 'auto-deleted', 'withdrawn']);
+            const archivedStatusIds = new Set([5, 6, 7]);
+            filteredSubjects = filteredSubjects.filter((s: any) => {
+              if (s.statusId && archivedStatusIds.has(s.statusId)) return false;
+              if (s.status && archivedStatuses.has(s.status.toLowerCase())) return false;
+              return true;
+            });
+          }
+
+          // Apply status filter if specified
           if (status) {
-            filteredSubjects = enrichedSubjects.filter((s: any) => 
+            filteredSubjects = filteredSubjects.filter((s: any) => 
               s.status?.toLowerCase() === status.toLowerCase()
             );
           }
@@ -813,9 +824,11 @@ export const getSubjectList = async (
     logger.info('📋 Using database fallback for subject list');
     
     const conditions: string[] = [
-      '(ss.study_id = $1 OR ss.study_id IN (SELECT study_id FROM study WHERE parent_study_id = $1))',
-      'ss.status_id NOT IN (5, 7)'
+      '(ss.study_id = $1 OR ss.study_id IN (SELECT study_id FROM study WHERE parent_study_id = $1))'
     ];
+    if (!includeArchived) {
+      conditions.push('ss.status_id NOT IN (5, 6, 7)');
+    }
     const params: any[] = [studyId];
     let paramIndex = 2;
 
@@ -931,7 +944,13 @@ export const getSubjectList = async (
               COALESCE(pef_cv.open_query_count, 0)::int AS "openQueryCount",
               COALESCE(pef_cv.closed_query_count, 0)::int AS "closedQueryCount",
               sed_cv.name AS "visitName",
-              COALESCE(edc_cv.ordinal, 1) AS "ordinal"
+              COALESCE(edc_cv.ordinal, 1) AS "ordinal",
+              CASE
+                WHEN se_cv.scheduled_date IS NOT NULL
+                  AND se_cv.scheduled_date < CURRENT_DATE
+                  AND COALESCE(ec_cv.completion_status_id, 0) < 4
+                THEN true ELSE false
+              END AS "isOverdue"
             FROM event_crf ec_cv
             INNER JOIN study_event se_cv ON ec_cv.study_event_id = se_cv.study_event_id
             INNER JOIN study_event_definition sed_cv ON se_cv.study_event_definition_id = sed_cv.study_event_definition_id
@@ -956,7 +975,12 @@ export const getSubjectList = async (
               0 AS "openQueryCount",
               0 AS "closedQueryCount",
               sed_ns.name AS "visitName",
-              COALESCE(edc_ns.ordinal, 1) AS "ordinal"
+              COALESCE(edc_ns.ordinal, 1) AS "ordinal",
+              CASE
+                WHEN se_ns.scheduled_date IS NOT NULL
+                  AND se_ns.scheduled_date < CURRENT_DATE
+                THEN true ELSE false
+              END AS "isOverdue"
             FROM study_event se_ns
             INNER JOIN study_event_definition sed_ns ON se_ns.study_event_definition_id = sed_ns.study_event_definition_id
             INNER JOIN event_definition_crf edc_ns ON edc_ns.study_event_definition_id = sed_ns.study_event_definition_id AND edc_ns.status_id = 1
@@ -1082,6 +1106,9 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
         sed.type as event_type,
         sed.ordinal as event_ordinal,
         sed.repeating,
+        sed.schedule_day,
+        sed.min_day,
+        sed.max_day,
         sest.name as status_name,
         u.user_name as created_by,
         (
@@ -1148,7 +1175,7 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
       ...studySubject,
       subject: {
         subjectId: subject.subject_id,
-        uniqueIdentifier: subject.label,
+        uniqueIdentifier: subject.unique_identifier,
         gender: subject.gender || '',
         dateOfBirth: subject.date_of_birth,
         dobCollected: !!subject.date_of_birth,
@@ -1183,7 +1210,10 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
         statusId: e.status_id,
         ownerId: e.owner_id,
         dateCreated: e.date_created,
-        dateUpdated: e.date_updated
+        dateUpdated: e.date_updated,
+        schedule_day: e.schedule_day,
+        min_day: e.min_day,
+        max_day: e.max_day
       })),
       progress: {
         totalEvents: eventsResult.rows.length,

@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rule-compiler.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rules"],
+  "properties": {
+    "rules": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "ruleType", "fieldPath", "itemId", "severity", "errorMessage", "rationale"],
+        "allOf": [
+          {
+            "comment": "format rules MUST populate formatType OR pattern. Without this, models like Gemini 2.5 routinely drop both fields and the validator wastes a retry round-trip.",
+            "if": { "properties": { "ruleType": { "const": "format" } }, "required": ["ruleType"] },
+            "then": { "anyOf": [
+              { "required": ["formatType"] },
+              { "required": ["pattern"] }
+            ]}
+          },
+          {
+            "comment": "consistency rules MUST populate operator AND (compareFieldPath OR compareValue).",
+            "if": { "properties": { "ruleType": { "const": "consistency" } }, "required": ["ruleType"] },
+            "then": {
+              "required": ["operator"],
+              "anyOf": [
+                { "required": ["compareFieldPath"] },
+                { "required": ["compareValue"] }
+              ]
+            }
+          },
+          {
+            "comment": "pattern_match rules MUST populate pattern.",
+            "if": { "properties": { "ruleType": { "const": "pattern_match" } }, "required": ["ruleType"] },
+            "then": { "required": ["pattern"] }
+          },
+          {
+            "comment": "value_match rules MUST populate compareValue.",
+            "if": { "properties": { "ruleType": { "const": "value_match" } }, "required": ["ruleType"] },
+            "then": { "required": ["compareValue"] }
+          },
+          {
+            "comment": "formula rules MUST populate customExpression.",
+            "if": { "properties": { "ruleType": { "const": "formula" } }, "required": ["ruleType"] },
+            "then": { "required": ["customExpression"] }
+          }
+        ],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+          "description": { "type": "string", "maxLength": 2000 },
+
+          "ruleType": {
+            "type": "string",
+            "enum": ["required", "range", "format", "consistency", "value_match", "pattern_match", "formula"],
+            "description": "AI may emit formula rules for cross-question conditional validation. business_logic / cross_form are forbidden."
+          },
+
+          "fieldPath": { "type": "string", "minLength": 1, "maxLength": 255 },
+          "itemId": { "type": "integer", "minimum": 1 },
+
+          "severity": { "type": "string", "enum": ["error", "warning"] },
+          "errorMessage": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "warningMessage": { "type": "string", "maxLength": 1000 },
+
+          "minValue": { "type": "number" },
+          "maxValue": { "type": "number" },
+
+          "pattern": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "formatType": { "type": "string", "minLength": 1, "maxLength": 100 },
+
+          "operator": {
+            "type": "string",
+            "description": "Comparison operator for `consistency` rules ONLY (value_match and pattern_match must NOT include this field). Generic operators (==, !=, >, <, >=, <=) auto-coerce numbers, time strings, and dates. The date_* operators force day-level date comparison and refuse to silently fall back to string compare.",
+            "enum": [
+              "==", "!=", ">", "<", ">=", "<=",
+              "date_before", "date_after",
+              "date_on_or_before", "date_on_or_after",
+              "date_equals"
+            ]
+          },
+          "compareFieldPath": { "type": "string", "maxLength": 255 },
+          "compareValue": { "type": "string", "maxLength": 1000 },
+          "customExpression": { "type": "string", "minLength": 2, "maxLength": 5000, "description": "Excel-style formula for formula rules (must start with =). Required for ruleType=formula." },
+
+          "bpSystolicMin": { "type": "number" },
+          "bpSystolicMax": { "type": "number" },
+          "bpDiastolicMin": { "type": "number" },
+          "bpDiastolicMax": { "type": "number" },
+
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 1000 },
+
+          "selfTest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["shouldPass", "shouldFail"],
+            "properties": {
+              "shouldPass": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "items": { "type": "string", "maxLength": 500 }
+              },
+              "shouldFail": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "items": { "type": "string", "maxLength": 500 }
+              }
+            }
+          },
+
+          "providerWarning": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+
+    "_batchWarning": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Optional batch-level message: refusal reason, ambiguity flag, missing-context note. Surfaced to the user above the result cards."
+    }
+  }
+}

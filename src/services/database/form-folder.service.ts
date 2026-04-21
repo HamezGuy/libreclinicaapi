@@ -7,6 +7,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { ForbiddenError } from '../../middleware/errorHandler.middleware';
 
 export interface FormFolder {
   folder_id: number;
@@ -31,9 +32,15 @@ export interface FormFolderItem {
   date_added: string;
 }
 
-export const getFolders = async (studyId?: number, userId?: number, parentFolderId?: number | null): Promise<FormFolder[]> => {
+export const getFolders = async (studyId?: number, userId?: number, parentFolderId?: number | null, organizationIds?: number[]): Promise<FormFolder[]> => {
   const conditions = ['($1::int IS NULL OR f.study_id = $1 OR f.study_id IS NULL)'];
   const params: any[] = [studyId || null];
+
+  // Organization scoping: only return folders belonging to the caller's org(s)
+  if (organizationIds && organizationIds.length > 0) {
+    params.push(organizationIds);
+    conditions.push(`(f.organization_id = ANY($${params.length}::int[]) OR f.organization_id IS NULL)`);
+  }
 
   if (parentFolderId === null || parentFolderId === undefined) {
     // No filter on parent — return all folders
@@ -66,7 +73,7 @@ export const getFolderById = async (folderId: number): Promise<FormFolder | null
   const result = await pool.query(`
     SELECT 
       f.folder_id, f.name, f.description, f.study_id, f.owner_id,
-      f.sort_order, f.parent_folder_id, f.date_created, f.date_updated,
+      f.sort_order, f.parent_folder_id, f.organization_id, f.date_created, f.date_updated,
       COUNT(DISTINCT fi.crf_id)::int AS form_count,
       COALESCE(ARRAY_AGG(DISTINCT fi.crf_id ORDER BY fi.crf_id) FILTER (WHERE fi.crf_id IS NOT NULL), '{}') AS crf_ids,
       (SELECT COUNT(*)::int FROM acc_form_folder cf WHERE cf.parent_folder_id = f.folder_id) AS child_count
@@ -79,14 +86,32 @@ export const getFolderById = async (folderId: number): Promise<FormFolder | null
   return result.rows[0] || null;
 };
 
+/**
+ * Verify a folder belongs to one of the given organizationIds.
+ * Throws if access is denied.
+ */
+export const assertFolderOrgAccess = async (folderId: number, organizationIds?: number[]): Promise<void> => {
+  if (!organizationIds || organizationIds.length === 0) return;
+  const result = await pool.query(
+    `SELECT organization_id FROM acc_form_folder WHERE folder_id = $1`,
+    [folderId]
+  );
+  if (result.rows.length === 0) return; // Will 404 downstream
+  const folderOrgId = result.rows[0].organization_id;
+  if (folderOrgId !== null && !organizationIds.includes(folderOrgId)) {
+    throw new ForbiddenError('Folder belongs to a different organization');
+  }
+};
+
 export const createFolder = async (
   name: string,
   userId: number,
   studyId?: number,
   description?: string,
-  parentFolderId?: number | null
+  parentFolderId?: number | null,
+  organizationId?: number
 ): Promise<FormFolder> => {
-  logger.info('Creating form folder', { name, userId, studyId, parentFolderId });
+  logger.info('Creating form folder', { name, userId, studyId, parentFolderId, organizationId });
 
   // Validate depth limit (max 4 levels)
   if (parentFolderId) {
@@ -102,10 +127,10 @@ export const createFolder = async (
   `, [studyId || null]);
 
   const result = await pool.query(`
-    INSERT INTO acc_form_folder (name, description, study_id, owner_id, sort_order, parent_folder_id)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING folder_id, name, description, study_id, owner_id, sort_order, parent_folder_id, date_created, date_updated
-  `, [name, description || null, studyId || null, userId, maxOrder.rows[0].next_order, parentFolderId || null]);
+    INSERT INTO acc_form_folder (name, description, study_id, owner_id, sort_order, parent_folder_id, organization_id)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    RETURNING folder_id, name, description, study_id, owner_id, sort_order, parent_folder_id, organization_id, date_created, date_updated
+  `, [name, description || null, studyId || null, userId, maxOrder.rows[0].next_order, parentFolderId || null, organizationId || null]);
 
   return { ...result.rows[0], form_count: 0, crf_ids: [], child_count: 0 };
 };

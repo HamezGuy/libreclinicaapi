@@ -12,11 +12,11 @@ import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = express.Router();
 
-// Admin: reset rate limiter (requires bypass key)
+// Admin: reset rate limiter (requires bypass key set via env var)
 router.post('/reset-rate-limit', (req, res) => {
   const key = req.headers['x-bypass-rate-limit'] || req.body?.bypassKey;
-  const expected = process.env.RATE_LIMIT_BYPASS_KEY || 'accura-test-bypass-2026';
-  if (key !== expected) {
+  const expected = process.env.RATE_LIMIT_BYPASS_KEY;
+  if (!expected || !key || key !== expected) {
     res.status(403).json({ success: false, message: 'Invalid bypass key' });
     return;
   }

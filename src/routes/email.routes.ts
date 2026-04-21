@@ -486,17 +486,9 @@ router.post('/test', authMiddleware, requireAdmin, async (req: Request, res: Res
  */
 router.get('/notification-types', authMiddleware, async (req: Request, res: Response) => {
   const notificationTypes = [
-    { key: 'query_opened', label: 'New Query Assigned', description: 'When a query is assigned to you' },
+    { key: 'query_created', label: 'New Query Assigned', description: 'When a query is assigned to you' },
     { key: 'query_response', label: 'Query Response', description: 'When a query you created receives a response' },
     { key: 'query_closed', label: 'Query Closed', description: 'When a query is closed' },
-    { key: 'signature_required', label: 'Signature Required', description: 'When your signature is required on a form' },
-    { key: 'form_submitted', label: 'Form Submitted', description: 'When a form is submitted for review' },
-    { key: 'sdv_complete', label: 'SDV Complete', description: 'When SDV is completed on a form' },
-    { key: 'subject_enrolled', label: 'Subject Enrolled', description: 'When a new subject is enrolled' },
-    { key: 'visit_overdue', label: 'Visit Overdue', description: 'When a scheduled visit is overdue' },
-    { key: 'protocol_deviation', label: 'Protocol Deviation', description: 'When a protocol deviation is detected' },
-    { key: 'study_lock', label: 'Study Lock/Unlock', description: 'When a study is locked or unlocked' },
-    { key: 'role_assigned', label: 'Role Assigned', description: 'When you are assigned a new role' }
   ];
 
   res.json({ success: true, data: notificationTypes });

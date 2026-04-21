@@ -25,7 +25,7 @@ import * as validationRulesService from '../database/validation-rules.service';
 import { encryptField, decryptField, isEncrypted } from '../../utils/encryption.util';
 import * as workflowService from '../database/workflow.service';
 import { stripExtendedProps, parseExtendedProps } from '../../utils/extended-props';
-import { resolveFieldType, isStructuredDataType } from '../../utils/field-type.utils';
+import { resolveFieldType, isStructuredDataType, isTableType } from '../../utils/field-type.utils';
 
 /** Attempt to parse a JSON string; return fallback on failure. */
 function tryParseJson(str: string, fallback: any): any {
@@ -785,7 +785,7 @@ const saveFormDataDirect = async (
             ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
               (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
               $5, $6)
-          `, [userId, existingResult.rows[0].item_data_id, oldValue, stringValue, eventCrfId, request.reasonForChange || null]);
+          `, [userId, existingResult.rows[0].item_data_id, oldValue, stringValue, eventCrfId, request.reasonForChange || 'Reason not given']);
         }
       } else {
         // Insert new
@@ -1817,6 +1817,16 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
 
     // Get decision conditions (forking/branching) from LibreClinica
     // decision_condition table handles form/section branching based on values
+    //
+    // ISSUE-414 fix: the previous query referenced columns that don't exist
+    // in LibreClinica's actual schema:
+    //   dcp.comparison_operator -> actual: dcp.comparison
+    //   dcp.value               -> actual: dcp.constant_value
+    //   dcsu.replacement_value  -> actual: dcsu.value
+    // Every metadata fetch logged a "column does not exist" error and
+    // returned decisionConditions: []. The frontend doesn't currently
+    // consume this field, but we fix it now so any future branching UI
+    // gets real data instead of an empty array.
     let decisionConditions: any[] = [];
     try {
       const dcQuery = `
@@ -1830,8 +1840,8 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
           -- Get dc_primitive conditions
           dcp.dc_primitive_id,
           dcp.item_id,
-          dcp.comparison_operator,
-          dcp.value as comparison_value,
+          dcp.comparison AS comparison_operator,
+          dcp.constant_value AS comparison_value,
           dcp.dynamic_value_item_id,
           i.name as item_name,
           i.oc_oid as item_oid,
@@ -1845,7 +1855,7 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
           dcce.item_target_id,
           -- Substitution events
           dcsu.item_id as substitution_item_id,
-          dcsu.replacement_value
+          dcsu.value AS replacement_value
         FROM decision_condition dc
         LEFT JOIN dc_primitive dcp ON dc.decision_condition_id = dcp.decision_condition_id
         LEFT JOIN item i ON dcp.item_id = i.item_id
@@ -2157,7 +2167,7 @@ export const getAllForms = async (userId?: number): Promise<any[]> => {
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN study st ON c.source_study_id = st.study_id
-      WHERE c.status_id IN (1, 2, 6)
+      WHERE c.status_id IN (1, 2)
       ${orgFilter}
       ORDER BY c.date_created DESC, c.name
     `;
@@ -2187,7 +2197,8 @@ export const getFormById = async (crfId: number, callerUserId?: number): Promise
         c.*,
         s.name as status_name,
         st.name as study_name,
-        (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id) as version_count
+        (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id) as version_count,
+        (SELECT name FROM crf_version WHERE crf_id = c.crf_id ORDER BY crf_version_id DESC LIMIT 1) as latest_version
       FROM crf c
       INNER JOIN status s ON c.status_id = s.status_id
       LEFT JOIN study st ON c.source_study_id = st.study_id
@@ -2428,14 +2439,38 @@ interface FormField {
 }
 
 /**
+ * Default clinical units for vital-sign field types.
+ * Used when a field is created/imported without an explicit unit.
+ */
+function getDefaultClinicalUnit(fieldType: string): string {
+  const defaults: Record<string, string> = {
+    height: 'cm',
+    weight: 'kg',
+    temperature: '°C',
+    heart_rate: 'bpm',
+    blood_pressure: 'mmHg',
+    oxygen_saturation: '%',
+    respiration_rate: 'breaths/min',
+    bmi: 'kg/m²',
+  };
+  return defaults[fieldType?.toLowerCase()] || '';
+}
+
+/**
  * Serialize extended field properties to JSON for storage.
  * IMPORTANT: field.type is normalized via resolveFieldType() so the DB
  * always stores canonical types ('radio', not 'radiobutton').
  */
 const serializeExtendedProperties = (field: FormField): string => {
+  // Layout-only types (section_header, static_text) are display elements,
+  // not data inputs — never required regardless of what the client sends.
+  // This is a safety net against legacy imports or buggy callers.
+  const canonicalType = resolveFieldType(field.type);
+  const isLayoutOnly = canonicalType === 'section_header' || canonicalType === 'static_text';
+
   const extended = {
     // Always store the CANONICAL type so reads never encounter aliases
-    type: resolveFieldType(field.type),
+    type: canonicalType,
     
     // Technical field name (lowercase_underscored identifier, distinct from the display label)
     // The DB item.name stores the display label; this preserves the technical ID for formulas, etc.
@@ -2444,7 +2479,7 @@ const serializeExtendedProperties = (field: FormField): string => {
     // Required flag — also stored in item_form_metadata.required DB column,
     // but duplicated here as a safety net so round-trips never lose it.
     // Use === true to ensure we store a clean boolean, never a truthy string.
-    required: field.required === true || field.isRequired === true,
+    required: isLayoutOnly ? false : (field.required === true || field.isRequired === true),
     
     // PHI and Compliance — explicit boolean so the safety net is reliable
     isPhiField: field.isPhiField === true,
@@ -2489,7 +2524,7 @@ const serializeExtendedProperties = (field: FormField): string => {
     formLinks: field.formLinks,
     
     // Clinical
-    unit: field.unit,
+    unit: field.unit || getDefaultClinicalUnit(resolveFieldType(field.type)),
     min: field.min,
     max: field.max,
     format: field.format,
@@ -2621,28 +2656,17 @@ export const createForm = async (
   try {
     await client.query('BEGIN');
 
-    // Check for existing CRF with the same name (owned by this user, any active status)
-    // Statuses: 1=available, 2=draft, 6=archived. Only skip 5=removed and 7=auto-removed.
+    // Check for existing CRF with the same name among ACTIVE forms only.
+    // Archived (6), removed (5), and auto-removed (7) forms are excluded so their names can be reused.
     const nameCheck = await client.query(
-      `SELECT crf_id, status_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 7) AND owner_id = $2 LIMIT 1`,
+      `SELECT crf_id, status_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 6, 7) AND owner_id = $2 LIMIT 1`,
       [data.name, userId]
     );
     if (nameCheck.rows.length > 0) {
       const existingId = nameCheck.rows[0].crf_id;
-      const existingStatus = nameCheck.rows[0].status_id;
+      await client.query('ROLLBACK');
       
-      // If the form was archived (6), restore it to available (1) so it can be used
-      if (existingStatus === 6) {
-        const targetStatus = data.status === 'draft' ? 2 : 1;
-        await client.query(`UPDATE crf SET status_id = $1, date_updated = NOW() WHERE crf_id = $2`, [targetStatus, existingId]);
-        await client.query(`UPDATE crf_version SET status_id = $1 WHERE crf_id = $2`, [targetStatus, existingId]);
-        await client.query('COMMIT');
-        logger.info('Restored archived form to active status', { name: data.name, crfId: existingId, newStatus: targetStatus });
-      } else {
-        await client.query('ROLLBACK');
-      }
-      
-      logger.info('Form with same name already exists, returning existing', { name: data.name, existingCrfId: existingId });
+      logger.info('Form with same name already exists among active forms', { name: data.name, existingCrfId: existingId });
       return {
         success: true,
         crfId: existingId,
@@ -2844,14 +2868,14 @@ export const createForm = async (
         // Only block save for brand-new table fields (no id yet).
         // Existing saved table fields may not carry columns in all API payloads.
         const isNewField = !field.id && !field.itemId;
-        if (field.type === 'table' && isNewField) {
+        if (isTableType(field.type) && isNewField) {
           if (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0) {
             throw new Error(
               `Table field "${field.label || field.name || `field #${i + 1}`}" must have at least one column defined. ` +
               `Please add columns in the form builder before saving.`
             );
           }
-        } else if (field.type === 'table' && (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0)) {
+        } else if (isTableType(field.type) && (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0)) {
           logger.warn('Saving existing table field without tableColumns — columns will be preserved from stored extended props', {
             fieldName: field.label || field.name
           });
@@ -2907,7 +2931,7 @@ export const createForm = async (
         `, [
           field.label || field.name || `Field ${i + 1}`,
           description,
-          field.unit || '', // Clinical units
+          field.unit || getDefaultClinicalUnit(field.type) || '',
           field.isPhiField === true, // PHI status — explicit boolean, never NULL
           dataTypeId,
           userId,
@@ -3299,7 +3323,7 @@ export const updateForm = async (
     if (data.version) {
       try {
         await client.query(`
-          UPDATE crf_version SET name = $1
+          UPDATE crf_version SET name = $1, date_updated = NOW()
           WHERE crf_version_id = (
             SELECT crf_version_id FROM crf_version
             WHERE crf_id = $2 ORDER BY crf_version_id DESC LIMIT 1
@@ -3515,14 +3539,14 @@ export const updateForm = async (
         // Never trust field.order; always use the loop index.
         const fieldOrdinal = i + 1;
 
-        if (field.type === 'table' && isNewField) {
+        if (isTableType(field.type) && isNewField) {
           if (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0) {
             throw new Error(
               `Table field "${fieldName}" must have at least one column defined. ` +
               `Please add columns in the form builder before saving.`
             );
           }
-        } else if (field.type === 'table' && (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0)) {
+        } else if (isTableType(field.type) && (!Array.isArray(field.tableColumns) || field.tableColumns.length === 0)) {
           logger.warn('Updating existing table field without tableColumns — preserved from stored props', { fieldName });
         }
 
@@ -3598,7 +3622,18 @@ export const updateForm = async (
 
         // Serialize extended properties
         const extendedProps = serializeExtendedProperties(mergedField);
-        let description = mergedField.helpText || mergedField.description || preservedHelpText || '';
+        // For full updates (user explicitly provided helpText/description), respect
+        // empty strings — don't fall back to old preservedHelpText.
+        // Only use preservedHelpText as fallback for partial updates where the
+        // user didn't send helpText at all (undefined).
+        let description: string;
+        if (isPartialUpdate) {
+          description = mergedField.helpText ?? mergedField.description ?? preservedHelpText ?? '';
+        } else {
+          // Full update: use exactly what the user sent (empty string = cleared)
+          const incoming = field.helpText ?? field.description ?? '';
+          description = incoming;
+        }
         if (extendedProps) {
           description = description ? `${description}\n---EXTENDED_PROPS---\n${extendedProps}` : `---EXTENDED_PROPS---\n${extendedProps}`;
         }
@@ -4187,6 +4222,36 @@ export const restoreForm = async (
       return { success: false, message: 'Form is not archived' };
     }
 
+    // Check if the name is already taken by an active form
+    const nameConflict = await client.query(
+      `SELECT crf_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 6, 7) AND crf_id != $2 LIMIT 1`,
+      [form.name, crfId]
+    );
+
+    let finalName = form.name;
+    if (nameConflict.rows.length > 0) {
+      // Name is taken — find a unique "Restored from Archive" suffix
+      let counter = 1;
+      let candidateName = `${form.name} - Restored from Archive ${counter}`;
+      while (true) {
+        const check = await client.query(
+          `SELECT crf_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 7) LIMIT 1`,
+          [candidateName]
+        );
+        if (check.rows.length === 0) break;
+        counter++;
+        candidateName = `${form.name} - Restored from Archive ${counter}`;
+      }
+      finalName = candidateName;
+
+      // Rename the form
+      await client.query(
+        `UPDATE crf SET name = $1 WHERE crf_id = $2`,
+        [finalName, crfId]
+      );
+      logger.info('Renamed restored form to avoid name conflict', { crfId, oldName: form.name, newName: finalName });
+    }
+
     // Restore to available status (status_id = 1)
     await client.query(`
       UPDATE crf
@@ -4202,6 +4267,9 @@ export const restoreForm = async (
     `, [userId, crfId]);
 
     // Log audit event
+    const auditNewValue = finalName !== form.name
+      ? `available (renamed from "${form.name}" to "${finalName}")`
+      : 'available';
     await client.query(`
       INSERT INTO audit_log_event (
         audit_date, audit_table, user_id, entity_id, entity_name,
@@ -4209,18 +4277,21 @@ export const restoreForm = async (
         audit_log_event_type_id
       ) VALUES (
         NOW(), 'crf', $1, $2, $3,
-        'archived', 'available', $4,
+        'archived', $4, $5,
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Restore%' OR name LIKE '%Update%' LIMIT 1)
       )
-    `, [userId, crfId, form.name, reason || 'Form restored from archive']);
+    `, [userId, crfId, finalName, auditNewValue, reason || 'Form restored from archive']);
 
     await client.query('COMMIT');
 
-    logger.info('Form template restored successfully', { crfId });
+    logger.info('Form template restored successfully', { crfId, finalName });
 
+    const nameNote = finalName !== form.name
+      ? ` It was renamed to "${finalName}" because the original name was already in use.`
+      : '';
     return {
       success: true,
-      message: `Form "${form.name}" restored successfully`
+      message: `Form "${finalName}" restored successfully.${nameNote}`
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -4293,6 +4364,7 @@ export const getArchivedForms = async (studyId?: number, userId?: number): Promi
         c.date_updated,
         u.first_name || ' ' || u.last_name as archived_by,
         (SELECT COUNT(*) FROM crf_version WHERE crf_id = c.crf_id) as version_count,
+        (SELECT name FROM crf_version WHERE crf_id = c.crf_id ORDER BY crf_version_id DESC LIMIT 1) as latest_version,
         (SELECT COUNT(*) FROM event_crf ec 
          JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id 
          WHERE cv.crf_id = c.crf_id) as usage_count

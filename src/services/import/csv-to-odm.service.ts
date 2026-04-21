@@ -13,6 +13,7 @@
  */
 
 import { logger } from '../../config/logger';
+import { buildOdmFromCsvRows, type CsvOdmMapping } from './odm-builder.service';
 
 /**
  * Column mapping configuration
@@ -169,113 +170,39 @@ export const validateCSV = (
 };
 
 /**
- * Convert CSV data to ODM XML format
- * Matches LibreClinica's ODMContainer structure for import
+ * Convert CSV data to ODM XML format.
+ *
+ * Refactored to delegate the XML envelope + CSV row → ODM mapping to the
+ * shared `odm-builder.service.ts`, so the CSV import path and the
+ * interop-middleware JSON import path produce identical XML structure
+ * (same envelope, same escape rules, same element ordering).
  */
 export const convertCSVToODM = (
   csvContent: string,
   config: CSVImportConfig
 ): string => {
-  logger.info('Converting CSV to ODM XML', { 
+  logger.info('Converting CSV to ODM XML', {
     studyOID: config.studyOID,
-    mappedColumns: Object.keys(config.mapping.columnToItemOID).length 
+    mappedColumns: Object.keys(config.mapping.columnToItemOID).length,
   });
 
   const { rows } = parseCSV(csvContent);
-  const { studyOID, metaDataVersionOID, mapping } = config;
-  const timestamp = new Date().toISOString();
+  const { mapping } = config;
 
-  // Group rows by subject (matching SubjectDataBean structure)
   const subjectMap = new Map<string, Record<string, string>[]>();
-  
   for (const row of rows) {
     const subjectId = row[mapping.subjectIdColumn]?.trim();
     if (!subjectId) continue;
-    
-    if (!subjectMap.has(subjectId)) {
-      subjectMap.set(subjectId, []);
-    }
-    subjectMap.get(subjectId)!.push(row);
+    const list = subjectMap.get(subjectId) ?? [];
+    list.push(row);
+    subjectMap.set(subjectId, list);
   }
 
-  // Build ODM XML following LibreClinica's expected structure
-  let odmXml = `<?xml version="1.0" encoding="UTF-8"?>
-<ODM xmlns="http://www.cdisc.org/ns/odm/v1.3"
-     xmlns:OpenClinica="http://www.openclinica.org/ns/odm_ext_v130/v3.1"
-     ODMVersion="1.3"
-     FileType="Transactional"
-     FileOID="CSV-Import-${Date.now()}"
-     CreationDateTime="${timestamp}">
-  <ClinicalData StudyOID="${escapeXml(studyOID)}" MetaDataVersionOID="${escapeXml(metaDataVersionOID)}">`;
-
-  // Build SubjectData elements (matching SubjectDataBean)
-  for (const [subjectId, subjectRows] of subjectMap) {
-    odmXml += `
-    <SubjectData SubjectKey="${escapeXml(subjectId)}">`;
-
-    // Get event OID (from row or default)
-    const eventOID = mapping.eventOIDColumn && subjectRows[0][mapping.eventOIDColumn]
-      ? subjectRows[0][mapping.eventOIDColumn]
-      : mapping.defaultEventOID;
-
-    // Build StudyEventData (matching StudyEventDataBean)
-    odmXml += `
-      <StudyEventData StudyEventOID="${escapeXml(eventOID)}" StudyEventRepeatKey="1">`;
-
-    // Get form OID (from row or default)
-    const formOID = mapping.formOIDColumn && subjectRows[0][mapping.formOIDColumn]
-      ? subjectRows[0][mapping.formOIDColumn]
-      : mapping.defaultFormOID;
-
-    // Build FormData (matching FormDataBean)
-    odmXml += `
-        <FormData FormOID="${escapeXml(formOID)}">`;
-
-    // Get item group OID (from row or default)
-    const itemGroupOID = mapping.itemGroupOIDColumn && subjectRows[0][mapping.itemGroupOIDColumn]
-      ? subjectRows[0][mapping.itemGroupOIDColumn]
-      : mapping.defaultItemGroupOID;
-
-    // Build ItemGroupData for each row (matching ImportItemGroupDataBean)
-    let repeatKey = 1;
-    for (const row of subjectRows) {
-      const currentRepeatKey = mapping.repeatKeyColumn && row[mapping.repeatKeyColumn]
-        ? row[mapping.repeatKeyColumn]
-        : String(repeatKey);
-
-      odmXml += `
-          <ItemGroupData ItemGroupOID="${escapeXml(itemGroupOID)}" ItemGroupRepeatKey="${currentRepeatKey}" TransactionType="Insert">`;
-
-      // Build ItemData elements (matching ImportItemDataBean)
-      for (const [csvColumn, itemOID] of Object.entries(mapping.columnToItemOID)) {
-        const value = row[csvColumn];
-        if (value !== undefined && value !== '') {
-          odmXml += `
-            <ItemData ItemOID="${escapeXml(itemOID)}" Value="${escapeXml(value)}"/>`;
-        }
-      }
-
-      odmXml += `
-          </ItemGroupData>`;
-      repeatKey++;
-    }
-
-    odmXml += `
-        </FormData>
-      </StudyEventData>
-    </SubjectData>`;
-  }
-
-  odmXml += `
-  </ClinicalData>
-</ODM>`;
-
-  logger.info('ODM XML generated', { 
-    subjectCount: subjectMap.size,
-    xmlLength: odmXml.length 
+  return buildOdmFromCsvRows(subjectMap, mapping as CsvOdmMapping, {
+    studyOID: config.studyOID,
+    metaDataVersionOID: config.metaDataVersionOID,
+    fileOID: `CSV-Import-${Date.now()}`,
   });
-
-  return odmXml;
 };
 
 /**
@@ -338,16 +265,9 @@ export const suggestColumnMappings = (
   return { subjectIdColumn, suggestions };
 };
 
-// Helper function
-function escapeXml(str: string): string {
-  if (!str) return '';
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
+// `escapeXml` was previously local to this file; it now lives in
+// `odm-builder.service.ts` so both the CSV path and the JSON
+// (interop-middleware) path use identical escaping rules.
 
 export default {
   parseCSV,

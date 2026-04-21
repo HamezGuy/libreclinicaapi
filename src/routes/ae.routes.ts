@@ -6,10 +6,14 @@
 
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
+import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import * as aeService from '../services/ae/adverse-event.service';
 import { logger } from '../config/logger';
 
 const router = Router();
+
+router.use(authMiddleware);
 
 /**
  * GET /api/ae/summary/:studyId
@@ -60,7 +64,7 @@ router.get('/subject/:studyId/:subjectId', asyncHandler(async (req: Request, res
  * POST /api/ae/report
  * Report a new Adverse Event via LibreClinica SOAP
  */
-router.post('/report', asyncHandler(async (req: Request, res: Response) => {
+router.post('/report', requireRole('coordinator', 'investigator', 'data_manager', 'admin'), asyncHandler(async (req: Request, res: Response) => {
   const { 
     studyOID, 
     subjectOID,
@@ -77,8 +81,15 @@ router.post('/report', asyncHandler(async (req: Request, res: Response) => {
     aeConfig
   } = req.body;
 
-  const userId = (req as any).user?.userId || 1;
-  const username = (req as any).user?.username || 'api';
+  const userId = (req as any).user?.userId;
+  const username = (req as any).user?.userName || (req as any).user?.username;
+
+  if (!userId || !username) {
+    return res.status(401).json({
+      success: false,
+      message: 'Authentication required'
+    });
+  }
 
   // Validation
   if (!studyOID || !subjectOID || !aeTerm || !onsetDate || !severity) {

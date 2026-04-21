@@ -1630,7 +1630,10 @@ CREATE TABLE public.discrepancy_note (
     parent_dn_id integer,
     entity_type character varying(30),
     study_id integer,
-    assigned_user_id integer
+    assigned_user_id integer,
+    pending_correction_value text,
+    pending_correction_reason text,
+    pending_correction_user_id integer
 );
 
 

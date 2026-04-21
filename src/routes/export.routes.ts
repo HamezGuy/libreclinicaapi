@@ -92,9 +92,9 @@ router.get('/events/:studyId', asyncHandler(async (req: Request, res: Response) 
  * GET /api/export/metadata/:studyOID
  * Get study metadata for export configuration
  */
-router.get('/metadata/:studyOID', asyncHandler(async (req: Request, res: Response) => {
+router.get('/metadata/:studyOID', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { studyOID } = req.params;
-  const username = (req as any).user?.username || 'api';
+  const username = (req as any).user?.userName || (req as any).user?.username;
 
   logger.info('Export metadata request', { studyOID, username });
 
@@ -110,9 +110,9 @@ router.get('/metadata/:studyOID', asyncHandler(async (req: Request, res: Respons
  * GET /api/export/subjects/:studyOID
  * Get subject list for export preview
  */
-router.get('/subjects/:studyOID', asyncHandler(async (req: Request, res: Response) => {
+router.get('/subjects/:studyOID', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { studyOID } = req.params;
-  const username = (req as any).user?.username || 'api';
+  const username = (req as any).user?.userName || (req as any).user?.username;
 
   const subjects = await exportService.getSubjectsForExport(studyOID, username);
 
@@ -129,10 +129,10 @@ router.get('/subjects/:studyOID', asyncHandler(async (req: Request, res: Respons
  * POST /api/export/execute
  * Execute data export
  */
-router.post('/execute', asyncHandler(async (req: Request, res: Response) => {
+router.post('/execute', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { datasetConfig, format } = req.body;
-  const username = (req as any).user?.username || 'api';
-  const userId = (req as any).user?.userId || 1;
+  const username = (req as any).user?.userName || (req as any).user?.username;
+  const userId = (req as any).user?.userId;
 
   if (!datasetConfig?.studyOID) {
     return res.status(400).json({
@@ -196,9 +196,9 @@ router.post('/execute', asyncHandler(async (req: Request, res: Response) => {
  * POST /api/export/preview
  * Preview export data (first N records)
  */
-router.post('/preview', asyncHandler(async (req: Request, res: Response) => {
+router.post('/preview', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { datasetConfig, format, limit = 10 } = req.body;
-  const username = (req as any).user?.username || 'api';
+  const username = (req as any).user?.userName || (req as any).user?.username;
 
   if (!datasetConfig?.studyOID) {
     return res.status(400).json({
@@ -237,9 +237,9 @@ router.post('/preview', asyncHandler(async (req: Request, res: Response) => {
  * POST /api/export/dataset
  * Create a saved dataset configuration (uses LibreClinica's dataset table)
  */
-router.post('/dataset', asyncHandler(async (req: Request, res: Response) => {
+router.post('/dataset', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { datasetConfig } = req.body;
-  const userId = (req as any).user?.userId || 1;
+  const userId = (req as any).user?.userId;
 
   if (!datasetConfig?.studyOID) {
     return res.status(400).json({
@@ -310,10 +310,10 @@ router.get('/archived/:datasetId', asyncHandler(async (req: Request, res: Respon
  * POST /api/export/cdisc
  * Full CDISC ODM export with all clinical data
  */
-router.post('/cdisc', asyncHandler(async (req: Request, res: Response) => {
+router.post('/cdisc', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
   const { datasetConfig } = req.body;
-  const username = (req as any).user?.username || 'api';
-  const userId = (req as any).user?.userId || 1;
+  const username = (req as any).user?.userName || (req as any).user?.username;
+  const userId = (req as any).user?.userId;
 
   if (!datasetConfig?.studyOID) {
     return res.status(400).json({

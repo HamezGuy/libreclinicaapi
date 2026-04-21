@@ -24,6 +24,7 @@ export interface StudyParameterConfig {
   interviewerNameDefault: 'blank' | 'user_name';
   interviewerNameEditable: boolean;
   interviewDateRequired: 'required' | 'optional' | 'not_used';
+  queryDueDays: number;
   interviewDateDefault: 'blank' | 'eventDate';
   interviewDateEditable: boolean;
   personIdShownOnCRF: boolean;
@@ -233,7 +234,8 @@ function parseParameterValues(rows: RawParameter[]): StudyParameterConfig {
     adminForcedReasonForChange: valueMap['adminForcedReasonForChange'] === 'true',
     eventLocationRequired: parseRequiredOption(valueMap['eventLocationRequired']),
     participantPortal: valueMap['participantPortal'] === 'enabled' ? 'enabled' : 'disabled',
-    randomization: valueMap['randomization'] === 'enabled' ? 'enabled' : 'disabled'
+    randomization: valueMap['randomization'] === 'enabled' ? 'enabled' : 'disabled',
+    queryDueDays: parseInt(valueMap['queryDueDays']) || 3
   };
 }
 
@@ -277,7 +279,8 @@ function getDefaultParameters(): StudyParameterConfig {
     adminForcedReasonForChange: true,
     eventLocationRequired: 'not_used',
     participantPortal: 'disabled',
-    randomization: 'disabled'
+    randomization: 'disabled',
+    queryDueDays: 3
   };
 }
 

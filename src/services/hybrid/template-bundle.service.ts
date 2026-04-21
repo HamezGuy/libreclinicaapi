@@ -395,8 +395,10 @@ function buildNameToFieldNameMap(
     const fieldName = ef.name || ef.label || ef.refKey;
     // refKey (primary) → field name
     map.set(ef.refKey, fieldName);
+    // field name identity (when refKey differs, e.g. oc_oid)
+    if (ef.name && ef.name !== ef.refKey) map.set(ef.name, fieldName);
     // label → field name
-    if (ef.label && ef.label !== fieldName) map.set(ef.label, fieldName);
+    if (ef.label && ef.label !== fieldName && ef.label !== ef.refKey) map.set(ef.label, fieldName);
     // numeric item_id → field name (so cross-references work)
     map.set(String(newItemIds[i]), fieldName);
   }

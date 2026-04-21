@@ -622,7 +622,10 @@ CREATE TABLE discrepancy_note (
     study_id INTEGER REFERENCES study(study_id),
     assigned_user_id INTEGER REFERENCES user_account(user_id),
     thread_number INTEGER,
-    thread_uuid VARCHAR(255)
+    thread_uuid VARCHAR(255),
+    pending_correction_value TEXT,
+    pending_correction_reason TEXT,
+    pending_correction_user_id INTEGER REFERENCES user_account(user_id)
 );
 
 -- Mapping tables for discrepancy notes

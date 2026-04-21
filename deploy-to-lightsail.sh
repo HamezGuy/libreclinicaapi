@@ -6,9 +6,10 @@
 # Username: ubuntu
 #
 # USAGE:
-# 1. Save your SSH private key to a file (e.g., lightsail-key.pem)
-# 2. chmod 600 lightsail-key.pem
-# 3. Run: ./deploy-to-lightsail.sh
+# 1. Save your SSH private key to ~/.ssh/lightsail_key.pem
+# 2. chmod 600 ~/.ssh/lightsail_key.pem
+# 3. Set LIGHTSAIL_KEY env var (or it defaults to ~/.ssh/lightsail_key.pem)
+# 4. Run: ./deploy-to-lightsail.sh
 #
 
 set -e
@@ -16,7 +17,7 @@ set -e
 # Configuration
 LIGHTSAIL_IP="18.225.57.5"
 LIGHTSAIL_USER="ubuntu"
-SSH_KEY="lightsail-key.pem"
+SSH_KEY="${LIGHTSAIL_KEY:-$HOME/.ssh/lightsail_key.pem}"
 REMOTE_DIR="/home/ubuntu/edc-app"
 
 echo "=========================================="
@@ -27,11 +28,9 @@ echo "=========================================="
 if [ ! -f "$SSH_KEY" ]; then
     echo "ERROR: SSH key file '$SSH_KEY' not found!"
     echo ""
-    echo "Please create the key file by running:"
-    echo "  cat > lightsail-key.pem << 'EOF'"
-    echo "  (paste your private key here)"
-    echo "  EOF"
-    echo "  chmod 600 lightsail-key.pem"
+    echo "Either set the LIGHTSAIL_KEY env var to your key path, or"
+    echo "save it to ~/.ssh/lightsail_key.pem:"
+    echo "  chmod 600 ~/.ssh/lightsail_key.pem"
     exit 1
 fi
 

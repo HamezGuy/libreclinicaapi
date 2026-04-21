@@ -20,10 +20,23 @@ import * as controller from '../controllers/validation-rules.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { FORMAT_TYPE_REGISTRY } from '../services/database/validation-rules.service';
 import { requireRole } from '../middleware/authorization.middleware';
-import { requireSignatureFor } from '../middleware/part11.middleware';
+import { requireSignatureFor, requireSignatureForStrict } from '../middleware/part11.middleware';
 import { validate, validationRuleSchemas } from '../middleware/validation.middleware';
+import { aiCompileRateLimiter } from '../middleware/rateLimiter.middleware';
 
 const router = Router();
+
+/**
+ * ISSUE-002 fix: opt-in strict signature enforcement on rule write routes.
+ * Set `STRICT_VALIDATION_RULE_SIGNATURES=true` in env to require an actual
+ * verified electronic signature on create/update/delete/toggle. The
+ * default (soft) keeps the existing behaviour so deploying this code
+ * change doesn't break the rule-authoring UI overnight; flip the env
+ * flag only after the frontend has been updated to surface the
+ * ESignatureModal before submitting rule mutations.
+ */
+const SIG_STRICT = process.env.STRICT_VALIDATION_RULE_SIGNATURES === 'true';
+const ruleSignature = SIG_STRICT ? requireSignatureForStrict : requireSignatureFor;
 
 // All routes require authentication
 router.use(authMiddleware);
@@ -63,7 +76,7 @@ router.get('/all-crfs', controller.getAllCrfsWithRules);
 // Toggle field required status (direct field property, not a validation rule)
 router.put('/field-required',
   requireRole('admin', 'data_manager'),
-  requireSignatureFor('I authorize changing this field required status'),
+  ruleSignature('I authorize changing this field required status'),
   controller.toggleFieldRequired
 );
 
@@ -82,7 +95,7 @@ router.get('/:ruleId', validate({ params: ruleIdParam }), controller.getRule);
 // Create a new rule
 router.post('/',
   requireRole('admin', 'data_manager'),
-  requireSignatureFor('I authorize creation of this validation rule'),
+  ruleSignature('I authorize creation of this validation rule'),
   validate({ body: validationRuleSchemas.create }),
   controller.createRule
 );
@@ -90,7 +103,7 @@ router.post('/',
 // Update a rule
 router.put('/:ruleId',
   requireRole('admin', 'data_manager'),
-  requireSignatureFor('I authorize modification of this validation rule'),
+  ruleSignature('I authorize modification of this validation rule'),
   validate({ params: ruleIdParam, body: validationRuleSchemas.update }),
   controller.updateRule
 );
@@ -98,7 +111,7 @@ router.put('/:ruleId',
 // Toggle rule active state
 router.patch('/:ruleId/toggle',
   requireRole('admin', 'data_manager'),
-  requireSignatureFor('I authorize toggling this validation rule'),
+  ruleSignature('I authorize toggling this validation rule'),
   validate({ params: ruleIdParam }),
   controller.toggleRule
 );
@@ -106,7 +119,7 @@ router.patch('/:ruleId/toggle',
 // Delete a rule
 router.delete('/:ruleId',
   requireRole('admin'),
-  requireSignatureFor('I authorize deletion of this validation rule'),
+  ruleSignature('I authorize deletion of this validation rule'),
   validate({ params: ruleIdParam }),
   controller.deleteRule
 );
@@ -121,6 +134,20 @@ router.post('/validate/:crfId',
 router.post('/test',
   validate({ body: validationRuleSchemas.testRule }),
   controller.testRule
+);
+
+// AI-suggested rule compilation (NEW v7).
+//   - Read-only with respect to validation_rules (no DB writes here).
+//   - Costs real money per call -> dedicated rate limiter (20/user/hr).
+//   - Authorisation: same as create/update — admin or data_manager only.
+//   - The orchestrator returns 200 with `data.flags.refused=true` when
+//     the kill-switch is off, the description has PHI, or every
+//     provider failed. The caller inspects `data.flags` and `data.warnings`.
+router.post('/compile',
+  requireRole('admin', 'data_manager'),
+  aiCompileRateLimiter,
+  validate({ body: validationRuleSchemas.compile }),
+  controller.compileRulesFromText
 );
 
 export default router;

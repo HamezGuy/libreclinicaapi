@@ -130,6 +130,43 @@ export const config = {
     enableFieldEncryption: process.env.ENABLE_FIELD_ENCRYPTION === 'true',
     // List of tables to encrypt (comma-separated)
     encryptedTables: (process.env.ENCRYPTED_TABLES || 'item_data,study_subject').split(',')
+  },
+
+  /**
+   * AI Validation-Rule Compiler — POST /api/validation-rules/compile
+   *
+   * Architecture:
+   *   - Frontend sends a plain-English description + the CRF's field
+   *     catalogue. Backend runs the description through an LLM with
+   *     constrained JSON output, then 4 deterministic gates
+   *     (registry preference, schema validation, re2 sandbox, self-test
+   *     loop) before returning structured rule suggestions.
+   *   - Suggestions are NEVER auto-saved. The frontend modal lets the
+   *     user accept each one through the existing saveRule() flow,
+   *     which pops the e-signature modal.
+   *
+   * Kill-switch: AI_COMPILER_ENABLED=false returns 503 from /compile.
+   * Provider switch: AI_COMPILER_PROVIDER ∈ { openai | gemini | mock }.
+   *   - 'mock' is the same shape as the frontend MockRuleSuggestionProvider;
+   *     useful for local dev / failover / running the test suite without
+   *     burning tokens.
+   * Defaults below are SAFE: feature off, mock provider, no API key.
+   */
+  ai: {
+    enabled: process.env.AI_COMPILER_ENABLED === 'true',
+    provider: (process.env.AI_COMPILER_PROVIDER || 'mock') as 'openai' | 'gemini' | 'mock',
+    openaiApiKey: process.env.OPENAI_API_KEY || '',
+    openaiModel: process.env.OPENAI_MODEL || 'gpt-4o-2024-11-20',
+    geminiApiKey: process.env.GEMINI_API_KEY || '',
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-pro',
+    // Keep determinism high for rule generation; we want reproducibility.
+    temperature: parseFloat(process.env.AI_COMPILER_TEMPERATURE || '0'),
+    // Per-request hard ceilings. The orchestrator returns 400 / strips
+    // anything outside these to keep token cost and abuse predictable.
+    timeoutMs: parseInt(process.env.AI_COMPILER_TIMEOUT_MS || '60000'),
+    maxFields: parseInt(process.env.AI_COMPILER_MAX_FIELDS || '500'),
+    maxDescriptionChars: parseInt(process.env.AI_COMPILER_MAX_DESCRIPTION_CHARS || '8000'),
+    maxRulesHardCap: parseInt(process.env.AI_COMPILER_MAX_RULES_HARD_CAP || '20'),
   }
 };
 

@@ -48,6 +48,17 @@ export interface UpdateEventRequest {
   maxDay?: number | null;
   referenceEventId?: number | null;
   estimatedDurationHours?: number | null;
+  crfAssignments?: Array<{
+    crfId: number;
+    crfVersionId?: number;
+    crfName?: string;
+    required?: boolean;
+    doubleDataEntry?: boolean;
+    doubleEntry?: boolean;
+    electronicSignature?: boolean;
+    hideCrf?: boolean;
+    ordinal?: number;
+  }>;
   // Electronic signature
   password?: string;
   signatureMeaning?: string;

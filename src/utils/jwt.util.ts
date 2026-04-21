@@ -119,8 +119,19 @@ export const generateTokenPair = (payload: JwtPayload): TokenPair => {
   const accessToken = generateAccessToken(payload);
   const refreshToken = generateRefreshToken(payload);
 
-  // Calculate expiry time in seconds
-  const expiresIn = config.part11.sessionTimeoutMinutes * 60; // Convert minutes to seconds
+  // Parse the configured JWT expiry string (e.g. "1h", "30m") into seconds
+  // so the client knows the real token lifetime.
+  const expiresInStr = config.jwt.expiresIn || '30m';
+  let expiresIn = 3600; // fallback: 1 hour
+  const match = expiresInStr.match(/^(\d+)\s*(s|m|h|d)$/i);
+  if (match) {
+    const num = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    if (unit === 's') expiresIn = num;
+    else if (unit === 'm') expiresIn = num * 60;
+    else if (unit === 'h') expiresIn = num * 3600;
+    else if (unit === 'd') expiresIn = num * 86400;
+  }
 
   return {
     accessToken,

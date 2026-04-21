@@ -96,9 +96,25 @@ export interface GoogleAuthRequest {
  * ============================================================================
  */
 
+/**
+ * @deprecated Use `SubjectCreateRequest` from `@accura-trial/shared-types`
+ * (re-exported there from shared-types/subject.types.ts). This local copy
+ * is preserved only for the legacy SOAP path in
+ * `services/soap/subjectSoap.service.ts`.
+ *
+ * WIRE-FORMAT ALIGNMENT: The Joi validator in
+ * `middleware/validation.middleware.ts` requires `label`, not the
+ * legacy `studySubjectId` field. This interface now declares both:
+ *   - `label` is the canonical field (matches shared-types + Joi)
+ *   - `studySubjectId` is a deprecated alias that the SOAP service
+ *     consumes; new callers MUST use `label`.
+ */
 export interface SubjectCreateRequest {
   studyId: number;
-  studySubjectId: string;
+  /** Canonical wire field; required for new callers. */
+  label?: string;
+  /** @deprecated alias of `label`; legacy SOAP path only. */
+  studySubjectId?: string;
   secondaryId?: string;
   enrollmentDate?: string;
   gender?: string;

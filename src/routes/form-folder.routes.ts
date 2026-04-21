@@ -6,7 +6,7 @@
  */
 
 import express, { Request, Response } from 'express';
-import { authMiddleware } from '../middleware/auth.middleware';
+import { authMiddleware, AuthRequest } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import * as folderService from '../services/database/form-folder.service';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
@@ -21,14 +21,18 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const parentFolderId = req.query.parentFolderId !== undefined
     ? (req.query.parentFolderId === 'null' || req.query.parentFolderId === '0' ? 0 : parseInt(req.query.parentFolderId as string))
     : undefined;
-  const userId = (req as any).user?.userId;
-  const folders = await folderService.getFolders(studyId, userId, parentFolderId);
+  const userId = (req as AuthRequest).user?.userId;
+  const organizationIds = (req as AuthRequest).user?.organizationIds;
+  const folders = await folderService.getFolders(studyId, userId, parentFolderId, organizationIds);
   res.json({ success: true, data: folders });
 }));
 
 // GET /api/form-folders/:id — Get a single folder with its form IDs
 router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
-  const folder = await folderService.getFolderById(parseInt(req.params.id));
+  const organizationIds = (req as AuthRequest).user?.organizationIds;
+  const folderId = parseInt(req.params.id);
+  await folderService.assertFolderOrgAccess(folderId, organizationIds);
+  const folder = await folderService.getFolderById(folderId);
   if (!folder) {
     res.status(404).json({ success: false, message: 'Folder not found' });
     return;
@@ -41,14 +45,16 @@ router.post('/',
   requireRole('admin', 'data_manager'),
   asyncHandler(async (req: Request, res: Response) => {
     const { name, description, studyId, parentFolderId } = req.body;
-    const userId = (req as any).user?.userId;
+    const userId = (req as AuthRequest).user?.userId;
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+    const organizationId = organizationIds && organizationIds.length > 0 ? organizationIds[0] : undefined;
 
     if (!name || !name.trim()) {
       res.status(400).json({ success: false, message: 'Folder name is required' });
       return;
     }
 
-    const folder = await folderService.createFolder(name.trim(), userId, studyId, description, parentFolderId || null);
+    const folder = await folderService.createFolder(name.trim(), userId!, studyId, description, parentFolderId || null, organizationId);
     res.status(201).json({ success: true, data: folder });
   })
 );
@@ -59,6 +65,9 @@ router.put('/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
     const { name, description } = req.body;
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
 
     if (name !== undefined && !name.trim()) {
       res.status(400).json({ success: false, message: 'Folder name cannot be empty' });
@@ -83,6 +92,10 @@ router.delete('/:id',
   requireRole('admin', 'data_manager'),
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
+
     const result = await folderService.deleteFolder(folderId);
     if (!result.success) {
       res.status(404).json(result);
@@ -98,6 +111,9 @@ router.post('/:id/forms',
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
     const { crfId } = req.body;
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
 
     if (!crfId) {
       res.status(400).json({ success: false, message: 'crfId is required' });
@@ -115,6 +131,9 @@ router.delete('/:id/forms/:crfId',
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
     const crfId = parseInt(req.params.crfId);
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
 
     const removed = await folderService.removeFormFromFolder(folderId, crfId);
     res.json({ success: removed, message: removed ? 'Form removed from folder' : 'Form was not in folder' });
@@ -126,6 +145,10 @@ router.post('/:id/move-all-out',
   requireRole('admin', 'data_manager'),
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
+
     const count = await folderService.moveAllFormsOut(folderId);
     res.json({ success: true, message: `Moved ${count} forms out of folder` });
   })
@@ -137,6 +160,10 @@ router.put('/:id/move',
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
     const { parentFolderId } = req.body;
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
+
     const folder = await folderService.moveFolder(folderId, parentFolderId ?? null);
     if (!folder) {
       res.status(404).json({ success: false, message: 'Folder not found' });
@@ -151,6 +178,10 @@ router.post('/:id/move-children',
   requireRole('admin', 'data_manager'),
   asyncHandler(async (req: Request, res: Response) => {
     const folderId = parseInt(req.params.id);
+    const organizationIds = (req as AuthRequest).user?.organizationIds;
+
+    await folderService.assertFolderOrgAccess(folderId, organizationIds);
+
     const count = await folderService.moveChildrenToParent(folderId);
     res.json({ success: true, message: `Moved ${count} subfolders to parent` });
   })

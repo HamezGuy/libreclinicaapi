@@ -13,6 +13,7 @@ import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
 import { pool } from '../config/database';
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 
 /**
  * Extended Express Request with Part 11 audit information
@@ -67,6 +68,8 @@ export const SignatureMeanings = {
   QUERY_CREATE: 'I authorize the creation of this data query',
   QUERY_RESPOND: 'I confirm my response to this data query',
   QUERY_CLOSE: 'I authorize the closure of this data query',
+  QUERY_ACCEPT_RESOLUTION: 'I have reviewed and approve the proposed resolution for this query',
+  QUERY_REJECT_RESOLUTION: 'I have reviewed and reject the proposed resolution for this query',
 
   // SDV/Verification
   VERIFY: 'I have verified the source data for this record',
@@ -134,33 +137,95 @@ export async function recordPart11Audit(
   metadata?: { ipAddress?: string; [key: string]: any }
 ): Promise<void> {
   try {
-    // Try to insert into audit_log_event (LibreClinica native table)
-    await pool.query(`
-      INSERT INTO audit_log_event (
-        audit_date,
-        audit_table,
-        user_id,
-        entity_id,
-        entity_name,
-        old_value,
-        new_value,
-        audit_log_event_type_id,
-        reason_for_change
-      ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, 
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $7 LIMIT 1),
-        $8
-      )
-    `, [
-      tableName,
+    const oldStr = typeof oldValue === 'object' ? JSON.stringify(oldValue) : (oldValue || '');
+    const newStr = typeof newValue === 'object' ? JSON.stringify(newValue) : (newValue || '');
+    const eventTypeKey = eventType.split('_')[0] || 'data';
+
+    // Compute SHA-256 hash of this audit record for tamper detection
+    const hashInput = [
+      new Date().toISOString(),
       userId,
-      typeof entityId === 'string' ? null : entityId,
-      entityName,
-      typeof oldValue === 'object' ? JSON.stringify(oldValue) : (oldValue || ''),
-      typeof newValue === 'object' ? JSON.stringify(newValue) : (newValue || ''),
-      eventType.split('_')[0] || 'data',
+      tableName,
+      entityId,
+      oldStr,
+      newStr,
       reasonForChange || ''
-    ]);
+    ].join('|');
+    const recordHash = crypto.createHash('sha256').update(hashInput).digest('hex');
+
+    // Fetch the hash of the most recent audit entry to form the chain
+    let previousHash: string | null = null;
+    let hashColumnsExist = true;
+    try {
+      const prev = await pool.query(
+        'SELECT record_hash FROM audit_log_event WHERE record_hash IS NOT NULL ORDER BY audit_id DESC LIMIT 1'
+      );
+      if (prev.rows.length > 0) {
+        previousHash = prev.rows[0].record_hash;
+      }
+    } catch {
+      hashColumnsExist = false;
+    }
+
+    if (hashColumnsExist) {
+      await pool.query(`
+        INSERT INTO audit_log_event (
+          audit_date,
+          audit_table,
+          user_id,
+          entity_id,
+          entity_name,
+          old_value,
+          new_value,
+          audit_log_event_type_id,
+          reason_for_change,
+          record_hash,
+          previous_hash
+        ) VALUES (
+          NOW(), $1, $2, $3, $4, $5, $6, 
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $7 LIMIT 1),
+          $8, $9, $10
+        )
+      `, [
+        tableName,
+        userId,
+        typeof entityId === 'string' ? null : entityId,
+        entityName,
+        oldStr,
+        newStr,
+        eventTypeKey,
+        reasonForChange || '',
+        recordHash,
+        previousHash
+      ]);
+    } else {
+      await pool.query(`
+        INSERT INTO audit_log_event (
+          audit_date,
+          audit_table,
+          user_id,
+          entity_id,
+          entity_name,
+          old_value,
+          new_value,
+          audit_log_event_type_id,
+          reason_for_change
+        ) VALUES (
+          NOW(), $1, $2, $3, $4, $5, $6, 
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $7 LIMIT 1),
+          $8
+        )
+      `, [
+        tableName,
+        userId,
+        typeof entityId === 'string' ? null : entityId,
+        entityName,
+        oldStr,
+        newStr,
+        eventTypeKey,
+        reasonForChange || ''
+      ]);
+    }
 
     logger.info('Part 11 audit event recorded', {
       eventType,
@@ -301,6 +366,55 @@ export function requireSignatureFor(meaning: string) {
         message: 'Electronic signature verification failed'
       });
     }
+  };
+}
+
+/**
+ * ISSUE-002 fix: STRICT variant of requireSignatureFor that returns 403
+ * when no valid signature was provided. The legacy `requireSignatureFor`
+ * is a soft middleware (sets req.signatureVerified = false and proceeds);
+ * many controllers don't check the flag, so signatures are decorative.
+ *
+ * Behaviour:
+ *   - No credentials in body          -> 403 with clear "signature required" message
+ *   - Partial credentials             -> 400 (delegated to soft middleware which already returns 400)
+ *   - Wrong credentials               -> 401 (delegated to soft middleware)
+ *   - Valid credentials               -> req.signatureVerified = true; proceeds
+ *
+ * We layer this on top of `requireSignatureFor` to reuse its credential
+ * verification logic. Use this on any route that 21 CFR Part 11 §11.50
+ * requires a signed action -- including all validation-rule write routes.
+ */
+export function requireSignatureForStrict(meaning: string) {
+  const softGate = requireSignatureFor(meaning);
+  return async (req: Part11Request, res: Response, next: NextFunction): Promise<void> => {
+    const { signatureUsername, signaturePassword } = req.body || {};
+
+    if (!signatureUsername && !signaturePassword) {
+      res.status(403).json({
+        success: false,
+        code: 'SIGNATURE_REQUIRED',
+        message: 'Electronic signature required for this action (21 CFR Part 11 §11.50). ' +
+                 'Re-submit with signatureUsername and signaturePassword.',
+        meaning
+      });
+      return;
+    }
+
+    // Delegate to the soft gate; it handles credential verification AND
+    // sets req.signatureVerified=true on success. We then double-check the
+    // flag is true before proceeding (defence in depth).
+    softGate(req, res, () => {
+      if (req.signatureVerified !== true) {
+        res.status(403).json({
+          success: false,
+          code: 'SIGNATURE_INVALID',
+          message: 'Electronic signature could not be verified.'
+        });
+        return;
+      }
+      next();
+    });
   };
 }
 

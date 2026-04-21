@@ -15,9 +15,10 @@ import * as subjectService from '../services/hybrid/subject.service';
 import { pool } from '../config/database';
 import { logger } from '../config/logger';
 import { trackUserAction } from '../services/database/audit.service';
+import { formatDate as formatIsoDate, parseDateLocal } from '../utils/date.util';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const { studyId, status, page, limit, search } = req.query;
+  const { studyId, status, page, limit, search, includeArchived } = req.query;
   const user = (req as any).user;
 
   // Validate studyId
@@ -38,7 +39,8 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     { 
       status: status as string, 
       page: parseInt(page as string) || 1, 
-      limit: parseInt(limit as string) || 20
+      limit: parseInt(limit as string) || 20,
+      includeArchived: includeArchived === 'true'
     },
     user?.userId,
     user?.username || user?.userName
@@ -108,7 +110,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
     userId: user.userId, 
     username,
     studyId: req.body.studyId,
-    studySubjectId: req.body.studySubjectId
+    label: req.body.label || req.body.studySubjectId
   });
   
   const result = await subjectService.createSubject(req.body, user.userId, username);
@@ -117,7 +119,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
     logger.warn('Subject creation failed', { 
       message: result.message,
       studyId: req.body.studyId,
-      studySubjectId: req.body.studySubjectId
+      label: req.body.label || req.body.studySubjectId
     });
   }
 
@@ -173,8 +175,8 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
     }
 
     if (updates.personId !== undefined) {
-      updateFields.push(`unique_identifier = $${paramIndex++}`);
-      params.push(updates.personId || null);
+      // personId maps to subject.unique_identifier (not study_subject)
+      // It will be updated below in the demographics section with study scoping
     }
 
     if (updates.enrollmentStatus !== undefined) {
@@ -188,6 +190,16 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
         updateFields.push(`status_id = $${paramIndex++}`);
         params.push(statusId);
       }
+    }
+
+    if (updates.visitDateReference !== undefined) {
+      updateFields.push(`visit_date_reference = $${paramIndex++}`);
+      params.push(updates.visitDateReference);
+    }
+
+    if (updates.visitDateCustom !== undefined) {
+      updateFields.push(`visit_date_custom = $${paramIndex++}`);
+      params.push(updates.visitDateCustom || null);
     }
 
     if (updateFields.length > 0) {
@@ -205,9 +217,90 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
       await client.query(updateQuery, params);
     }
 
-    // Update subject table if demographic info provided
-    if (updates.dateOfBirth || updates.gender) {
-      const subjectQuery = `SELECT subject_id FROM study_subject WHERE study_subject_id = $1`;
+    // Reschedule visit due dates when any anchor-relevant field changes.
+    // The anchor is determined by the patient's visit_date_reference setting:
+    //   'enrollment_date' → enrollment_date
+    //   'custom_date'     → visit_date_custom
+    //   'scheduling_date' → screening_date (initial scheduling anchor)
+    // Each visit's scheduled_date = anchor + schedule_day offset.
+    const anchorFieldChanged =
+      updates.enrollmentDate !== undefined ||
+      updates.screeningDate !== undefined ||
+      updates.visitDateReference !== undefined ||
+      updates.visitDateCustom !== undefined ||
+      updates.enrollmentStatus !== undefined;
+
+    if (anchorFieldChanged) {
+      const subjectRow = await client.query(
+        `SELECT ss.enrollment_date, ss.screening_date,
+                ss.visit_date_reference, ss.visit_date_custom,
+                COALESCE(s.parent_study_id, ss.study_id) AS parent_study_id
+         FROM study_subject ss
+         JOIN study s ON ss.study_id = s.study_id
+         WHERE ss.study_subject_id = $1`,
+        [parseInt(id)]
+      );
+      const subj = subjectRow.rows[0];
+
+      if (subj) {
+        const ref = updates.visitDateReference ?? subj.visit_date_reference ?? 'scheduling_date';
+        let anchorStr: string | null = null;
+
+        if (ref === 'enrollment_date') {
+          anchorStr = updates.enrollmentDate ?? subj.enrollment_date;
+        } else if (ref === 'custom_date') {
+          anchorStr = updates.visitDateCustom ?? subj.visit_date_custom;
+        } else {
+          anchorStr = updates.screeningDate ?? subj.screening_date ?? updates.enrollmentDate ?? subj.enrollment_date;
+        }
+
+        const anchor = anchorStr ? parseDateLocal(anchorStr) : null;
+
+        if (anchor && subj.parent_study_id) {
+          const visitRows = await client.query(`
+            SELECT se.study_event_id, sed.ordinal, sed.schedule_day
+            FROM study_event se
+            JOIN study_event_definition sed
+              ON se.study_event_definition_id = sed.study_event_definition_id
+            WHERE se.study_subject_id = $1
+              AND sed.study_id = $2
+              AND COALESCE(se.is_unscheduled, false) = false
+            ORDER BY sed.ordinal
+          `, [parseInt(id), subj.parent_study_id]);
+
+          for (const row of visitRows.rows) {
+            if (row.schedule_day == null) {
+              logger.warn('Skipping reschedule for visit without schedule_day', {
+                studyEventId: row.study_event_id,
+                ordinal: row.ordinal
+              });
+              continue;
+            }
+            const daysOffset = row.schedule_day;
+            const visitDate = new Date(anchor.getTime());
+            visitDate.setDate(visitDate.getDate() + daysOffset);
+            const isoDate = formatIsoDate(visitDate);
+
+            await client.query(`
+              UPDATE study_event
+              SET scheduled_date = $1::date
+              WHERE study_event_id = $2
+            `, [isoDate, row.study_event_id]);
+          }
+
+          logger.info('Rescheduled visit due dates', {
+            studySubjectId: parseInt(id),
+            reference: ref,
+            anchorDate: anchorStr,
+            visitsUpdated: visitRows.rows.length
+          });
+        }
+      }
+    }
+
+    // Update subject table if demographic info or personId provided
+    if (updates.dateOfBirth || updates.gender || updates.personId !== undefined) {
+      const subjectQuery = `SELECT ss.subject_id FROM study_subject ss WHERE ss.study_subject_id = $1`;
       const subjectResult = await client.query(subjectQuery, [parseInt(id)]);
       
       if (subjectResult.rows.length > 0) {
@@ -224,6 +317,15 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
         if (updates.gender) {
           subjectUpdates.push(`gender = $${subjectParamIndex++}`);
           subjectParams.push(updates.gender === 'male' ? 'm' : updates.gender === 'female' ? 'f' : updates.gender);
+        }
+
+        if (updates.personId !== undefined) {
+          // personId is a user-facing display field, not the internal identifier.
+          // The subject.unique_identifier holds the immutable UUID; we do NOT overwrite it.
+          // personId updates are recorded in the audit trail only.
+          logger.info('personId update requested (display-only, does not change internal UUID)', {
+            studySubjectId: parseInt(id), personId: updates.personId
+          });
         }
 
         if (subjectUpdates.length > 0) {
@@ -393,6 +495,9 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
         sed.description as event_description,
         sed.type as event_type,
         sed.ordinal as event_order,
+        sed.schedule_day,
+        sed.min_day,
+        sed.max_day,
         se.sample_ordinal,
         se.date_start,
         se.date_end,
@@ -464,6 +569,9 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
         isUnscheduled: event.is_unscheduled,
         is_unscheduled: event.is_unscheduled,
         location: event.location || '',
+        schedule_day: event.schedule_day,
+        min_day: event.min_day,
+        max_day: event.max_day,
         status,
         status_name: status,
         dateCreated: event.date_created,

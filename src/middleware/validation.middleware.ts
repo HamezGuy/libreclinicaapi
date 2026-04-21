@@ -17,9 +17,12 @@ import { logger } from '../config/logger';
  * Validation schema options
  */
 const validationOptions: Joi.ValidationOptions = {
-  abortEarly: false, // Return all errors, not just first
-  allowUnknown: true, // Allow unknown properties
-  stripUnknown: true  // Remove unknown properties
+  abortEarly: false,    // Return all errors, not just first
+  allowUnknown: true,   // Allow unknown properties
+  stripUnknown: false   // MUST be false — true silently removes any field not in the schema,
+                        // including snake_case variants (schedule_day vs scheduleDay) and
+                        // nested sub-object fields like crfName. Backend services only access
+                        // the specific keys they need, so extra fields are harmless.
 };
 
 /**
@@ -173,10 +176,11 @@ export const subjectSchemas = {
         'number.positive': 'Study ID must be positive',
         'any.required': 'Study ID is required'
       }),
-    studySubjectId: Joi.string().required().max(30)
+    label: Joi.string().required().max(30)
       .messages({
         'string.empty': 'Subject ID is required',
-        'string.max': 'Subject ID must not exceed 30 characters'
+        'string.max': 'Subject ID must not exceed 30 characters',
+        'any.required': 'Subject ID (label) is required'
       }),
 
     // === OPTIONAL STUDY_SUBJECT FIELDS ===
@@ -246,6 +250,13 @@ export const subjectSchemas = {
       Joi.string().isoDate()
     ).optional(),
     enrollmentStatus: Joi.string().valid('enrolled', 'screening', 'screen_failure').optional(),
+    // Visit date reference (per-patient setting for overdue calculations)
+    visitDateReference: Joi.string().valid('scheduling_date', 'enrollment_date', 'custom_date').optional(),
+    visitDateCustom: Joi.alternatives().try(
+      Joi.date().iso(),
+      Joi.string().isoDate(),
+      Joi.string().allow('', null)
+    ).optional(),
     // Electronic signature
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
@@ -415,6 +426,28 @@ export const formSchemas = {
 // ============================================================================
 // Validation Rules Schemas
 // ============================================================================
+// ISSUE-207 fix: enumerate FORMAT_TYPE_REGISTRY keys + 'custom_regex' so that
+// typos in formatType (which would silently never match the registry) are
+// rejected at the API surface. Loaded directly from the same JSON the runtime
+// evaluator uses, so the two cannot drift out of sync.
+import formatTypesJson from '../config/format-types.json';
+const FORMAT_TYPE_KEYS: string[] = Object.keys(formatTypesJson);
+
+// ISSUE-001 fix: business_logic and cross_form rule types removed from the
+// allowed enum. They were the only path that flowed into a `new Function`
+// JS-eval; the runtime evaluator now only honours `formula` rules (via the
+// sandboxed hot-formula-parser). Rules already persisted with these types
+// continue to be evaluated via the formula path on the runtime side.
+const ALLOWED_RULE_TYPES = [
+  'required',
+  'range',
+  'format',
+  'consistency',
+  'formula',
+  'value_match',
+  'pattern_match',
+];
+
 export const validationRuleSchemas = {
   // Common ShowWhen / branching condition shape
   showWhenCondition: Joi.object({
@@ -426,13 +459,19 @@ export const validationRuleSchemas = {
   }),
 
   // POST /api/validation-rules/  — create a validation rule
+  // ISSUE-207/413: per-ruleType conditional requirements via .when() so that:
+  //   - format requires either formatType OR pattern (and rejects pattern when
+  //     formatType is a registry key, since the pattern would be ignored).
+  //   - range requires at least one of minValue / maxValue / bp limits.
+  //   - consistency requires operator + (compareValue OR compareFieldPath).
+  //   - value_match requires compareValue.
+  //   - pattern_match requires pattern.
+  //   - formula requires customExpression.
   create: Joi.object({
     crfId: Joi.number().integer().positive().required(),
     itemId: Joi.number().integer().positive().optional(),
     fieldPath: Joi.string().required().max(255),
-    ruleType: Joi.string().valid(
-      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula', 'value_match', 'pattern_match'
-    ).required(),
+    ruleType: Joi.string().valid(...ALLOWED_RULE_TYPES).required(),
     severity: Joi.string().valid('error', 'warning').required(),
     errorMessage: Joi.string().required().max(1000),
     // warningMessage: alias used by the validation-rules-config UI component
@@ -443,9 +482,9 @@ export const validationRuleSchemas = {
     // Range rule
     minValue: Joi.number().optional(),
     maxValue: Joi.number().optional(),
-    // Format rule
+    // Format rule: registry-key OR 'custom_regex'
     pattern: Joi.string().optional().max(2000).allow(''),
-    formatType: Joi.string().optional().max(100).allow(''),
+    formatType: Joi.string().valid(...FORMAT_TYPE_KEYS, '').optional().allow('', null),
     // Consistency / cross-form rule
     operator: Joi.string().optional().max(64).allow(''),
     compareFieldPath: Joi.string().optional().max(255).allow(''),
@@ -468,6 +507,9 @@ export const validationRuleSchemas = {
     // Table cell targeting for table/question_table validation rules
     tableCellTarget: Joi.object({
       tableFieldPath: Joi.string().required().max(255),
+      // Stable identifier for the target table item (item.item_id). Optional
+      // for backward compat — old rules don't have it; new rules always do.
+      tableItemId: Joi.number().integer().positive().optional(),
       columnId: Joi.string().required().max(255),
       columnType: Joi.string().required().max(50),
       rowIndex: Joi.number().integer().optional().allow(null),
@@ -480,9 +522,7 @@ export const validationRuleSchemas = {
   // PUT /api/validation-rules/:ruleId — update a rule (all fields optional)
   update: Joi.object({
     fieldPath: Joi.string().optional().max(255),
-    ruleType: Joi.string().valid(
-      'required', 'range', 'format', 'consistency', 'business_logic', 'cross_form', 'formula', 'value_match', 'pattern_match'
-    ).optional(),
+    ruleType: Joi.string().valid(...ALLOWED_RULE_TYPES).optional(),
     severity: Joi.string().valid('error', 'warning').optional(),
     errorMessage: Joi.string().optional().max(1000),
     name: Joi.string().optional().max(255).allow(''),
@@ -491,7 +531,7 @@ export const validationRuleSchemas = {
     minValue: Joi.number().optional().allow(null),
     maxValue: Joi.number().optional().allow(null),
     pattern: Joi.string().optional().max(2000).allow('', null),
-    formatType: Joi.string().optional().max(100).allow('', null),
+    formatType: Joi.string().valid(...FORMAT_TYPE_KEYS, '').optional().allow('', null),
     operator: Joi.string().optional().max(64).allow('', null),
     compareFieldPath: Joi.string().optional().max(255).allow('', null),
     compareValue: Joi.string().optional().max(1000).allow('', null),
@@ -506,6 +546,7 @@ export const validationRuleSchemas = {
     signatureMeaning: Joi.string().optional().max(500),
     tableCellTarget: Joi.object({
       tableFieldPath: Joi.string().required().max(255),
+      tableItemId: Joi.number().integer().positive().optional(),
       columnId: Joi.string().required().max(255),
       columnType: Joi.string().required().max(50),
       rowIndex: Joi.number().integer().optional().allow(null),
@@ -531,6 +572,7 @@ export const validationRuleSchemas = {
     value: Joi.any().optional(),
     testData: Joi.object().optional(),
     allFormData: Joi.object().optional(),
+    additionalFields: Joi.object().optional(),
   }),
 
   // POST /api/validation-rules/validate-field
@@ -549,6 +591,7 @@ export const validationRuleSchemas = {
     cellPath: Joi.string().optional().max(500).allow('', null),
     tableCellTarget: Joi.object({
       tableFieldPath: Joi.string().required().max(255),
+      tableItemId: Joi.number().integer().positive().optional(),
       columnId: Joi.string().required().max(255),
       columnType: Joi.string().required().max(50),
       rowIndex: Joi.number().integer().optional().allow(null),
@@ -556,6 +599,72 @@ export const validationRuleSchemas = {
       allRows: Joi.boolean().required(),
       displayPath: Joi.string().optional().max(500).allow(''),
     }).optional().allow(null),
+  }),
+
+  // POST /api/validation-rules/compile  — AI-suggested rule compilation.
+  // Hard limits here are belt-and-suspenders alongside the orchestrator's
+  // own caps (config.ai.maxFields, maxDescriptionChars, maxRulesHardCap).
+  // Anything in the body the schema doesn't enumerate is ignored
+  // downstream — see services/ai/types.ts for the canonical shape.
+  compile: Joi.object({
+    description: Joi.string().required().min(1).max(8000)
+      .messages({
+        'string.empty': 'Description is required',
+        'string.max': 'Description must not exceed 8000 characters',
+      }),
+    fieldContext: Joi.array().items(
+      Joi.object({
+        path: Joi.string().required().max(255),
+        label: Joi.string().required().max(500),
+        type: Joi.string().required().max(50),
+        itemId: Joi.number().integer().positive().required(),
+        required: Joi.boolean().optional(),
+        unit: Joi.string().optional().allow(''),
+        min: Joi.number().optional(),
+        max: Joi.number().optional(),
+        options: Joi.array().items(
+          Joi.object({
+            label: Joi.string().required().max(255),
+            value: Joi.string().required().max(255).allow(''),
+          })
+        ).optional(),
+        tableColumns: Joi.array().items(Joi.object().unknown(true)).optional(),
+        questionRows: Joi.array().items(Joi.object().unknown(true)).optional(),
+        semanticTag: Joi.string().optional().max(100),
+        description: Joi.string().optional().max(2000).allow(''),
+      })
+    ).min(1).max(500).required(),
+    // existingRules: every optional field MUST allow null. The frontend
+    // builds this list from the backend's GET /validation-rules/crf/:id
+    // response, which returns explicit `null` for any unset column on a
+    // rule (e.g. a `required` rule has minValue/maxValue/pattern/operator
+    // all NULL in the DB and serializes to `null`). Without `.allow(null)`
+    // here, calling /compile on ANY CRF that already has a rule causes
+    // a 400 "Validation failed" — the AI flow is dead-on-arrival the
+    // moment a real form has any rule on it. The frontend builder is
+    // also being tightened in the same change to strip nulls before
+    // sending, but the backend keeps `.allow(null)` as defence in depth
+    // so any future caller that forgets to strip still works.
+    existingRules: Joi.array().items(
+      Joi.object({
+        id: Joi.number().integer().required(),
+        name: Joi.string().optional().max(255).allow('', null),
+        ruleType: Joi.string().required().max(50),
+        fieldPath: Joi.string().required().max(255),
+        severity: Joi.string().valid('error', 'warning').required(),
+        minValue: Joi.number().optional().allow(null),
+        maxValue: Joi.number().optional().allow(null),
+        pattern: Joi.string().optional().allow('', null).max(2000),
+        formatType: Joi.string().optional().allow('', null).max(100),
+        operator: Joi.string().optional().allow('', null).max(64),
+        compareValue: Joi.string().optional().allow('', null).max(1000),
+        compareFieldPath: Joi.string().optional().allow('', null).max(255),
+      })
+    ).max(500).optional().default([]),
+    correlationId: Joi.string().required().max(128),
+    maxRules: Joi.number().integer().min(1).max(10).optional().default(5),
+    idempotencyKey: Joi.string().required().max(256),
+    crfId: Joi.number().integer().positive().optional(),
   }),
 };
 
@@ -565,6 +674,8 @@ export const validationRuleSchemas = {
 
 const crfAssignmentSchema = Joi.object({
   crfId: Joi.number().integer().positive().required(),
+  crfName: Joi.string().optional().allow(''),
+  crfVersionId: Joi.number().integer().positive().optional(),
   required: Joi.boolean().default(true),
   doubleDataEntry: Joi.boolean().default(false),
   electronicSignature: Joi.boolean().default(false),
@@ -573,16 +684,16 @@ const crfAssignmentSchema = Joi.object({
 });
 
 const eventDefinitionSchema = Joi.object({
-  studyEventDefinitionId: Joi.number().integer().optional(), // For existing events (update)
+  studyEventDefinitionId: Joi.number().integer().optional(),
   name: Joi.string().required().max(255),
   description: Joi.string().optional().max(2000).allow(''),
   category: Joi.string().optional().allow(''),
   type: Joi.string().valid('scheduled', 'unscheduled', 'common').default('scheduled'),
   ordinal: Joi.number().integer().min(1).optional(),
   repeating: Joi.boolean().default(false),
-  scheduleDay: Joi.number().integer().min(0).optional().allow(null),
-  minDay: Joi.number().integer().max(0).optional().allow(null),
-  maxDay: Joi.number().integer().min(0).optional().allow(null),
+  scheduleDay: Joi.number().integer().optional().allow(null),
+  minDay: Joi.number().integer().optional().allow(null),
+  maxDay: Joi.number().integer().optional().allow(null),
   referenceEventId: Joi.number().integer().positive().optional().allow(null),
   crfAssignments: Joi.array().items(crfAssignmentSchema).optional()
 });
@@ -645,7 +756,8 @@ const studyParametersSchema = Joi.object({
   allowAdministrativeEditing: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
   adminForcedReasonForChange: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
   mailNotification: Joi.string().optional().allow(''),
-  contactEmail: Joi.string().optional().email({ tlds: { allow: false } }).allow('')
+  contactEmail: Joi.string().optional().email({ tlds: { allow: false } }).allow(''),
+  queryDueDays: Joi.number().integer().min(1).max(90).optional()
 }).optional();
 
 /**
@@ -919,6 +1031,7 @@ export const querySchemas = {
     fieldName: Joi.string().optional().allow('').max(255),
     fieldPath: Joi.string().optional().allow('').max(255),
     columnName: Joi.string().optional().allow('').max(255),
+    cellPath: Joi.string().optional().allow('').max(500),
     // Required fields
     description: Joi.string().required().min(10).max(2000)
       .messages({
@@ -934,7 +1047,8 @@ export const querySchemas = {
     subjectId: Joi.number().integer().positive().optional(),
     assignedUserId: Joi.number().integer().positive().optional(),
     severity: Joi.string().optional().valid('minor', 'major', 'critical').default('minor'),
-    dueDate: Joi.string().optional().allow('', null)
+    dueDate: Joi.string().optional().allow('', null).isoDate()
+      .messages({ 'string.isoDate': 'dueDate must be a valid ISO date string (YYYY-MM-DD)' })
   }),
 
   respond: Joi.object({
@@ -1195,9 +1309,9 @@ export const eventSchemas = {
     type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
     repeating: Joi.boolean().optional(),
     category: Joi.string().optional().max(2000).allow(''),
-    scheduleDay: Joi.number().integer().min(0).optional().allow(null),
-    minDay: Joi.number().integer().min(0).optional().allow(null),
-    maxDay: Joi.number().integer().min(0).optional().allow(null),
+    scheduleDay: Joi.number().integer().optional().allow(null),
+    minDay: Joi.number().integer().optional().allow(null),
+    maxDay: Joi.number().integer().optional().allow(null),
     referenceEventId: Joi.number().integer().positive().optional().allow(null),
     estimatedDurationHours: Joi.number().min(0).optional().allow(null),
     password: Joi.string().optional(),
@@ -1212,11 +1326,12 @@ export const eventSchemas = {
     type: Joi.string().optional().valid('scheduled', 'unscheduled', 'common'),
     repeating: Joi.boolean().optional(),
     category: Joi.string().optional().max(2000).allow(''),
-    scheduleDay: Joi.number().integer().min(0).optional().allow(null),
-    minDay: Joi.number().integer().min(0).optional().allow(null),
-    maxDay: Joi.number().integer().min(0).optional().allow(null),
+    scheduleDay: Joi.number().integer().optional().allow(null),
+    minDay: Joi.number().integer().optional().allow(null),
+    maxDay: Joi.number().integer().optional().allow(null),
     referenceEventId: Joi.number().integer().positive().optional().allow(null),
     estimatedDurationHours: Joi.number().min(0).optional().allow(null),
+    crfAssignments: Joi.array().items(crfAssignmentSchema).optional(),
     password: Joi.string().optional(),
     signatureMeaning: Joi.string().optional()
   }),

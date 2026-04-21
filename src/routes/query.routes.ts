@@ -102,6 +102,7 @@ router.post('/:id/close-with-signature',
 router.post('/:id/accept-resolution',
   requireRole('monitor', 'admin', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.acceptResolution }),
+  requireSignatureFor(SignatureMeanings.QUERY_ACCEPT_RESOLUTION),
   controller.acceptResolution
 );
 
@@ -109,6 +110,7 @@ router.post('/:id/accept-resolution',
 router.post('/:id/reject-resolution',
   requireRole('monitor', 'admin', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.rejectResolution }),
+  requireSignatureFor(SignatureMeanings.QUERY_REJECT_RESOLUTION),
   controller.rejectResolution
 );
 

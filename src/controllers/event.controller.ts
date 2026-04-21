@@ -348,6 +348,22 @@ export const assignFormToPatientVisit = asyncHandler(async (req: Request, res: R
 });
 
 /**
+ * Remove a form from a specific patient visit instance
+ */
+export const removeFormFromPatientVisit = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { studyEventId, eventCrfId } = req.params;
+
+  const result = await eventService.removeFormFromPatientVisit(
+    parseInt(studyEventId),
+    parseInt(eventCrfId),
+    user.userId
+  );
+
+  res.json(result);
+});
+
+/**
  * Create an unscheduled visit on the fly for a patient
  */
 export const createUnscheduledVisit = asyncHandler(async (req: Request, res: Response) => {
@@ -455,6 +471,7 @@ export default {
   bulkAssignCrfs,
   // Patient-specific
   assignFormToPatientVisit,
+  removeFormFromPatientVisit,
   createUnscheduledVisit,
   getPatientFormSnapshots,
   savePatientFormData,

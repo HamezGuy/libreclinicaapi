@@ -11,6 +11,7 @@
 
 import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import { logger } from '../config/logger';
 import {
   isDDERequired,
@@ -103,7 +104,7 @@ router.get('/forms/:eventCrfId/can-enter', authMiddleware, async (req: Request, 
  * POST /api/dde/forms/:eventCrfId/first-entry-complete
  * Mark first entry as complete (called when initial form is submitted)
  */
-router.post('/forms/:eventCrfId/first-entry-complete', authMiddleware, async (req: Request, res: Response) => {
+router.post('/forms/:eventCrfId/first-entry-complete', authMiddleware, requireRole('coordinator', 'data_manager', 'admin'), async (req: Request, res: Response) => {
   try {
     const eventCrfId = parseInt(req.params.eventCrfId);
     const userId = (req as any).user?.userId;
@@ -121,7 +122,7 @@ router.post('/forms/:eventCrfId/first-entry-complete', authMiddleware, async (re
  * POST /api/dde/forms/:eventCrfId/second-entry
  * Submit second entry data
  */
-router.post('/forms/:eventCrfId/second-entry', authMiddleware, async (req: Request, res: Response) => {
+router.post('/forms/:eventCrfId/second-entry', authMiddleware, requireRole('coordinator', 'data_manager', 'admin'), async (req: Request, res: Response) => {
   try {
     const eventCrfId = parseInt(req.params.eventCrfId);
     const userId = (req as any).user?.userId;

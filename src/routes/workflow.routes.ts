@@ -40,12 +40,14 @@ router.post(
 // Update workflow status
 router.put(
   '/:id/status',
+  requireRole('admin', 'data_manager', 'coordinator'),
   controller.updateWorkflowStatus.bind(controller)
 );
 
 // Complete workflow task
 router.post(
   '/:id/complete',
+  requireRole('admin', 'data_manager', 'coordinator'),
   controller.completeWorkflow.bind(controller)
 );
 
@@ -66,6 +68,7 @@ router.post(
 // Handoff workflow task to another user/role
 router.post(
   '/:id/handoff',
+  requireRole('admin', 'data_manager', 'coordinator'),
   controller.handoffWorkflow.bind(controller)
 );
 

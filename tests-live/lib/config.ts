@@ -1,10 +1,14 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
+// Load .env.test if USE_TEST_ENV is set or .env.test exists
+const testEnvPath = path.resolve(__dirname, '..', '.env.test');
+const defaultEnvPath = path.resolve(__dirname, '..', '.env');
+const fs = require('fs');
+dotenv.config({ path: fs.existsSync(testEnvPath) && process.env.USE_TEST_ENV !== 'false' ? testEnvPath : defaultEnvPath });
 
 export const CONFIG = {
-  BASE_URL: process.env.BASE_URL || 'https://api.accuratrials.com/api',
+  BASE_URL: process.env.BASE_URL || 'http://localhost:3100/api',
 
   ADMIN_EMAILS: [
     process.env.ADMIN_EMAIL || 'jamesgui111@gmail.com',

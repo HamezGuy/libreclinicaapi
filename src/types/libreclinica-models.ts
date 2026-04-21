@@ -382,6 +382,10 @@ export interface StudySubject {
   screeningDate?: Date | string;
   enrollmentStatus?: string;  // 'screening' | 'enrolled' | 'screen_failure'
   
+  // Visit date reference: controls how visit timing is calculated per patient
+  visitDateReference?: 'scheduling_date' | 'enrollment_date' | 'custom_date';
+  visitDateCustom?: Date | string;
+  
   // OID
   oid?: string;
   
@@ -1298,7 +1302,9 @@ export function toStudySubject(row: any): StudySubject {
     dobCollected: row.dob_collected,
     studyName: row.study_name,
     siteName: row.site_name,
-    timeZone: row.time_zone
+    timeZone: row.time_zone,
+    visitDateReference: row.visit_date_reference,
+    visitDateCustom: row.visit_date_custom
   };
 }
 

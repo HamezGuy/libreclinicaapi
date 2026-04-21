@@ -84,3 +84,7 @@ export function isStructuredDataType(type: string | undefined | null): boolean {
   return ['table', 'question_table', 'criteria_list', 'inline_group'].includes(type?.toLowerCase() ?? '');
 }
 
+export function isTableType(type: string | undefined | null): boolean {
+  return ['table', 'repeating', 'repeating-group', 'grid'].includes(type?.toLowerCase() ?? '');
+}
+

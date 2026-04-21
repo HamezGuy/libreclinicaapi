@@ -279,9 +279,14 @@ export const validateData = async (req: Request, res: Response, next: NextFuncti
  */
 export const testRule = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { rule, testValue, testData } = req.body;
+    const { rule, testValue, testData, additionalFields } = req.body;
 
-    // Create a mock rule object
+    // Create a mock rule object.
+    // 2026-04-18 hardening session #4: include BP per-component limits
+    // and tableCellTarget. Without these, the /test endpoint silently
+    // dropped them from the body, so a `range` rule on a BP cell with
+    // bpSystolicMax=200 would actually evaluate against the clinical
+    // default (sysMax=250), giving misleading test results to authors.
     const mockRule: validationRulesService.ValidationRule = {
       id: 0,
       crfId: 0,
@@ -300,14 +305,24 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
       compareFieldPath: rule.compareFieldPath,
       compareValue: rule.compareValue,
       customExpression: rule.customExpression,
+      bpSystolicMin: rule.bpSystolicMin,
+      bpSystolicMax: rule.bpSystolicMax,
+      bpDiastolicMin: rule.bpDiastolicMin,
+      bpDiastolicMax: rule.bpDiastolicMax,
+      tableCellTarget: rule.tableCellTarget,
       dateCreated: new Date(),
       createdBy: 0
     };
 
-    // Build test data object
+    // Build test data object, merging any cross-question reference values
+    // from additionalFields (e.g., {subject_sex: "Male"} for formulas
+    // that reference answers from other questions).
     const data = testData || { testField: testValue };
     if (!testData) {
       data.testField = testValue;
+    }
+    if (additionalFields && typeof additionalFields === 'object') {
+      Object.assign(data, additionalFields);
     }
 
     // Use the service's testRuleDirectly for consistent evaluation
@@ -444,14 +459,16 @@ export const validateFieldChange = async (req: Request, res: Response, next: Nex
       return;
     }
 
-    // Safely parse numeric params - they may already be numbers from JSON body
     const safeParseInt = (val: any): number | undefined => {
       if (val === undefined || val === null) return undefined;
       const n = typeof val === 'number' ? val : parseInt(val);
       return isNaN(n) ? undefined : n;
     };
 
-    const result = await validationRulesService.validateFieldChange(
+    // Wrap validation in a timeout to prevent hanging requests from
+    // blocking the connection pool and triggering nginx 502 errors.
+    const timeoutMs = 30000;
+    const resultPromise = validationRulesService.validateFieldChange(
       safeParseInt(crfId)!,
       fieldPath,
       value,
@@ -467,6 +484,25 @@ export const validateFieldChange = async (req: Request, res: Response, next: Nex
         operationType: operationType as 'create' | 'update' | 'delete'
       }
     );
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Validation timed out')), timeoutMs)
+    );
+
+    let result;
+    try {
+      result = await Promise.race([resultPromise, timeoutPromise]);
+    } catch (timeoutErr: any) {
+      if (timeoutErr.message === 'Validation timed out') {
+        logger.warn('Validation timed out for field', { crfId, fieldPath });
+        res.json({
+          success: true,
+          data: { valid: true, errors: [], warnings: [], queryCreated: false, queriesCreated: 0 }
+        });
+        return;
+      }
+      throw timeoutErr;
+    }
 
     // Log audit event if queries were created
     if (result.queriesCreated && result.queriesCreated > 0) {
@@ -488,6 +524,42 @@ export const validateFieldChange = async (req: Request, res: Response, next: Nex
     res.json(response);
   } catch (error) {
     logger.error('Validate field change error:', error);
+    next(error);
+  }
+};
+
+/**
+ * AI Rule Compiler — POST /api/validation-rules/compile
+ *
+ * Translates a plain-English description into structured rule
+ * suggestions. NEVER persists. The frontend reviews the suggestions,
+ * lets the human accept each one, then goes through the existing
+ * createRule path (with e-signature gate) to persist.
+ *
+ * Returns HTTP:
+ *   200 with body `{ success: true, data: RuleSuggestionResponse }`
+ *       even when the AI refused / produced 0 rules. The caller
+ *       inspects `data.flags.refused` and `data.warnings[]`.
+ *   400 only on Joi validation failure (handled by the validate
+ *       middleware before this fires).
+ *   503 if the kill-switch is off — handled by the orchestrator
+ *       returning `flags.refused=true reason=feature_disabled`.
+ */
+export const compileRulesFromText = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const user = (req as any).user;
+    // Lazy-load the orchestrator so a misconfigured AI block doesn't
+    // brick the rest of the controller at module-load time.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { compileRules } = require('../services/ai/rule-compiler.service');
+    const result = await compileRules(req.body, {
+      userId: user.userId,
+      username: user.username || user.userName,
+      role: user.role || user.userType,
+    });
+    res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    logger.error('AI rule compile error:', error);
     next(error);
   }
 };
@@ -536,6 +608,7 @@ export default {
   validateEventCrf,
   validateFieldChange,
   testRule,
-  toggleFieldRequired
+  toggleFieldRequired,
+  compileRulesFromText
 };
 

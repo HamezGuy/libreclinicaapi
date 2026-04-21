@@ -422,7 +422,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
     const eventDefinitions = [];
     for (const event of eventsResult.rows) {
       const crfQuery = `
-        SELECT 
+        SELECT DISTINCT ON (edc.crf_id)
           edc.crf_id,
           edc.required_crf as required,
           edc.double_entry as double_data_entry,
@@ -437,10 +437,10 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
         LEFT JOIN acc_form_workflow_config awc ON (
           c.crf_id = awc.crf_id AND (awc.study_id IS NULL OR awc.study_id = edc.study_id)
         )
-        WHERE edc.study_event_definition_id = $1 AND edc.status_id = 1
-        ORDER BY edc.ordinal
+        WHERE edc.study_event_definition_id = $1 AND edc.study_id = $2 AND edc.status_id = 1
+        ORDER BY edc.crf_id, edc.ordinal
       `;
-      const crfResult = await pool.query(crfQuery, [event.study_event_definition_id]);
+      const crfResult = await pool.query(crfQuery, [event.study_event_definition_id, studyId]);
       
       eventDefinitions.push({
         studyEventDefinitionId: event.study_event_definition_id,
@@ -981,8 +981,10 @@ export const createStudy = async (
       for (const eventDef of eventDefs) {
         if (!eventDef.name) continue;
         
-        // Generate OC OID for event
-        const eventOid = `SE_${studyId}_${eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)}`;
+        // Generate OC OID for event — include random suffix for uniqueness
+        const sanitizedName = eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+        const randomSuffix = Math.random().toString(36).substring(2, 6);
+        const eventOid = `SE_${studyId}_${sanitizedName}_${randomSuffix}`;
         
         // Insert study_event_definition (with visit window fields)
         const eventResult = await client.query(`
@@ -1013,8 +1015,12 @@ export const createStudy = async (
         
         // Assign CRFs to this event if provided
         if (eventDef.crfAssignments && Array.isArray(eventDef.crfAssignments)) {
+          const seenCrfIdsCreate = new Set<number>();
           for (const crfAssign of eventDef.crfAssignments) {
             if (!crfAssign.crfId) continue;
+            const numCrfId = typeof crfAssign.crfId === 'string' ? parseInt(crfAssign.crfId, 10) : crfAssign.crfId;
+            if (seenCrfIdsCreate.has(numCrfId)) continue;
+            seenCrfIdsCreate.add(numCrfId);
             
             // Get default version if not specified
             let defaultVersionId = crfAssign.crfVersionId;
@@ -1023,7 +1029,7 @@ export const createStudy = async (
                 SELECT crf_version_id FROM crf_version
                 WHERE crf_id = $1 AND status_id = 1
                 ORDER BY crf_version_id DESC LIMIT 1
-              `, [crfAssign.crfId]);
+              `, [numCrfId]);
               if (versionResult.rows.length > 0) {
                 defaultVersionId = versionResult.rows[0].crf_version_id;
               }
@@ -1036,10 +1042,11 @@ export const createStudy = async (
                 double_entry, hide_crf, ordinal, status_id, owner_id,
                 date_created, default_version_id, electronic_signature
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9, $10)
+              ON CONFLICT (study_event_definition_id, study_id, crf_id) DO NOTHING
             `, [
               eventDefId,
               studyId,
-              crfAssign.crfId,
+              numCrfId,
               crfAssign.required ?? false,
               crfAssign.doubleDataEntry ?? false,
               crfAssign.hideCrf ?? false,
@@ -1049,7 +1056,7 @@ export const createStudy = async (
               crfAssign.electronicSignature ?? false
             ]);
             
-            logger.info('Assigned CRF to event', { eventDefId, crfId: crfAssign.crfId });
+            logger.info('Assigned CRF to event', { eventDefId, crfId: numCrfId });
           }
         }
       }
@@ -1303,10 +1310,11 @@ export const updateStudy = async (
       sdvRequirement: 'sdv_requirement'
     };
 
-    // Build update query dynamically for main study fields
+    // Build update query dynamically for main study fields.
+    // Allow null values through so fields can be explicitly cleared.
     for (const [frontendField, dbColumn] of Object.entries(fieldMapping)) {
       const value = (data as any)[frontendField];
-      if (value !== undefined && value !== null) {
+      if (value !== undefined) {
         updates.push(`${dbColumn} = $${paramIndex++}`);
         params.push(value);
       }
@@ -1333,6 +1341,7 @@ export const updateStudy = async (
     if (data.eventDefinitions && Array.isArray(data.eventDefinitions)) {
       logger.info('Updating event definitions', { studyId, count: data.eventDefinitions.length });
       
+      const eventErrors: string[] = [];
       for (const eventDef of data.eventDefinitions) {
         if (!eventDef.name) continue;
         
@@ -1363,22 +1372,46 @@ export const updateStudy = async (
               eventDef.studyEventDefinitionId
             ]);
             
-            // Update CRF assignments - delete existing and recreate
+            // Update CRF assignments using UPSERT to avoid unique-constraint violations.
+            // This only affects the TEMPLATE (event_definition_crf).
+            // Existing patient copies (event_crf, patient_event_form) are NOT touched —
+            // patients own their visit data independently.
             if (eventDef.crfAssignments && Array.isArray(eventDef.crfAssignments)) {
-              await client.query(`
-                UPDATE event_definition_crf SET status_id = 5
-                WHERE study_event_definition_id = $1
-              `, [eventDef.studyEventDefinitionId]);
-              
+              const incomingCrfIds: number[] = [];
+
+              const seenCrfIds = new Set<number>();
               for (const crfAssign of eventDef.crfAssignments) {
                 if (!crfAssign.crfId) continue;
+                if (seenCrfIds.has(crfAssign.crfId)) continue;
+                seenCrfIds.add(crfAssign.crfId);
+                incomingCrfIds.push(crfAssign.crfId);
+                
+                let defaultVersionId = (crfAssign as any).crfVersionId || null;
+                if (!defaultVersionId) {
+                  const vr = await client.query(
+                    `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
+                    [crfAssign.crfId]
+                  );
+                  if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crf_version_id;
+                }
                 
                 await client.query(`
                   INSERT INTO event_definition_crf (
                     study_event_definition_id, study_id, crf_id, required_crf,
                     double_entry, hide_crf, ordinal, status_id, owner_id, date_created,
-                    electronic_signature
-                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+                    default_version_id, electronic_signature
+                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9, $10)
+                  ON CONFLICT (study_event_definition_id, study_id, crf_id)
+                  DO UPDATE SET
+                    required_crf = EXCLUDED.required_crf,
+                    double_entry = EXCLUDED.double_entry,
+                    hide_crf = EXCLUDED.hide_crf,
+                    ordinal = EXCLUDED.ordinal,
+                    status_id = 1,
+                    default_version_id = EXCLUDED.default_version_id,
+                    electronic_signature = EXCLUDED.electronic_signature,
+                    update_id = EXCLUDED.owner_id,
+                    date_updated = NOW()
                 `, [
                   eventDef.studyEventDefinitionId,
                   studyId,
@@ -1388,13 +1421,32 @@ export const updateStudy = async (
                   crfAssign.hideCrf ?? false,
                   crfAssign.ordinal || 1,
                   userId,
+                  defaultVersionId,
                   crfAssign.electronicSignature ?? false
                 ]);
+              }
+
+              // Soft-delete CRFs that were removed from this event
+              if (incomingCrfIds.length > 0) {
+                await client.query(`
+                  UPDATE event_definition_crf SET status_id = 5, date_updated = NOW()
+                  WHERE study_event_definition_id = $1 AND study_id = $2
+                    AND crf_id != ALL($3) AND status_id != 5
+                `, [eventDef.studyEventDefinitionId, studyId, incomingCrfIds]);
+              } else {
+                await client.query(`
+                  UPDATE event_definition_crf SET status_id = 5, date_updated = NOW()
+                  WHERE study_event_definition_id = $1 AND study_id = $2 AND status_id != 5
+                `, [eventDef.studyEventDefinitionId, studyId]);
               }
             }
           } else {
             // Create new event (with visit window fields)
-            const eventOid = `SE_${studyId}_${eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)}`;
+            // Generate a unique OID by appending a random suffix to prevent collisions
+            // when event names sanitize to the same first 20 characters.
+            const sanitizedName = eventDef.name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+            const randomSuffix = Math.random().toString(36).substring(2, 6);
+            const eventOid = `SE_${studyId}_${sanitizedName}_${randomSuffix}`;
             
             const eventResult = await client.query(`
               INSERT INTO study_event_definition (
@@ -1421,17 +1473,32 @@ export const updateStudy = async (
             
             const newEventDefId = eventResult.rows[0].study_event_definition_id;
             
-            // Add CRF assignments
+            // Add CRF assignments for the new event definition
+            // Deduplicate by crfId to prevent unique-constraint violation if the
+            // frontend accidentally sends the same CRF twice in one payload.
             if (eventDef.crfAssignments && Array.isArray(eventDef.crfAssignments)) {
+              const seenCrfIds = new Set<number>();
               for (const crfAssign of eventDef.crfAssignments) {
                 if (!crfAssign.crfId) continue;
+                if (seenCrfIds.has(crfAssign.crfId)) continue;
+                seenCrfIds.add(crfAssign.crfId);
+                
+                let defaultVersionId = (crfAssign as any).crfVersionId || null;
+                if (!defaultVersionId) {
+                  const vr = await client.query(
+                    `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
+                    [crfAssign.crfId]
+                  );
+                  if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crf_version_id;
+                }
                 
                 await client.query(`
                   INSERT INTO event_definition_crf (
                     study_event_definition_id, study_id, crf_id, required_crf,
                     double_entry, hide_crf, ordinal, status_id, owner_id, date_created,
-                    electronic_signature
-                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9)
+                    default_version_id, electronic_signature
+                  ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, NOW(), $9, $10)
+                  ON CONFLICT (study_event_definition_id, study_id, crf_id) DO NOTHING
                 `, [
                   newEventDefId,
                   studyId,
@@ -1441,6 +1508,7 @@ export const updateStudy = async (
                   crfAssign.hideCrf ?? false,
                   crfAssign.ordinal || 1,
                   userId,
+                  defaultVersionId,
                   crfAssign.electronicSignature ?? false
                 ]);
               }
@@ -1450,8 +1518,18 @@ export const updateStudy = async (
           await client.query('RELEASE SAVEPOINT update_event');
         } catch (eventError: any) {
           await client.query('ROLLBACK TO SAVEPOINT update_event');
-          logger.warn('Event definition update warning', { error: eventError.message, event: eventDef.name });
+          const msg = `Event "${eventDef.name}": ${eventError.message}`;
+          logger.error('Event definition update FAILED', { error: eventError.message, event: eventDef.name });
+          eventErrors.push(msg);
         }
+      }
+      
+      if (eventErrors.length > 0) {
+        await client.query('ROLLBACK');
+        return {
+          success: false,
+          message: `Failed to update event definitions: ${eventErrors.join('; ')}`
+        };
       }
     }
 
@@ -1565,7 +1643,12 @@ export const updateStudy = async (
           await client.query('RELEASE SAVEPOINT update_group_class');
         } catch (gcError: any) {
           await client.query('ROLLBACK TO SAVEPOINT update_group_class');
-          logger.warn('Group class update warning', { error: gcError.message, groupClass: groupClass.name });
+          logger.error('Group class update FAILED', { error: gcError.message, groupClass: groupClass.name });
+          await client.query('ROLLBACK');
+          return {
+            success: false,
+            message: `Failed to update group class "${groupClass.name}": ${gcError.message}`
+          };
         }
       }
     }
@@ -1610,8 +1693,10 @@ export const updateStudy = async (
               studyId
             ]);
           } else {
-            // Create new site
-            const siteOid = `S_${site.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            // Create new site — add random suffix to OID to prevent collisions
+            const sanitizedId = site.uniqueIdentifier.replace(/[^a-zA-Z0-9]/g, '_');
+            const randomSuffix = Math.random().toString(36).substring(2, 6);
+            const siteOid = `S_${sanitizedId}_${randomSuffix}`;
             
             await client.query(`
               INSERT INTO study (
@@ -1642,7 +1727,12 @@ export const updateStudy = async (
           await client.query('RELEASE SAVEPOINT update_site');
         } catch (siteError: any) {
           await client.query('ROLLBACK TO SAVEPOINT update_site');
-          logger.warn('Site update warning', { error: siteError.message, site: site.name });
+          logger.error('Site update FAILED', { error: siteError.message, site: site.name });
+          await client.query('ROLLBACK');
+          return {
+            success: false,
+            message: `Failed to update site "${site.name}": ${siteError.message}`
+          };
         }
       }
     }
@@ -1659,23 +1749,18 @@ export const updateStudy = async (
           
           const stringValue = String(value);
           
-          // Check if parameter exists (no UNIQUE constraint in real LC)
-          const existsCheck = await client.query(`
-            SELECT study_parameter_value_id FROM study_parameter_value
-            WHERE study_id = $1 AND parameter = $2
-          `, [studyId, param]);
+          // Atomic UPSERT — avoids race conditions and doesn't depend on
+          // whether a unique constraint exists on (study_id, parameter).
+          const upserted = await client.query(`
+            UPDATE study_parameter_value SET value = $1
+            WHERE study_id = $2 AND parameter = $3
+          `, [stringValue, studyId, param]);
           
-          if (existsCheck.rows.length > 0) {
-            // Update existing
-            await client.query(`
-              UPDATE study_parameter_value SET value = $1
-              WHERE study_id = $2 AND parameter = $3
-            `, [stringValue, studyId, param]);
-          } else {
-            // Insert new
+          if ((upserted.rowCount ?? 0) === 0) {
             await client.query(`
               INSERT INTO study_parameter_value (study_id, parameter, value)
               VALUES ($1, $2, $3)
+              ON CONFLICT DO NOTHING
             `, [studyId, param, stringValue]);
           }
         }

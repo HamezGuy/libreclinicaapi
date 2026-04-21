@@ -65,16 +65,16 @@ export interface PasswordPolicy {
 }
 
 /**
- * Default password policy - 8 chars + 1 special character
+ * Default password policy — uses environment config (21 CFR Part 11 §11.300)
  */
 const DEFAULT_POLICY: PasswordPolicy = {
-  minLength: config.part11.passwordMinLength || 8,
-  requireUppercase: false,
-  requireLowercase: false,
-  requireNumber: false,
-  requireSpecialChar: true,  // Require at least 1 special character
-  expirationDays: config.part11.passwordExpiryDays || 365,
-  preventReuse: 0
+  minLength: config.part11.passwordMinLength || 12,
+  requireUppercase: config.part11.passwordRequireUppercase !== false,
+  requireLowercase: config.part11.passwordRequireLowercase !== false,
+  requireNumber: config.part11.passwordRequireNumber !== false,
+  requireSpecialChar: config.part11.passwordRequireSpecial !== false,
+  expirationDays: config.part11.passwordExpiryDays || 90,
+  preventReuse: 5
 };
 
 /**

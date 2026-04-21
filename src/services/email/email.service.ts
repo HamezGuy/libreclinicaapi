@@ -12,6 +12,8 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
+import nodemailer from 'nodemailer';
+import type { Transporter } from 'nodemailer';
 import {
   EmailTemplate,
   EmailQueueEntry,
@@ -38,6 +40,27 @@ const smtpConfig = {
 
 const EMAIL_QUEUE_ENABLED = process.env.EMAIL_QUEUE_ENABLED !== 'false';
 const MAX_RETRY_ATTEMPTS = 3;
+
+let _transporter: Transporter | null = null;
+
+function getTransporter(): Transporter {
+  if (_transporter) return _transporter;
+
+  if (!smtpConfig.host || !smtpConfig.user) {
+    logger.warn('SMTP not fully configured — emails will be logged but not sent');
+  }
+
+  _transporter = nodemailer.createTransport({
+    host: smtpConfig.host,
+    port: smtpConfig.port,
+    secure: smtpConfig.secure,
+    auth: smtpConfig.user ? { user: smtpConfig.user, pass: smtpConfig.pass } : undefined,
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+  });
+  return _transporter;
+}
 
 /**
  * Get email template by name
@@ -230,8 +253,7 @@ export async function queueDirectEmail(request: DirectEmailRequest): Promise<num
 }
 
 /**
- * Send email directly via SMTP (for testing or immediate send)
- * Note: In production, this would use nodemailer
+ * Send email directly via SMTP
  */
 export async function sendEmailDirect(
   to: string,
@@ -239,45 +261,28 @@ export async function sendEmailDirect(
   htmlBody: string,
   textBody?: string
 ): Promise<EmailSendResult> {
-  logger.info('Sending email directly', { to, subject });
+  logger.info('Sending email', { to, subject });
 
   try {
-    // In a real implementation, this would use nodemailer:
-    // const nodemailer = require('nodemailer');
-    // const transporter = nodemailer.createTransport({
-    //   host: smtpConfig.host,
-    //   port: smtpConfig.port,
-    //   secure: smtpConfig.secure,
-    //   auth: {
-    //     user: smtpConfig.user,
-    //     pass: smtpConfig.pass
-    //   }
-    // });
-    // 
-    // const info = await transporter.sendMail({
-    //   from: `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>`,
-    //   to,
-    //   subject,
-    //   text: textBody,
-    //   html: htmlBody
-    // });
-    // 
-    // return { success: true, messageId: info.messageId };
+    const transporter = getTransporter();
 
-    // For now, log that email would be sent
-    logger.info('Email would be sent (SMTP not configured)', {
+    const info = await transporter.sendMail({
+      from: `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>`,
       to,
       subject,
-      from: `${smtpConfig.fromName} <${smtpConfig.fromEmail}>`
+      text: textBody || undefined,
+      html: htmlBody
     });
 
-    // Simulate success for development
-    return { 
-      success: true, 
-      messageId: `dev-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` 
-    };
+    logger.info('Email sent successfully', {
+      to,
+      subject,
+      messageId: info.messageId
+    });
+
+    return { success: true, messageId: info.messageId };
   } catch (error: any) {
-    logger.error('Error sending email', { error: error.message, to });
+    logger.error('Error sending email', { error: error.message, to, subject });
     return { success: false, error: error.message };
   }
 }
@@ -295,25 +300,33 @@ export async function processEmailQueue(batchSize: number = 10): Promise<QueuePr
     errors: []
   };
 
+  const client = await pool.connect();
   try {
-    // Get pending emails
-    const query = `
-      SELECT 
-        queue_id, recipient_email, subject, html_body, text_body, attempts
-      FROM acc_email_queue
-      WHERE status = 'pending'
-        AND (scheduled_for IS NULL OR scheduled_for <= CURRENT_TIMESTAMP)
-        AND attempts < $1
-      ORDER BY priority ASC, date_created ASC
-      LIMIT $2
+    await client.query('BEGIN');
+
+    // Atomically claim a batch — FOR UPDATE SKIP LOCKED prevents concurrent
+    // workers from picking up the same rows and double-sending.
+    const claimQuery = `
+      UPDATE acc_email_queue
+      SET status = 'processing'
+      WHERE queue_id IN (
+        SELECT queue_id FROM acc_email_queue
+        WHERE status = 'pending'
+          AND (scheduled_for IS NULL OR scheduled_for <= CURRENT_TIMESTAMP)
+          AND attempts < $1
+        ORDER BY priority ASC, date_created ASC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING queue_id, recipient_email, subject, html_body, text_body, attempts
     `;
 
-    const pendingEmails = await pool.query(query, [MAX_RETRY_ATTEMPTS, batchSize]);
+    const claimed = await client.query(claimQuery, [MAX_RETRY_ATTEMPTS, batchSize]);
+    await client.query('COMMIT');
 
-    for (const email of pendingEmails.rows) {
+    for (const email of claimed.rows) {
       result.processed++;
 
-      // Attempt to send
       const sendResult = await sendEmailDirect(
         email.recipient_email,
         email.subject,
@@ -322,25 +335,23 @@ export async function processEmailQueue(batchSize: number = 10): Promise<QueuePr
       );
 
       if (sendResult.success) {
-        // Mark as sent
         await pool.query(`
           UPDATE acc_email_queue
           SET status = 'sent', sent_at = CURRENT_TIMESTAMP, last_attempt = CURRENT_TIMESTAMP
           WHERE queue_id = $1
         `, [email.queue_id]);
-        
+
         result.sent++;
       } else {
-        // Mark as failed or increment attempts
         const newAttempts = email.attempts + 1;
         const newStatus = newAttempts >= MAX_RETRY_ATTEMPTS ? 'failed' : 'pending';
-        
+
         await pool.query(`
           UPDATE acc_email_queue
           SET status = $1, attempts = $2, last_attempt = CURRENT_TIMESTAMP, error_message = $3
           WHERE queue_id = $4
         `, [newStatus, newAttempts, sendResult.error, email.queue_id]);
-        
+
         if (newStatus === 'failed') {
           result.failed++;
           result.errors.push(`Email ${email.queue_id}: ${sendResult.error}`);
@@ -351,9 +362,12 @@ export async function processEmailQueue(batchSize: number = 10): Promise<QueuePr
     logger.info('Email queue processed', result);
     return result;
   } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => {});
     logger.error('Error processing email queue', { error: error.message });
     result.errors.push(error.message);
     return result;
+  } finally {
+    client.release();
   }
 }
 

@@ -819,28 +819,124 @@ export const AuditEventTypes: Record<string, string> = {
   FORM_UPDATED: 'Form Updated',
   FORM_DELETED: 'Form Deleted',
   FORM_SIGNED: 'Form Signed',
-  
+
   // Subject access
   SUBJECT_VIEWED: 'Subject Viewed',
   SUBJECT_CREATED: 'Subject Created',
   SUBJECT_UPDATED: 'Subject Updated',
-  
+
   // Study access
   STUDY_ACCESSED: 'Study Accessed',
   STUDY_EXPORTED: 'Study Exported',
-  
-  // Query events  
+
+  // Query events
   QUERY_CREATED: 'Query Created',
   QUERY_RESPONDED: 'Query Responded',
   QUERY_CLOSED: 'Query Closed',
-  
+
   // SDV events
   SDV_VERIFIED: 'SDV Verified',
   SDV_REJECTED: 'SDV Rejected',
-  
+
   // Report events
   REPORT_GENERATED: 'Report Generated',
-  AUDIT_EXPORTED: 'Audit Exported'
+  AUDIT_EXPORTED: 'Audit Exported',
+
+  // ISSUE-201 fix: validation-rule mutations were silently mis-tagged as
+  // generic "Entity Created" before. Now they map to dedicated rows in
+  // audit_log_event_type (seeded by the bootstrap migration below). Even
+  // if the seed doesn't run, the trackUserAction resolver falls back to
+  // eventTypeId=1 -- the names below give it something to actually look up.
+  VALIDATION_RULE_CREATED: 'Validation Rule Created',
+  VALIDATION_RULE_UPDATED: 'Validation Rule Updated',
+  VALIDATION_RULE_DELETED: 'Validation Rule Deleted',
+  VALIDATION_RULE_ACTIVATED: 'Validation Rule Toggled',
+  VALIDATION_RULE_DEACTIVATED: 'Validation Rule Toggled',
+  VALIDATION_RULE_TESTED: 'Validation Rule Tested',
+  VALIDATION_QUERIES_CREATED: 'Validation Queries Created',
+  VALIDATION_QUERY_CREATED: 'Validation Queries Created',
+  FIELD_MARKED_REQUIRED: 'Field Required Toggled',
+  FIELD_MARKED_OPTIONAL: 'Field Required Toggled',
+
+  // AI rule-compiler audit events. Every /api/validation-rules/compile
+  // request goes through trackUserAction with REQUESTED, then RETURNED
+  // (or REFUSED). When the user accepts a suggestion through saveRule()
+  // the existing VALIDATION_RULE_CREATED event also fires; the
+  // ACCEPTED/REJECTED rows below are tracked PER-suggestion-card by the
+  // frontend so we have a defensible audit chain that distinguishes
+  // "the LLM made 5 suggestions" from "the human kept 2 of them".
+  // The provider-failover row fires when one provider fails over to
+  // the next inside select-provider.ts.
+  AI_RULE_COMPILATION_REQUESTED: 'AI Rule Compilation Requested',
+  AI_RULE_COMPILATION_RETURNED: 'AI Rule Compilation Returned',
+  AI_RULE_COMPILATION_REFUSED: 'AI Rule Compilation Refused',
+  AI_RULE_COMPILATION_ACCEPTED: 'AI Rule Compilation Accepted',
+  AI_RULE_COMPILATION_REJECTED: 'AI Rule Compilation Rejected',
+  AI_RULE_COMPILATION_EDITED: 'AI Rule Compilation Edited',
+  AI_PROVIDER_FAILOVER: 'AI Provider Failover',
+};
+
+/**
+ * ISSUE-201 fix: ensure all event-type rows referenced by AuditEventTypes
+ * exist in the database. Called during server startup. Idempotent.
+ *
+ * ISSUE-414 fix: previously this swallowed errors at the function level,
+ * but the per-row pool.query() call still logged at ERROR through the
+ * database wrapper before the catch fired. Now we skip names that
+ * already exist BEFORE attempting the insert, and we filter expected
+ * "duplicate key" / "unique violation" sqlstates inside the query.
+ *
+ * Sequence repair for audit_log_event_type runs in repairAllSequences()
+ * just before this function, so nextval() is guaranteed to return a
+ * fresh PK and the insert never collides on the primary key.
+ */
+export const ensureAuditEventTypesSeeded = async (): Promise<void> => {
+  const desiredNames = Array.from(new Set(Object.values(AuditEventTypes)));
+  let inserted = 0;
+  let alreadyPresent = 0;
+
+  try {
+    const existing = await pool.query(
+      `SELECT name FROM audit_log_event_type WHERE name = ANY($1::varchar[])`,
+      [desiredNames]
+    );
+    const existingSet = new Set(
+      existing.rows.map((r: { name: string }) => r.name)
+    );
+    alreadyPresent = existingSet.size;
+
+    const missing = desiredNames.filter((n) => !existingSet.has(n));
+    for (const name of missing) {
+      try {
+        await pool.query(
+          `INSERT INTO audit_log_event_type (name) VALUES ($1::varchar)`,
+          [name]
+        );
+        inserted++;
+      } catch (rowErr: any) {
+        // 23505 = unique_violation, 23503 = foreign_key_violation. Both are
+        // benign here: another concurrent boot may have raced us, or the
+        // sequence was momentarily stale. The wrapper has already logged
+        // the row, so we just count and move on.
+        if (rowErr?.code !== '23505' && rowErr?.code !== '23503') {
+          logger.warn('Could not seed audit event type', {
+            name,
+            error: rowErr.message,
+          });
+        }
+      }
+    }
+
+    logger.info('Audit event types seeded', {
+      total: desiredNames.length,
+      inserted,
+      alreadyPresent,
+    });
+  } catch (err: any) {
+    logger.warn('Audit event-type seed pre-check failed', {
+      error: err.message,
+    });
+  }
 };
 
 /**
@@ -1382,6 +1478,7 @@ export default {
   trackUserAction,
   trackDocumentAccess,
   AuditEventTypes,
+  ensureAuditEventTypesSeeded,
   // Login audit
   getLoginHistory,
   getLoginStatistics

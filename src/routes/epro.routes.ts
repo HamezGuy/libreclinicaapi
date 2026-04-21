@@ -144,8 +144,8 @@ router.get('/instruments', async (req: Request, res: Response, next: NextFunctio
 router.post('/instruments', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { name, shortName, description, content, category, estimatedMinutes, languageCode } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     // Generate short_name if not provided (required unique field)
     const finalShortName = shortName || name.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50).toLowerCase() + '_' + Date.now();
@@ -291,8 +291,8 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
 router.post('/assignments', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { subjectId, instrumentId, dueDate, studyId } = req.body;
-    const userId = req.user?.userId || 1;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     const result = await pool.query(`
       INSERT INTO acc_pro_assignment (
@@ -339,8 +339,8 @@ router.post('/assignments', async (req: Part11Request, res: Response, next: Next
 router.post('/assignments/:id/remind', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     // Get assignment and patient account details
     const assignmentResult = await pool.query(`
@@ -424,8 +424,8 @@ router.post('/assignments/:id/respond', async (req: Part11Request, res: Response
   try {
     const { id } = req.params;
     const { responses, startedAt, completedAt } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     const client = await pool.connect();
     try {
@@ -775,8 +775,8 @@ router.post('/reminders', async (req: Part11Request, res: Response, next: NextFu
       messageSubject, 
       messageBody 
     } = req.body;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     if (!assignmentId || !patientAccountId || !reminderType || !scheduledFor) {
       return res.status(400).json({
@@ -840,8 +840,8 @@ router.post('/reminders', async (req: Part11Request, res: Response, next: NextFu
 router.post('/reminders/:id/send', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     // Get reminder details
     const reminderResult = await pool.query(
@@ -927,8 +927,8 @@ router.post('/reminders/:id/send', async (req: Part11Request, res: Response, nex
 router.post('/reminders/:id/cancel', async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const userId = req.user?.userId || 0;
-    const userName = req.user?.userName || 'system';
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     // Get current status
     const currentResult = await pool.query(
@@ -1035,7 +1035,7 @@ router.post('/assignments/:id/schedule-reminders', async (req: Part11Request, re
     const { id } = req.params;
     const { reminderSchedule } = req.body;
     // reminderSchedule: [{ daysBefore: 1, type: 'email' }, { daysBefore: 0, type: 'sms' }]
-    const userId = req.user?.userId || 0;
+    const userId = req.user?.userId;
 
     // Get assignment details
     const assignmentResult = await pool.query(`

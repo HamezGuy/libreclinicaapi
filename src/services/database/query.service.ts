@@ -10,6 +10,7 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { ApiResponse, PaginatedResponse } from '../../types';
 import * as notificationService from './notification.service';
+import * as emailTriggers from '../email/notification-triggers';
 import { resolveAllQueryAssignees } from './workflow-config.provider';
 import { verifyAndUpgrade } from '../../utils/password.util';
 import {
@@ -18,7 +19,7 @@ import {
   BadRequestError,
   ForbiddenError,
 } from '../../middleware/errorHandler.middleware';
-import { buildFieldTypeInfo, serializeCorrectionForStorage, parseResponseSetOptions } from '../../utils/query-correction.helper';
+import { buildFieldTypeInfo, serializeCorrectionForStorage, parseResponseSetOptions, resolveCellTypeInfo } from '../../utils/query-correction.helper';
 import { parseExtendedProps } from '../../utils/extended-props';
 import { resolveFieldType, isStructuredDataType } from '../../utils/field-type.utils';
 
@@ -450,6 +451,12 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
           formVersion: r.form_version,
           fieldTypeInfo
         };
+
+        // Resolve cell-level type info when column_name contains a cellPath
+        const cellTypeInfo = resolveCellTypeInfo(r.column_name, fieldTypeInfo);
+        if (cellTypeInfo) {
+          linkedItemData.cellTypeInfo = cellTypeInfo;
+        }
         linkedEventCrf = {
           eventCrfId: r.event_crf_id,
           crfId: r.crf_id,
@@ -472,18 +479,60 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
           [queryId]
         );
         if (ecrfLink.rows.length > 0) {
+          const eRow = ecrfLink.rows[0];
           linkedEventCrf = {
-            eventCrfId: ecrfLink.rows[0].event_crf_id,
-            crfId: ecrfLink.rows[0].crf_id,
-            crfVersionId: ecrfLink.rows[0].crf_version_id,
-            columnName: ecrfLink.rows[0].column_name,
-            formName: ecrfLink.rows[0].form_name,
-            formVersion: ecrfLink.rows[0].form_version
+            eventCrfId: eRow.event_crf_id,
+            crfId: eRow.crf_id,
+            crfVersionId: eRow.crf_version_id,
+            columnName: eRow.column_name,
+            formName: eRow.form_name,
+            formVersion: eRow.form_version
           };
+
+          // For cell-path queries on eventCrf, resolve cellTypeInfo from item extended properties
+          const cellPathStr = eRow.column_name;
+          if (cellPathStr && (cellPathStr.includes('[') || (cellPathStr.split('.').length === 3))) {
+            try {
+              const dtMatch = cellPathStr.match(/^(.+)\[\d+\]\.(.+)$/);
+              const qtMatch = cellPathStr.match(/^([^.[]+)\.[^.]+\.([^.]+)$/);
+              const fieldKey = dtMatch ? dtMatch[1] : (qtMatch ? qtMatch[1] : null);
+              const colKey = dtMatch ? dtMatch[2] : (qtMatch ? qtMatch[2] : null);
+
+              if (fieldKey && colKey) {
+                // Look up the item by fieldName in its extended properties
+                const itemLookup = await pool.query(
+                  `SELECT i.description FROM item i
+                   INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+                   WHERE ifm.crf_version_id = $1
+                     AND i.description LIKE $2`,
+                  [eRow.crf_version_id, `%"fieldName":"${fieldKey}"%`]
+                );
+
+                if (itemLookup.rows.length > 0 && itemLookup.rows[0].description) {
+                  const parentTypeInfo = buildFieldTypeInfo(itemLookup.rows[0].description, null, null, null, null);
+                  const cellInfo = resolveCellTypeInfo(cellPathStr, parentTypeInfo);
+                  if (cellInfo) {
+                    (linkedEventCrf as any).cellTypeInfo = cellInfo;
+                    canCorrectValue = true;
+                  }
+                }
+              }
+            } catch { /* ignore template lookup errors */ }
+          }
         }
       }
     } catch (linkedErr: any) {
       logger.warn('Failed to fetch linked item data for query', { queryId, error: linkedErr.message });
+    }
+
+    // Pending correction metadata — only expose that one exists, plus reason
+    const hasPendingCorrection = !!parent.pending_correction_value;
+    let pendingCorrectionValue: any = undefined;
+    let pendingCorrectionReason: string | undefined;
+    if (hasPendingCorrection) {
+      try { pendingCorrectionValue = JSON.parse(parent.pending_correction_value); }
+      catch { pendingCorrectionValue = parent.pending_correction_value; }
+      pendingCorrectionReason = parent.pending_correction_reason || undefined;
     }
 
     return {
@@ -491,7 +540,10 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
       responses: responsesResult.rows,
       linkedItemData,
       linkedEventCrf,
-      canCorrectValue
+      canCorrectValue,
+      hasPendingCorrection,
+      pendingCorrectionValue: hasPendingCorrection ? pendingCorrectionValue : undefined,
+      pendingCorrectionReason
     };
   } catch (error: any) {
     logger.error('Get query by ID error', { error: error.message });
@@ -633,6 +685,14 @@ export const createQuery = async (
     // Resolve generation type: manual queries from the controller are always 'manual'.
     // Automatic queries created by validation-rules.service use 'automatic'.
     const generationType = (data as any).generationType || 'manual';
+
+    // Validate dueDate format if provided
+    if (data.dueDate) {
+      const parsed = new Date(data.dueDate);
+      if (isNaN(parsed.getTime())) {
+        throw new Error(`Invalid dueDate format: "${data.dueDate}". Expected ISO date string (YYYY-MM-DD).`);
+      }
+    }
 
     // Insert discrepancy note (main record) with resolved assignment
     const insertNoteQuery = `
@@ -778,7 +838,9 @@ export const createQuery = async (
     }
 
     // Insert into the mapping table with the validated entity ID
-    const fieldPath = (data as any).fieldName || (data as any).fieldPath || (data as any).columnName;
+    // For cell-level queries, use cellPath (e.g., "vitals_table[2].heart_rate") as column_name
+    const cellPath = (data as any).cellPath;
+    const fieldPath = cellPath || (data as any).fieldName || (data as any).fieldPath || (data as any).columnName;
     if (fieldPath && (mapping.table === 'dn_event_crf_map' || mapping.table === 'dn_item_data_map')) {
       await client.query(`
         INSERT INTO ${mapping.table} (discrepancy_note_id, ${mapping.idColumn}, column_name)
@@ -930,6 +992,22 @@ export const createQuery = async (
       logger.warn('Failed to send query assignment notifications', { error: notifErr.message });
     }
 
+    // Fire-and-forget: queue email notifications for assigned users
+    try {
+      const allAssigned = [
+        ...(resolvedAssignedUserId ? [resolvedAssignedUserId] : []),
+        ...additionalAssigneeIds
+      ];
+      for (const assigneeId of allAssigned) {
+        emailTriggers.triggerQueryOpened(
+          queryId, data.studyId, data.studyId, studySubjectId || 0,
+          userId, assigneeId, data.description || 'New query'
+        ).catch(e => logger.warn('Email trigger failed for query opened', { error: e.message }));
+      }
+    } catch (emailErr: any) {
+      logger.warn('Failed to queue query email notifications', { error: emailErr.message });
+    }
+
     return { success: true, queryId, message: 'Query created successfully' };
   } catch (error: any) {
     if (txStarted) {
@@ -942,6 +1020,356 @@ export const createQuery = async (
   } finally {
     client.release();
   }
+};
+
+/**
+ * Apply a data correction to the linked item_data row and sync to patient_event_form.
+ * Shared by both:
+ *   - addQueryResponse (immediate path when caller closes directly)
+ *   - acceptResolution (deferred path when Monitor/DM/Admin approves)
+ *
+ * Returns true if the correction was applied, false otherwise.
+ */
+const applyCorrectionToItemData = async (
+  client: any,
+  queryId: number,
+  linkedRow: any,
+  correctedValue: any,
+  correctionReason: string,
+  userId: number
+): Promise<boolean> => {
+  const { item_data_id, old_value, event_crf_id, field_name,
+          item_description, item_data_type_id,
+          options_text, options_values, response_type_name,
+          column_name } = linkedRow;
+
+  const ext = parseExtendedProps(item_description);
+  const technicalFieldName: string | null = ext.fieldName || null;
+
+  const fieldInfo = buildFieldTypeInfo(
+    item_description, item_data_type_id, response_type_name, options_text, options_values
+  );
+
+  // Detect cell-path queries: column_name contains a path like "vitals[0].hr"
+  // or "symptoms.headache.severity" rather than the literal string "value".
+  // For cell corrections, we must update ONLY the cell inside form_data JSONB —
+  // never overwrite item_data.value (which holds the __STRUCTURED_DATA__ marker
+  // for table fields) or replace the whole table.
+  const cellPath: string | null = (column_name && typeof column_name === 'string' &&
+    (column_name.includes('[') || column_name.split('.').length === 3))
+    ? column_name : null;
+
+  let lockNote = '';
+  if (event_crf_id) {
+    const lockCheck = await client.query(
+      `SELECT status_id, COALESCE(frozen, false) AS frozen FROM event_crf WHERE event_crf_id = $1`,
+      [event_crf_id]
+    );
+    if (lockCheck.rows.length > 0) {
+      if (lockCheck.rows[0].status_id === 6) lockNote = ' [LOCKED RECORD — query correction override]';
+      else if (lockCheck.rows[0].frozen) lockNote = ' [FROZEN RECORD — query correction override]';
+    }
+  }
+
+  const auditNewValue = typeof correctedValue === 'object'
+    ? JSON.stringify(correctedValue) : String(correctedValue);
+  const fullReason = correctionReason + lockNote;
+
+  if (cellPath) {
+    // ── CELL-LEVEL CORRECTION ─────────────────────────────────────────
+    // Parse the cell path, then surgically update form_data[table][row][col].
+    // item_data.value stays as the __STRUCTURED_DATA__ marker for table fields.
+    const dtMatch = cellPath.match(/^(.+)\[(\d+)\]\.(.+)$/);
+    const qtMatch = !dtMatch ? cellPath.match(/^([^.[]+)\.([^.]+)\.([^.]+)$/) : null;
+
+    if (!event_crf_id) {
+      logger.warn('Cell correction requested but no event_crf_id available', {
+        queryId, cellPath
+      });
+      return false;
+    }
+
+    let pathArray: string[] | null = null;
+    let tableKey: string | null = null;
+    let cellColumnId: string | null = null;
+    if (dtMatch) {
+      tableKey = dtMatch[1];
+      cellColumnId = dtMatch[3];
+      pathArray = [dtMatch[1], dtMatch[2], dtMatch[3]]; // jsonb_set treats numeric strings as array indices
+    } else if (qtMatch) {
+      tableKey = qtMatch[1];
+      cellColumnId = qtMatch[3];
+      pathArray = [qtMatch[1], qtMatch[2], qtMatch[3]];
+    }
+
+    if (!pathArray || !tableKey || !cellColumnId) {
+      logger.warn('Cell path could not be parsed for correction', { queryId, cellPath });
+      return false;
+    }
+
+    // Resolve the canonical column data key. A column can have differing
+    // `id`, `name`, and `key` properties — the form-table-manager stores
+    // cell values under `key || name || id`, but a manually-created query
+    // (or a legacy validation-rule auto-query) may have used the column's
+    // `id` in the cell path. Without this translation, jsonb_set would
+    // create a NEW property on the row instead of updating the existing
+    // canonical-key cell, leaving the original value untouched.
+    let canonicalCellColumnKey = cellColumnId;
+    try {
+      const ext = parseExtendedProps(item_description);
+      const isDataTable = Array.isArray(ext.tableColumns) && ext.tableColumns.length > 0;
+      const isQuestionTable = Array.isArray(ext.questionRows) && ext.questionRows.length > 0;
+      if (isDataTable) {
+        const col = ext.tableColumns.find((c: any) =>
+          c && (c.key === cellColumnId || c.id === cellColumnId || c.name === cellColumnId)
+        );
+        if (col) canonicalCellColumnKey = col.key || col.name || col.id || cellColumnId;
+      } else if (isQuestionTable) {
+        // Question table answer columns are defined per-row with `id`.
+        // Inspect every row to find the column definition (rows can have
+        // varying answer columns in some templates).
+        for (const row of ext.questionRows) {
+          const cols = Array.isArray(row?.answerColumns) ? row.answerColumns : [];
+          const col = cols.find((c: any) =>
+            c && (c.id === cellColumnId || c.name === cellColumnId || (c as any).key === cellColumnId)
+          );
+          if (col) {
+            canonicalCellColumnKey = col.id || col.name || (col as any).key || cellColumnId;
+            break;
+          }
+        }
+      }
+    } catch (e: any) {
+      // If metadata parsing fails, fall back to the raw cell-path column
+      // segment — better to attempt the update than fail outright.
+      logger.warn('Could not resolve canonical column key for correction', {
+        cellPath, error: e.message
+      });
+    }
+    if (canonicalCellColumnKey !== cellColumnId) {
+      logger.info('Translated cell-path column to canonical data key', {
+        cellPath, original: cellColumnId, canonical: canonicalCellColumnKey
+      });
+      pathArray = [pathArray[0], pathArray[1], canonicalCellColumnKey];
+    }
+
+    // Coerce the corrected value to JSON for jsonb_set. Strings need quoting.
+    const jsonbLiteral = JSON.stringify(correctedValue);
+
+    // Try the technical field name first, then the display name as fallback.
+    // The first segment of the cell path SHOULD already be the form data key,
+    // but we verify by checking that key exists on form_data.
+    //
+    // Same-named-table dedup tolerance: when a CRF has multiple tables sharing
+    // the same name, the patient form deduplicates by appending "_<itemId>".
+    // The cell path may contain the bare name OR the deduped key. Try BOTH
+    // variants and look up by the item_id (linkedRow's item_id is the table's).
+    const itemIdNum: number | undefined =
+      (linkedRow.item_id != null && Number.isFinite(Number(linkedRow.item_id)))
+        ? Number(linkedRow.item_id) : undefined;
+    const candidateKeys: string[] = [];
+    const pushUnique = (k: string | null | undefined) => {
+      if (k && !candidateKeys.includes(k)) candidateKeys.push(k);
+    };
+    pushUnique(tableKey);
+    if (itemIdNum != null) {
+      pushUnique(`${tableKey}_${itemIdNum}`);
+      if (technicalFieldName) pushUnique(`${technicalFieldName}_${itemIdNum}`);
+      if (field_name) pushUnique(`${field_name}_${itemIdNum}`);
+    }
+    pushUnique(technicalFieldName);
+    pushUnique(field_name);
+
+    let cellUpdated = false;
+    let resolvedKey: string | null = null;
+    for (const key of candidateKeys) {
+      try {
+        // Replace the first path segment with the actual form_data key
+        const adjustedPath = [key, ...pathArray.slice(1)];
+        const updateResult = await client.query(`
+          UPDATE patient_event_form
+          SET form_data = jsonb_set(
+                COALESCE(form_data, '{}'::jsonb),
+                $1::text[], $2::jsonb, true
+              ),
+              date_updated = NOW()
+          WHERE event_crf_id = $3
+            AND form_data ? $4
+        `, [adjustedPath, jsonbLiteral, event_crf_id, key]);
+        if ((updateResult as any).rowCount > 0) {
+          cellUpdated = true;
+          resolvedKey = key;
+          logger.info('Cell correction applied to form_data', {
+            event_crf_id, key, cellPath, queryId
+          });
+          break;
+        }
+      } catch (e: any) {
+        logger.warn('Cell correction attempt failed', {
+          error: e.message, event_crf_id, key, cellPath
+        });
+      }
+    }
+
+    if (!cellUpdated) {
+      logger.error('Cell correction could not be applied — table key not found in form_data', {
+        event_crf_id, cellPath, candidateKeys, queryId
+      });
+      return false;
+    }
+
+    // If the actual form key was a deduped variant OR the column key was
+    // translated to its canonical form, persist the corrected cell path back
+    // into dn_item_data_map.column_name so subsequent loads/dedup checks
+    // resolve the right cell going forward.
+    const tableKeyChanged = resolvedKey && resolvedKey !== tableKey;
+    const colKeyChanged = canonicalCellColumnKey !== cellColumnId;
+    if (tableKeyChanged || colKeyChanged) {
+      try {
+        // Rebuild the cell path from the resolved table+column keys so both
+        // are persisted correctly. For data tables the path looks like
+        // "<tableKey>[<rowIdx>].<colKey>"; for question tables it's
+        // "<tableKey>.<rowId>.<colKey>".
+        let normalizedPath: string;
+        if (dtMatch) {
+          normalizedPath = `${resolvedKey || tableKey}[${dtMatch[2]}].${canonicalCellColumnKey}`;
+        } else {
+          normalizedPath = `${resolvedKey || tableKey}.${qtMatch![2]}.${canonicalCellColumnKey}`;
+        }
+        await client.query(`
+          UPDATE dn_item_data_map
+             SET column_name = $1
+           WHERE discrepancy_note_id = $2
+             AND item_data_id = $3
+        `, [normalizedPath, queryId, item_data_id]);
+      } catch (e: any) {
+        logger.warn('Could not normalize dn_item_data_map column_name', { error: e.message });
+      }
+    }
+
+    // Audit log the cell correction (item_data row level — the table field)
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id,
+        old_value, new_value, audit_log_event_type_id,
+        event_crf_id, reason_for_change
+      ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type
+         WHERE name ILIKE '%updated%' LIMIT 1),
+        $5, $6)
+    `, [userId, item_data_id, `[cell ${cellPath}]`, `[cell ${cellPath}] = ${auditNewValue}`, event_crf_id, fullReason]);
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        old_value, new_value, reason_for_change,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'discrepancy_note', $1, $2, 'Query Data Correction (Cell)',
+        $3, $4, $5,
+        COALESCE(
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+          1
+        )
+      )
+    `, [
+      userId, queryId,
+      `Cell: ${cellPath}, Old: [in form_data]`,
+      `Cell: ${cellPath}, Corrected: ${auditNewValue}`,
+      fullReason
+    ]);
+
+    return true;
+  }
+
+  // ── REGULAR FIELD CORRECTION ────────────────────────────────────────
+  const serialized = serializeCorrectionForStorage(fieldInfo.canonicalType, correctedValue);
+
+  await client.query(`
+    UPDATE item_data SET value = $1, date_updated = NOW(), update_id = $2
+    WHERE item_data_id = $3
+  `, [serialized.itemDataValue, userId, item_data_id]);
+
+  await client.query(`
+    INSERT INTO audit_log_event (
+      audit_date, audit_table, user_id, entity_id,
+      old_value, new_value, audit_log_event_type_id,
+      event_crf_id, reason_for_change
+    ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
+      (SELECT audit_log_event_type_id FROM audit_log_event_type
+       WHERE name ILIKE '%updated%' LIMIT 1),
+      $5, $6)
+  `, [userId, item_data_id, old_value, auditNewValue, event_crf_id, fullReason]);
+
+  await client.query(`
+    INSERT INTO audit_log_event (
+      audit_date, audit_table, user_id, entity_id, entity_name,
+      old_value, new_value, reason_for_change,
+      audit_log_event_type_id
+    ) VALUES (
+      NOW(), 'discrepancy_note', $1, $2, 'Query Data Correction',
+      $3, $4, $5,
+      COALESCE(
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+        1
+      )
+    )
+  `, [
+    userId, queryId,
+    `Field: ${field_name}, Value: ${old_value}`,
+    `Field: ${field_name}, Corrected Value: ${auditNewValue}`,
+    fullReason
+  ]);
+
+  if (event_crf_id) {
+    const jsonbLiteral = JSON.stringify(serialized.jsonbValue);
+    const keysToTry = [technicalFieldName, field_name].filter(Boolean) as string[];
+    for (const key of keysToTry) {
+      try {
+        const updateResult = await client.query(`
+          UPDATE patient_event_form
+          SET form_data = jsonb_set(
+                COALESCE(form_data, '{}'::jsonb),
+                $1::text[], $2::jsonb
+              ),
+              date_updated = NOW()
+          WHERE event_crf_id = $3
+            AND form_data ? $4
+        `, [[key], jsonbLiteral, event_crf_id, key]);
+        if ((updateResult as any).rowCount > 0) {
+          logger.info('Synced correction to patient_event_form', { event_crf_id, key, queryId });
+          break;
+        }
+      } catch (snapErr: any) {
+        logger.warn('Failed to sync correction to patient_event_form', {
+          error: snapErr.message, event_crf_id, key
+        });
+      }
+    }
+    if (keysToTry.length > 0) {
+      try {
+        const fallbackKey = technicalFieldName || field_name;
+        await client.query(`
+          UPDATE patient_event_form
+          SET form_data = jsonb_set(
+                COALESCE(form_data, '{}'::jsonb),
+                $1::text[], $2::jsonb
+              ),
+              date_updated = NOW()
+          WHERE event_crf_id = $3
+            AND NOT (form_data ? $4)
+        `, [[fallbackKey], jsonbLiteral, event_crf_id, fallbackKey]);
+      } catch { /* non-blocking */ }
+    }
+  }
+
+  logger.info('Data correction applied via query resolution', {
+    queryId, item_data_id, field_name,
+    technicalFieldName, canonicalType: fieldInfo.canonicalType,
+    oldValue: old_value, newValue: auditNewValue
+  });
+
+  return true;
 };
 
 /**
@@ -960,7 +1388,7 @@ export const addQueryResponse = async (
     correctionReason?: string;
   },
   userId: number
-): Promise<{ success: true; responseId: number; message: string; correctionApplied?: boolean }> => {
+): Promise<{ success: true; responseId: number; message: string; correctionApplied?: boolean; correctionDeferred?: boolean }> => {
   logger.info('Adding query response', { parentQueryId, userId });
 
   // Guarantee a non-empty description — an empty description violates NOT NULL
@@ -1087,170 +1515,90 @@ export const addQueryResponse = async (
       'Query response added'
     ]);
 
-    // ── DATA CORRECTION: update the linked item_data value if provided ──
+    // ── DATA CORRECTION: handle corrected value based on resolution status ──
+    // When status = 3 (Resolution Proposed): store correction as PENDING —
+    //   it only gets applied when a Monitor/DM/Admin accepts the resolution.
+    // When status = 4 (Closed) or other: apply immediately (caller has authority).
     let correctionApplied = false;
+    let correctionDeferred = false;
 
     if (data.correctedValue !== undefined && data.correctedValue !== null && data.correctedValue !== '') {
       logger.info('Data correction requested', { 
         parentQueryId, correctedValueType: typeof data.correctedValue,
         correctedValuePreview: JSON.stringify(data.correctedValue).substring(0, 100)
       });
-      try {
-        const linkedData = await client.query(`
-          SELECT dim.item_data_id, id.value AS old_value, id.event_crf_id,
-                 i.name AS field_name, i.item_id, i.description AS item_description,
-                 i.item_data_type_id,
-                 rs.options_text, rs.options_values,
-                 rt.name AS response_type_name
-          FROM dn_item_data_map dim
-          INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
-          INNER JOIN item i ON id.item_id = i.item_id
-          LEFT JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
-          LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = ec.crf_version_id
-          LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
-          LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
-          WHERE dim.discrepancy_note_id = $1
-          LIMIT 1
-        `, [parentQueryId]);
 
-        logger.info('Linked data lookup result', { 
-          parentQueryId, rowCount: linkedData.rows.length,
-          firstRow: linkedData.rows[0] ? { item_data_id: linkedData.rows[0].item_data_id, field_name: linkedData.rows[0].field_name } : null
+      const correctedSerialized = typeof data.correctedValue === 'object'
+        ? JSON.stringify(data.correctedValue) : String(data.correctedValue);
+      const correctionReason = data.correctionReason || 'Query resolution data correction';
+
+      if (newStatusId === 3) {
+        // ── DEFERRED: store pending correction on the parent query ──
+        await client.query(`
+          UPDATE discrepancy_note
+          SET pending_correction_value   = $1,
+              pending_correction_reason  = $2,
+              pending_correction_user_id = $3
+          WHERE discrepancy_note_id = $4
+        `, [correctedSerialized, correctionReason, userId, parentQueryId]);
+
+        correctionDeferred = true;
+        logger.info('Data correction deferred — stored as pending (awaiting approval)', {
+          queryId: parentQueryId, userId
         });
 
-        if (linkedData.rows.length > 0) {
-          const { item_data_id, old_value, event_crf_id, field_name, item_id, item_description,
-                  item_data_type_id, options_text, options_values, response_type_name } = linkedData.rows[0];
-
-          const ext = parseExtendedProps(item_description);
-          const technicalFieldName: string | null = ext.fieldName || null;
-
-          const fieldInfo = buildFieldTypeInfo(
-            item_description, item_data_type_id, response_type_name, options_text, options_values
-          );
-
-          // Check lock/freeze status — query-driven corrections are ALLOWED on
-          // locked/frozen forms (EDC standard) but we log an explicit audit entry
-          let lockNote = '';
-          if (event_crf_id) {
-            const lockCheck = await client.query(
-              `SELECT status_id, COALESCE(frozen, false) AS frozen FROM event_crf WHERE event_crf_id = $1`,
-              [event_crf_id]
-            );
-            if (lockCheck.rows.length > 0) {
-              if (lockCheck.rows[0].status_id === 6) lockNote = ' [LOCKED RECORD — query correction override]';
-              else if (lockCheck.rows[0].frozen) lockNote = ' [FROZEN RECORD — query correction override]';
-            }
-          }
-
-          // Type-aware serialization via helper
-          const serialized = serializeCorrectionForStorage(fieldInfo.canonicalType, data.correctedValue);
-
-          // 1. Update item_data value (marker preserved for structured fields)
-          await client.query(`
-            UPDATE item_data SET value = $1, date_updated = NOW(), update_id = $2
-            WHERE item_data_id = $3
-          `, [serialized.itemDataValue, userId, item_data_id]);
-
-          // 2. Write audit trail for the data correction
-          const auditNewValue = typeof data.correctedValue === 'object'
-            ? JSON.stringify(data.correctedValue) : String(data.correctedValue);
-          const correctionReason = (data.correctionReason || 'Query resolution data correction') + lockNote;
-          await client.query(`
-            INSERT INTO audit_log_event (
-              audit_date, audit_table, user_id, entity_id,
-              old_value, new_value, audit_log_event_type_id,
-              event_crf_id, reason_for_change
-            ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
-              (SELECT audit_log_event_type_id FROM audit_log_event_type
-               WHERE name ILIKE '%updated%' LIMIT 1),
-              $5, $6)
-          `, [
-            userId, item_data_id, old_value, auditNewValue,
-            event_crf_id, correctionReason
-          ]);
-
-          // 3. Write audit trail for the query-driven correction
-          await client.query(`
-            INSERT INTO audit_log_event (
-              audit_date, audit_table, user_id, entity_id, entity_name,
-              old_value, new_value, reason_for_change,
-              audit_log_event_type_id
-            ) VALUES (
-              NOW(), 'discrepancy_note', $1, $2, 'Query Data Correction',
-              $3, $4, $5,
-              COALESCE(
-                (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
-                1
-              )
+        // Audit log the pending proposal
+        await client.query(`
+          INSERT INTO audit_log_event (
+            audit_date, audit_table, user_id, entity_id, entity_name,
+            old_value, new_value, reason_for_change,
+            audit_log_event_type_id
+          ) VALUES (
+            NOW(), 'discrepancy_note', $1, $2, 'Pending Data Correction Proposed',
+            'No correction', $3, $4,
+            COALESCE(
+              (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+              1
             )
-          `, [
-            userId, parentQueryId,
-            `Field: ${field_name}, Value: ${old_value}`,
-            `Field: ${field_name}, Corrected Value: ${auditNewValue}`,
-            correctionReason
-          ]);
+          )
+        `, [
+          userId, parentQueryId,
+          `Pending correction: ${correctedSerialized.substring(0, 200)}`,
+          correctionReason
+        ]);
+      } else {
+        // ── IMMEDIATE: apply correction now (caller is closing or has authority) ──
+        try {
+          const linkedData = await client.query(`
+            SELECT dim.item_data_id, dim.column_name, id.value AS old_value, id.event_crf_id,
+                   i.name AS field_name, i.item_id, i.description AS item_description,
+                   i.item_data_type_id,
+                   rs.options_text, rs.options_values,
+                   rt.name AS response_type_name
+            FROM dn_item_data_map dim
+            INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+            INNER JOIN item i ON id.item_id = i.item_id
+            LEFT JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+            LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = ec.crf_version_id
+            LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
+            LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
+            WHERE dim.discrepancy_note_id = $1
+            LIMIT 1
+          `, [parentQueryId]);
 
-          // 4. Sync corrected value into patient_event_form JSONB snapshot.
-          if (event_crf_id) {
-            const jsonbLiteral = JSON.stringify(serialized.jsonbValue);
-
-            const keysToTry = [technicalFieldName, field_name].filter(Boolean) as string[];
-            for (const key of keysToTry) {
-              try {
-                const updateResult = await client.query(`
-                  UPDATE patient_event_form
-                  SET form_data = jsonb_set(
-                        COALESCE(form_data, '{}'::jsonb),
-                        $1::text[], $2::jsonb
-                      ),
-                      date_updated = NOW()
-                  WHERE event_crf_id = $3
-                    AND form_data ? $4
-                `, [[key], jsonbLiteral, event_crf_id, key]);
-                if ((updateResult as any).rowCount > 0) {
-                  logger.info('Synced correction to patient_event_form', { 
-                    event_crf_id, key, queryId: parentQueryId 
-                  });
-                  break;
-                }
-              } catch (snapErr: any) {
-                logger.warn('Failed to sync correction to patient_event_form', {
-                  error: snapErr.message, event_crf_id, key
-                });
-              }
-            }
-            if (keysToTry.length > 0) {
-              try {
-                const fallbackKey = technicalFieldName || field_name;
-                await client.query(`
-                  UPDATE patient_event_form
-                  SET form_data = jsonb_set(
-                        COALESCE(form_data, '{}'::jsonb),
-                        $1::text[], $2::jsonb
-                      ),
-                      date_updated = NOW()
-                  WHERE event_crf_id = $3
-                    AND NOT (form_data ? $4)
-                `, [[fallbackKey], jsonbLiteral, event_crf_id, fallbackKey]);
-              } catch { /* non-blocking */ }
-            }
+          if (linkedData.rows.length > 0) {
+            correctionApplied = await applyCorrectionToItemData(
+              client, parentQueryId, linkedData.rows[0], data.correctedValue, correctionReason, userId
+            );
+          } else {
+            logger.warn('correctedValue provided but no linked item_data found for query', {
+              queryId: parentQueryId
+            });
           }
-
-          correctionApplied = true;
-          logger.info('Data correction applied via query resolution', {
-            queryId: parentQueryId, item_data_id, field_name,
-            technicalFieldName, canonicalType: fieldInfo.canonicalType,
-            oldValue: old_value, newValue: auditNewValue
-          });
-        } else {
-          logger.warn('correctedValue provided but no linked item_data found for query', {
-            queryId: parentQueryId
-          });
+        } catch (correctionErr: any) {
+          logger.error('Data correction failed — rolling back', { error: correctionErr.message });
+          throw correctionErr;
         }
-      } catch (correctionErr: any) {
-        logger.error('Data correction failed — rolling back', { error: correctionErr.message });
-        throw correctionErr;
       }
     }
 
@@ -1263,7 +1611,7 @@ export const addQueryResponse = async (
     await client.query('COMMIT');
 
     logger.info('Query response added successfully', {
-      responseId, parentQueryId, newStatusId, correctionApplied
+      responseId, parentQueryId, newStatusId, correctionApplied, correctionDeferred
     });
 
     // Resolve responder's display name for notifications
@@ -1311,12 +1659,33 @@ export const addQueryResponse = async (
       logger.warn('Failed to send query response notification', { error: notifErr.message });
     }
 
+    // Fire-and-forget: queue email notifications for query response/close
+    try {
+      if (newStatusId === 4) {
+        emailTriggers.triggerQueryClosed(
+          parentQueryId, parent.study_id, userId,
+          (await getQueryParticipants(parentQueryId)).filter(uid => uid !== userId)
+        ).catch(e => logger.warn('Email trigger failed for query closed', { error: e.message }));
+      } else {
+        emailTriggers.triggerQueryResponse(
+          parentQueryId, parent.study_id, userId,
+          parent.owner_id || userId,
+          safeDescription
+        ).catch(e => logger.warn('Email trigger failed for query response', { error: e.message }));
+      }
+    } catch (emailErr: any) {
+      logger.warn('Failed to queue query response email', { error: emailErr.message });
+    }
+
     return {
       success: true, responseId,
-      message: correctionApplied
-        ? 'Response added and data correction applied'
-        : 'Response added successfully',
-      correctionApplied
+      message: correctionDeferred
+        ? 'Response added — data correction saved as pending (will be applied upon approval)'
+        : correctionApplied
+          ? 'Response added and data correction applied'
+          : 'Response added successfully',
+      correctionApplied,
+      correctionDeferred
     };
   } catch (error: any) {
     if (txStarted) {
@@ -1939,7 +2308,7 @@ export const getFormQueries = async (eventCrfId: number, callerUserId?: number):
         u2.user_name as assigned_to,
         dn.assigned_user_id,
         (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count,
-        didm.column_name as field_name,
+        COALESCE(didm.column_name, decm.column_name) as field_name,
         i.name as item_name,
         i.item_id as item_id,
         i.description as item_description
@@ -1959,18 +2328,68 @@ export const getFormQueries = async (eventCrfId: number, callerUserId?: number):
 
     const result = await pool.query(query, params);
 
-    // Post-process: resolve fieldName from extended_properties if column_name is missing
+    // Post-process: resolve fieldName from extended_properties if column_name is missing,
+    // and resolve cell-level type info for cell-path queries
+    // For eventCrf queries (no item_description), look up cell type from form template
+    const cellPathPattern = /^(.+)\[(\d+|\*)\]\.(.+)$|^([^.[]+)\.([^.]+)\.([^.]+)$/;
+
     for (const row of result.rows) {
-      if (!row.field_name && row.item_description) {
+      const hasCellPath = row.field_name && cellPathPattern.test(row.field_name);
+
+      if (row.item_description) {
         try {
           if (row.item_description.includes('---EXTENDED_PROPS---')) {
             const json = row.item_description.split('---EXTENDED_PROPS---')[1]?.trim();
             if (json) {
               const ext = JSON.parse(json);
-              if (ext.fieldName) row.field_name = ext.fieldName;
+              if (!row.field_name && ext.fieldName) row.field_name = ext.fieldName;
+
+              if (row.field_name && cellPathPattern.test(row.field_name)) {
+                const parentTypeInfo = buildFieldTypeInfo(row.item_description, null, null, null, null);
+                const cellInfo = resolveCellTypeInfo(row.field_name, parentTypeInfo);
+                if (cellInfo) {
+                  row.cell_type = cellInfo.cellType;
+                  row.cell_options = cellInfo.cellOptions;
+                  row.cell_min = cellInfo.cellMin;
+                  row.cell_max = cellInfo.cellMax;
+                }
+              }
             }
           }
         } catch { /* ignore parse errors */ }
+      } else if (hasCellPath && !row.cell_type) {
+        // eventCrf-level query with cellPath but no item_description —
+        // resolve cell type from item extended properties via crf_version
+        try {
+          const dtMatch = row.field_name.match(/^(.+)\[\d+\]\.(.+)$/);
+          const qtMatch = row.field_name.match(/^([^.[]+)\.[^.]+\.([^.]+)$/);
+          const fieldKey = dtMatch ? dtMatch[1] : (qtMatch ? qtMatch[1] : null);
+
+          if (fieldKey) {
+            const itemLookup = await pool.query(
+              `SELECT i.description FROM item i
+               INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+               INNER JOIN event_crf ec ON ifm.crf_version_id = ec.crf_version_id
+               WHERE ec.event_crf_id = $1
+                 AND i.description LIKE $2
+               LIMIT 1`,
+              [eventCrfId, `%"fieldName":"${fieldKey}"%`]
+            );
+
+            if (itemLookup.rows.length > 0 && itemLookup.rows[0].description) {
+              const parentTypeInfo = buildFieldTypeInfo(itemLookup.rows[0].description, null, null, null, null);
+              const cellInfo = resolveCellTypeInfo(row.field_name, parentTypeInfo);
+              if (cellInfo) {
+                row.cell_type = cellInfo.cellType;
+                row.cell_options = cellInfo.cellOptions;
+                row.cell_min = cellInfo.cellMin;
+                row.cell_max = cellInfo.cellMax;
+              }
+            }
+          }
+        } catch (lookupErr: any) {
+          logger.warn('Failed to resolve cell type from item description', { cellPath: row.field_name, error: lookupErr.message });
+        }
       }
     }
 
@@ -2366,6 +2785,7 @@ export const getFieldQueries = async (itemDataId: number, callerUserId?: number)
         u1.user_name as created_by,
         u2.user_name as assigned_to,
         dim.column_name,
+        i.description as item_description,
         (SELECT COUNT(*) FROM discrepancy_note WHERE parent_dn_id = dn.discrepancy_note_id) as response_count
       FROM discrepancy_note dn
       INNER JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id
@@ -2373,12 +2793,32 @@ export const getFieldQueries = async (itemDataId: number, callerUserId?: number)
       LEFT JOIN user_account u1 ON dn.owner_id = u1.user_id
       LEFT JOIN user_account u2 ON dn.assigned_user_id = u2.user_id
       INNER JOIN dn_item_data_map dim ON dn.discrepancy_note_id = dim.discrepancy_note_id
+      INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+      INNER JOIN item i ON id.item_id = i.item_id
       WHERE dim.item_data_id = $1
         AND dn.parent_dn_id IS NULL${orgFilter}
       ORDER BY dn.date_created DESC
     `;
 
     const result = await pool.query(query, params);
+
+    // Post-process: resolve cell-level type info for cell-path queries
+    for (const row of result.rows) {
+      const colName = row.column_name;
+      if (colName && row.item_description && (colName.includes('[') || (colName.split('.').length === 3))) {
+        try {
+          const parentTypeInfo = buildFieldTypeInfo(row.item_description, null, null, null, null);
+          const cellInfo = resolveCellTypeInfo(colName, parentTypeInfo);
+          if (cellInfo) {
+            row.cell_type = cellInfo.cellType;
+            row.cell_options = cellInfo.cellOptions;
+            row.cell_min = cellInfo.cellMin;
+            row.cell_max = cellInfo.cellMax;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
     return result.rows;
   } catch (error: any) {
     logger.error('Get field queries error', { error: error.message });
@@ -2460,6 +2900,10 @@ export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?:
       }
     }
 
+    // Exclude cell-level queries (column_name contains "[" or has 3 dot segments)
+    // from the field-level count — cells get their own dedicated indicator.
+    // Otherwise a table with 3 cell queries would show "3" on the table label
+    // PLUS each cell separately, double-counting and confusing the user.
     const query = `
       SELECT 
         i.item_id,
@@ -2474,7 +2918,13 @@ export const getFormFieldQueryCounts = async (eventCrfId: number, callerUserId?:
       WHERE id.event_crf_id = $1
         AND id.deleted = false
         AND dn.parent_dn_id IS NULL
-        AND rs.name NOT IN ('Closed', 'Not Applicable')${orgFilter}
+        AND rs.name NOT IN ('Closed', 'Not Applicable')
+        AND (
+          dim.column_name IS NULL
+          OR dim.column_name = 'value'
+          OR (POSITION('[' IN dim.column_name) = 0
+              AND array_length(string_to_array(dim.column_name, '.'), 1) <> 3)
+        )${orgFilter}
       GROUP BY i.item_id, i.name, i.description
     `;
 
@@ -2536,7 +2986,8 @@ export const acceptResolution = async (
     txStarted = true;
 
     const qResult = await client.query(
-      `SELECT resolution_status_id, description, study_id, owner_id, assigned_user_id
+      `SELECT resolution_status_id, description, study_id, owner_id, assigned_user_id,
+              pending_correction_value, pending_correction_reason, pending_correction_user_id
        FROM discrepancy_note WHERE discrepancy_note_id = $1`,
       [queryId]
     );
@@ -2589,6 +3040,56 @@ export const acceptResolution = async (
       )
     `, [userId, queryId, `Status: Closed (Accepted by ${userName})`, reason]);
 
+    // ── APPLY PENDING CORRECTION if one was stored ──
+    let correctionApplied = false;
+    if (q.pending_correction_value) {
+      logger.info('Applying pending correction on resolution acceptance', { queryId });
+      try {
+        let correctedValue: any;
+        try { correctedValue = JSON.parse(q.pending_correction_value); }
+        catch { correctedValue = q.pending_correction_value; }
+
+        const linkedData = await client.query(`
+          SELECT dim.item_data_id, dim.column_name, id.value AS old_value, id.event_crf_id,
+                 i.name AS field_name, i.item_id, i.description AS item_description,
+                 i.item_data_type_id,
+                 rs.options_text, rs.options_values,
+                 rt.name AS response_type_name
+          FROM dn_item_data_map dim
+          INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+          INNER JOIN item i ON id.item_id = i.item_id
+          LEFT JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+          LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = ec.crf_version_id
+          LEFT JOIN response_set rs ON ifm.response_set_id = rs.response_set_id
+          LEFT JOIN response_type rt ON rs.response_type_id = rt.response_type_id
+          WHERE dim.discrepancy_note_id = $1
+          LIMIT 1
+        `, [queryId]);
+
+        if (linkedData.rows.length > 0) {
+          correctionApplied = await applyCorrectionToItemData(
+            client, queryId, linkedData.rows[0], correctedValue,
+            (q.pending_correction_reason || 'Approved query correction') + ` [Accepted by ${userName}]`,
+            userId
+          );
+        } else {
+          logger.warn('Pending correction exists but no linked item_data found', { queryId });
+        }
+      } catch (corrErr: any) {
+        logger.error('Failed to apply pending correction on accept — rolling back', { error: corrErr.message });
+        throw corrErr;
+      }
+
+      // Clear pending correction columns
+      await client.query(`
+        UPDATE discrepancy_note
+        SET pending_correction_value = NULL,
+            pending_correction_reason = NULL,
+            pending_correction_user_id = NULL
+        WHERE discrepancy_note_id = $1
+      `, [queryId]);
+    }
+
     // Update denormalized query counts on patient_event_form
     const ecIdsAccept = await resolveEventCrfIdsForQuery(client, queryId);
     for (const ecId of ecIdsAccept) {
@@ -2624,7 +3125,9 @@ export const acceptResolution = async (
       }
     } catch { /* non-blocking */ }
 
-    return { success: true, message: 'Resolution accepted — query closed' };
+    return { success: true, message: correctionApplied
+      ? 'Resolution accepted — query closed and data correction applied'
+      : 'Resolution accepted — query closed' };
   } catch (error: any) {
     if (txStarted) {
       await client.query('ROLLBACK').catch((rbErr: any) =>
@@ -2693,9 +3196,14 @@ export const rejectResolution = async (
       FROM discrepancy_note WHERE discrepancy_note_id = $1
     `, [queryId, `[REJECTED] ${reason}`, 'Resolution rejected — please re-investigate', userId]);
 
-    // Set status back to New (1)
+    // Set status back to New (1) and clear any pending correction
     await client.query(
-      `UPDATE discrepancy_note SET resolution_status_id = 1 WHERE discrepancy_note_id = $1`,
+      `UPDATE discrepancy_note
+       SET resolution_status_id = 1,
+           pending_correction_value = NULL,
+           pending_correction_reason = NULL,
+           pending_correction_user_id = NULL
+       WHERE discrepancy_note_id = $1`,
       [queryId]
     );
 
@@ -3089,6 +3597,13 @@ export const resolveQueryRecipients = async (
       return { recipients: [] };
     }
 
+    const queryParams: any[] = [allIds];
+    let studyFilter = '';
+    if (studyId) {
+      queryParams.push(parseInt(String(studyId)));
+      studyFilter = `AND sur2.study_id = $${queryParams.length}`;
+    }
+
     const userResult = await pool.query(`
       SELECT ua.user_id, ua.user_name, ua.first_name, ua.last_name,
              COALESCE(uae.platform_role, sur.role_name, 'unknown') as role_name
@@ -3097,11 +3612,11 @@ export const resolveQueryRecipients = async (
       LEFT JOIN LATERAL (
         SELECT sur2.role_name FROM study_user_role sur2
         WHERE sur2.user_name = ua.user_name AND sur2.status_id = 1
-        ${studyId ? 'AND sur2.study_id = ' + parseInt(String(studyId)) : ''}
+        ${studyFilter}
         LIMIT 1
       ) sur ON true
       WHERE ua.user_id = ANY($1)
-    `, [allIds]);
+    `, queryParams);
 
     const recipients = userResult.rows.map((r: any) => ({
       userId: r.user_id,

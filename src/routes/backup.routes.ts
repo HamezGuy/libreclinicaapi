@@ -10,11 +10,13 @@
 import { Router } from 'express';
 import * as backupController from '../controllers/backup.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 
 const router = Router();
 
-// Apply authentication to all backup routes
+// Apply authentication and admin role to all backup routes
 router.use(authMiddleware);
+router.use(requireRole('admin'));
 
 /**
  * @route GET /api/backup/status
