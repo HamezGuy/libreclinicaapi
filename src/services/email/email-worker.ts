@@ -137,7 +137,7 @@ async function processDigest(): Promise<void> {
     `);
 
     for (const row of usersResult.rows) {
-      await sendDigestToUser(row.user_id);
+      await sendDigestToUser(row.userId);
     }
 
     logger.info('Daily digest processing complete', { 
@@ -163,7 +163,7 @@ async function sendDigestToUser(userId: number): Promise<void> {
       return;
     }
 
-    const { email, first_name } = userResult.rows[0];
+    const { email, firstName } = userResult.rows[0];
 
     // Get digest-eligible notifications from the last 24 hours
     const digestData = await getDigestData(userId);
@@ -182,7 +182,7 @@ async function sendDigestToUser(userId: number): Promise<void> {
       recipientUserId: userId,
       priority: 8, // Lower priority
       variables: {
-        firstName: first_name,
+        firstName: firstName,
         ...digestData
       }
     });
@@ -213,7 +213,7 @@ async function getDigestData(userId: number): Promise<{
       WHERE user_id = $1 AND status_id = 1
     `, [userId]);
 
-    const studyIds = studiesResult.rows.map(r => r.study_id);
+    const studyIds = studiesResult.rows.map(r => r.studyId);
     
     if (studyIds.length === 0) {
       return {

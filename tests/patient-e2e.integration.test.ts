@@ -168,7 +168,7 @@ describe('Patient Management E2E Integration Tests', () => {
       // Frontend sends this format (from component line 119-126):
       const frontendRequest = {
         studyId: TEST_CONFIG.STUDY_ID,
-        studySubjectId: testPatientId,
+        label: testPatientId,
         secondaryId: 'MRN-E2E-TEST',
         dateOfBirth: '1990-05-15',
         gender: 'm', // Frontend converts 'male' → 'm' before sending
@@ -219,7 +219,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: '1985-08-20',
           gender: 'f',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -246,12 +246,12 @@ describe('Patient Management E2E Integration Tests', () => {
     it('should validate required fields', async () => {
       if (!authToken) return;
 
-      // Missing studySubjectId
+      // Missing label
       const response = await request(app)
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          // studySubjectId missing
+          // label missing
           dateOfBirth: '1990-01-01',
           gender: 'm'
         })
@@ -271,7 +271,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: duplicateId,
+          label: duplicateId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -290,7 +290,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: duplicateId,
+          label: duplicateId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -334,7 +334,7 @@ describe('Patient Management E2E Integration Tests', () => {
       if (response.body.data.length > 0) {
         const subject = response.body.data[0];
         // Frontend expects these fields (libreclinica-subject.service.ts mapSubjectResponse)
-        expect(subject).toHaveProperty('study_subject_id');
+        expect(subject).toHaveProperty('studySubjectId');
         expect(subject).toHaveProperty('label');
       }
     });
@@ -349,7 +349,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .set('Authorization', `Bearer ${authToken}`);
 
       if (listResponse.body.data?.length > 0) {
-        const subjectId = listResponse.body.data[0].study_subject_id;
+        const subjectId = listResponse.body.data[0].studySubjectId;
 
         // Get single subject details
         const response = await request(app)
@@ -372,7 +372,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .set('Authorization', `Bearer ${authToken}`);
 
       if (listResponse.body.data?.length > 0) {
-        const subjectId = listResponse.body.data[0].study_subject_id;
+        const subjectId = listResponse.body.data[0].studySubjectId;
 
         const response = await request(app)
           .get(`/api/subjects/${subjectId}/progress`)
@@ -401,7 +401,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .set('Authorization', `Bearer ${authToken}`);
 
       if (listResponse.body.data?.length > 0) {
-        const subjectId = listResponse.body.data[0].study_subject_id;
+        const subjectId = listResponse.body.data[0].studySubjectId;
 
         const response = await request(app)
           .get(`/api/subjects/${subjectId}/events`)
@@ -422,7 +422,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .set('Authorization', `Bearer ${authToken}`);
 
       if (listResponse.body.data?.length > 0) {
-        const subjectId = listResponse.body.data[0].study_subject_id;
+        const subjectId = listResponse.body.data[0].studySubjectId;
 
         const response = await request(app)
           .get(`/api/subjects/${subjectId}/forms`)
@@ -451,7 +451,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           secondaryId: 'ORIGINAL-MRN',
           dateOfBirth: '1990-01-01',
           gender: 'm',
@@ -481,7 +481,7 @@ describe('Patient Management E2E Integration Tests', () => {
           'SELECT secondary_label FROM study_subject WHERE study_subject_id = $1',
           [subjectId]
         );
-        expect(dbResult.rows[0]?.secondary_label).toBe('UPDATED-MRN');
+        expect(dbResult.rows[0]?.secondaryLabel).toBe('UPDATED-MRN');
       }
     });
 
@@ -495,7 +495,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -525,7 +525,7 @@ describe('Patient Management E2E Integration Tests', () => {
           'SELECT status_id FROM study_subject WHERE study_subject_id = $1',
           [subjectId]
         );
-        expect(dbResult.rows[0]?.status_id).toBe(3);
+        expect(dbResult.rows[0]?.statusId).toBe(3);
       }
     });
   });
@@ -546,7 +546,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -572,7 +572,7 @@ describe('Patient Management E2E Integration Tests', () => {
         );
         
         expect(dbResult.rows.length).toBe(1); // Record still exists
-        expect(dbResult.rows[0]?.status_id).toBe(5); // Status = removed
+        expect(dbResult.rows[0]?.statusId).toBe(5); // Status = removed
       }
     });
   });
@@ -592,7 +592,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -626,7 +626,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]
@@ -648,7 +648,7 @@ describe('Patient Management E2E Integration Tests', () => {
         );
 
         expect(integrityResult.rows.length).toBe(1);
-        expect(integrityResult.rows[0].subject_id).toBe(integrityResult.rows[0].s_subject_id);
+        expect(integrityResult.rows[0].subjectId).toBe(integrityResult.rows[0].sSubjectId);
         expect(integrityResult.rows[0].label).toBe(testPatientId);
       }
     });
@@ -664,7 +664,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: testDob,
           gender: 'm',
           enrollmentDate: testEnrollment
@@ -683,12 +683,12 @@ describe('Patient Management E2E Integration Tests', () => {
           [response.body.data.studySubjectId]
         );
 
-        expect(dateResult.rows[0].date_of_birth).toBeDefined();
-        expect(dateResult.rows[0].enrollment_date).toBeDefined();
+        expect(dateResult.rows[0].dateOfBirth).toBeDefined();
+        expect(dateResult.rows[0].enrollmentDate).toBeDefined();
         
         // Verify dates are parseable
-        const dob = new Date(dateResult.rows[0].date_of_birth);
-        const enrollment = new Date(dateResult.rows[0].enrollment_date);
+        const dob = new Date(dateResult.rows[0].dateOfBirth);
+        const enrollment = new Date(dateResult.rows[0].enrollmentDate);
         expect(dob.getFullYear()).toBe(1985);
         expect(enrollment.getFullYear()).toBe(2025);
       }
@@ -750,7 +750,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: 'not-a-number', // Invalid type
-          studySubjectId: '', // Empty string
+          label: '', // Empty string
         })
         .set('Authorization', `Bearer ${authToken}`)
         .set('Content-Type', 'application/json');
@@ -767,7 +767,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: -1, // Invalid study
-          studySubjectId: 'TEST',
+          label: 'TEST',
           dateOfBirth: 'invalid-date',
           gender: 'X' // Invalid gender
         })
@@ -816,7 +816,7 @@ describe('Patient Management E2E Integration Tests', () => {
         .post('/api/subjects')
         .send({
           studyId: TEST_CONFIG.STUDY_ID,
-          studySubjectId: testPatientId,
+          label: testPatientId,
           dateOfBirth: '1990-01-01',
           gender: 'm',
           enrollmentDate: new Date().toISOString().split('T')[0]

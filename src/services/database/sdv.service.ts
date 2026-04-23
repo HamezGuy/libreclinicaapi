@@ -71,19 +71,6 @@ export const getSDVRecords = async (filters: {
     params.push(limit, offset);
     const result = await pool.query(query, params);
 
-    // Get total count for pagination
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM event_crf ec
-      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-      WHERE ${whereClause.replace(/\$\d+/g, (match) => {
-        const idx = parseInt(match.slice(1));
-        // Adjust for the limit/offset params we added
-        return idx <= params.length - 2 ? match : '';
-      }).replace(/LIMIT.*OFFSET.*/, '')}
-    `;
-    
     // Build count params (exclude limit and offset)
     const countParams = params.slice(0, -2);
     const countResult = await pool.query(
@@ -162,9 +149,10 @@ export const getSDVFormData = async (eventCrfId: number) => {
         ifm.ordinal,
         ifm.required
       FROM item_data id
+      INNER JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
       INNER JOIN item i ON id.item_id = i.item_id
       INNER JOIN item_data_type idt ON i.item_data_type_id = idt.item_data_type_id
-      LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+      LEFT JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = ec.crf_version_id
       LEFT JOIN section s ON ifm.section_id = s.section_id
       LEFT JOIN item_group_metadata igm ON i.item_id = igm.item_id
       LEFT JOIN item_group ig ON igm.item_group_id = ig.item_group_id
@@ -178,20 +166,20 @@ export const getSDVFormData = async (eventCrfId: number) => {
     return {
       success: true,
       data: result.rows.map(row => ({
-        itemDataId: row.item_data_id,
-        itemId: row.item_id,
-        name: row.item_name,
-        description: row.item_description,
-        oid: row.item_oid,
-        dataType: row.data_type,
+        itemDataId: row.itemDataId,
+        itemId: row.itemId,
+        name: row.itemName,
+        description: row.itemDescription,
+        oid: row.itemOid,
+        dataType: row.dataType,
         value: row.value,
-        statusId: row.status_id,
-        section: row.section_label,
-        group: row.group_name,
+        statusId: row.statusId,
+        section: row.sectionLabel,
+        group: row.groupName,
         ordinal: row.ordinal,
         required: row.required,
-        dateCreated: row.date_created,
-        dateUpdated: row.date_updated
+        dateCreated: row.dateCreated,
+        dateUpdated: row.dateUpdated
       }))
     };
   } catch (error: any) {
@@ -246,43 +234,47 @@ export const verifySDV = async (eventCrfId: number, userId: number) => {
  * Bulk verify multiple SDV records
  */
 export const bulkVerifySDV = async (eventCrfIds: number[], userId: number) => {
+  if (eventCrfIds.length === 0) {
+    return { success: true, verified: 0, failed: 0, errors: [] };
+  }
+
   const client = await pool.connect();
-  const results: any[] = [];
-  const errors: any[] = [];
 
   try {
     await client.query('BEGIN');
 
-    for (const eventCrfId of eventCrfIds) {
-      try {
-        const updateQuery = `
-          UPDATE event_crf
-          SET sdv_status = true, sdv_update_id = $2, date_updated = CURRENT_TIMESTAMP
-          WHERE event_crf_id = $1
-          RETURNING event_crf_id
-        `;
+    const updateResult = await client.query(`
+      UPDATE event_crf
+      SET sdv_status = true, sdv_update_id = $2, date_updated = CURRENT_TIMESTAMP
+      WHERE event_crf_id = ANY($1::int[])
+      RETURNING event_crf_id
+    `, [eventCrfIds, userId]);
 
-        const result = await client.query(updateQuery, [eventCrfId, userId]);
-        if (result.rows[0]) {
-          results.push(result.rows[0].event_crf_id);
-        }
-      } catch (e: any) {
-        errors.push({ eventCrfId, error: e.message });
-      }
-    }
+    const verifiedIds: number[] = updateResult.rows.map((r: any) => r.eventCrfId);
+    const verifiedIdSet = new Set(verifiedIds);
+    const failedIds = eventCrfIds.filter(id => !verifiedIdSet.has(id));
+    const errors = failedIds.map(id => ({ eventCrfId: id, error: 'Row not found or not updated' }));
 
-    // Log bulk operation
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_name, audit_log_event_type_id)
       VALUES (CURRENT_TIMESTAMP, 'event_crf', $1, $2,
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
-    `, [userId, `Bulk SDV: ${results.length} records verified`]);
+    `, [userId, `Bulk SDV: ${verifiedIds.length} records verified`]);
 
     await client.query('COMMIT');
 
+    for (const eventCrfId of verifiedIds) {
+      try {
+        await workflowService.triggerSDVCompletedWorkflow(eventCrfId, userId);
+        logger.info('Auto-completed SDV workflow tasks (bulk)', { eventCrfId });
+      } catch (workflowError: any) {
+        logger.warn('Failed to auto-complete SDV workflows (bulk)', { eventCrfId, error: workflowError.message });
+      }
+    }
+
     return { 
       success: true, 
-      verified: results.length,
+      verified: verifiedIds.length,
       failed: errors.length,
       errors 
     };
@@ -315,8 +307,8 @@ export const getSubjectSDVStatus = async (subjectId: number) => {
     const result = await pool.query(query, [subjectId]);
     const row = result.rows[0];
 
-    const total = parseInt(row.total_forms) || 0;
-    const verified = parseInt(row.verified_forms) || 0;
+    const total = parseInt(row.totalForms) || 0;
+    const verified = parseInt(row.verifiedForms) || 0;
 
     return {
       success: true,
@@ -324,7 +316,7 @@ export const getSubjectSDVStatus = async (subjectId: number) => {
         subjectId,
         totalForms: total,
         verifiedForms: verified,
-        pendingForms: parseInt(row.pending_forms) || 0,
+        pendingForms: parseInt(row.pendingForms) || 0,
         completionRate: total > 0 ? Math.round((verified / total) * 100) : 0
       }
     };
@@ -402,12 +394,12 @@ export const getSDVByVisit = async (studyId: number) => {
     return {
       success: true,
       data: result.rows.map(row => ({
-        eventId: row.event_id,
-        eventName: row.event_name,
-        totalForms: parseInt(row.total_forms) || 0,
-        verifiedForms: parseInt(row.verified_forms) || 0,
-        verificationRate: row.total_forms > 0 
-          ? Math.round((parseInt(row.verified_forms) / parseInt(row.total_forms)) * 100) 
+        eventId: row.eventId,
+        eventName: row.eventName,
+        totalForms: parseInt(row.totalForms) || 0,
+        verifiedForms: parseInt(row.verifiedForms) || 0,
+        verificationRate: row.totalForms > 0 
+          ? Math.round((parseInt(row.verifiedForms) / parseInt(row.totalForms)) * 100) 
           : 0
       }))
     };

@@ -320,7 +320,7 @@ export const createUser = async (
       data.passwdChallengeAnswer || null
     ]);
 
-    const userId = insertResult.rows[0].user_id;
+    const userId = insertResult.rows[0].userId;
 
     // Assign to a study with the specified role if role is provided
     if (data.role) {
@@ -352,7 +352,7 @@ export const createUser = async (
           [creatorId]
         );
         if (creatorStudy.rows.length > 0) {
-          studyId = creatorStudy.rows[0].study_id;
+          studyId = creatorStudy.rows[0].studyId;
         }
       }
       if (!studyId) {
@@ -371,7 +371,7 @@ export const createUser = async (
           [creatorId]
         );
         if (orgStudy.rows.length > 0) {
-          studyId = orgStudy.rows[0].study_id;
+          studyId = orgStudy.rows[0].studyId;
           logger.info('Using org-scoped study fallback for new user', { userId, studyId });
         }
       }
@@ -382,7 +382,7 @@ export const createUser = async (
           `SELECT study_id FROM study WHERE status_id = 1 ORDER BY study_id LIMIT 1`
         );
         if (anyStudy.rows.length > 0) {
-          studyId = anyStudy.rows[0].study_id;
+          studyId = anyStudy.rows[0].studyId;
           logger.warn('No org/creator studies found — falling back to first active study', { userId, studyId });
         }
       }
@@ -442,8 +442,8 @@ export const createUser = async (
           INSERT INTO acc_organization_member (organization_id, user_id, role, status, date_joined)
           VALUES ($1, $2, $3, 'active', NOW())
           ON CONFLICT (organization_id, user_id) DO NOTHING
-        `, [orgRow.organization_id, userId, data.role || 'data_entry']);
-        logger.info('User added to organization', { userId, organizationId: orgRow.organization_id });
+        `, [orgRow.organizationId, userId, data.role || 'data_entry']);
+        logger.info('User added to organization', { userId, organizationId: orgRow.organizationId });
       }
     } catch (orgError: any) {
       logger.warn('Could not add user to creator org', { error: orgError.message });
@@ -456,7 +456,7 @@ export const createUser = async (
         audit_log_event_type_id
       ) VALUES (
         NOW(), 'user_account', $1, $2, 'User', $3,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'User Created' LIMIT 1)
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Created' LIMIT 1)
       )
     `, [creatorId, userId, data.username]);
 
@@ -678,7 +678,7 @@ export const updateUser = async (
         [userId]
       );
       if (userNameResult.rows.length > 0) {
-        const userName = userNameResult.rows[0].user_name;
+        const userName = userNameResult.rows[0].userName;
 
         // Update ALL existing study_user_role rows for this user
         const existingRoles = await client.query(
@@ -707,7 +707,7 @@ export const updateUser = async (
             [updaterId]
           );
           if (updaterStudy.rows.length > 0) {
-            const studyId = updaterStudy.rows[0].study_id;
+            const studyId = updaterStudy.rows[0].studyId;
             await client.query(
               `INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, date_created, user_name)
                VALUES ($1, $2, 1, $3, NOW(), $4)`,
@@ -788,7 +788,7 @@ export const updateUser = async (
         audit_log_event_type_id
       ) VALUES (
         NOW(), 'user_account', $1, $2, 'User',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'User Updated' LIMIT 1)
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1)
       )
     `, [updaterId, userId]);
 
@@ -858,7 +858,7 @@ export const deleteUser = async (
         audit_log_event_type_id
       ) VALUES (
         NOW(), 'user_account', $1, $2, 'User',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'User Updated' LIMIT 1)
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1)
       )
     `, [deleterId, userId]);
 
@@ -923,7 +923,7 @@ export const assignUserToStudy = async (
       };
     }
 
-    const username = userResult.rows[0].user_name;
+    const username = userResult.rows[0].userName;
 
     // Validate study exists
     const studyQuery = `SELECT study_id, parent_study_id FROM study WHERE study_id = $1`;
@@ -939,7 +939,7 @@ export const assignUserToStudy = async (
     
     // Check if study is a site (has parent_study_id) to use appropriate role name
     let finalRoleName = roleName;
-    if (studyResult.rows[0].parent_study_id) {
+    if (studyResult.rows[0].parentStudyId) {
       // This is a site - use site role names if appropriate
       const siteRoleName = SITE_ROLE_MAP[role.id];
       if (siteRoleName) {
@@ -1024,7 +1024,7 @@ export const getUserStudyRole = async (
       return null;
     }
 
-    const roleName = result.rows[0].role_name;
+    const roleName = result.rows[0].roleName;
     const role = getRoleByName(roleName);
 
     return {

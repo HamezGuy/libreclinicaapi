@@ -207,13 +207,13 @@ describe('Study API Integration Tests', () => {
           `S_LIST_${timestamp}_${i}`
         ]);
 
-        createdStudyIds.push(result.rows[0].study_id);
+        createdStudyIds.push(result.rows[0].studyId);
 
         // Assign user to study
         await testDb.pool.query(`
           INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, user_name, date_created)
           VALUES ('admin', $1, 1, $2, 'root', NOW())
-        `, [result.rows[0].study_id, userId]);
+        `, [result.rows[0].studyId, userId]);
       }
     });
 
@@ -276,7 +276,7 @@ describe('Study API Integration Tests', () => {
         `S_GETID_${timestamp}`
       ]);
 
-      testStudyId = result.rows[0].study_id;
+      testStudyId = result.rows[0].studyId;
       createdStudyIds.push(testStudyId);
 
       await testDb.pool.query(`
@@ -294,9 +294,9 @@ describe('Study API Integration Tests', () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data).toBeDefined();
-      expect(response.body.data.study_id).toBe(testStudyId);
+      expect(response.body.data.studyId).toBe(testStudyId);
       expect(response.body.data.name).toBe('Get By ID Study');
-      expect(response.body.data.principal_investigator).toBe('Dr. GetById');
+      expect(response.body.data.principalInvestigator).toBe('Dr. GetById');
     });
 
     it('should return 404 for non-existent study', async () => {
@@ -314,8 +314,8 @@ describe('Study API Integration Tests', () => {
         .set('Authorization', `Bearer ${authToken}`)
         .expect(200);
 
-      expect(response.body.data.total_subjects).toBeDefined();
-      expect(response.body.data.total_events).toBeDefined();
+      expect(response.body.data.totalSubjects).toBeDefined();
+      expect(response.body.data.totalEvents).toBeDefined();
     });
   });
 
@@ -336,7 +336,7 @@ describe('Study API Integration Tests', () => {
         RETURNING study_id
       `, [`EVENTS-${timestamp}`, 'Events Study', userId, `S_EVENTS_${timestamp}`]);
 
-      testStudyId = studyResult.rows[0].study_id;
+      testStudyId = studyResult.rows[0].studyId;
       createdStudyIds.push(testStudyId);
 
       // Create events
@@ -428,7 +428,7 @@ describe('Study API Integration Tests', () => {
         `S_UPDATE_${timestamp}`
       ]);
 
-      testStudyId = result.rows[0].study_id;
+      testStudyId = result.rows[0].studyId;
       createdStudyIds.push(testStudyId);
 
       await testDb.pool.query(`
@@ -462,8 +462,8 @@ describe('Study API Integration Tests', () => {
 
       expect(dbResult.rows[0].name).toBe(updates.name);
       expect(dbResult.rows[0].summary).toBe(updates.description);
-      expect(dbResult.rows[0].principal_investigator).toBe(updates.principalInvestigator);
-      expect(dbResult.rows[0].expected_total_enrollment).toBe(updates.expectedTotalEnrollment);
+      expect(dbResult.rows[0].principalInvestigator).toBe(updates.principalInvestigator);
+      expect(dbResult.rows[0].expectedTotalEnrollment).toBe(updates.expectedTotalEnrollment);
     });
 
     it('should return error for non-existent study', async () => {
@@ -492,7 +492,7 @@ describe('Study API Integration Tests', () => {
         RETURNING study_id
       `, [`DELETE-${timestamp}`, 'Delete Study', userId, `S_DELETE_${timestamp}`]);
 
-      testStudyId = result.rows[0].study_id;
+      testStudyId = result.rows[0].studyId;
       createdStudyIds.push(testStudyId);
 
       await testDb.pool.query(`
@@ -516,7 +516,7 @@ describe('Study API Integration Tests', () => {
         [testStudyId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(5);
+      expect(dbResult.rows[0].statusId).toBe(5);
     });
   });
 
@@ -594,7 +594,7 @@ describe('Study API Integration Tests', () => {
         .set('Authorization', `Bearer ${authToken}`)
         .expect(200);
 
-      expect(verifyResponse.body.data.expected_total_enrollment).toBe(200);
+      expect(verifyResponse.body.data.expectedTotalEnrollment).toBe(200);
 
       console.log(`✅ Verified update via API`);
 

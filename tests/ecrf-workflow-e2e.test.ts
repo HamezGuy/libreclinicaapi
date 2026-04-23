@@ -48,7 +48,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
       VALUES ('E2E Test Study', 'E2E-TEST-' || NOW()::text, 'E2E-PROTO', 1, NOW(), $1)
       RETURNING study_id
     `, [testUserId]);
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
 
     // Create test subject
     const subjectResult = await pool.query(`
@@ -56,7 +56,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
       VALUES ('E2E-SUBJ-001', $1, 1, NOW(), $2)
       RETURNING study_subject_id
     `, [testStudyId, testUserId]);
-    testSubjectId = subjectResult.rows[0].study_subject_id;
+    testSubjectId = subjectResult.rows[0].studySubjectId;
 
     // Create test CRF (form template)
     const crfResult = await pool.query(`
@@ -64,7 +64,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
       VALUES ('Vital Signs eCRF', 'Test vital signs form', $1, 1, NOW())
       RETURNING crf_id
     `, [testUserId]);
-    testCrfId = crfResult.rows[0].crf_id;
+    testCrfId = crfResult.rows[0].crfId;
 
     // Create CRF version
     const versionResult = await pool.query(`
@@ -72,7 +72,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
       VALUES ($1, 'v1.0', 'Initial version', $2, 1, NOW(), 'E2E test')
       RETURNING crf_version_id
     `, [testCrfId, testUserId]);
-    testCrfVersionId = versionResult.rows[0].crf_version_id;
+    testCrfVersionId = versionResult.rows[0].crfVersionId;
 
     // Create test items (form fields)
     const fields = [
@@ -89,7 +89,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
         VALUES ($1, $2, $3, 1, $4, NOW())
         RETURNING item_id
       `, [field.name, field.description, field.dataType, testUserId]);
-      testItemIds[field.name] = itemResult.rows[0].item_id;
+      testItemIds[field.name] = itemResult.rows[0].itemId;
     }
 
     // Create study event definition and study event
@@ -98,14 +98,14 @@ describe('eCRF + Validation + Workflow E2E', () => {
       VALUES ($1, 'Screening Visit', 'scheduled', 1, NOW(), $2, 1)
       RETURNING study_event_definition_id
     `, [testStudyId, testUserId]);
-    const sedId = sedResult.rows[0].study_event_definition_id;
+    const sedId = sedResult.rows[0].studyEventDefinitionId;
 
     const seResult = await pool.query(`
       INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, subject_event_status_id, owner_id, date_created, start_time_flag, end_time_flag)
       VALUES ($1, $2, NOW(), 1, $3, NOW(), false, false)
       RETURNING study_event_id
     `, [sedId, testSubjectId, testUserId]);
-    const studyEventId = seResult.rows[0].study_event_id;
+    const studyEventId = seResult.rows[0].studyEventId;
 
     // Create event_crf (form instance for patient)
     const ecResult = await pool.query(`
@@ -113,7 +113,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
       VALUES ($1, $2, $3, 1, 2, $4, NOW())
       RETURNING event_crf_id
     `, [studyEventId, testCrfVersionId, testSubjectId, testUserId]);
-    testEventCrfId = ecResult.rows[0].event_crf_id;
+    testEventCrfId = ecResult.rows[0].eventCrfId;
   });
 
   afterAll(async () => {
@@ -144,7 +144,7 @@ describe('eCRF + Validation + Workflow E2E', () => {
         itemId: testItemIds['heart_rate'],
       });
       expect(rule).toBeDefined();
-      expect(rule.id || rule.validation_rule_id).toBeTruthy();
+      expect(rule.id || rule.validationRuleId).toBeTruthy();
     });
 
     it('should create a range rule for systolic BP', async () => {

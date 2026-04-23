@@ -60,8 +60,7 @@ async function ensureTable(): Promise<boolean> {
         WHERE table_name = 'acc_form_workflow_config'
       ) AS exists
     `);
-    _tableExists = res.rows[0].exists;
-  } catch {
+    _tableExists = res.rows[0].exists;  } catch {
     _tableExists = false;
   }
   return _tableExists;
@@ -99,7 +98,7 @@ export async function getFormWorkflowConfig(
 
     let queryRouteToUsers: string[] = [];
     try {
-      const raw = row.query_route_to_users;
+      const raw = row.queryRouteToUsers;
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) queryRouteToUsers = parsed;
@@ -113,16 +112,16 @@ export async function getFormWorkflowConfig(
           `SELECT user_id FROM user_account WHERE user_name = ANY($1) AND enabled = true`,
           [queryRouteToUsers]
         );
-        queryRouteToUserIds = userResult.rows.map((r: any) => r.user_id);
+        queryRouteToUserIds = userResult.rows.map((r: any) => r.userId);
       } catch { /* ignore */ }
     }
 
     return {
       crfId,
       studyId,
-      requiresSDV: !!row.requires_sdv,
-      requiresSignature: !!row.requires_signature,
-      requiresDDE: !!row.requires_dde,
+      requiresSDV: !!row.requiresSdv,
+      requiresSignature: !!row.requiresSignature,
+      requiresDDE: !!row.requiresDde,
       queryRouteToUsers,
       queryRouteToUserIds,
     };
@@ -162,7 +161,7 @@ export async function resolveQueryAssignee(
         WHERE ec.event_crf_id = $1
       `, [eventCrfId]);
       if (ecResult.rows.length > 0) {
-        resolvedCrfId = ecResult.rows[0].crf_id;
+        resolvedCrfId = ecResult.rows[0].crfId;
       }
     }
 
@@ -208,7 +207,7 @@ export async function resolveAllQueryAssignees(
         INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
         WHERE ec.event_crf_id = $1
       `, [eventCrfId]);
-      if (ecResult.rows.length > 0) resolvedCrfId = ecResult.rows[0].crf_id;
+      if (ecResult.rows.length > 0) resolvedCrfId = ecResult.rows[0].crfId;
     } catch { /* ignore */ }
   }
 

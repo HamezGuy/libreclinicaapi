@@ -60,11 +60,11 @@ export const getCrfLifecycleStatus = async (
     if (ecResult.rows.length === 0) return null;
 
     const row = ecResult.rows[0];
-    const statusId = row.status_id;          // 1=available, 2=data_complete, 6=locked
-    const completionStatusId = row.completion_status_id; // 1=not_started..5=signed
-    const sdvVerified = row.sdv_verified;
-    const isSigned = row.is_signed;
-    const crfId = row.crf_id;
+    const statusId = row.statusId;          // 1=available, 2=data_complete, 6=locked
+    const completionStatusId = row.completionStatusId; // 1=not_started..5=signed
+    const sdvVerified = row.sdvVerified;
+    const isSigned = row.isSigned;
+    const crfId = row.crfId;
 
     // 2. Load workflow config via shared provider
     const wfConfig = await getFormWorkflowConfig(crfId);
@@ -207,7 +207,7 @@ export const triggerFormSubmittedWorkflow = async (
     `, [eventCrfId]);
 
     if (crfResult.rows.length === 0) return;
-    const crfId = crfResult.rows[0].crf_id;
+    const crfId = crfResult.rows[0].crfId;
 
     const wfConfig = await getFormWorkflowConfig(crfId, studyId);
     const needsAction = wfConfig.requiresSDV || wfConfig.requiresDDE || wfConfig.requiresSignature;
@@ -426,11 +426,10 @@ export const getAllWorkflows = async (filters: WorkflowFilter): Promise<{ data: 
         LIMIT $${paramIdx++} OFFSET $${paramIdx++}
       `, [...params, limit, offset]);
 
-      // Collect all unique user IDs across all workflow rows and batch-fetch in one query
       const allUserIds = new Set<number>();
       for (const row of result.rows) {
-        if (Array.isArray(row.assigned_to_user_ids)) {
-          row.assigned_to_user_ids.forEach((id: number) => allUserIds.add(id));
+        if (Array.isArray(row.assignedToUserIds)) {
+          row.assignedToUserIds.forEach((id: number) => allUserIds.add(id));
         }
       }
       const userNameMap = new Map<number, string>();
@@ -440,13 +439,13 @@ export const getAllWorkflows = async (filters: WorkflowFilter): Promise<{ data: 
           [Array.from(allUserIds)]
         );
         for (const u of userResult.rows) {
-          userNameMap.set(u.user_id, u.user_name);
+          userNameMap.set(u.userId, u.userName);
         }
       }
 
       const workflows = result.rows.map((row: any) => ({
         ...row,
-        assignedTo: (row.assigned_to_user_ids || []).map((id: number) => userNameMap.get(id) ?? String(id)),
+        assignedTo: (row.assignedToUserIds || []).map((id: number) => userNameMap.get(id) ?? String(id)),
         metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {})
       }));
 
@@ -478,9 +477,9 @@ export const getAllWorkflows = async (filters: WorkflowFilter): Promise<{ data: 
       try { parsed = JSON.parse(row.metadata || '{}'); } catch { /* ignore */ }
       return {
         ...row,
-        type: parsed.type || row.entity_type?.replace('_workflow', '') || 'custom',
+        type: parsed.type || row.entityType?.replace('_workflow', '') || 'custom',
         priority: parsed.priority || 'medium',
-        assignedTo: parsed.assignedTo || (row.assigned_to ? [row.assigned_to] : [])
+        assignedTo: parsed.assignedTo || (row.assignedTo ? [row.assignedTo] : [])
       };
     });
 
@@ -618,19 +617,17 @@ export const createWorkflow = async (
   userId: number,
   username: string
 ): Promise<{ success: boolean; data?: any; message?: string }> => {
-  try {
-    // Resolve assignee usernames to user IDs
+  return pool.transaction(async (client) => {
     let assigneeIds: number[] = [];
     if (input.assignedTo?.length) {
-      const userResult = await pool.query(
+      const userResult = await client.query(
         `SELECT user_id FROM user_account WHERE user_name = ANY($1) AND enabled = true`,
         [input.assignedTo]
       );
-      assigneeIds = userResult.rows.map((r: any) => r.user_id);
+      assigneeIds = userResult.rows.map((r: any) => r.userId);
     }
 
-    // Insert into the dedicated tasks table
-    const taskResult = await pool.query(`
+    const taskResult = await client.query(`
       INSERT INTO acc_workflow_tasks (
         task_type, title, description, status, priority,
         entity_type, entity_id, event_crf_id, study_id,
@@ -656,15 +653,14 @@ export const createWorkflow = async (
       })
     ]);
 
-    const taskId = taskResult.rows[0]?.task_id;
+    const taskId = taskResult.rows[0]?.taskId;
 
-    // Also log to audit trail for compliance
     const auditTable = input.type === 'query' ? 'query_workflow'
       : input.type === 'sdv' ? 'sdv_workflow'
       : input.type === 'signature' ? 'signature_workflow'
       : 'custom_workflow';
 
-    await pool.query(`
+    await client.query(`
       INSERT INTO audit_log_event (
         audit_log_event_type_id, audit_date, audit_table,
         entity_id, entity_name, user_id, new_value, reason_for_change
@@ -683,15 +679,24 @@ export const createWorkflow = async (
       data: { id: taskId, ...input, status: 'pending', createdBy: username },
       message: 'Workflow created successfully'
     };
-  } catch (error: any) {
+  }).catch((error: any) => {
     logger.error('Failed to create workflow', { error: error.message });
     return { success: false, message: error.message };
-  }
+  });
 };
 
 /**
  * Update workflow task status in acc_workflow_tasks.
  */
+const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
+  pending: ['in_progress', 'cancelled'],
+  in_progress: ['completed', 'pending', 'cancelled'],
+  completed: ['approved', 'rejected'],
+  approved: [],
+  rejected: ['pending', 'in_progress'],
+  cancelled: ['pending'],
+};
+
 export const updateWorkflowStatus = async (
   workflowId: string,
   status: string,
@@ -700,6 +705,19 @@ export const updateWorkflowStatus = async (
   try {
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
+
+    const currentResult = await pool.query(
+      'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+      [taskId]
+    );
+    if (currentResult.rows.length === 0) {
+      return { success: false, message: 'Workflow task not found' };
+    }
+    const currentStatus = currentResult.rows[0].status;
+    const allowed = VALID_STATUS_TRANSITIONS[currentStatus] || [];
+    if (!allowed.includes(status)) {
+      return { success: false, message: `Invalid transition from '${currentStatus}' to '${status}'` };
+    }
 
     await pool.query(`
       UPDATE acc_workflow_tasks
@@ -727,11 +745,23 @@ export const completeWorkflow = async (
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
 
+    const currentResult = await pool.query(
+      'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+      [taskId]
+    );
+    if (currentResult.rows.length === 0) {
+      return { success: false, message: 'Workflow task not found' };
+    }
+    const currentStatus = currentResult.rows[0].status;
+    if (currentStatus !== 'pending' && currentStatus !== 'in_progress') {
+      return { success: false, message: `Cannot complete a task with status '${currentStatus}'` };
+    }
+
     await pool.query(`
       UPDATE acc_workflow_tasks
       SET status = 'completed', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
           metadata = metadata || $2
-      WHERE task_id = $3
+      WHERE task_id = $3 AND status IN ('pending', 'in_progress')
     `, [userId, JSON.stringify({ signedBy: signature ? userId : null }), taskId]);
 
     logger.info('Workflow completed', { taskId, userId });
@@ -754,11 +784,22 @@ export const approveWorkflow = async (
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
 
+    const currentResult = await pool.query(
+      'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+      [taskId]
+    );
+    if (currentResult.rows.length === 0) {
+      return { success: false, message: 'Workflow task not found' };
+    }
+    if (currentResult.rows[0].status !== 'completed') {
+      return { success: false, message: `Cannot approve a task with status '${currentResult.rows[0].status}' (must be 'completed')` };
+    }
+
     await pool.query(`
       UPDATE acc_workflow_tasks
       SET status = 'approved', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
           metadata = metadata || $2
-      WHERE task_id = $3
+      WHERE task_id = $3 AND status = 'completed'
     `, [userId, JSON.stringify({ approvedBy: userId, approvalReason: reason }), taskId]);
 
     logger.info('Workflow approved', { taskId, userId, reason });

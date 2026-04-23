@@ -29,6 +29,15 @@ import crypto from 'crypto';
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 
+function safeJsonParse(raw: string | null | undefined, fallback: any, context: string): any {
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); }
+  catch (e: any) {
+    logger.error(`Corrupted JSON in ${context}`, { error: e.message, raw: raw.substring(0, 200) });
+    return fallback;
+  }
+}
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -273,7 +282,7 @@ export const saveConfig = async (config: RandomizationConfig, userId: number): P
       userId
     ]);
 
-    const configId = result.rows[0].config_id;
+    const configId = result.rows[0].configId;
 
     // Audit log — use type 28 (Subject Group Assignment) as closest match for randomization config
     await client.query(`
@@ -305,8 +314,8 @@ export const updateConfig = async (configId: number, updates: Partial<Randomizat
     await client.query('BEGIN');
 
     // Check if locked
-    const lockCheck = await client.query('SELECT is_locked, is_active FROM acc_randomization_config WHERE config_id = $1', [configId]);
-    if (lockCheck.rows[0]?.is_locked) {
+    const lockCheck = await client.query('SELECT is_locked, is_active FROM acc_randomization_config WHERE config_id = $1 FOR UPDATE', [configId]);
+    if (lockCheck.rows[0]?.isLocked) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Configuration is locked and cannot be modified' };
     }
@@ -384,31 +393,31 @@ export const getConfig = async (studyId: number): Promise<RandomizationConfig | 
 
     const row = result.rows[0];
     return {
-      configId: row.config_id,
-      studyId: row.study_id,
+      configId: row.configId,
+      studyId: row.studyId,
       name: row.name,
       description: row.description,
-      randomizationType: row.randomization_type,
-      blindingLevel: row.blinding_level,
-      blockSize: row.block_size,
-      blockSizeVaried: row.block_size_varied,
-      blockSizesList: row.block_sizes_list ? JSON.parse(row.block_sizes_list) : [],
-      allocationRatios: typeof row.allocation_ratios === 'string'
-        ? JSON.parse(row.allocation_ratios)
-        : row.allocation_ratios || {},
-      stratificationFactors: typeof row.stratification_factors === 'string'
-        ? JSON.parse(row.stratification_factors)
-        : row.stratification_factors || [],
-      studyGroupClassId: row.study_group_class_id,
+      randomizationType: row.randomizationType,
+      blindingLevel: row.blindingLevel,
+      blockSize: row.blockSize,
+      blockSizeVaried: row.blockSizeVaried,
+      blockSizesList: safeJsonParse(row.blockSizesList, [], 'randomization.block_sizes_list'),
+      allocationRatios: typeof row.allocationRatios === 'string'
+        ? safeJsonParse(row.allocationRatios, {}, 'randomization.allocation_ratios')
+        : row.allocationRatios || {},
+      stratificationFactors: typeof row.stratificationFactors === 'string'
+        ? safeJsonParse(row.stratificationFactors, [], 'randomization.stratification_factors')
+        : row.stratificationFactors || [],
+      studyGroupClassId: row.studyGroupClassId,
       seed: row.seed,
-      totalSlots: row.total_slots,
-      isActive: row.is_active,
-      isLocked: row.is_locked,
-      drugKitManagement: row.drug_kit_management,
-      drugKitPrefix: row.drug_kit_prefix,
-      siteSpecific: row.site_specific,
-      createdBy: row.created_by,
-      dateCreated: row.date_created,
+      totalSlots: row.totalSlots,
+      isActive: row.isActive,
+      isLocked: row.isLocked,
+      drugKitManagement: row.drugKitManagement,
+      drugKitPrefix: row.drugKitPrefix,
+      siteSpecific: row.siteSpecific,
+      createdBy: row.createdBy,
+      dateCreated: row.dateCreated,
     };
   } catch (error: any) {
     logger.error('Failed to get randomization config', { studyId, error: error.message });
@@ -429,31 +438,31 @@ export const getConfigById = async (configId: number): Promise<RandomizationConf
 
     const row = result.rows[0];
     return {
-      configId: row.config_id,
-      studyId: row.study_id,
+      configId: row.configId,
+      studyId: row.studyId,
       name: row.name,
       description: row.description,
-      randomizationType: row.randomization_type,
-      blindingLevel: row.blinding_level,
-      blockSize: row.block_size,
-      blockSizeVaried: row.block_size_varied,
-      blockSizesList: row.block_sizes_list ? JSON.parse(row.block_sizes_list) : [],
-      allocationRatios: typeof row.allocation_ratios === 'string'
-        ? JSON.parse(row.allocation_ratios)
-        : row.allocation_ratios || {},
-      stratificationFactors: typeof row.stratification_factors === 'string'
-        ? JSON.parse(row.stratification_factors)
-        : row.stratification_factors || [],
-      studyGroupClassId: row.study_group_class_id,
+      randomizationType: row.randomizationType,
+      blindingLevel: row.blindingLevel,
+      blockSize: row.blockSize,
+      blockSizeVaried: row.blockSizeVaried,
+      blockSizesList: safeJsonParse(row.blockSizesList, [], 'randomization.block_sizes_list'),
+      allocationRatios: typeof row.allocationRatios === 'string'
+        ? safeJsonParse(row.allocationRatios, {}, 'randomization.allocation_ratios')
+        : row.allocationRatios || {},
+      stratificationFactors: typeof row.stratificationFactors === 'string'
+        ? safeJsonParse(row.stratificationFactors, [], 'randomization.stratification_factors')
+        : row.stratificationFactors || [],
+      studyGroupClassId: row.studyGroupClassId,
       seed: row.seed,
-      totalSlots: row.total_slots,
-      isActive: row.is_active,
-      isLocked: row.is_locked,
-      drugKitManagement: row.drug_kit_management,
-      drugKitPrefix: row.drug_kit_prefix,
-      siteSpecific: row.site_specific,
-      createdBy: row.created_by,
-      dateCreated: row.date_created,
+      totalSlots: row.totalSlots,
+      isActive: row.isActive,
+      isLocked: row.isLocked,
+      drugKitManagement: row.drugKitManagement,
+      drugKitPrefix: row.drugKitPrefix,
+      siteSpecific: row.siteSpecific,
+      createdBy: row.createdBy,
+      dateCreated: row.dateCreated,
     };
   } catch (error: any) {
     logger.error('Failed to get randomization config by id', { configId, error: error.message });
@@ -474,7 +483,7 @@ export const generateList = async (configId: number, userId: number): Promise<{ 
     await client.query('BEGIN');
 
     // Load config
-    const configResult = await client.query('SELECT * FROM acc_randomization_config WHERE config_id = $1', [configId]);
+    const configResult = await client.query('SELECT * FROM acc_randomization_config WHERE config_id = $1 FOR UPDATE', [configId]);
     if (configResult.rows.length === 0) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Configuration not found' };
@@ -482,20 +491,20 @@ export const generateList = async (configId: number, userId: number): Promise<{ 
 
     const cfg = configResult.rows[0];
 
-    if (cfg.is_locked) {
+    if (cfg.isLocked) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Configuration is locked. List already generated.' };
     }
 
-    const allocationRatios = typeof cfg.allocation_ratios === 'string'
-      ? JSON.parse(cfg.allocation_ratios)
-      : cfg.allocation_ratios || {};
-    const stratFactors: StratificationFactor[] = typeof cfg.stratification_factors === 'string'
-      ? JSON.parse(cfg.stratification_factors)
-      : cfg.stratification_factors || [];
-    const blockSizesList = cfg.block_sizes_list
-      ? (typeof cfg.block_sizes_list === 'string' ? JSON.parse(cfg.block_sizes_list) : cfg.block_sizes_list)
-      : [cfg.block_size];
+    const allocationRatios = typeof cfg.allocationRatios === 'string'
+      ? JSON.parse(cfg.allocationRatios)
+      : cfg.allocationRatios || {};
+    const stratFactors: StratificationFactor[] = typeof cfg.stratificationFactors === 'string'
+      ? JSON.parse(cfg.stratificationFactors)
+      : cfg.stratificationFactors || [];
+    const blockSizesList = cfg.blockSizesList
+      ? (typeof cfg.blockSizesList === 'string' ? JSON.parse(cfg.blockSizesList) : cfg.blockSizesList)
+      : [cfg.blockSize];
 
     const groupIds = Object.keys(allocationRatios).map(Number);
 
@@ -508,18 +517,18 @@ export const generateList = async (configId: number, userId: number): Promise<{ 
     await client.query('DELETE FROM acc_randomization_list WHERE config_id = $1 AND is_used = false', [configId]);
 
     // Generate stratum keys
-    const stratumKeys = cfg.randomization_type === 'stratified'
+    const stratumKeys = cfg.randomizationType === 'stratified'
       ? generateStratumKeys(stratFactors)
       : ['default'];
 
     const prng = new SeededPRNG(cfg.seed);
     let totalEntries = 0;
-    const slotsPerStratum = Math.ceil(cfg.total_slots / stratumKeys.length);
+    const slotsPerStratum = Math.ceil(cfg.totalSlots / stratumKeys.length);
 
     for (const stratumKey of stratumKeys) {
       let list: { groupId: number; blockNumber: number }[];
 
-      if (cfg.randomization_type === 'simple') {
+      if (cfg.randomizationType === 'simple') {
         // Simple randomization: each slot is independently random
         list = [];
         for (let i = 0; i < slotsPerStratum; i++) {
@@ -542,8 +551,8 @@ export const generateList = async (configId: number, userId: number): Promise<{ 
           prng,
           groupIds,
           allocationRatios,
-          cfg.block_size,
-          cfg.block_size_varied,
+          cfg.blockSize,
+          cfg.blockSizeVaried,
           blockSizesList,
           slotsPerStratum
         );
@@ -615,7 +624,7 @@ export const activateConfig = async (configId: number, userId: number): Promise<
 
     // Deactivate any other configs for this study
     const configResult = await client.query('SELECT study_id FROM acc_randomization_config WHERE config_id = $1', [configId]);
-    const studyId = configResult.rows[0]?.study_id;
+    const studyId = configResult.rows[0]?.studyId;
 
     if (studyId) {
       await client.query(
@@ -689,7 +698,7 @@ export const randomizeSubject = async (
     }
 
     const cfg = configResult.rows[0];
-    const configId = cfg.config_id;
+    const configId = cfg.configId;
 
     // 2. Check if subject is already randomized
     const existingCheck = await client.query(
@@ -713,10 +722,10 @@ export const randomizeSubject = async (
 
     // 3. Determine stratum key
     let stratumKey = 'default';
-    if (cfg.randomization_type === 'stratified' && stratumValues) {
-      const factors: StratificationFactor[] = typeof cfg.stratification_factors === 'string'
-        ? JSON.parse(cfg.stratification_factors)
-        : cfg.stratification_factors || [];
+    if (cfg.randomizationType === 'stratified' && stratumValues) {
+      const factors: StratificationFactor[] = typeof cfg.stratificationFactors === 'string'
+        ? JSON.parse(cfg.stratificationFactors)
+        : cfg.stratificationFactors || [];
 
       const parts: string[] = [];
       for (const factor of factors) {
@@ -774,15 +783,15 @@ export const randomizeSubject = async (
       UPDATE acc_randomization_list
       SET is_used = true, used_by_subject_id = $2, used_at = CURRENT_TIMESTAMP, used_by_user_id = $3
       WHERE list_entry_id = $1
-    `, [slot.list_entry_id, studySubjectId, userId]);
+    `, [slot.listEntryId, studySubjectId, userId]);
 
     // 6. Create the subject_group_map entry in LibreClinica
     // Get study_group_class_id
     const groupInfo = await client.query(
       'SELECT study_group_class_id FROM study_group WHERE study_group_id = $1',
-      [slot.study_group_id]
+      [slot.studyGroupId]
     );
-    const studyGroupClassId = groupInfo.rows[0]?.study_group_class_id || cfg.study_group_class_id;
+    const studyGroupClassId = groupInfo.rows[0]?.studyGroupClassId || cfg.studyGroupClassId;
 
     // Check if subject already has an assignment for this group class (prevent duplicates)
     const existingAssignment = await client.query(
@@ -796,39 +805,39 @@ export const randomizeSubject = async (
         UPDATE subject_group_map 
         SET study_group_id = $1, notes = $2, date_updated = CURRENT_DATE, update_id = $3
         WHERE study_subject_id = $4 AND study_group_class_id = $5
-      `, [slot.study_group_id, `Randomization: ${slot.randomization_number}`, userId, studySubjectId, studyGroupClassId]);
+      `, [slot.studyGroupId, `Randomization: ${slot.randomizationNumber}`, userId, studySubjectId, studyGroupClassId]);
     } else {
       await client.query(`
         INSERT INTO subject_group_map (study_subject_id, study_group_id, study_group_class_id, owner_id, status_id, notes, date_created)
         VALUES ($1, $2, $3, $4, 1, $5, CURRENT_DATE)
-      `, [studySubjectId, slot.study_group_id, studyGroupClassId, userId, `Randomization: ${slot.randomization_number}`]);
+      `, [studySubjectId, slot.studyGroupId, studyGroupClassId, userId, `Randomization: ${slot.randomizationNumber}`]);
     }
 
     // 7. Audit log — use type 28 (Subject Group Assignment) from LibreClinica's audit_log_event_type
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
       VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Randomized', NULL, $3, 28)
-    `, [userId, studySubjectId, `Subject ${studySubjectId} assigned to ${slot.group_name} (${slot.randomization_number})`]);
+    `, [userId, studySubjectId, `Subject ${studySubjectId} assigned to ${slot.groupName} (${slot.randomizationNumber})`]);
 
     await client.query('COMMIT');
 
-    const isBlinded = cfg.blinding_level !== 'open_label';
+    const isBlinded = cfg.blindingLevel !== 'open_label';
 
     logger.info('Subject randomized', {
       studySubjectId,
       configId,
-      randomizationNumber: slot.randomization_number,
-      groupId: slot.study_group_id,
+      randomizationNumber: slot.randomizationNumber,
+      groupId: slot.studyGroupId,
       stratumKey,
       isBlinded
     });
 
     return {
       success: true,
-      randomizationNumber: slot.randomization_number,
-      studyGroupId: slot.study_group_id,
-      groupName: isBlinded ? '[Blinded]' : slot.group_name,
-      sequenceNumber: slot.sequence_number,
+      randomizationNumber: slot.randomizationNumber,
+      studyGroupId: slot.studyGroupId,
+      groupName: isBlinded ? '[Blinded]' : slot.groupName,
+      sequenceNumber: slot.sequenceNumber,
       stratumKey,
       isBlinded
     };
@@ -894,14 +903,14 @@ export const getListStats = async (configId: number): Promise<{
       used,
       available: total - used,
       byStratum: stratumStats.rows.map((r: any) => ({
-        stratumKey: r.stratum_key,
+        stratumKey: r.stratumKey,
         total: parseInt(r.total),
         used: parseInt(r.used),
         available: parseInt(r.available)
       })),
       byGroup: groupStats.rows.map((r: any) => ({
-        studyGroupId: r.study_group_id,
-        groupName: r.group_name,
+        studyGroupId: r.studyGroupId,
+        groupName: r.groupName,
         total: parseInt(r.total),
         used: parseInt(r.used)
       }))
@@ -924,7 +933,7 @@ export const deleteConfig = async (configId: number, userId: number): Promise<{ 
 
     // Verify the config exists and is deletable
     const configResult = await client.query(
-      'SELECT config_id, is_active, is_locked, study_id, name FROM acc_randomization_config WHERE config_id = $1',
+      'SELECT config_id, is_active, is_locked, study_id, name FROM acc_randomization_config WHERE config_id = $1 FOR UPDATE',
       [configId]
     );
 
@@ -935,7 +944,7 @@ export const deleteConfig = async (configId: number, userId: number): Promise<{ 
 
     const config = configResult.rows[0];
 
-    if (config.is_active || config.is_locked) {
+    if (config.isActive || config.isLocked) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Cannot delete an active or locked configuration' };
     }
@@ -946,7 +955,7 @@ export const deleteConfig = async (configId: number, userId: number): Promise<{ 
       [configId]
     );
 
-    if (parseInt(usedCheck.rows[0].used_count) > 0) {
+    if (parseInt(usedCheck.rows[0].usedCount) > 0) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Cannot delete configuration with used randomization slots' };
     }
@@ -965,7 +974,7 @@ export const deleteConfig = async (configId: number, userId: number): Promise<{ 
 
     await client.query('COMMIT');
 
-    logger.info('Randomization config deleted', { configId, userId, studyId: config.study_id });
+    logger.info('Randomization config deleted', { configId, userId, studyId: config.studyId });
     return { success: true, message: 'Configuration deleted successfully' };
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -997,7 +1006,7 @@ export const testConfig = async (config: RandomizationConfig): Promise<{
       [groupIds]
     );
     const groupNames: Record<number, string> = {};
-    groupNamesResult.rows.forEach((r: any) => { groupNames[r.study_group_id] = r.name; });
+    groupNamesResult.rows.forEach((r: any) => { groupNames[r.studyGroupId] = r.name; });
 
     const testSeed = crypto.randomBytes(32).toString('hex');
     const prng = new SeededPRNG(testSeed);

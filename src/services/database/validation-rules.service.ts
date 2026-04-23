@@ -20,24 +20,14 @@ import { resolveQueryAssignee } from './workflow-config.provider';
 import { parseExtendedProps } from '../../utils/extended-props';
 import { updateFormQueryCounts } from './query.service';
 import { getStudyParameters } from './studyParameters.service';
+import { getOrgMemberUserIds as getOrgMemberUserIdsShared } from '../../utils/org.util';
 
 /**
  * Helper: get org member user IDs for the caller.
  * Returns [callerUserId] if the caller has no org membership (only see own data).
  */
 const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
-  const orgCheck = await pool.query(
-    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-    [callerUserId]
-  );
-  const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
-  if (callerOrgIds.length === 0) return [callerUserId];
-
-  const memberCheck = await pool.query(
-    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
-    [callerOrgIds]
-  );
-  return memberCheck.rows.map((r: any) => r.user_id);
+  return getOrgMemberUserIdsShared(pool, callerUserId);
 };
 
 export interface ValidationRule {
@@ -171,68 +161,26 @@ const mapActionTypeToRuleType = (actionType: string): string => {
 };
 
 /**
- * Initialize the validation_rules table if it doesn't exist
- * Uses simple columns without foreign key constraints to avoid dependency issues
+ * Verify that the validation_rules table exists (safety-net check).
+ * The table is now created by migration 20260422_validation_rules_table.sql.
  */
-let initializationInProgress: Promise<boolean> | null = null;
-
 export const initializeValidationRulesTable = async (): Promise<boolean> => {
   if (tableInitialized) {
     return true;
   }
 
-  // Prevent concurrent initialization attempts from multiple requests
-  if (initializationInProgress) {
-    return initializationInProgress;
-  }
-
-  initializationInProgress = (async () => {
-    try {
-      const checkResult = await pool.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.tables WHERE table_name = 'validation_rules'
-        )
-      `);
-      if (!checkResult.rows[0].exists) {
-        logger.warn('validation_rules table does not exist yet — run startup migrations');
-        return false;
-      }
-
-      // Ensure columns added in later migrations are present.
-      // Use a single query to check which columns are missing, then only ALTER for those.
-      const existingCols = await pool.query(`
-        SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'validation_rules'
-      `);
-      const existingSet = new Set(existingCols.rows.map((r: any) => r.column_name));
-
-      const columnsToEnsure = [
-        { name: 'format_type', type: 'VARCHAR(50)' },
-        { name: 'operator', type: 'VARCHAR(20)' },
-        { name: 'compare_field_path', type: 'VARCHAR(255)' },
-        { name: 'custom_expression', type: 'TEXT' },
-        { name: 'compare_value', type: 'TEXT' },
-        { name: 'table_cell_target', type: 'JSONB' },
-      ];
-
-      const missing = columnsToEnsure.filter(c => !existingSet.has(c.name));
-      for (const col of missing) {
-        try {
-          await pool.query(`ALTER TABLE validation_rules ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
-        } catch { /* column already exists */ }
-      }
-
-      tableInitialized = true;
-      return true;
-    } catch (error: any) {
-      logger.error('Failed to check validation_rules table:', error.message);
+  try {
+    const result = await pool.query(`SELECT to_regclass('public.validation_rules')`);
+    if (!result.rows[0]?.toRegclass) {
+      logger.warn('validation_rules table does not exist — run migrations first');
       return false;
-    } finally {
-      initializationInProgress = null;
     }
-  })();
-
-  return initializationInProgress;
+    tableInitialized = true;
+    return true;
+  } catch (error: any) {
+    logger.error('Failed to check validation_rules table:', error.message);
+    return false;
+  }
 };
 
 /**
@@ -268,7 +216,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
           `SELECT cv.owner_id FROM crf_version cv WHERE cv.crf_id = $1 LIMIT 1`,
           [crfId]
         );
-        if (crfOwnerCheck.rows.length > 0 && !orgUserIds.includes(crfOwnerCheck.rows[0].owner_id)) {
+        if (crfOwnerCheck.rows.length > 0 && !orgUserIds.includes(crfOwnerCheck.rows[0].ownerId)) {
           logger.info('CRF not owned by caller org, returning empty rules', { crfId, callerUserId });
           return [];
         }
@@ -341,26 +289,26 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
     ]);
 
     const customRules = customResult.rows.map(mapDbRowToRule);
-    const itemRules = itemResult.rows.filter((row: any) => row.rule_type !== null).map(mapDbRowToRule);
+    const itemRules = itemResult.rows.filter((row: any) => row.ruleType !== null).map(mapDbRowToRule);
     const nativeRules: ValidationRule[] = nativeResult.rows.map((row: any) => ({
       id: row.id + 100000,
-      crfId: row.crf_id,
-      crfVersionId: row.crf_version_id,
-      itemId: row.item_id,
+      crfId: row.crfId,
+      crfVersionId: row.crfVersionId,
+      itemId: row.itemId,
       name: row.name || 'LibreClinica Rule',
       description: row.description || '',
-      ruleType: mapActionTypeToRuleType(row.action_type) as ValidationRule['ruleType'],
-      fieldPath: row.oc_oid || '',
-      severity: row.action_type === 'DISCREPANCY_NRS' ? 'warning' : 'error' as ValidationRule['severity'],
-      errorMessage: row.action_message || 'Validation failed',
-      warningMessage: row.action_type === 'DISCREPANCY_NRS' ? row.action_message : undefined,
+      ruleType: mapActionTypeToRuleType(row.actionType) as ValidationRule['ruleType'],
+      fieldPath: row.ocOid || '',
+      severity: row.actionType === 'DISCREPANCY_NRS' ? 'warning' : 'error' as ValidationRule['severity'],
+      errorMessage: row.actionMessage || 'Validation failed',
+      warningMessage: row.actionType === 'DISCREPANCY_NRS' ? row.actionMessage : undefined,
       active: row.enabled !== false,
       customExpression: row.expression,
       dateCreated: new Date(),
-      createdBy: row.owner_id || 1,
+      createdBy: row.ownerId || 1,
       nativeRuleId: row.id,
-      nativeOcOid: row.oc_oid,
-      expressionContext: row.expression_context
+      nativeOcOid: row.ocOid,
+      expressionContext: row.expressionContext
     }));
 
     // Deduplicate with O(1) Set lookups instead of O(N) .some() scans
@@ -460,9 +408,9 @@ export const getRulesForStudy = async (studyId: number, callerUserId?: number): 
     // Use Map to ensure uniqueness by crf_id
     const crfMap = new Map<number, { crfId: number; crfName: string }>();
     for (const crf of crfsResult.rows) {
-      if (!crfMap.has(crf.crf_id)) {
-        crfMap.set(crf.crf_id, {
-          crfId: crf.crf_id,
+      if (!crfMap.has(crf.crfId)) {
+        crfMap.set(crf.crfId, {
+          crfId: crf.crfId,
           crfName: crf.name
         });
       }
@@ -543,9 +491,9 @@ export const getAllCrfsWithRuleCounts = async (callerUserId?: number): Promise<{
     // The frontend dropdown only needs crfId + name + count.
     // Full rules are fetched on demand when the user selects a CRF.
     const results = crfsResult.rows.map((row: any) => ({
-      crfId: row.crf_id,
+      crfId: row.crfId,
       crfName: row.name,
-      rules: new Array(parseInt(row.rule_count, 10) || 0),
+      rules: new Array(parseInt(row.ruleCount, 10) || 0),
     }));
 
     return results;
@@ -606,7 +554,7 @@ export const getRuleById = async (ruleId: number, callerUserId?: number): Promis
     // Org-scoping: verify caller can see this rule
     if (callerUserId) {
       const orgUserIds = await getOrgMemberUserIds(callerUserId);
-      if (orgUserIds && !orgUserIds.includes(result.rows[0].created_by)) {
+      if (orgUserIds && !orgUserIds.includes(result.rows[0].createdBy)) {
         return null;
       }
     }
@@ -669,7 +617,7 @@ export const createRule = async (
           [rule.crfId]
         );
         if (verRes.rows.length > 0) {
-          resolvedCrfVersionId = verRes.rows[0].crf_version_id;
+          resolvedCrfVersionId = verRes.rows[0].crfVersionId;
         }
       } catch (e: any) {
         logger.warn('Could not resolve crf_version_id for rule create', { crfId: rule.crfId, error: e.message });
@@ -713,7 +661,7 @@ export const createRule = async (
           [rule.crfId]
         );
         if (versionResult.rows.length > 0) {
-          crfVersionId = versionResult.rows[0].crf_version_id;
+          crfVersionId = versionResult.rows[0].crfVersionId;
         }
       }
 
@@ -734,7 +682,7 @@ export const createRule = async (
 
     await client.query('COMMIT');
 
-    return { success: true, ruleId: result.rows[0].validation_rule_id };
+    return { success: true, ruleId: result.rows[0].validationRuleId };
   } catch (error: any) {
     await client.query('ROLLBACK');
     logger.error('Create validation rule error', { error: error.message });
@@ -910,6 +858,12 @@ export const validateFormData = async (
     /** When set, only rules matching this severity are evaluated.
      *  Use 'warning' in post-save mode to avoid duplicate error queries. */
     severityFilter?: 'error' | 'warning';
+    /** Item IDs hidden by branching/skip logic on the frontend.
+     *  Rules targeting these fields are skipped — hidden fields must
+     *  never block saves or generate spurious queries. */
+    hiddenFieldIds?: number[];
+    /** Field names hidden by branching (for rules lacking itemId). */
+    hiddenFieldNames?: string[];
   }
 ): Promise<{
   valid: boolean;
@@ -960,6 +914,15 @@ export const validateFormData = async (
     // Skipping them here prevents both duplicate evaluation (and thus duplicate
     // queries) and incorrect application of cell rules to the whole table value.
     if (rule.tableCellTarget) continue;
+
+    // Skip rules targeting fields hidden by branching/skip logic.
+    if (options?.hiddenFieldIds && options.hiddenFieldIds.length > 0) {
+      if (rule.itemId && options.hiddenFieldIds.includes(rule.itemId)) continue;
+    }
+    if (!rule.itemId && rule.fieldPath && options?.hiddenFieldNames && options.hiddenFieldNames.length > 0) {
+      const ruleField = rule.fieldPath.split('.').pop()?.toLowerCase() || rule.fieldPath.toLowerCase();
+      if (options.hiddenFieldNames.some(n => n.toLowerCase() === ruleField)) continue;
+    }
 
     // Match field value using itemId first (stable), then fall back to name matching
     const value = getFieldValue(formData, rule, itemDataMap, itemIdToFormKey);
@@ -1121,6 +1084,13 @@ export const validateFormData = async (
 
   for (const rule of cellRules) {
     if (!rule.tableCellTarget) continue;
+
+    // Skip cell rules on hidden table fields
+    const ruleItemId = rule.tableCellTarget.tableItemId ?? rule.itemId;
+    if (options?.hiddenFieldIds && options.hiddenFieldIds.length > 0 && ruleItemId != null) {
+      if (options.hiddenFieldIds.includes(ruleItemId)) continue;
+    }
+
     const targetTableFieldPath = rule.tableCellTarget.tableFieldPath;
 
     // Resolve the actual form_data key for this rule's table. Two tables in the
@@ -1388,21 +1358,18 @@ async function buildItemDataMap(eventCrfId: number): Promise<Record<string, numb
   // item_<id> form is always unique and is what callers should prefer.
   const claimedByName = new Set<string>();
   for (const row of result.rows) {
-    const lowerName = row.field_name?.toLowerCase();
-    // Only set the bare-name keys for the FIRST item that has that name —
-    // subsequent items would overwrite and collapse different cells onto
-    // the same item_data_id.
+    const lowerName = row.fieldName?.toLowerCase();
     if (lowerName && !claimedByName.has(lowerName)) {
-      map[row.field_name] = row.item_data_id;
-      map[lowerName] = row.item_data_id;
+      map[row.fieldName] = row.itemDataId;
+      map[lowerName] = row.itemDataId;
       claimedByName.add(lowerName);
     }
-    if (row.field_oid && !claimedByName.has(row.field_oid)) {
-      map[row.field_oid] = row.item_data_id;
-      claimedByName.add(row.field_oid);
+    if (row.fieldOid && !claimedByName.has(row.fieldOid)) {
+      map[row.fieldOid] = row.itemDataId;
+      claimedByName.add(row.fieldOid);
     }
     // item_<id> is always unique per row
-    map[`item_${row.item_id}`] = row.item_data_id;
+    map[`item_${row.itemId}`] = row.itemDataId;
   }
 
   return map;
@@ -1447,7 +1414,7 @@ async function buildTableColumnMetadataMap(crfId: number): Promise<Map<number, T
       [crfId]
     );
     if (latestVersion.rows.length === 0) return map;
-    const versionId = latestVersion.rows[0].crf_version_id;
+    const versionId = latestVersion.rows[0].crfVersionId;
 
     const result = await pool.query(`
       SELECT i.item_id, i.description
@@ -1467,8 +1434,6 @@ async function buildTableColumnMetadataMap(crfId: number): Promise<Map<number, T
 
       if (isDataTable) {
         ext.tableColumns.forEach((col: any, idx: number) => {
-          // Same resolution as FormTableManager.getColumns():
-          //   key || name || id || `col_${idx}`
           const dataKey = col.key || col.name || col.id || `col_${idx}`;
           const candidates: string[] = [];
           for (const v of [col.key, col.id, col.name, dataKey]) {
@@ -1478,7 +1443,6 @@ async function buildTableColumnMetadataMap(crfId: number): Promise<Map<number, T
           for (const id of candidates) columnsByAnyId.set(id, meta);
         });
       } else {
-        // question_table: take answerColumns from the first question row
         const firstRow = ext.questionRows[0] || {};
         const ansCols = Array.isArray(firstRow.answerColumns) ? firstRow.answerColumns : [];
         ansCols.forEach((col: any, idx: number) => {
@@ -1492,7 +1456,7 @@ async function buildTableColumnMetadataMap(crfId: number): Promise<Map<number, T
         });
       }
 
-      map.set(row.item_id, { columnsByAnyId, isQuestionTable });
+      map.set(row.itemId, { columnsByAnyId, isQuestionTable });
     }
   } catch (e: any) {
     logger.warn('Could not build table column metadata map', { crfId, error: e.message });
@@ -1519,7 +1483,7 @@ async function buildItemIdToFormKeyMap(
       [crfId]
     );
     if (latestVersion.rows.length === 0) return map;
-    const versionId = latestVersion.rows[0].crf_version_id;
+    const versionId = latestVersion.rows[0].crfVersionId;
 
     // Order by item_form_metadata.ordinal so we iterate items in the same order
     // the frontend renders them. This matters for same-named fields: the FIRST
@@ -1567,19 +1531,18 @@ async function buildItemIdToFormKeyMap(
     };
 
     for (const row of result.rows) {
-      const itemId: number = row.item_id;
+      const itemId: number = row.itemId;
 
       // Priority 1: technical fieldName from extended_properties (what the frontend sends)
       const extProps = parseExtendedProps(row.description);
       if (extProps.fieldName && claim(itemId, extProps.fieldName)) continue;
 
       // Priority 2: OID (e.g., "I_GENER_ASSES")
-      if (row.oc_oid && claim(itemId, row.oc_oid)) continue;
+      if (row.ocOid && claim(itemId, row.ocOid)) continue;
 
       // Priority 3: Display label (item.name, e.g., "Assessment Date")
       if (row.name) {
         if (claim(itemId, row.name)) continue;
-        // Also try spaces→underscores (e.g., "Assessment Date" → "assessment_date")
         const normalized = row.name.replace(/[\s\-]+/g, '_');
         if (claim(itemId, normalized)) continue;
       }
@@ -1799,8 +1762,8 @@ export const validateFieldChange = async (
         `SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1`,
         [options.eventCrfId]
       );
-      if (ecv.rows.length > 0 && ecv.rows[0].crf_version_id) {
-        pinnedVersionId = ecv.rows[0].crf_version_id;
+      if (ecv.rows.length > 0 && ecv.rows[0].crfVersionId) {
+        pinnedVersionId = ecv.rows[0].crfVersionId;
       }
     } catch (e: any) {
       logger.warn('Could not resolve pinned crf_version_id for event_crf', { eventCrfId: options.eventCrfId, error: e.message });
@@ -2159,7 +2122,7 @@ async function createValidationQuery(params: {
       }
 
       if (existingQuery.rows.length > 0) {
-        const existingId = existingQuery.rows[0].discrepancy_note_id;
+        const existingId = existingQuery.rows[0].discrepancyNoteId;
         logger.info('Existing open validation query for THIS rule found, skipping duplicate creation', {
           existingQueryId: existingId,
           fieldPath: params.fieldPath,
@@ -2190,7 +2153,7 @@ async function createValidationQuery(params: {
       `, [params.eventCrfId, expectedDescription, params.fieldPath]);
 
       if (existingByDesc.rows.length > 0) {
-        const existingId = existingByDesc.rows[0].discrepancy_note_id;
+        const existingId = existingByDesc.rows[0].discrepancyNoteId;
         logger.info('Existing validation query for THIS rule found in event_crf map, skipping duplicate', {
           existingQueryId: existingId,
           fieldPath: params.fieldPath,
@@ -2257,7 +2220,7 @@ async function createValidationQuery(params: {
       RETURNING discrepancy_note_id
     `, [description, detailedNotes, noteTypeId, params.studyId, params.userId, assignedUserId, params.severity || 'minor', dueDateStr]);
 
-    const queryId = result.rows[0]?.discrepancy_note_id;
+    const queryId = result.rows[0]?.discrepancyNoteId;
     
     if (!queryId) {
       throw new Error('Failed to create discrepancy note');
@@ -2422,7 +2385,7 @@ async function findItemDataId(
     `, [eventCrfId, itemId]);
     
     if (result.rows.length > 0) {
-      return result.rows[0].item_data_id;
+      return result.rows[0].itemDataId;
     }
   }
   
@@ -2450,14 +2413,14 @@ async function findItemDataId(
           LOWER(i.name) = LOWER($2) 
           OR LOWER(i.oc_oid) = LOWER($2)
           OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2)
-          OR i.description ILIKE '%"fieldName":"' || LOWER($2) || '"%'
+          OR i.description ILIKE '%"fieldName":"' || REPLACE(REPLACE(REPLACE(LOWER($2), '%', '\\%'), '_', '\\_'), '''', '''''') || '"%'
         )
         AND id.deleted = false
       LIMIT 1
     `, [eventCrfId, fieldName]);
     
     if (result.rows.length > 0) {
-      return result.rows[0].item_data_id;
+      return result.rows[0].itemDataId;
     }
   }
   
@@ -2495,11 +2458,15 @@ function applyRule(
   }
 
   // Detect multi-value fields (checkbox/multi-select stored as comma-separated strings)
-  // These need special handling: range and format rules designed for single values
-  // should not be applied to comma-separated multi-value strings.
+  // Only treat as multi-value if there are distinct non-empty segments after splitting.
+  // A single value containing a comma (e.g., "Smith, John") should NOT be treated as
+  // multi-value — require the rule's field to be a known multi-select type, or for the
+  // value to have at least 2 non-trivial segments that aren't part of a number or date.
   const isMultiValue = typeof value === 'string' && value.includes(',') &&
-    !/^\d[\d,.]*$/.test(value) && // Not a decimal number with commas (e.g., "1,234.56")
-    !/^\d{4}-\d{2}-\d{2}/.test(value); // Not a date string
+    !/^\d[\d,.]*$/.test(value) &&
+    !/^\d{4}-\d{2}-\d{2}/.test(value) &&
+    value.split(',').filter(s => s.trim()).length >= 2 &&
+    !value.includes('"') && !value.includes("'");
 
   // Detect blood pressure composite values (e.g., "120/80")
   const isBloodPressure = typeof value === 'string' && /^\d{2,3}\/\d{2,3}$/.test(value);
@@ -2509,8 +2476,11 @@ function applyRule(
     ['yes', 'no', 'true', 'false'].includes(value.toLowerCase());
 
   // Detect JSON-encoded values (table fields, repeating groups)
-  const isJsonValue = typeof value === 'string' &&
-    (value.startsWith('[') || value.startsWith('{'));
+  // Verify with actual parsing to avoid misclassifying freetext like "[Patient refused]"
+  let isJsonValue = false;
+  if (typeof value === 'string' && (value.startsWith('[') || value.startsWith('{'))) {
+    try { JSON.parse(value); isJsonValue = true; } catch { isJsonValue = false; }
+  }
 
   // Detect file upload IDs (UUID format with hyphens like "550e8400-e29b-41d4-a716-446655440000")
   const isFileIds = typeof value === 'string' &&
@@ -2661,7 +2631,12 @@ function applyRule(
       }
 
       const numValue = Number(value);
-      if (isNaN(numValue)) return { valid: true };
+      if (isNaN(numValue)) {
+        // Non-numeric value in a range rule: the value doesn't belong in a numeric
+        // range. Return invalid so format/range rules catch garbage input instead
+        // of silently passing it.
+        return { valid: false };
+      }
       if (rule.minValue !== undefined && numValue < rule.minValue) return { valid: false };
       if (rule.maxValue !== undefined && numValue > rule.maxValue) return { valid: false };
       return { valid: true };
@@ -2709,14 +2684,9 @@ function applyRule(
       }
       try {
         const regex = new RegExp(resolvedPattern);
-        // ISSUE-407 fix: trim whitespace before testing format patterns. A
-        // user pasting "  42  " into a numbers-only field shouldn't be
-        // penalized for invisible padding around an otherwise-correct value.
-        // Patterns that intentionally include whitespace (e.g., "letters_only"
-        // includes \s in its character class) still work because trim only
-        // removes outer whitespace.
         const testTarget = typeof value === 'string' ? value.trim() : String(value);
-        const regexMatched = regex.test(testTarget);
+        const safeTarget = testTarget.length > 10000 ? testTarget.slice(0, 10000) : testTarget;
+        const regexMatched = regex.test(safeTarget);
         if (!regexMatched) return { valid: false };
         // ISSUE-DATE-CALENDAR fix: pure regex cannot reject calendar-impossible
         // dates like 2024-02-30 or 2024-04-31 (non-leap Feb 29 only the JS Date
@@ -3355,7 +3325,7 @@ function compareValues(a: any, b: any, operator: string): boolean {
   }
 
   switch (operator) {
-    case '==': return a == b;
+    case '==': return a === b;
     case '===': return a === b;
     case '!=': return a != b;
     case '!==': return a !== b;
@@ -3380,36 +3350,35 @@ function getNestedValue(obj: Record<string, any>, path: string): any {
  */
 function mapDbRowToRule(row: any): ValidationRule {
   return {
-    id: row.id || row.validation_rule_id,
-    crfId: row.crf_id,
-    crfVersionId: row.crf_version_id,
-    itemId: row.item_id,
+    id: row.id || row.validationRuleId,
+    crfId: row.crfId,
+    crfVersionId: row.crfVersionId,
+    itemId: row.itemId,
     name: row.name,
     description: row.description || '',
-    ruleType: row.rule_type,
-    fieldPath: row.field_path,
+    ruleType: row.ruleType,
+    fieldPath: row.fieldPath,
     severity: row.severity || 'error',
-    errorMessage: row.error_message,
-    warningMessage: row.warning_message,
+    errorMessage: row.errorMessage,
+    warningMessage: row.warningMessage,
     active: row.active !== false,
-    minValue: row.min_value != null ? Number(row.min_value) : undefined,
-    maxValue: row.max_value != null ? Number(row.max_value) : undefined,
+    minValue: row.minValue != null ? Number(row.minValue) : undefined,
+    maxValue: row.maxValue != null ? Number(row.maxValue) : undefined,
     pattern: row.pattern,
-    formatType: row.format_type || undefined,
+    formatType: row.formatType || undefined,
     operator: row.operator,
-    compareFieldPath: row.compare_field_path,
-    compareValue: row.compare_value || undefined,
-    customExpression: row.custom_expression,
-    // Blood pressure per-component limits
-    bpSystolicMin: row.bp_systolic_min != null ? Number(row.bp_systolic_min) : undefined,
-    bpSystolicMax: row.bp_systolic_max != null ? Number(row.bp_systolic_max) : undefined,
-    bpDiastolicMin: row.bp_diastolic_min != null ? Number(row.bp_diastolic_min) : undefined,
-    bpDiastolicMax: row.bp_diastolic_max != null ? Number(row.bp_diastolic_max) : undefined,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    createdBy: row.created_by || row.owner_id,
-    updatedBy: row.updated_by || row.update_id,
-    tableCellTarget: row.table_cell_target || null
+    compareFieldPath: row.compareFieldPath,
+    compareValue: row.compareValue || undefined,
+    customExpression: row.customExpression,
+    bpSystolicMin: row.bpSystolicMin != null ? Number(row.bpSystolicMin) : undefined,
+    bpSystolicMax: row.bpSystolicMax != null ? Number(row.bpSystolicMax) : undefined,
+    bpDiastolicMin: row.bpDiastolicMin != null ? Number(row.bpDiastolicMin) : undefined,
+    bpDiastolicMax: row.bpDiastolicMax != null ? Number(row.bpDiastolicMax) : undefined,
+    dateCreated: row.dateCreated,
+    dateUpdated: row.dateUpdated,
+    createdBy: row.createdBy || row.ownerId,
+    updatedBy: row.updatedBy || row.updateId,
+    tableCellTarget: row.tableCellTarget || null
   };
 }
 
@@ -3443,8 +3412,8 @@ export const getRulesForEventCrf = async (eventCrfId: number, callerUserId?: num
       return [];
     }
 
-    const crfId = eventCrfResult.rows[0].crf_id;
-    const pinnedVersionId = eventCrfResult.rows[0].crf_version_id;
+    const crfId = eventCrfResult.rows[0].crfId;
+    const pinnedVersionId = eventCrfResult.rows[0].crfVersionId;
 
     // Get all rules for this CRF, then filter to ones that are version-locked
     // to the patient's pinned version OR have no version pin (legacy / "applies
@@ -3474,6 +3443,8 @@ export const validateEventCrf = async (
   options?: {
     createQueries?: boolean;
     userId?: number;
+    hiddenFieldIds?: number[];
+    hiddenFieldNames?: string[];
   }
 ): Promise<{
   valid: boolean;
@@ -3526,41 +3497,36 @@ export const validateEventCrf = async (
 
     for (const row of itemDataResult.rows) {
       // Display name
-      formData[row.field_name] = row.value;
-      itemDataMap[row.field_name] = row.item_data_id;
-      itemDataMap[row.field_name.toLowerCase()] = row.item_data_id;
+      formData[row.fieldName] = row.value;
+      itemDataMap[row.fieldName] = row.itemDataId;
+      itemDataMap[row.fieldName.toLowerCase()] = row.itemDataId;
       // OID
-      if (row.field_oid) {
-        formData[row.field_oid] = row.value;
-        itemDataMap[row.field_oid] = row.item_data_id;
+      if (row.fieldOid) {
+        formData[row.fieldOid] = row.value;
+        itemDataMap[row.fieldOid] = row.itemDataId;
       }
       // item_id key
-      itemDataMap[`item_${row.item_id}`] = row.item_data_id;
+      itemDataMap[`item_${row.itemId}`] = row.itemDataId;
       // Technical fieldName from extended_props
-      if (row.description?.includes('---EXTENDED_PROPS---')) {
-        try {
-          const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
-          if (json) {
-            const ext = JSON.parse(json);
-            if (ext.fieldName) {
-              formData[ext.fieldName] = row.value;
-              itemDataMap[ext.fieldName] = row.item_data_id;
-              itemDataMap[ext.fieldName.toLowerCase()] = row.item_data_id;
-            }
-          }
-        } catch { /* ignore */ }
+      const ext = parseExtendedProps(row.description);
+      if (ext.fieldName) {
+        formData[ext.fieldName] = row.value;
+        itemDataMap[ext.fieldName] = row.itemDataId;
+        itemDataMap[ext.fieldName.toLowerCase()] = row.itemDataId;
       }
     }
 
     // Validate the form data
-    return await validateFormData(eventCrf.crf_id, formData, {
+    return await validateFormData(eventCrf.crfId, formData, {
       createQueries: options?.createQueries,
-      studyId: eventCrf.study_id,
-      subjectId: eventCrf.study_subject_id,
+      studyId: eventCrf.studyId,
+      subjectId: eventCrf.studySubjectId,
       eventCrfId: eventCrfId,
       userId: options?.userId,
-      crfVersionId: eventCrf.crf_version_id,
-      itemDataMap
+      crfVersionId: eventCrf.crfVersionId,
+      itemDataMap,
+      hiddenFieldIds: options?.hiddenFieldIds,
+      hiddenFieldNames: options?.hiddenFieldNames
     });
   } catch (error: any) {
     logger.error('Validate event_crf error', { error: error.message, eventCrfId });
@@ -3601,7 +3567,7 @@ export const toggleFieldRequired = async (
     if (versionResult.rows.length === 0) {
       return { success: false, message: 'CRF version not found' };
     }
-    const crfVersionId = versionResult.rows[0].crf_version_id;
+    const crfVersionId = versionResult.rows[0].crfVersionId;
 
     const updateResult = await pool.query(
       `UPDATE item_form_metadata SET required = $1 WHERE item_id = $2 AND crf_version_id = $3`,

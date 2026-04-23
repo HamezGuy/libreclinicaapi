@@ -70,8 +70,8 @@ describe('API to Database Integration Tests', () => {
       );
 
       expect(dbResult.rows.length).toBe(1);
-      expect(dbResult.rows[0].user_name).toBe(userData.username);
-      expect(dbResult.rows[0].first_name).toBe(userData.firstName);
+      expect(dbResult.rows[0].userName).toBe(userData.username);
+      expect(dbResult.rows[0].firstName).toBe(userData.firstName);
       expect(dbResult.rows[0].email).toBe(userData.email);
 
       // Verify audit log
@@ -121,8 +121,8 @@ describe('API to Database Integration Tests', () => {
         [userId]
       );
 
-      expect(dbResult.rows[0].first_name).toBe(updates.firstName);
-      expect(dbResult.rows[0].last_name).toBe(updates.lastName);
+      expect(dbResult.rows[0].firstName).toBe(updates.firstName);
+      expect(dbResult.rows[0].lastName).toBe(updates.lastName);
       expect(dbResult.rows[0].email).toBe(updates.email);
     });
 
@@ -193,8 +193,8 @@ describe('API to Database Integration Tests', () => {
 
       expect(dbResult.rows.length).toBe(1);
       expect(dbResult.rows[0].name).toBe(studyData.name);
-      expect(dbResult.rows[0].unique_identifier).toBe(studyData.uniqueIdentifier);
-      expect(dbResult.rows[0].expected_total_enrollment).toBe(studyData.expectedTotalEnrollment);
+      expect(dbResult.rows[0].uniqueIdentifier).toBe(studyData.uniqueIdentifier);
+      expect(dbResult.rows[0].expectedTotalEnrollment).toBe(studyData.expectedTotalEnrollment);
 
       // Verify audit log
       const auditResult = await testDb.query(
@@ -242,7 +242,7 @@ describe('API to Database Integration Tests', () => {
       );
 
       expect(dbResult.rows[0].name).toBe(updates.name);
-      expect(dbResult.rows[0].expected_total_enrollment).toBe(updates.expectedTotalEnrollment);
+      expect(dbResult.rows[0].expectedTotalEnrollment).toBe(updates.expectedTotalEnrollment);
     });
 
     it('should delete study via API and verify status in database', async () => {
@@ -274,7 +274,7 @@ describe('API to Database Integration Tests', () => {
         [studyId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(5);
+      expect(dbResult.rows[0].statusId).toBe(5);
     });
   });
 
@@ -397,7 +397,7 @@ describe('API to Database Integration Tests', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].new_value).toBe(userData.username);
+      expect(auditResult.rows[0].newValue).toBe(userData.username);
 
       // Cleanup
       await testDb.query('DELETE FROM user_account WHERE user_id = $1', [userId]);
@@ -566,7 +566,7 @@ describe('API to Database Integration Tests', () => {
         [studyId]
       );
       expect(dbCheck.rows[0].name).toBe(updateData.name);
-      expect(dbCheck.rows[0].expected_total_enrollment).toBe(updateData.expectedTotalEnrollment);
+      expect(dbCheck.rows[0].expectedTotalEnrollment).toBe(updateData.expectedTotalEnrollment);
 
       // DELETE
       const deleteResponse = await request(app)
@@ -581,7 +581,7 @@ describe('API to Database Integration Tests', () => {
         'SELECT status_id FROM study WHERE study_id = $1',
         [studyId]
       );
-      expect(statusCheck.rows[0].status_id).toBe(5); // Removed status
+      expect(statusCheck.rows[0].statusId).toBe(5); // Removed status
 
       // Cleanup
       await testDb.query('DELETE FROM study_user_role WHERE study_id = $1', [studyId]);

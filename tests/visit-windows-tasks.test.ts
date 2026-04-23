@@ -34,7 +34,7 @@ describe('Visit Windows & Task Management', () => {
       ) VALUES ($1, $2, 1, $3, NOW(), $4)
       RETURNING study_id
     `, [`VW-TEST-${Date.now()}`, 'Visit Window Test Study', userId, `S_VW_${Date.now()}`]);
-    studyId = studyResult.rows[0].study_id;
+    studyId = studyResult.rows[0].studyId;
 
     // Ensure acc_task_status table exists
     await testDb.pool.query(`
@@ -95,7 +95,7 @@ describe('Visit Windows & Task Management', () => {
       VALUES ('Test Org', 'sponsor', 'active', 'test@org.com', $1)
       RETURNING organization_id
     `, [userId]);
-    orgId = orgResult.rows[0].organization_id;
+    orgId = orgResult.rows[0].organizationId;
     await testDb.pool.query(`
       INSERT INTO acc_organization_member (organization_id, user_id, role, status)
       VALUES ($1, $2, 'admin', 'active')
@@ -134,10 +134,10 @@ describe('Visit Windows & Task Management', () => {
         14, 12, 16, userId, `SE_VW_${Date.now()}`
       ]);
 
-      eventDefId = result.rows[0].study_event_definition_id;
-      expect(result.rows[0].schedule_day).toBe(14);
-      expect(result.rows[0].min_day).toBe(12);
-      expect(result.rows[0].max_day).toBe(16);
+      eventDefId = result.rows[0].studyEventDefinitionId;
+      expect(result.rows[0].scheduleDay).toBe(14);
+      expect(result.rows[0].minDay).toBe(12);
+      expect(result.rows[0].maxDay).toBe(16);
     });
 
     it('should read visit window fields from study_event_definition', async () => {
@@ -147,9 +147,9 @@ describe('Visit Windows & Task Management', () => {
       `, [eventDefId]);
 
       expect(result.rows.length).toBe(1);
-      expect(result.rows[0].schedule_day).toBe(14);
-      expect(result.rows[0].min_day).toBe(12);
-      expect(result.rows[0].max_day).toBe(16);
+      expect(result.rows[0].scheduleDay).toBe(14);
+      expect(result.rows[0].minDay).toBe(12);
+      expect(result.rows[0].maxDay).toBe(16);
     });
 
     it('should update visit window fields', async () => {
@@ -164,9 +164,9 @@ describe('Visit Windows & Task Management', () => {
         WHERE study_event_definition_id = $1
       `, [eventDefId]);
 
-      expect(result.rows[0].schedule_day).toBe(28);
-      expect(result.rows[0].min_day).toBe(25);
-      expect(result.rows[0].max_day).toBe(31);
+      expect(result.rows[0].scheduleDay).toBe(28);
+      expect(result.rows[0].minDay).toBe(25);
+      expect(result.rows[0].maxDay).toBe(31);
     });
 
     it('should allow null visit window fields (unscheduled visits)', async () => {
@@ -178,9 +178,9 @@ describe('Visit Windows & Task Management', () => {
         RETURNING schedule_day, min_day, max_day
       `, [studyId, userId, `SE_VW_UNSCHED_${Date.now()}`]);
 
-      expect(result.rows[0].schedule_day).toBeNull();
-      expect(result.rows[0].min_day).toBeNull();
-      expect(result.rows[0].max_day).toBeNull();
+      expect(result.rows[0].scheduleDay).toBeNull();
+      expect(result.rows[0].minDay).toBeNull();
+      expect(result.rows[0].maxDay).toBeNull();
     });
 
     it('should enforce buffer math: minDay < scheduleDay < maxDay', async () => {
@@ -198,9 +198,9 @@ describe('Visit Windows & Task Management', () => {
         RETURNING schedule_day, min_day, max_day
       `, [studyId, scheduleDay, minDay, maxDay, userId, `SE_VW_BUF_${Date.now()}`]);
 
-      expect(result.rows[0].min_day).toBeLessThanOrEqual(result.rows[0].schedule_day);
-      expect(result.rows[0].max_day).toBeGreaterThanOrEqual(result.rows[0].schedule_day);
-      expect(result.rows[0].max_day - result.rows[0].min_day).toBe(windowBefore + windowAfter);
+      expect(result.rows[0].minDay).toBeLessThanOrEqual(result.rows[0].scheduleDay);
+      expect(result.rows[0].maxDay).toBeGreaterThanOrEqual(result.rows[0].scheduleDay);
+      expect(result.rows[0].maxDay - result.rows[0].minDay).toBe(windowBefore + windowAfter);
     });
   });
 
@@ -223,7 +223,7 @@ describe('Visit Windows & Task Management', () => {
         VALUES ('1990-01-01', 'm', $1, NOW(), 1, $2)
         RETURNING subject_id
       `, [`VW-SUBJ-${Date.now()}`, userId]);
-      subjectId = subjectResult.rows[0].subject_id;
+      subjectId = subjectResult.rows[0].subjectId;
 
       const enrollmentDate = new Date();
       enrollmentDate.setDate(enrollmentDate.getDate() - 30);
@@ -234,7 +234,7 @@ describe('Visit Windows & Task Management', () => {
         ) VALUES ($1, $2, $3, $4, 1, $5, NOW())
         RETURNING study_subject_id
       `, [studyId, subjectId, 'VW-001', enrollmentDate, userId]);
-      studySubjectId = ssResult.rows[0].study_subject_id;
+      studySubjectId = ssResult.rows[0].studySubjectId;
 
       // Schedule a visit for this subject
       const seResult = await testDb.pool.query(`
@@ -245,7 +245,7 @@ describe('Visit Windows & Task Management', () => {
         ) VALUES ($1, $2, 1, $3, $4, 1, NOW(), 1, false, false)
         RETURNING study_event_id
       `, [eventDefId, studySubjectId, enrollmentDate, userId]);
-      studyEventId = seResult.rows[0].study_event_id;
+      studyEventId = seResult.rows[0].studyEventId;
     });
 
     it('should calculate due date as enrollment_date + max_day when visit window is set', async () => {
@@ -260,13 +260,13 @@ describe('Visit Windows & Task Management', () => {
       `, [studyEventId]);
 
       const row = result.rows[0];
-      expect(row.schedule_day).toBe(14);
-      expect(row.max_day).toBe(16);
-      expect(row.enrollment_date).toBeDefined();
+      expect(row.scheduleDay).toBe(14);
+      expect(row.maxDay).toBe(16);
+      expect(row.enrollmentDate).toBeDefined();
 
       // Due date = enrollment + max_day
-      const enrollDate = new Date(row.enrollment_date);
-      const dueDate = new Date(enrollDate.getTime() + row.max_day * 24 * 60 * 60 * 1000);
+      const enrollDate = new Date(row.enrollmentDate);
+      const dueDate = new Date(enrollDate.getTime() + row.maxDay * 24 * 60 * 60 * 1000);
 
       // Enrollment was 30 days ago, max_day is 16, so due date was 14 days ago (overdue)
       expect(dueDate.getTime()).toBeLessThan(Date.now());
@@ -284,7 +284,7 @@ describe('Visit Windows & Task Management', () => {
         WHERE se.study_event_id = $1
       `, [studyEventId]);
 
-      const dueDate = new Date(result.rows[0].due_date);
+      const dueDate = new Date(result.rows[0].dueDate);
       const now = new Date();
       expect(dueDate.getTime()).toBeLessThan(now.getTime());
     });
@@ -312,8 +312,8 @@ describe('Visit Windows & Task Management', () => {
       );
       expect(result.rows.length).toBe(1);
       expect(result.rows[0].status).toBe('completed');
-      expect(result.rows[0].completed_by).toBe(userId);
-      expect(result.rows[0].organization_id).toBe(orgId);
+      expect(result.rows[0].completedBy).toBe(userId);
+      expect(result.rows[0].organizationId).toBe(orgId);
     });
 
     it('should dismiss a task with reason', async () => {
@@ -339,7 +339,7 @@ describe('Visit Windows & Task Management', () => {
         SELECT task_id FROM acc_task_status 
         WHERE status IN ('dismissed', 'completed')
       `);
-      const dismissedIds = new Set(result.rows.map(r => r.task_id));
+      const dismissedIds = new Set(result.rows.map(r => r.taskId));
       expect(dismissedIds.has(testTaskId)).toBe(true);
     });
 
@@ -394,14 +394,14 @@ describe('Visit Windows & Task Management', () => {
         VALUES ($1, 'Test Form', 1, $2, NOW(), $3, $4)
         RETURNING crf_id
       `, [`VW Test Form ${Date.now()}`, userId, `F_VW_${Date.now()}`, studyId]);
-      crfId = crfResult.rows[0].crf_id;
+      crfId = crfResult.rows[0].crfId;
 
       const cvResult = await testDb.pool.query(`
         INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
         VALUES ($1, 'v1.0', 1, $2, NOW(), $3)
         RETURNING crf_version_id
       `, [crfId, userId, `FV_VW_${Date.now()}`]);
-      crfVersionId = cvResult.rows[0].crf_version_id;
+      crfVersionId = cvResult.rows[0].crfVersionId;
 
       // Assign CRF to event definition
       await testDb.pool.query(`
@@ -468,12 +468,12 @@ describe('Visit Windows & Task Management', () => {
       const result = await testDb.pool.query(`
         SELECT c.name FROM crf c
         WHERE c.crf_id = $1 AND c.status_id NOT IN (5, 7)
-      `, [deletedCrfResult.rows[0].crf_id]);
+      `, [deletedCrfResult.rows[0].crfId]);
 
       expect(result.rows.length).toBe(0);
 
       // Cleanup
-      await testDb.pool.query(`DELETE FROM crf WHERE crf_id = $1`, [deletedCrfResult.rows[0].crf_id]);
+      await testDb.pool.query(`DELETE FROM crf WHERE crf_id = $1`, [deletedCrfResult.rows[0].crfId]);
     });
 
     it('should exclude deleted event_crf instances from counts', async () => {
@@ -492,7 +492,7 @@ describe('Visit Windows & Task Management', () => {
       `, [studyEventId, crfVersionId]);
 
       // Should still be 3 (the deleted one excluded)
-      expect(parseInt(result.rows[0].active_count)).toBe(3);
+      expect(parseInt(result.rows[0].activeCount)).toBe(3);
     });
   });
 
@@ -513,9 +513,9 @@ describe('Visit Windows & Task Management', () => {
         RETURNING schedule_day, min_day, max_day
       `, [studyId, data.scheduleDay, data.minDay, data.maxDay, userId, `SE_CC_${Date.now()}`]);
 
-      expect(result.rows[0].schedule_day).toBe(7);
-      expect(result.rows[0].min_day).toBe(5);
-      expect(result.rows[0].max_day).toBe(9);
+      expect(result.rows[0].scheduleDay).toBe(7);
+      expect(result.rows[0].minDay).toBe(5);
+      expect(result.rows[0].maxDay).toBe(9);
     });
 
     it('should compute buffer correctly: minDay = scheduleDay - bufferBefore', () => {
@@ -556,7 +556,7 @@ describe('Visit Windows & Task Management', () => {
         WHERE organization_id = $1 AND status = 'active'
       `, [orgId]);
 
-      const orgUserIds = memberResult.rows.map(r => r.user_id);
+      const orgUserIds = memberResult.rows.map(r => r.userId);
       expect(orgUserIds).toContain(userId);
 
       // Forms owned by org members should be visible

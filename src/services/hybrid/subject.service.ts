@@ -26,8 +26,7 @@ import {
   StudySubjectWithDetails,
   SubjectProgress,
   ApiResponse, 
-  PaginatedResponse,
-  toStudySubject
+  PaginatedResponse
 } from '../../types/libreclinica-models';
 import * as workflowService from '../database/workflow.service';
 import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp, parseDateLocal } from '../../utils/date.util';
@@ -73,6 +72,7 @@ async function insertWithRetry(
       throw err;
     }
   }
+  throw new Error('insertWithRetry: exhausted retries without returning');
 }
 
 /**
@@ -214,7 +214,7 @@ const createSubjectDirect = async (
       logger.warn('Subject label already exists in study', { 
         label: subjectLabel, 
         studyId: request.studyId,
-        existingId: duplicateCheck.rows[0].study_subject_id
+        existingId: duplicateCheck.rows[0].studySubjectId
       });
       return {
         success: false,
@@ -302,7 +302,7 @@ const createSubjectDirect = async (
         }
       }
 
-      subjectId = subjectResult.rows[0].subject_id;
+      subjectId = subjectResult.rows[0].subjectId;
     }
 
     // 2. Create study_subject record (enrollment table)
@@ -340,7 +340,7 @@ const createSubjectDirect = async (
       ocOid
     ]);
 
-    const studySubjectId = studySubjectResult.rows[0].study_subject_id;
+    const studySubjectId = studySubjectResult.rows[0].studySubjectId;
 
     // 3. Create audit log entry
     // Use COALESCE to ensure we get a valid audit event type ID
@@ -403,7 +403,7 @@ const createSubjectDirect = async (
       `SELECT COALESCE(parent_study_id, study_id) AS parent_study_id FROM study WHERE study_id = $1`,
       [request.studyId]
     );
-    const parentStudyId = parentStudyResult.rows[0]?.parent_study_id || request.studyId;
+    const parentStudyId = parentStudyResult.rows[0]?.parentStudyId || request.studyId;
 
     // Get all scheduled/common event definitions for this study (using parent study).
     // Unscheduled event definitions are NOT auto-scheduled during enrollment —
@@ -424,7 +424,7 @@ const createSubjectDirect = async (
       });
       
       for (const eventDef of eventDefsResult.rows) {
-        const spName = `phase_${eventDef.study_event_definition_id}`;
+        const spName = `phase_${eventDef.studyEventDefinitionId}`;
         try {
           // Wrap each phase in a SAVEPOINT so a failure in one phase
           // (e.g. missing CRF version, FK violation) doesn't abort the
@@ -435,13 +435,13 @@ const createSubjectDirect = async (
           // Use schedule_day from the event definition to compute the due date.
           // date_start = the anchor (enrollment/screening date) for all visits,
           // scheduled_date (due date) = anchor + schedule_day offset.
-          if (eventDef.schedule_day == null) {
+          if (eventDef.scheduleDay == null) {
             throw new Error(
-              `Visit "${eventDef.name}" (definition ${eventDef.study_event_definition_id}) has no schedule_day configured. ` +
+              `Visit "${eventDef.name}" (definition ${eventDef.studyEventDefinitionId}) has no schedule_day configured. ` +
               `Set the number of days for this visit in the study event definitions before enrolling patients.`
             );
           }
-          const daysOffset = eventDef.schedule_day;
+          const daysOffset = eventDef.scheduleDay;
           const anchorDate = parseDateLocal(enrollmentDate) || new Date();
           const eventDueDate = new Date(anchorDate.getTime());
           eventDueDate.setDate(eventDueDate.getDate() + daysOffset);
@@ -451,13 +451,13 @@ const createSubjectDirect = async (
           const sesResult = await client.query(
             `SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1`
           );
-          const sesId = sesResult.rows[0]?.subject_event_status_id ?? 1;
+          const sesId = sesResult.rows[0]?.subjectEventStatusId ?? 1;
 
           // Try full schema first; fall back to minimal schema if extra columns
           // (scheduled_date, is_unscheduled) don't exist in the production DB.
           let eventResult;
           await repairSequence(client, 'study_event_study_event_id_seq', 'study_event', 'study_event_id');
-          await client.query(`SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
+          await client.query(`SAVEPOINT event_insert_${eventDef.studyEventDefinitionId}`);
           try {
             eventResult = await client.query(`
               INSERT INTO study_event (
@@ -471,7 +471,7 @@ const createSubjectDirect = async (
               )
               RETURNING study_event_id
             `, [
-              eventDef.study_event_definition_id,
+              eventDef.studyEventDefinitionId,
               studySubjectId,
               request.scheduleEvent?.location || '',
               formatIsoDate(anchorDate),
@@ -480,9 +480,9 @@ const createSubjectDirect = async (
               sesId,
               formatIsoDate(eventDueDate)
             ]);
-            await client.query(`RELEASE SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
+            await client.query(`RELEASE SAVEPOINT event_insert_${eventDef.studyEventDefinitionId}`);
           } catch (insertErr: any) {
-            await client.query(`ROLLBACK TO SAVEPOINT event_insert_${eventDef.study_event_definition_id}`);
+            await client.query(`ROLLBACK TO SAVEPOINT event_insert_${eventDef.studyEventDefinitionId}`);
             if (insertErr.message?.includes('scheduled_date') || insertErr.message?.includes('is_unscheduled')) {
               logger.info('Using minimal study_event schema (no scheduled_date/is_unscheduled)');
               eventResult = await client.query(`
@@ -495,7 +495,7 @@ const createSubjectDirect = async (
                 )
                 RETURNING study_event_id
               `, [
-                eventDef.study_event_definition_id,
+                eventDef.studyEventDefinitionId,
                 studySubjectId,
                 request.scheduleEvent?.location || '',
                 formatIsoDate(anchorDate),
@@ -508,8 +508,8 @@ const createSubjectDirect = async (
             }
           }
           
-          if (eventResult.rows[0]?.study_event_id) {
-            const studyEventId = eventResult.rows[0].study_event_id;
+          if (eventResult.rows[0]?.studyEventId) {
+            const studyEventId = eventResult.rows[0].studyEventId;
             scheduledEventIds.push(studyEventId);
             let phaseFormsCreated = 0;
             
@@ -523,26 +523,26 @@ const createSubjectDirect = async (
                 AND edc.status_id = 1
                 AND c.status_id NOT IN (5, 7)
               ORDER BY edc.ordinal
-            `, [eventDef.study_event_definition_id]);
+            `, [eventDef.studyEventDefinitionId]);
             
             if (crfAssignments.rows.length === 0) {
               logger.warn(`⚠️ Phase "${eventDef.name}" has no forms assigned`, {
-                studyEventDefinitionId: eventDef.study_event_definition_id
+                studyEventDefinitionId: eventDef.studyEventDefinitionId
               });
             }
             
             for (const crfAssign of crfAssignments.rows) {
-              let crfVersionId = crfAssign.default_version_id;
+              let crfVersionId = crfAssign.defaultVersionId;
               if (!crfVersionId) {
                 const versionResult = await client.query(`
                   SELECT crf_version_id FROM crf_version 
                   WHERE crf_id = $1 AND status_id NOT IN (5, 7) 
                   ORDER BY crf_version_id DESC LIMIT 1
-                `, [crfAssign.crf_id]);
+                `, [crfAssign.crfId]);
                 if (versionResult.rows.length > 0) {
-                  crfVersionId = versionResult.rows[0].crf_version_id;
+                  crfVersionId = versionResult.rows[0].crfVersionId;
                 } else {
-                  logger.warn(`Form "${crfAssign.crf_name}" (CRF ${crfAssign.crf_id}) has no active versions — skipping`);
+                  logger.warn(`Form "${crfAssign.crfName}" (CRF ${crfAssign.crfId}) has no active versions — skipping`);
                   continue;
                 }
               }
@@ -558,7 +558,7 @@ const createSubjectDirect = async (
               `, [studyEventId, crfVersionId, studySubjectId, userId],
               'event_crf_event_crf_id_seq', 'event_crf', 'event_crf_id');
               
-              const eventCrfId = ecResult.rows[0].event_crf_id;
+              const eventCrfId = ecResult.rows[0].eventCrfId;
               phaseFormsCreated++;
               totalFormsCreated++;
               
@@ -571,16 +571,16 @@ const createSubjectDirect = async (
                 await client.query(`SAVEPOINT ${snapSp}`);
                 await createPatientFormSnapshotForEnrollment(
                   client, studyEventId, eventCrfId,
-                  crfAssign.crf_id, crfVersionId, studySubjectId,
-                  crfAssign.crf_name, crfAssign.edc_ordinal ?? phaseFormsCreated, userId
+                  crfAssign.crfId, crfVersionId, studySubjectId,
+                  crfAssign.crfName, crfAssign.edcOrdinal ?? phaseFormsCreated, userId
                 );
                 await client.query(`RELEASE SAVEPOINT ${snapSp}`);
               } catch (snapErr: any) {
                 await client.query(`ROLLBACK TO SAVEPOINT ${snapSp}`);
                 logger.error('❌ CRITICAL: Form snapshot creation failed during enrollment — patient will not be able to open this form', {
                   error: snapErr.message,
-                  crfId: crfAssign.crf_id,
-                  crfName: crfAssign.crf_name,
+                  crfId: crfAssign.crfId,
+                  crfName: crfAssign.crfName,
                   studyEventId,
                   eventCrfId
                 });
@@ -588,8 +588,8 @@ const createSubjectDirect = async (
               
               logger.debug('📋 Created event_crf + snapshot for patient phase', {
                 studyEventId, eventCrfId,
-                crfId: crfAssign.crf_id,
-                crfName: crfAssign.crf_name,
+                crfId: crfAssign.crfId,
+                crfName: crfAssign.crfName,
                 studySubjectId
               });
             }
@@ -606,7 +606,7 @@ const createSubjectDirect = async (
           // Roll back only THIS phase — earlier phases and the subject record survive
           await client.query(`ROLLBACK TO SAVEPOINT ${spName}`);
           logger.warn('❌ Failed to schedule phase (rolled back phase only)', { 
-            eventDefId: eventDef.study_event_definition_id, 
+            eventDefId: eventDef.studyEventDefinitionId, 
             phaseName: eventDef.name,
             error: eventError.message 
           });
@@ -771,7 +771,7 @@ export const getSubjectList = async (
         // Get study OID first
         const studyOidQuery = `SELECT oc_oid FROM study WHERE study_id = $1`;
         const oidResult = await pool.query(studyOidQuery, [studyId]);
-        const studyOid = oidResult.rows[0]?.oc_oid || `S_${studyId}`;
+        const studyOid = oidResult.rows[0]?.ocOid || `S_${studyId}`;
 
         const soapResult = await subjectSoap.listSubjects(studyOid, userId, username);
         
@@ -1035,12 +1035,12 @@ export const getSubjectList = async (
 
     const mappedData = dataResult.rows.map((row: any) => ({
       ...row,
-      open_query_count: parseInt(row.open_query_count) || 0,
-      overdue_query_count: parseInt(row.overdue_query_count) || 0,
-      closed_query_count: parseInt(row.closed_query_count) || 0,
-      current_visit_event_id: row.current_visit_event_id ? parseInt(row.current_visit_event_id) : null,
-      current_visit_forms: Array.isArray(row.current_visit_forms) ? row.current_visit_forms : (row.current_visit_forms || []),
-      all_forms_with_open_queries: Array.isArray(row.all_forms_with_open_queries) ? row.all_forms_with_open_queries : (row.all_forms_with_open_queries || []),
+      openQueryCount: parseInt(row.openQueryCount) || 0,
+      overdueQueryCount: parseInt(row.overdueQueryCount) || 0,
+      closedQueryCount: parseInt(row.closedQueryCount) || 0,
+      currentVisitEventId: row.currentVisitEventId ? parseInt(row.currentVisitEventId) : null,
+      currentVisitForms: Array.isArray(row.currentVisitForms) ? row.currentVisitForms : (row.currentVisitForms || []),
+      allFormsWithOpenQueries: Array.isArray(row.allFormsWithOpenQueries) ? row.allFormsWithOpenQueries : (row.allFormsWithOpenQueries || []),
     }));
 
     return {
@@ -1137,8 +1137,8 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
     const eventsResult = await pool.query(eventsQuery, [subjectId]);
 
     // Calculate completion percentage
-    const totalForms = eventsResult.rows.reduce((sum, e) => sum + parseInt(e.total_forms), 0);
-    const completedForms = eventsResult.rows.reduce((sum, e) => sum + parseInt(e.completed_forms), 0);
+    const totalForms = eventsResult.rows.reduce((sum, e) => sum + parseInt(e.totalForms), 0);
+    const completedForms = eventsResult.rows.reduce((sum, e) => sum + parseInt(e.completedForms), 0);
     const completionPercentage = totalForms > 0 ? Math.round((completedForms / totalForms) * 100) : 0;
 
     // Get last activity from form data (most recent event_crf change)
@@ -1155,70 +1155,70 @@ export const getSubjectById = async (subjectId: number): Promise<StudySubjectWit
       FROM study_subject ss2
       WHERE ss2.study_subject_id = $1
     `;
-    let lastActivity = subject.date_updated || subject.date_created;
+    let lastActivity = subject.dateUpdated || subject.dateCreated;
     try {
       const activityResult = await pool.query(lastActivityQuery, [subjectId]);
-      if (activityResult.rows.length > 0 && activityResult.rows[0].last_activity_date) {
-        const actDate = new Date(activityResult.rows[0].last_activity_date);
+      if (activityResult.rows.length > 0 && activityResult.rows[0].lastActivityDate) {
+        const actDate = new Date(activityResult.rows[0].lastActivityDate);
         if (actDate.getFullYear() > 1970) {
-          lastActivity = activityResult.rows[0].last_activity_date;
+          lastActivity = activityResult.rows[0].lastActivityDate;
         }
       }
     } catch (err) {
       logger.warn('Failed to get last activity date', { error: (err as any).message });
     }
 
-    // Convert to LibreClinica StudySubject format
-    const studySubject = toStudySubject(subject);
+    // Row is already camelCase from the database layer
+    const studySubject = subject;
     
     const details: StudySubjectWithDetails = {
       ...studySubject,
       subject: {
-        subjectId: subject.subject_id,
-        uniqueIdentifier: subject.unique_identifier,
+        subjectId: subject.subjectId,
+        uniqueIdentifier: subject.uniqueIdentifier,
         gender: subject.gender || '',
-        dateOfBirth: subject.date_of_birth,
-        dobCollected: !!subject.date_of_birth,
-        statusId: subject.status_id,
-        ownerId: subject.owner_id,
-        dateCreated: subject.date_created,
-        dateUpdated: subject.date_updated,
-        updateId: subject.update_id
+        dateOfBirth: subject.dateOfBirth,
+        dobCollected: !!subject.dateOfBirth,
+        statusId: subject.statusId,
+        ownerId: subject.ownerId,
+        dateCreated: subject.dateCreated,
+        dateUpdated: subject.dateUpdated,
+        updateId: subject.updateId
       },
       study: {
-        studyId: subject.study_id,
-        name: subject.parent_study_name || subject.study_name || '',
+        studyId: subject.studyId,
+        name: subject.parentStudyName || subject.studyName || '',
         identifier: '',
         type: 'nongenetic',
         statusId: 1,
-        ownerId: subject.owner_id,
-        dateCreated: subject.date_created
+        ownerId: subject.ownerId,
+        dateCreated: subject.dateCreated
       },
       events: eventsResult.rows.map((e: any) => ({
-        studyEventId: e.study_event_id,
-        studyEventDefinitionId: e.study_event_definition_id,
+        studyEventId: e.studyEventId,
+        studyEventDefinitionId: e.studyEventDefinitionId,
         studySubjectId: subjectId,
         location: e.location,
-        sampleOrdinal: e.sample_ordinal || 1,
-        dateStarted: e.date_start,
-        dateEnded: e.date_end,
-        scheduledDate: e.scheduled_date,
-        isUnscheduled: e.is_unscheduled || false,
-        type: e.event_type || 'scheduled',
-        name: e.event_name,
-        subjectEventStatus: e.status_name || 'scheduled',
-        statusId: e.status_id,
-        ownerId: e.owner_id,
-        dateCreated: e.date_created,
-        dateUpdated: e.date_updated,
-        schedule_day: e.schedule_day,
-        min_day: e.min_day,
-        max_day: e.max_day
+        sampleOrdinal: e.sampleOrdinal || 1,
+        dateStarted: e.dateStart,
+        dateEnded: e.dateEnd,
+        scheduledDate: e.scheduledDate,
+        isUnscheduled: e.isUnscheduled || false,
+        type: e.eventType || 'scheduled',
+        name: e.eventName,
+        subjectEventStatus: e.statusName || 'scheduled',
+        statusId: e.statusId,
+        ownerId: e.ownerId,
+        dateCreated: e.dateCreated,
+        dateUpdated: e.dateUpdated,
+        scheduleDay: e.scheduleDay,
+        minDay: e.minDay,
+        maxDay: e.maxDay
       })),
       progress: {
         totalEvents: eventsResult.rows.length,
         completedEvents: eventsResult.rows.filter((e: any) => 
-          ['completed', 'stopped'].includes(e.status_name?.toLowerCase())
+          ['completed', 'stopped'].includes(e.statusName?.toLowerCase())
         ).length,
         totalForms: totalForms,
         completedForms: completedForms,
@@ -1270,11 +1270,11 @@ export const getSubjectProgress = async (subjectId: number): Promise<SubjectProg
 
     const stats = result.rows[0];
 
-    const totalEvents = parseInt(stats.total_events) || 0;
-    const completedEvents = parseInt(stats.completed_events) || 0;
-    const totalForms = parseInt(stats.total_forms) || 0;
-    const completedForms = parseInt(stats.completed_forms) || 0;
-    const openQueries = parseInt(stats.open_queries) || 0;
+    const totalEvents = parseInt(stats.totalEvents) || 0;
+    const completedEvents = parseInt(stats.completedEvents) || 0;
+    const totalForms = parseInt(stats.totalForms) || 0;
+    const completedForms = parseInt(stats.completedForms) || 0;
+    const openQueries = parseInt(stats.openQueries) || 0;
     
     // Calculate completion percentages
     const eventCompletionPercentage = totalEvents > 0
@@ -1375,9 +1375,9 @@ async function enrichSubjectsWithStats(soapSubjects: any, studyId: number): Prom
         ...stats,
         ...soapSubject,
         label: label,
-        study_subject_id: stats.study_subject_id,
-        total_events: parseInt(stats.total_events) || 0,
-        completed_forms: parseInt(stats.completed_forms) || 0
+        studySubjectId: stats.studySubjectId,
+        totalEvents: parseInt(stats.totalEvents) || 0,
+        completedForms: parseInt(stats.completedForms) || 0
       };
     });
   } catch (error: any) {
@@ -1406,10 +1406,10 @@ export const getQueryCountsForSubjects = async (studySubjectIds: number[]): Prom
 
   const counts: Record<number, { openQueryCount: number; overdueQueryCount: number; closedQueryCount: number }> = {};
   for (const row of result.rows) {
-    counts[row.study_subject_id] = {
-      openQueryCount: row.open_query_count,
-      overdueQueryCount: row.overdue_query_count,
-      closedQueryCount: row.closed_query_count
+    counts[row.studySubjectId] = {
+      openQueryCount: row.openQueryCount,
+      overdueQueryCount: row.overdueQueryCount,
+      closedQueryCount: row.closedQueryCount
     };
   }
   return counts;
@@ -1447,7 +1447,7 @@ export const getFormsWithQueriesForSubjects = async (studySubjectIds: number[]):
 
   const formsMap: Record<number, any[]> = {};
   for (const row of result.rows) {
-    formsMap[row.study_subject_id] = row.forms || [];
+    formsMap[row.studySubjectId] = row.forms || [];
   }
   return formsMap;
 };

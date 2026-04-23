@@ -64,7 +64,7 @@ describe('Unlock Requests Service', () => {
       INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id)
       VALUES ($1, $2, NOW(), 1, $3, NOW(), 1)
       RETURNING study_event_id
-    `, [eventDefResult.rows[0].study_event_definition_id, testSubjectId, rootUserId]);
+    `, [eventDefResult.rows[0].studyEventDefinitionId, testSubjectId, rootUserId]);
 
     const crfResult = await testDb.pool.query(`
       INSERT INTO crf (source_study_id, name, status_id, owner_id, date_created, oc_oid)
@@ -76,16 +76,16 @@ describe('Unlock Requests Service', () => {
       INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
       VALUES ($1, 'v1.0', 1, $2, NOW(), $3)
       RETURNING crf_version_id
-    `, [crfResult.rows[0].crf_id, rootUserId, `FV_UR_${Date.now()}`]);
+    `, [crfResult.rows[0].crfId, rootUserId, `FV_UR_${Date.now()}`]);
 
     // Create locked event_crf (status_id = 6)
     const ecResult = await testDb.pool.query(`
       INSERT INTO event_crf (study_event_id, crf_version_id, status_id, owner_id, date_created, study_subject_id)
       VALUES ($1, $2, 6, $3, NOW(), $4)
       RETURNING event_crf_id
-    `, [eventResult.rows[0].study_event_id, cvResult.rows[0].crf_version_id, rootUserId, testSubjectId]);
+    `, [eventResult.rows[0].studyEventId, cvResult.rows[0].crfVersionId, rootUserId, testSubjectId]);
 
-    testEventCrfId = ecResult.rows[0].event_crf_id;
+    testEventCrfId = ecResult.rows[0].eventCrfId;
   });
 
   afterEach(async () => {
@@ -213,7 +213,7 @@ describe('Unlock Requests Service', () => {
         'SELECT status_id FROM event_crf WHERE event_crf_id = $1',
         [testEventCrfId]
       );
-      expect(dbResult.rows[0].status_id).toBe(2); // restored to data complete
+      expect(dbResult.rows[0].statusId).toBe(2); // restored to data complete
     });
 
     it('should reject and leave form locked', async () => {
@@ -236,7 +236,7 @@ describe('Unlock Requests Service', () => {
         'SELECT status_id FROM event_crf WHERE event_crf_id = $1',
         [testEventCrfId]
       );
-      expect(dbResult.rows[0].status_id).toBe(6);
+      expect(dbResult.rows[0].statusId).toBe(6);
     });
 
     it('should reject reviewing an already-reviewed request', async () => {

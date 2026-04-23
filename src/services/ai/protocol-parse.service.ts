@@ -71,7 +71,7 @@ export async function submitProtocol(
       return { jobId: '', status: 'error', message: `Pipeline returned ${response.status}: ${err.slice(0, 300)}` };
     }
 
-    const data = await response.json();
+    const data: any = await response.json();
     return { jobId: data.job_id, status: data.status, message: data.message };
   } catch (error: any) {
     const msg = error.name === 'AbortError' ? 'Submit timed out' : error.message;
@@ -91,7 +91,7 @@ export async function getJobStatus(jobId: string): Promise<JobStatusResult> {
                progressMessage: `Status check returned ${response.status}`, createdAt: '',
                completedAt: null, error: `HTTP ${response.status}`, warnings: [], stats: {} };
     }
-    const data = await response.json();
+    const data: any = await response.json();
     return {
       jobId: data.job_id,
       status: data.status,
@@ -118,7 +118,7 @@ export async function getJobResult(jobId: string): Promise<JobResult | null> {
   try {
     const response = await fetch(`${PIPELINE_URL}/jobs/${jobId}/result`, { signal: AbortSignal.timeout(30000) });
     if (!response.ok) return null;
-    const data = await response.json();
+    const data: any = await response.json();
     return {
       bundle: data.bundle,
       visitDefinitions: data.visit_definitions,
@@ -150,7 +150,7 @@ export async function checkPipelineHealth(): Promise<boolean> {
   try {
     const response = await fetch(`${PIPELINE_URL}/health`, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) return false;
-    const data = await response.json();
+    const data: any = await response.json();
     return data?.status === 'ok';
   } catch {
     return false;

@@ -42,7 +42,7 @@ router.get('/:crfVersionId', asyncHandler(async (req: Request, res: Response) =>
   `, [crfVersionId]);
 
   // Determine max column count
-  const maxColumns = Math.max(1, ...result.rows.map(r => r.column_number || 1));
+  const maxColumns = Math.max(1, ...result.rows.map(r => r.columnNumber || 1));
 
   res.json({
     success: true,
@@ -51,18 +51,18 @@ router.get('/:crfVersionId', asyncHandler(async (req: Request, res: Response) =>
       columnCount: maxColumns,
       sections: groupBySections(result.rows),
       items: result.rows.map(r => ({
-        itemFormMetadataId: r.item_form_metadata_id,
-        itemId: r.item_id,
-        itemName: r.item_name,
-        columnNumber: r.column_number || 1,
-        sectionId: r.section_id,
-        ordinal: r.item_ordinal,
-        leftItemText: r.left_item_text,
-        rightItemText: r.right_item_text,
+        itemFormMetadataId: r.itemFormMetadataId,
+        itemId: r.itemId,
+        itemName: r.itemName,
+        columnNumber: r.columnNumber || 1,
+        sectionId: r.sectionId,
+        ordinal: r.itemOrdinal,
+        leftItemText: r.leftItemText,
+        rightItemText: r.rightItemText,
         required: r.required,
-        showItem: r.show_item !== false,
-        responseTypeId: r.response_type_id,
-        widthDecimal: r.width_decimal
+        showItem: r.showItem !== false,
+        responseTypeId: r.responseTypeId,
+        widthDecimal: r.widthDecimal
       }))
     }
   });
@@ -84,7 +84,7 @@ router.get('/:crfVersionId/render', asyncHandler(async (req: Request, res: Respo
     ORDER BY s.ordinal, ifm.ordinal
   `, [crfVersionId]);
 
-  const maxColumns = Math.max(1, ...result.rows.map(r => r.column_number || 1));
+  const maxColumns = Math.max(1, ...result.rows.map(r => r.columnNumber || 1));
 
   // Group items into rows based on column_number
   const rows: any[] = [];
@@ -92,17 +92,17 @@ router.get('/:crfVersionId/render', asyncHandler(async (req: Request, res: Respo
   let currentOrdinal = -1;
 
   for (const item of result.rows) {
-    const colNum = item.column_number || 1;
+    const colNum = item.columnNumber || 1;
     if (colNum === 1 && currentRow.length > 0) {
       rows.push({ items: currentRow });
       currentRow = [];
     }
     currentRow.push({
-      itemFormMetadataId: item.item_form_metadata_id,
-      itemId: item.item_id,
-      itemName: item.item_name,
+      itemFormMetadataId: item.itemFormMetadataId,
+      itemId: item.itemId,
+      itemName: item.itemName,
       columnNumber: colNum,
-      leftItemText: item.left_item_text,
+      leftItemText: item.leftItemText,
       required: item.required
     });
   }
@@ -162,16 +162,16 @@ router.put('/field/:itemFormMetadataId', requireRole('admin', 'data_manager'), a
 function groupBySections(rows: any[]): any[] {
   const sections: Record<number, any> = {};
   for (const row of rows) {
-    if (!sections[row.section_id]) {
-      sections[row.section_id] = {
-        sectionId: row.section_id,
-        label: row.section_label,
-        title: row.section_title,
-        ordinal: row.section_ordinal,
+    if (!sections[row.sectionId]) {
+      sections[row.sectionId] = {
+        sectionId: row.sectionId,
+        label: row.sectionLabel,
+        title: row.sectionTitle,
+        ordinal: row.sectionOrdinal,
         itemCount: 0
       };
     }
-    sections[row.section_id].itemCount++;
+    sections[row.sectionId].itemCount++;
   }
   return Object.values(sections).sort((a, b) => a.ordinal - b.ordinal);
 }

@@ -56,7 +56,7 @@ export const createNotification = async (input: CreateNotificationInput): Promis
       RETURNING notification_id
     `, [input.userId, input.type, input.title, input.message, input.entityType || null, input.entityId || null, input.studyId || null, input.linkUrl || null]);
 
-    return result.rows[0]?.notification_id || null;
+    return result.rows[0]?.notificationId || null;
   } catch (error: any) {
     logger.warn('Failed to create notification', { error: error.message, userId: input.userId });
     return null;
@@ -65,6 +65,7 @@ export const createNotification = async (input: CreateNotificationInput): Promis
 
 /**
  * Create notifications for multiple users (e.g., multi-user query routing).
+ * Uses a single bulk INSERT instead of per-user queries.
  */
 export const notifyUsers = async (
   userIds: number[],
@@ -73,18 +74,31 @@ export const notifyUsers = async (
   message: string,
   options?: { entityType?: string; entityId?: number; studyId?: number; linkUrl?: string }
 ): Promise<number> => {
-  let count = 0;
-  for (const uid of userIds) {
-    const id = await createNotification({
-      userId: uid,
-      type,
-      title,
-      message,
-      ...options
-    });
-    if (id) count++;
+  if (userIds.length === 0) return 0;
+
+  try {
+    const tableCheck = await pool.query(
+      `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_notifications') as exists`
+    );
+    if (!tableCheck.rows[0].exists) return 0;
+
+    const entityType = options?.entityType || null;
+    const entityId = options?.entityId || null;
+    const studyId = options?.studyId || null;
+    const linkUrl = options?.linkUrl || null;
+
+    const result = await pool.query(`
+      INSERT INTO acc_notifications (user_id, notification_type, title, message, entity_type, entity_id, study_id, link_url)
+      SELECT uid, $2, $3, $4, $5, $6, $7, $8
+      FROM unnest($1::int[]) AS uid
+      RETURNING notification_id
+    `, [userIds, type, title, message, entityType, entityId, studyId, linkUrl]);
+
+    return result.rowCount || 0;
+  } catch (error: any) {
+    logger.warn('Failed to bulk create notifications', { error: error.message, userIds });
+    return 0;
   }
-  return count;
 };
 
 /**

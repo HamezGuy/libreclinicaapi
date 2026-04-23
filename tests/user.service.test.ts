@@ -55,9 +55,9 @@ describe('User Service', () => {
       );
 
       expect(dbResult.rows.length).toBe(1);
-      expect(dbResult.rows[0].user_name).toBe(userData.username);
-      expect(dbResult.rows[0].first_name).toBe(userData.firstName);
-      expect(dbResult.rows[0].last_name).toBe(userData.lastName);
+      expect(dbResult.rows[0].userName).toBe(userData.username);
+      expect(dbResult.rows[0].firstName).toBe(userData.firstName);
+      expect(dbResult.rows[0].lastName).toBe(userData.lastName);
       expect(dbResult.rows[0].email).toBe(userData.email);
     });
 
@@ -127,7 +127,7 @@ describe('User Service', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].user_id).toBe(creatorId);
+      expect(auditResult.rows[0].userId).toBe(creatorId);
 
       // Cleanup
       if (result.userId) {
@@ -178,8 +178,8 @@ describe('User Service', () => {
         [updateTestUserId]
       );
 
-      expect(dbResult.rows[0].first_name).toBe(updates.firstName);
-      expect(dbResult.rows[0].last_name).toBe(updates.lastName);
+      expect(dbResult.rows[0].firstName).toBe(updates.firstName);
+      expect(dbResult.rows[0].lastName).toBe(updates.lastName);
       expect(dbResult.rows[0].email).toBe(updates.email);
       expect(dbResult.rows[0].phone).toBe(updates.phone);
     });
@@ -237,7 +237,7 @@ describe('User Service', () => {
       const user = await userService.getUserById(1);
 
       expect(user).toBeDefined();
-      expect(user?.user_name).toBeDefined();
+      expect(user?.userName).toBeDefined();
     });
 
     it('should return null for non-existent user', async () => {

@@ -119,7 +119,7 @@ export const verifyPasswordForSignature = async (
     const verification = await verifyAndUpgrade(
       password,
       user.passwd,
-      user.bcrypt_passwd || null
+      user.bcryptPasswd || null
     );
 
     if (!verification.valid) {
@@ -181,7 +181,71 @@ export const applyElectronicSignature = async (
       return { success: false, message: passwordVerification.message || 'Password verification failed' };
     }
 
-    // Step 2: Update the entity's electronic signature status
+    // Step 2: Lock and update the entity's electronic signature status
+    // Lock the target entity row first to prevent concurrent signature application
+    switch (request.entityType) {
+      case 'event_crf': {
+        const lockResult = await client.query(
+          'SELECT event_crf_id, electronic_signature_status FROM event_crf WHERE event_crf_id = $1 FOR UPDATE',
+          [request.entityId]
+        );
+        if (lockResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return { success: false, message: 'event_crf not found' };
+        }
+        if (lockResult.rows[0].electronicSignatureStatus === true) {
+          await client.query('ROLLBACK');
+          return { success: false, message: 'Entity is already signed' };
+        }
+        break;
+      }
+      case 'study_event': {
+        const lockResult = await client.query(
+          'SELECT study_event_id FROM study_event WHERE study_event_id = $1 FOR UPDATE',
+          [request.entityId]
+        );
+        if (lockResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return { success: false, message: 'study_event not found' };
+        }
+        const existingSig = await client.query(
+          `SELECT 1 FROM audit_log_event
+           WHERE audit_table = 'study_event' AND entity_id = $1
+             AND entity_name = 'Electronic Signature Applied'
+           LIMIT 1`,
+          [request.entityId]
+        );
+        if (existingSig.rows.length > 0) {
+          await client.query('ROLLBACK');
+          return { success: false, message: 'Entity is already signed' };
+        }
+        break;
+      }
+      case 'study_subject':
+      case 'consent': {
+        const lockResult = await client.query(
+          'SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1 FOR UPDATE',
+          [request.entityId]
+        );
+        if (lockResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return { success: false, message: 'study_subject not found' };
+        }
+        const existingSubjectSig = await client.query(
+          `SELECT 1 FROM audit_log_event
+           WHERE audit_table = $1 AND entity_id = $2
+             AND entity_name = 'Electronic Signature Applied'
+           LIMIT 1`,
+          [request.entityType, request.entityId]
+        );
+        if (existingSubjectSig.rows.length > 0) {
+          await client.query('ROLLBACK');
+          return { success: false, message: 'Entity is already signed' };
+        }
+        break;
+      }
+    }
+
     let updateQuery: string;
     let updateParams: any[];
 
@@ -324,7 +388,7 @@ export const applyElectronicSignature = async (
       request.entityType === 'study_event' ? request.entityId : null
     ]);
 
-    const signatureId = auditResult.rows[0].audit_id;
+    const signatureId = auditResult.rows[0].auditId;
 
     await client.query('COMMIT');
 
@@ -428,9 +492,9 @@ export const getSignatureStatus = async (
 
     // Parse signature data if available
     let signatureDetails = null;
-    if (row.signature_data) {
+    if (row.signatureData) {
       try {
-        signatureDetails = JSON.parse(row.signature_data);
+        signatureDetails = JSON.parse(row.signatureData);
       } catch (e) {
         signatureDetails = null;
       }
@@ -441,15 +505,15 @@ export const getSignatureStatus = async (
       data: {
         entityType,
         entityId,
-        isSigned: row.is_signed === true || !!signatureDetails,
-        signatureRequired: row.signature_required === true,
-        signedAt: row.signed_at || row.last_updated,
-        signedBy: row.signed_by || row.updated_by,
-        signedByFullName: row.signed_by_full_name,
+        isSigned: row.isSigned === true || !!signatureDetails,
+        signatureRequired: row.signatureRequired === true,
+        signedAt: row.signedAt || row.lastUpdated,
+        signedBy: row.signedBy || row.updatedBy,
+        signedByFullName: row.signedByFullName,
         signatureDetails,
-        crfName: row.crf_name,
-        eventName: row.event_name,
-        subjectLabel: row.subject_label
+        crfName: row.crfName,
+        eventName: row.eventName,
+        subjectLabel: row.subjectLabel
       }
     };
 
@@ -492,18 +556,18 @@ export const getSignatureHistory = async (
     const history: SignatureRecord[] = result.rows.map(row => {
       let signatureData: any = {};
       try {
-        signatureData = JSON.parse(row.signature_data || '{}');
+        signatureData = JSON.parse(row.signatureData || '{}');
       } catch (e) {
         signatureData = {};
       }
 
       return {
-        signatureId: row.signature_id,
-        entityType: row.entity_type,
-        entityId: row.entity_id,
-        signedBy: row.signed_by,
-        signedByFullName: row.signed_by_full_name,
-        signedAt: row.signed_at,
+        signatureId: row.signatureId,
+        entityType: row.entityType,
+        entityId: row.entityId,
+        signedBy: row.signedBy,
+        signedByFullName: row.signedByFullName,
+        signedAt: row.signedAt,
         meaning: signatureData.meaning || 'unknown',
         reasonForSigning: row.reason || signatureData.reason
       };
@@ -564,14 +628,14 @@ export const getPendingSignatures = async (
     return {
       success: true,
       data: result.rows.map(row => ({
-        entityId: row.event_crf_id,
-        entityType: row.entity_type,
-        crfName: row.crf_name,
-        eventName: row.event_name,
-        subjectLabel: row.subject_label,
-        studyName: row.study_name,
-        dateCreated: row.date_created,
-        status: row.status_id
+        entityId: row.eventCrfId,
+        entityType: row.entityType,
+        crfName: row.crfName,
+        eventName: row.eventName,
+        subjectLabel: row.subjectLabel,
+        studyName: row.studyName,
+        dateCreated: row.dateCreated,
+        status: row.statusId
       }))
     };
 
@@ -648,7 +712,7 @@ export const certifyUser = async (
     return {
       success: true,
       data: {
-        certificationId: result.rows[0].audit_id,
+        certificationId: result.rows[0].auditId,
         certifiedAt: new Date().toISOString()
       },
       message: 'E-signature certification recorded successfully'
@@ -693,11 +757,11 @@ export const getStudySignatureRequirements = async (
     return {
       success: true,
       data: result.rows.map(row => ({
-        crfId: row.crf_id,
-        crfName: row.crf_name,
-        requiresSignature: row.requires_signature === true,
-        requiresSDV: row.requires_sdv === true,
-        requiresDDE: row.requires_dde === true
+        crfId: row.crfId,
+        crfName: row.crfName,
+        requiresSignature: row.requiresSignature === true,
+        requiresSDV: row.requiresSdv === true,
+        requiresDDE: row.requiresDde === true
       }))
     };
 
@@ -868,7 +932,7 @@ export const getCertificationStatus = async (
       success: true,
       data: {
         isCertified: true,
-        certifiedAt: result.rows[0].certified_at
+        certifiedAt: result.rows[0].certifiedAt
       }
     };
 

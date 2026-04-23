@@ -25,32 +25,126 @@
 // Re-export all LibreClinica core models (CANONICAL — single source of truth)
 export * from './libreclinica-models';
 
+// Re-export shared cross-project DTOs from the shared-types package
+export {
+  ElectronicSignature,
+  SignatureMeaning,
+  SubjectCreateRequest,
+  FormDataRequest,
+  // Entity types
+  type AuditableEntity as SharedAuditableEntity,
+  type ApiResponse as SharedApiResponse,
+  type PaginatedResponse as SharedPaginatedResponse,
+  type DataEntryStage as SharedDataEntryStage,
+  type CompletionStatus as SharedCompletionStatus,
+  type SubjectEventStatus as SharedSubjectEventStatus,
+  DATA_ENTRY_STAGE_MAP as SHARED_DATA_ENTRY_STAGE_MAP,
+  COMPLETION_STATUS_MAP as SHARED_COMPLETION_STATUS_MAP,
+  SUBJECT_EVENT_STATUS_MAP as SHARED_SUBJECT_EVENT_STATUS_MAP,
+  // Form/CRF types
+  type CRF as SharedCRF,
+  type CRFVersion as SharedCRFVersion,
+  type EventCRF as SharedEventCRF,
+  type PatientEventForm as SharedPatientEventForm,
+  type ItemData as SharedItemData,
+  type Item as SharedItem,
+  type EventDefinitionCRF as SharedEventDefinitionCRF,
+  type StudyEventDefinition as SharedStudyEventDefinition,
+  type StudyEvent as SharedStudyEvent,
+  type StudyPhase as SharedStudyPhase,
+  type StudyGroupClass as SharedStudyGroupClass,
+  type StudyGroup as SharedStudyGroup,
+  // Query types
+  type DiscrepancyNote as SharedDiscrepancyNote,
+  type DiscrepancyNoteType as SharedDiscrepancyNoteType,
+  type QueryGenerationType as SharedQueryGenerationType,
+  type ResolutionStatus as SharedResolutionStatus,
+  DISCREPANCY_NOTE_TYPE_MAP as SHARED_DISCREPANCY_NOTE_TYPE_MAP,
+  RESOLUTION_STATUS_MAP as SHARED_RESOLUTION_STATUS_MAP,
+  type CreateQueryRequest,
+  type RespondToQueryRequest,
+  type QueryWithDetails,
+  // Event DTOs
+  type CreateEventRequest,
+  type UpdateEventRequest,
+  type ScheduleEventRequest,
+  type CreateUnscheduledVisitRequest,
+  type AssignCrfToEventRequest,
+  type UpdateCrfAssignmentRequest,
+  type BulkAssignCrfRequest,
+  type AssignFormToPatientVisitRequest,
+  type SavePatientFormDataRequest,
+  // Study DTOs
+  type CreateStudyRequest,
+  type UpdateStudyRequest,
+  type EventDefinitionInput,
+  type CRFAssignmentInput,
+  type GroupClassInput,
+  type GroupInput,
+  type SiteInput,
+  type CreateStudyResponse,
+  // E-Signature types
+  type SignatureRequest,
+  type SignatureVerificationResult,
+  // Dashboard & reporting types
+  type EnrollmentStats,
+  type MonthlyEnrollment,
+  type CompletionStats,
+  type FormCompletionMetric,
+  type FormCompletion,
+  type QueryStats,
+  type QueryTypeCount,
+  type QueryStatusCount,
+  type UserActivityStats,
+  type UserActivityDetail,
+  type UserActivity,
+  type DailyActivity,
+  type SitePerformance,
+  type DataQualityMetrics,
+  type SubjectStatusDistribution,
+  type ActivityFeedItem,
+  type StudyHealthScore,
+  type DashboardSummary,
+  type DashboardStats,
+  type EnrollmentTrendPoint,
+  type CompletionTrendPoint,
+  type FormCompletionRate,
+  type ActionItemsSummary,
+  type SubjectProgressRow,
+  type SubjectProgressResponse,
+  type OverdueForm,
+  type DataLockProgress,
+  type SubjectLockReadiness,
+  type CrfLifecycleStage,
+  type CrfLifecycleResponse,
+} from '@accura-trial/shared-types';
+
 /**
  * User account row from user_account table.
  * Used by auth and user services for database-row mapping.
  */
 export interface User {
-  user_id: number;
-  user_name: string;
+  userId: number;
+  userName: string;
   passwd: string;
-  first_name: string;
-  last_name: string;
+  firstName: string;
+  lastName: string;
   email: string;
-  institutional_affiliation?: string;
+  institutionalAffiliation?: string;
   phone?: string;
   enabled?: boolean;
-  account_non_locked?: boolean;
-  user_type_id?: number;
-  user_type?: string;
-  owner_id?: number;
-  status_id?: number;
-  update_id?: number;
-  date_created?: Date | string;
-  date_lastvisit?: Date | string;
-  passwd_timestamp?: Date | string;
-  lock_counter?: number;
-  run_webservices?: boolean;
-  bcrypt_passwd?: string;
+  accountNonLocked?: boolean;
+  userTypeId?: number;
+  userType?: string;
+  ownerId?: number;
+  statusId?: number;
+  updateId?: number;
+  dateCreated?: Date | string;
+  dateLastvisit?: Date | string;
+  passwdTimestamp?: Date | string;
+  lockCounter?: number;
+  runWebservices?: boolean;
+  bcryptPasswd?: string;
 }
 
 // Re-export Wound Scanner types
@@ -94,32 +188,12 @@ export interface GoogleAuthRequest {
  * ============================================================================
  * SUBJECT (PATIENT) TYPES
  * ============================================================================
- */
-
-/**
- * @deprecated Use `SubjectCreateRequest` from `@accura-trial/shared-types`
- * (re-exported there from shared-types/subject.types.ts). This local copy
- * is preserved only for the legacy SOAP path in
- * `services/soap/subjectSoap.service.ts`.
  *
- * WIRE-FORMAT ALIGNMENT: The Joi validator in
- * `middleware/validation.middleware.ts` requires `label`, not the
- * legacy `studySubjectId` field. This interface now declares both:
- *   - `label` is the canonical field (matches shared-types + Joi)
- *   - `studySubjectId` is a deprecated alias that the SOAP service
- *     consumes; new callers MUST use `label`.
+ * SubjectCreateRequest is now re-exported from @accura-trial/shared-types
+ * at the top of this file. The SOAP service
+ * (services/soap/subjectSoap.service.ts) uses `label` — the canonical field
+ * that matches both shared-types and the Joi validator.
  */
-export interface SubjectCreateRequest {
-  studyId: number;
-  /** Canonical wire field; required for new callers. */
-  label?: string;
-  /** @deprecated alias of `label`; legacy SOAP path only. */
-  studySubjectId?: string;
-  secondaryId?: string;
-  enrollmentDate?: string;
-  gender?: string;
-  dateOfBirth?: string;
-}
 
 export interface SubjectListQuery {
   studyId: number;
@@ -137,18 +211,11 @@ export interface SubjectListQuery {
 /**
  * ============================================================================
  * FORM DATA TYPES
+ *
+ * FormDataRequest and ElectronicSignature are now re-exported from
+ * @accura-trial/shared-types at the top of this file.
  * ============================================================================
  */
-
-export interface FormDataRequest {
-  studyId: number;
-  subjectId: number;
-  studyEventDefinitionId: number;
-  crfId: number;
-  formData: Record<string, any>;
-  hiddenFields?: string[];
-  electronicSignature?: ElectronicSignature;
-}
 
 /**
  * ============================================================================
@@ -179,10 +246,6 @@ export interface FieldValidationConstraint {
   value?: any;
   message?: string;
 }
-
-/** @deprecated Use FieldValidationConstraint instead. Do NOT confuse with the
- *  full ValidationRule interface in services/database/validation-rules.service.ts. */
-export type FieldValidationRule = FieldValidationConstraint;
 
 /** Cross-field validation (like Medidata Rave edit checks) */
 export interface EditCheck {
@@ -369,12 +432,8 @@ export interface QuestionTableSettings {
 }
 
 // ---------------------------------------------------------------------------
-
-export interface ElectronicSignature {
-  username: string;
-  password: string;
-  meaning: 'Data Entry' | 'Review' | 'Approval';
-}
+// ElectronicSignature and FormDataResponse are re-exported from shared-types.
+// ---------------------------------------------------------------------------
 
 export interface FormDataResponse {
   success: boolean;
@@ -459,86 +518,9 @@ export interface AuditExportRequest {
 /**
  * ============================================================================
  * DASHBOARD & REPORTING TYPES
+ * Re-exported from @accura-trial/shared-types (canonical source)
  * ============================================================================
  */
-
-export interface EnrollmentStats {
-  totalSubjects: number;
-  activeSubjects: number;
-  completedSubjects: number;
-  withdrawnSubjects: number;
-  screenedSubjects: number;
-  enrollmentByMonth: MonthlyEnrollment[];
-  enrollmentRate: number;
-  targetEnrollment?: number;
-}
-
-export interface MonthlyEnrollment {
-  month: string;
-  year: number;
-  count: number;
-  cumulative: number;
-}
-
-export interface CompletionStats {
-  totalCRFs: number;
-  completedCRFs: number;
-  incompleteCRFs: number;
-  completionPercentage: number;
-  completionByForm: FormCompletion[];
-  averageCompletionTime: number;
-}
-
-export interface FormCompletion {
-  crfId: number;
-  crfName: string;
-  totalExpected: number;
-  completed: number;
-  completionPercentage: number;
-}
-
-export interface QueryStats {
-  totalQueries: number;
-  openQueries: number;
-  closedQueries: number;
-  queriesByType: QueryTypeCount[];
-  queriesByStatus: QueryStatusCount[];
-  averageResolutionTime: number;
-  queryRate: number;
-}
-
-export interface QueryTypeCount {
-  type: string;
-  count: number;
-}
-
-export interface QueryStatusCount {
-  status: string;
-  count: number;
-}
-
-export interface UserActivityStats {
-  activeUsers: number;
-  totalLogins: number;
-  averageSessionDuration: number;
-  activityByUser: UserActivity[];
-  activityByDay: DailyActivity[];
-}
-
-export interface UserActivity {
-  userId: number;
-  username: string;
-  loginCount: number;
-  lastLogin: Date;
-  dataEntryCount: number;
-}
-
-export interface DailyActivity {
-  date: string;
-  logins: number;
-  dataEntries: number;
-  queries: number;
-}
 
 /**
  * ============================================================================

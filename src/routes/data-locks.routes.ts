@@ -15,6 +15,7 @@
 import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { requireEntityStudyAccess } from '../middleware/study-scope.middleware';
 import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
 import { validate, dataLockSchemas, commonSchemas } from '../middleware/validation.middleware';
 import * as dataLocksController from '../controllers/data-locks.controller';
@@ -90,14 +91,26 @@ router.get('/eligibility/event/:studyEventId',
 router.post('/', 
   requireRole('monitor', 'data_manager', 'admin'), 
   validate({ body: dataLockSchemas.lock }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
   requireSignatureFor(SignatureMeanings.FORM_LOCK),
   dataLocksController.lock
 );
 
 // DELETE /api/data-locks/:eventCrfId - Unlock a single form
+// Deprecated: prefer POST /:eventCrfId/unlock — DELETE with body is unreliable through proxies/CDNs
 router.delete('/:eventCrfId', 
   requireRole('admin'), 
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unlockBody }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
+  requireSignatureFor('I authorize unlocking this form for editing'),
+  dataLocksController.unlock
+);
+
+// POST /api/data-locks/:eventCrfId/unlock - Unlock a single form (proxy-safe alternative)
+router.post('/:eventCrfId/unlock',
+  requireRole('admin'),
+  validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unlockBody }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
   requireSignatureFor('I authorize unlocking this form for editing'),
   dataLocksController.unlock
 );
@@ -110,14 +123,26 @@ router.delete('/:eventCrfId',
 router.post('/subject/:studySubjectId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.lockSubject }),
+  requireEntityStudyAccess('studySubject', 'studySubjectId'),
   requireSignatureFor('I confirm that all data has been reviewed and is ready for locking'),
   dataLocksController.lockSubject
 );
 
 // DELETE /api/data-locks/subject/:studySubjectId - Unlock all subject data
+// Deprecated: prefer POST /subject/:studySubjectId/unlock — DELETE with body is unreliable through proxies/CDNs
 router.delete('/subject/:studySubjectId',
   requireRole('admin'),
   validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.unlockBody }),
+  requireEntityStudyAccess('studySubject', 'studySubjectId'),
+  requireSignatureFor('I authorize unlocking this subject data for editing'),
+  dataLocksController.unlockSubject
+);
+
+// POST /api/data-locks/subject/:studySubjectId/unlock - Unlock all subject data (proxy-safe alternative)
+router.post('/subject/:studySubjectId/unlock',
+  requireRole('admin'),
+  validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.unlockBody }),
+  requireEntityStudyAccess('studySubject', 'studySubjectId'),
   requireSignatureFor('I authorize unlocking this subject data for editing'),
   dataLocksController.unlockSubject
 );
@@ -130,14 +155,26 @@ router.delete('/subject/:studySubjectId',
 router.post('/event/:studyEventId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.lockEvent }),
+  requireEntityStudyAccess('studyEvent', 'studyEventId'),
   requireSignatureFor('I confirm that all data for this visit has been reviewed and is ready for locking'),
   dataLocksController.lockEvent
 );
 
 // DELETE /api/data-locks/event/:studyEventId - Unlock all event data
+// Deprecated: prefer POST /event/:studyEventId/unlock — DELETE with body is unreliable through proxies/CDNs
 router.delete('/event/:studyEventId',
   requireRole('admin'),
   validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.unlockBody }),
+  requireEntityStudyAccess('studyEvent', 'studyEventId'),
+  requireSignatureFor('I authorize unlocking this visit data for editing'),
+  dataLocksController.unlockEvent
+);
+
+// POST /api/data-locks/event/:studyEventId/unlock - Unlock all event data (proxy-safe alternative)
+router.post('/event/:studyEventId/unlock',
+  requireRole('admin'),
+  validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.unlockBody }),
+  requireEntityStudyAccess('studyEvent', 'studyEventId'),
   requireSignatureFor('I authorize unlocking this visit data for editing'),
   dataLocksController.unlockEvent
 );
@@ -160,7 +197,15 @@ router.post('/freeze/subject/:id',
 );
 
 // DELETE /api/data-locks/freeze/subject/:id - Unfreeze all subject data
+// Deprecated: prefer POST /freeze/subject/:id/unfreeze — DELETE with body is unreliable through proxies/CDNs
 router.delete('/freeze/subject/:id',
+  requireRole('data_manager', 'admin'),
+  requireSignatureFor('I authorize unfreezing this subject data for editing'),
+  dataLocksController.unfreezeSubject
+);
+
+// POST /api/data-locks/freeze/subject/:id/unfreeze - Unfreeze all subject data (proxy-safe alternative)
+router.post('/freeze/subject/:id/unfreeze',
   requireRole('data_manager', 'admin'),
   requireSignatureFor('I authorize unfreezing this subject data for editing'),
   dataLocksController.unfreezeSubject
@@ -175,7 +220,16 @@ router.post('/freeze/:eventCrfId',
 );
 
 // DELETE /api/data-locks/freeze/:eventCrfId - Unfreeze a single form
+// Deprecated: prefer POST /freeze/:eventCrfId/unfreeze — DELETE with body is unreliable through proxies/CDNs
 router.delete('/freeze/:eventCrfId',
+  requireRole('data_manager', 'admin'),
+  validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
+  requireSignatureFor('I authorize unfreezing this form for editing'),
+  dataLocksController.unfreeze
+);
+
+// POST /api/data-locks/freeze/:eventCrfId/unfreeze - Unfreeze a single form (proxy-safe alternative)
+router.post('/freeze/:eventCrfId/unfreeze',
   requireRole('data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
   requireSignatureFor('I authorize unfreezing this form for editing'),
@@ -285,7 +339,16 @@ router.post('/study/:studyId',
 );
 
 // DELETE /api/data-locks/study/:studyId - Unlock the study dataset (admin only)
+// Deprecated: prefer POST /study/:studyId/unlock — DELETE with body is unreliable through proxies/CDNs
 router.delete('/study/:studyId',
+  requireRole('admin'),
+  validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.unlockBody }),
+  requireSignatureFor('I authorize unlocking this study dataset'),
+  dataLocksController.unlockStudy
+);
+
+// POST /api/data-locks/study/:studyId/unlock - Unlock the study dataset (proxy-safe alternative)
+router.post('/study/:studyId/unlock',
   requireRole('admin'),
   validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.unlockBody }),
   requireSignatureFor('I authorize unlocking this study dataset'),

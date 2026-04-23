@@ -108,7 +108,7 @@ describe('Patient/Subject CRUD API', () => {
         
         const result = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: label,
+          label: label,
           secondaryId: 'MRN-TEST-001',
           dateOfBirth: '1990-05-15',
           gender: 'm',
@@ -129,7 +129,7 @@ describe('Patient/Subject CRUD API', () => {
 
         // Track for cleanup
         if (dbResult.rows[0]) {
-          testSubjectIds.push(dbResult.rows[0].study_subject_id);
+          testSubjectIds.push(dbResult.rows[0].studySubjectId);
         }
       });
 
@@ -138,7 +138,7 @@ describe('Patient/Subject CRUD API', () => {
         
         const result = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: label,
+          label: label,
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
         
@@ -151,7 +151,7 @@ describe('Patient/Subject CRUD API', () => {
           [label]
         );
         if (dbResult.rows[0]) {
-          testSubjectIds.push(dbResult.rows[0].study_subject_id);
+          testSubjectIds.push(dbResult.rows[0].studySubjectId);
         }
       });
 
@@ -160,7 +160,7 @@ describe('Patient/Subject CRUD API', () => {
         
         const result = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: label,
+          label: label,
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
         
@@ -173,8 +173,8 @@ describe('Patient/Subject CRUD API', () => {
         );
         
         if (dbResult.rows.length > 0) {
-          expect(dbResult.rows[0].oc_oid).toMatch(/^SS_/);
-          testSubjectIds.push(dbResult.rows[0].study_subject_id || 0);
+          expect(dbResult.rows[0].ocOid).toMatch(/^SS_/);
+          testSubjectIds.push(dbResult.rows[0].studySubjectId || 0);
         }
       });
 
@@ -183,7 +183,7 @@ describe('Patient/Subject CRUD API', () => {
         const maleLabel = generateTestSubjectLabel();
         const maleResult = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: maleLabel,
+          label: maleLabel,
           gender: 'Male',
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
@@ -194,7 +194,7 @@ describe('Patient/Subject CRUD API', () => {
         const femaleLabel = generateTestSubjectLabel();
         const femaleResult = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: femaleLabel,
+          label: femaleLabel,
           gender: 'Female',
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
@@ -229,7 +229,7 @@ describe('Patient/Subject CRUD API', () => {
         // First creation should succeed
         const result1 = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: label,
+          label: label,
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
         
@@ -241,13 +241,13 @@ describe('Patient/Subject CRUD API', () => {
           [label]
         );
         if (dbResult.rows[0]) {
-          testSubjectIds.push(dbResult.rows[0].study_subject_id);
+          testSubjectIds.push(dbResult.rows[0].studySubjectId);
         }
         
         // Second creation with same label should fail or return existing
         const result2 = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: label,
+          label: label,
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
         
@@ -263,7 +263,7 @@ describe('Patient/Subject CRUD API', () => {
       it('should require studyId', async () => {
         const result = await subjectService.createSubject({
           studyId: 0, // Invalid study ID
-          studySubjectId: generateTestSubjectLabel(),
+          label: generateTestSubjectLabel(),
           enrollmentDate: new Date().toISOString().split('T')[0]
         }, rootUserId, 'root');
         
@@ -274,7 +274,7 @@ describe('Patient/Subject CRUD API', () => {
       it('should require enrollment date', async () => {
         const result = await subjectService.createSubject({
           studyId: testStudyId,
-          studySubjectId: generateTestSubjectLabel(),
+          label: generateTestSubjectLabel(),
           enrollmentDate: '' // Empty enrollment date
         }, rootUserId, 'root');
         
@@ -449,7 +449,7 @@ describe('Patient/Subject CRUD API', () => {
         [testSubjectId]
       );
       
-      expect(result.rows[0].secondary_label).toBe(newSecondaryLabel);
+      expect(result.rows[0].secondaryLabel).toBe(newSecondaryLabel);
     });
   });
 
@@ -478,7 +478,7 @@ describe('Patient/Subject CRUD API', () => {
         [testSubjectId]
       );
       
-      expect(result.rows[0].status_id).toBe(newStatusId);
+      expect(result.rows[0].statusId).toBe(newStatusId);
     });
   });
 
@@ -510,7 +510,7 @@ describe('Patient/Subject CRUD API', () => {
         [testSubjectId]
       );
       
-      expect(result.rows[0].status_id).toBe(5); // removed status
+      expect(result.rows[0].statusId).toBe(5); // removed status
     });
 
     it('should preserve record for audit trail (Part 11 compliance)', async () => {
@@ -527,7 +527,7 @@ describe('Patient/Subject CRUD API', () => {
       );
       
       expect(result.rows.length).toBe(1); // Record should still exist
-      expect(result.rows[0].status_id).toBe(5); // But marked as removed
+      expect(result.rows[0].statusId).toBe(5); // But marked as removed
     });
   });
 
@@ -543,7 +543,7 @@ describe('Patient/Subject CRUD API', () => {
       );
       
       expect(result.rows.length).toBeGreaterThanOrEqual(2);
-      expect(result.rows.find((s: any) => s.status_id === 1)).toBeDefined();
+      expect(result.rows.find((s: any) => s.statusId === 1)).toBeDefined();
     });
 
     it('should properly associate subjects with studies', async () => {
@@ -551,7 +551,7 @@ describe('Patient/Subject CRUD API', () => {
       
       await subjectService.createSubject({
         studyId: testStudyId,
-        studySubjectId: label,
+        label: label,
         enrollmentDate: new Date().toISOString().split('T')[0]
       }, rootUserId, 'root');
       
@@ -562,7 +562,7 @@ describe('Patient/Subject CRUD API', () => {
       );
       
       if (result.rows.length > 0) {
-        expect(result.rows[0].study_id).toBe(testStudyId);
+        expect(result.rows[0].studyId).toBe(testStudyId);
         
         // Cleanup
         const cleanupResult = await testDb.pool.query(
@@ -570,7 +570,7 @@ describe('Patient/Subject CRUD API', () => {
           [label]
         );
         if (cleanupResult.rows[0]) {
-          testSubjectIds.push(cleanupResult.rows[0].study_subject_id);
+          testSubjectIds.push(cleanupResult.rows[0].studySubjectId);
         }
       }
     });
@@ -587,7 +587,7 @@ describe('Patient/Subject CRUD API', () => {
       // rather than throwing uncaught exceptions
       const result = await subjectService.createSubject({
         studyId: -1, // Invalid study ID
-        studySubjectId: generateTestSubjectLabel(),
+        label: generateTestSubjectLabel(),
         enrollmentDate: new Date().toISOString().split('T')[0]
       }, rootUserId, 'root');
       

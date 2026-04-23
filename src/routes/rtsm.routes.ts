@@ -90,15 +90,15 @@ router.get('/dashboard', async (req: Request, res: Response, next: NextFunction)
       success: true,
       data: {
         kits: {
-          total: parseInt(kitStats.total_kits || 0),
-          available: parseInt(kitStats.available_kits || 0),
-          dispensed: parseInt(kitStats.dispensed_kits || 0),
-          reserved: parseInt(kitStats.reserved_kits || 0),
-          expiring: parseInt(kitStats.expiring_kits || 0)
+          total: parseInt(kitStats.totalKits || 0),
+          available: parseInt(kitStats.availableKits || 0),
+          dispensed: parseInt(kitStats.dispensedKits || 0),
+          reserved: parseInt(kitStats.reservedKits || 0),
+          expiring: parseInt(kitStats.expiringKits || 0)
         },
         shipments: {
-          pending: parseInt(shipmentStats.pending_shipments || 0),
-          inTransit: parseInt(shipmentStats.in_transit_shipments || 0)
+          pending: parseInt(shipmentStats.pendingShipments || 0),
+          inTransit: parseInt(shipmentStats.inTransitShipments || 0)
         }
       }
     });
@@ -135,15 +135,15 @@ router.get('/kit-types', async (req: Request, res: Response, next: NextFunction)
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        kitTypeId: row.kit_type_id,
-        studyId: row.study_id,
+        kitTypeId: row.kitTypeId,
+        studyId: row.studyId,
         name: row.name,
         description: row.description,
-        treatmentArm: row.treatment_arm,
-        storageConditions: row.storage_conditions,
-        minTemp: row.min_temp,
-        maxTemp: row.max_temp,
-        unitsPerKit: row.units_per_kit
+        treatmentArm: row.treatmentArm,
+        storageConditions: row.storageConditions,
+        minTemp: row.minTemp,
+        maxTemp: row.maxTemp,
+        unitsPerKit: row.unitsPerKit
       }))
     });
   } catch (error) {
@@ -211,16 +211,16 @@ router.get('/kits', async (req: Request, res: Response, next: NextFunction) => {
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        kitId: row.kit_id,
-        kitNumber: row.kit_number,
-        kitType: row.kit_type_name,
-        kitTypeId: row.kit_type_id,
+        kitId: row.kitId,
+        kitNumber: row.kitNumber,
+        kitType: row.kitTypeName,
+        kitTypeId: row.kitTypeId,
         status: row.status,
-        siteId: row.current_site_id,
-        siteName: row.site_name,
-        lotNumber: row.lot_number,
-        expirationDate: row.expiration_date,
-        manufactureDate: row.manufacture_date
+        siteId: row.currentSiteId,
+        siteName: row.siteName,
+        lotNumber: row.lotNumber,
+        expirationDate: row.expirationDate,
+        manufactureDate: row.manufactureDate
       }))
     });
   } catch (error) {
@@ -269,7 +269,7 @@ router.post('/kits', async (req: Part11Request, res: Response, next: NextFunctio
           userName,
           Part11EventTypes.KIT_REGISTERED,
           'acc_kit',
-          insertedKit.kit_id,
+          insertedKit.kitId,
           kit.kitNumber,
           null,
           {
@@ -383,16 +383,16 @@ router.get('/shipments', async (req: Request, res: Response, next: NextFunction)
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        shipmentId: row.shipment_id,
-        shipmentNumber: row.shipment_number,
-        destinationId: row.destination_id,
-        destinationName: row.destination_name || row.site_name,
+        shipmentId: row.shipmentId,
+        shipmentNumber: row.shipmentNumber,
+        destinationId: row.destinationId,
+        destinationName: row.destinationName || row.siteName,
         status: row.status,
-        kitCount: parseInt(row.kit_count || 0),
-        shippedAt: row.shipped_at,
-        expectedDelivery: row.expected_delivery,
-        deliveredAt: row.delivered_at,
-        trackingNumber: row.tracking_number,
+        kitCount: parseInt(row.kitCount || 0),
+        shippedAt: row.shippedAt,
+        expectedDelivery: row.expectedDelivery,
+        deliveredAt: row.deliveredAt,
+        trackingNumber: row.trackingNumber,
         carrier: row.carrier
       }))
     });
@@ -443,7 +443,7 @@ router.post('/shipments', async (req: Part11Request, res: Response, next: NextFu
         RETURNING *
       `, [studyId, shipmentNumber, destinationSiteId, destinationName, trackingNumber, expectedDeliveryDate, userId]);
 
-      const shipmentId = shipmentResult.rows[0].shipment_id;
+      const shipmentId = shipmentResult.rows[0].shipmentId;
 
       // Assign kits to shipment
       if (kitIds && kitIds.length > 0) {
@@ -551,7 +551,7 @@ router.post('/shipments/:id/confirm', async (req: Part11Request, res: Response, 
         [id]
       );
       const oldStatus = shipmentBefore.rows[0]?.status;
-      const shipmentNumber = shipmentBefore.rows[0]?.shipment_number;
+      const shipmentNumber = shipmentBefore.rows[0]?.shipmentNumber;
 
       // Update shipment
       // Table has receipt_notes column (not notes), status 'delivered' (not 'confirmed')
@@ -571,7 +571,7 @@ router.post('/shipments/:id/confirm', async (req: Part11Request, res: Response, 
           'SELECT destination_id FROM acc_shipment WHERE shipment_id = $1',
           [id]
         );
-        const siteId = shipmentResult.rows[0]?.destination_id;
+        const siteId = shipmentResult.rows[0]?.destinationId;
 
         await client.query(`
           UPDATE acc_kit 
@@ -687,12 +687,12 @@ router.post('/dispense', requireSignature, async (req: Part11Request, res: Respo
         userName,
         Part11EventTypes.KIT_DISPENSED,
         'acc_kit_dispensing',
-        dispensingResult.rows[0].dispensing_id,
-        dispensedKit.kit_number,
+        dispensingResult.rows[0].dispensingId,
+        dispensedKit.kitNumber,
         { status: oldKitData?.status || 'available' },
         {
           kitId,
-          kitNumber: dispensedKit.kit_number,
+          kitNumber: dispensedKit.kitNumber,
           subjectId,
           visitId,
           status: 'dispensed',
@@ -772,15 +772,15 @@ router.get('/dispensations', async (req: Request, res: Response, next: NextFunct
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        dispensingId: row.dispensing_id,
-        kitId: row.kit_id,
-        kitNumber: row.kit_number,
-        kitType: row.kit_type_name,
-        subjectId: row.study_subject_id,
-        subjectLabel: row.subject_label,
-        dispensedBy: row.dispensed_by_name,
-        dispensedAt: row.dispensed_at,
-        quantityDispensed: row.quantity_dispensed,
+        dispensingId: row.dispensingId,
+        kitId: row.kitId,
+        kitNumber: row.kitNumber,
+        kitType: row.kitTypeName,
+        subjectId: row.studySubjectId,
+        subjectLabel: row.subjectLabel,
+        dispensedBy: row.dispensedByName,
+        dispensedAt: row.dispensedAt,
+        quantityDispensed: row.quantityDispensed,
         notes: row.notes
       }))
     });
@@ -831,11 +831,11 @@ router.post('/temperature', async (req: Request, res: Response, next: NextFuncti
     res.json({
       success: true,
       data: {
-        logId: result.rows[0].log_id,
+        logId: result.rows[0].logId,
         temperature: result.rows[0].temperature,
         humidity: result.rows[0].humidity,
-        isExcursion: result.rows[0].is_excursion,
-        recordedAt: result.rows[0].recorded_at
+        isExcursion: result.rows[0].isExcursion,
+        recordedAt: result.rows[0].recordedAt
       }
     });
   } catch (error) {
@@ -854,15 +854,15 @@ router.get('/temperature', async (req: Request, res: Response, next: NextFunctio
   try {
     const { siteId, days = 7 } = req.query;
 
+    const params: any[] = [parseInt(String(days)) || 7];
     let query = `
       SELECT 
         log_id, entity_type, entity_id, recorded_at, temperature, humidity,
         is_excursion, excursion_duration_minutes, recorded_by, device_id, notes, date_created
       FROM acc_temperature_log
-      WHERE recorded_at >= NOW() - INTERVAL '${parseInt(String(days))} days'
+      WHERE recorded_at >= NOW() - make_interval(days => $1)
         AND entity_type = 'site_storage'
     `;
-    const params: any[] = [];
 
     if (siteId) {
       params.push(siteId);
@@ -874,19 +874,19 @@ router.get('/temperature', async (req: Request, res: Response, next: NextFunctio
     const result = await pool.query(query, params);
 
     // Count excursions using the is_excursion column
-    const excursionCount = result.rows.filter(row => row.is_excursion === true).length;
+    const excursionCount = result.rows.filter(row => row.isExcursion === true).length;
 
     res.json({
       success: true,
       data: {
         readings: result.rows.map(row => ({
-          logId: row.log_id,
-          siteId: row.entity_id,
+          logId: row.logId,
+          siteId: row.entityId,
           temperature: parseFloat(row.temperature),
           humidity: row.humidity ? parseFloat(row.humidity) : null,
-          isExcursion: row.is_excursion,
-          recordedAt: row.recorded_at,
-          deviceId: row.device_id,
+          isExcursion: row.isExcursion,
+          recordedAt: row.recordedAt,
+          deviceId: row.deviceId,
           notes: row.notes
         })),
         excursionCount
@@ -965,30 +965,91 @@ router.get('/alerts', async (req: Request, res: Response, next: NextFunction) =>
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        alertId: row.alert_id,
-        studyId: row.study_id,
-        studyName: row.study_name,
-        siteId: row.site_id,
-        siteName: row.site_name,
-        kitTypeId: row.kit_type_id,
-        kitTypeName: row.kit_type_name,
-        alertType: row.alert_type,
+        alertId: row.alertId,
+        studyId: row.studyId,
+        studyName: row.studyName,
+        siteId: row.siteId,
+        siteName: row.siteName,
+        kitTypeId: row.kitTypeId,
+        kitTypeName: row.kitTypeName,
+        alertType: row.alertType,
         severity: row.severity,
         message: row.message,
-        thresholdValue: row.threshold_value,
-        currentValue: row.current_value,
+        thresholdValue: row.thresholdValue,
+        currentValue: row.currentValue,
         status: row.status,
-        acknowledgedAt: row.acknowledged_at,
-        acknowledgedBy: row.acknowledged_by,
-        acknowledgedByName: row.acknowledged_by_name,
-        resolvedAt: row.resolved_at,
-        resolvedBy: row.resolved_by,
-        resolvedByName: row.resolved_by_name,
-        dateCreated: row.date_created
+        acknowledgedAt: row.acknowledgedAt,
+        acknowledgedBy: row.acknowledgedBy,
+        acknowledgedByName: row.acknowledgedByName,
+        resolvedAt: row.resolvedAt,
+        resolvedBy: row.resolvedBy,
+        resolvedByName: row.resolvedByName,
+        dateCreated: row.dateCreated
       }))
     });
   } catch (error) {
     logger.error('Failed to list inventory alerts', { error });
+    next(error);
+  }
+});
+
+/**
+ * GET /api/rtsm/alerts/summary
+ * Get alert summary statistics
+ * NOTE: Must be registered BEFORE /alerts/:id so Express doesn't match "summary" as :id
+ */
+router.get('/alerts/summary', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { studyId, siteId } = req.query;
+
+    let whereClause = 'WHERE 1=1';
+    const params: any[] = [];
+
+    if (studyId) {
+      params.push(studyId);
+      whereClause += ` AND study_id = $${params.length}`;
+    }
+
+    if (siteId) {
+      params.push(siteId);
+      whereClause += ` AND site_id = $${params.length}`;
+    }
+
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status = 'open') as open_count,
+        COUNT(*) FILTER (WHERE status = 'acknowledged') as acknowledged_count,
+        COUNT(*) FILTER (WHERE status = 'resolved') as resolved_count,
+        COUNT(*) FILTER (WHERE status = 'open' AND severity = 'critical') as critical_count,
+        COUNT(*) FILTER (WHERE status = 'open' AND severity = 'warning') as warning_count,
+        COUNT(*) FILTER (WHERE alert_type = 'low_stock' AND status = 'open') as low_stock_count,
+        COUNT(*) FILTER (WHERE alert_type = 'expiring_soon' AND status = 'open') as expiring_count,
+        COUNT(*) FILTER (WHERE alert_type = 'temperature_excursion' AND status = 'open') as temp_excursion_count
+      FROM acc_inventory_alert
+      ${whereClause}
+    `, params);
+
+    const stats = result.rows[0] || {};
+
+    res.json({
+      success: true,
+      data: {
+        open: parseInt(stats.openCount || 0),
+        acknowledged: parseInt(stats.acknowledgedCount || 0),
+        resolved: parseInt(stats.resolvedCount || 0),
+        bySeverity: {
+          critical: parseInt(stats.criticalCount || 0),
+          warning: parseInt(stats.warningCount || 0)
+        },
+        byType: {
+          lowStock: parseInt(stats.lowStockCount || 0),
+          expiringSoon: parseInt(stats.expiringCount || 0),
+          temperatureExcursion: parseInt(stats.tempExcursionCount || 0)
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to get alerts summary', { error });
     next(error);
   }
 });
@@ -1026,24 +1087,24 @@ router.get('/alerts/:id', async (req: Request, res: Response, next: NextFunction
     res.json({
       success: true,
       data: {
-        alertId: row.alert_id,
-        studyId: row.study_id,
-        studyName: row.study_name,
-        siteId: row.site_id,
-        siteName: row.site_name,
-        kitTypeId: row.kit_type_id,
-        kitTypeName: row.kit_type_name,
-        alertType: row.alert_type,
+        alertId: row.alertId,
+        studyId: row.studyId,
+        studyName: row.studyName,
+        siteId: row.siteId,
+        siteName: row.siteName,
+        kitTypeId: row.kitTypeId,
+        kitTypeName: row.kitTypeName,
+        alertType: row.alertType,
         severity: row.severity,
         message: row.message,
-        thresholdValue: row.threshold_value,
-        currentValue: row.current_value,
+        thresholdValue: row.thresholdValue,
+        currentValue: row.currentValue,
         status: row.status,
-        acknowledgedAt: row.acknowledged_at,
-        acknowledgedByName: row.acknowledged_by_name,
-        resolvedAt: row.resolved_at,
-        resolvedByName: row.resolved_by_name,
-        dateCreated: row.date_created
+        acknowledgedAt: row.acknowledgedAt,
+        acknowledgedByName: row.acknowledgedByName,
+        resolvedAt: row.resolvedAt,
+        resolvedByName: row.resolvedByName,
+        dateCreated: row.dateCreated
       }
     });
   } catch (error) {
@@ -1101,7 +1162,7 @@ router.post('/alerts', async (req: Part11Request, res: Response, next: NextFunct
       currentValue || null
     ]);
 
-    const alertId = result.rows[0].alert_id;
+    const alertId = result.rows[0].alertId;
 
     // Part 11 Audit: Record alert creation (§11.10(e))
     await recordPart11Audit(
@@ -1121,7 +1182,7 @@ router.post('/alerts', async (req: Part11Request, res: Response, next: NextFunct
       success: true,
       data: {
         alertId,
-        alertType: result.rows[0].alert_type,
+        alertType: result.rows[0].alertType,
         severity: result.rows[0].severity,
         status: result.rows[0].status
       }
@@ -1156,7 +1217,7 @@ router.post('/alerts/:id/acknowledge', async (req: Part11Request, res: Response,
     }
 
     const oldStatus = currentResult.rows[0].status;
-    const alertType = currentResult.rows[0].alert_type;
+    const alertType = currentResult.rows[0].alertType;
 
     if (oldStatus !== 'open') {
       return res.status(400).json({ 
@@ -1220,7 +1281,7 @@ router.post('/alerts/:id/resolve', async (req: Part11Request, res: Response, nex
     }
 
     const oldStatus = currentResult.rows[0].status;
-    const alertType = currentResult.rows[0].alert_type;
+    const alertType = currentResult.rows[0].alertType;
 
     if (oldStatus === 'resolved') {
       return res.status(400).json({ 
@@ -1255,66 +1316,6 @@ router.post('/alerts/:id/resolve', async (req: Part11Request, res: Response, nex
     });
   } catch (error) {
     logger.error('Failed to resolve inventory alert', { error });
-    next(error);
-  }
-});
-
-/**
- * GET /api/rtsm/alerts/summary
- * Get alert summary statistics
- */
-router.get('/alerts/summary', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { studyId, siteId } = req.query;
-
-    let whereClause = 'WHERE 1=1';
-    const params: any[] = [];
-
-    if (studyId) {
-      params.push(studyId);
-      whereClause += ` AND study_id = $${params.length}`;
-    }
-
-    if (siteId) {
-      params.push(siteId);
-      whereClause += ` AND site_id = $${params.length}`;
-    }
-
-    const result = await pool.query(`
-      SELECT 
-        COUNT(*) FILTER (WHERE status = 'open') as open_count,
-        COUNT(*) FILTER (WHERE status = 'acknowledged') as acknowledged_count,
-        COUNT(*) FILTER (WHERE status = 'resolved') as resolved_count,
-        COUNT(*) FILTER (WHERE status = 'open' AND severity = 'critical') as critical_count,
-        COUNT(*) FILTER (WHERE status = 'open' AND severity = 'warning') as warning_count,
-        COUNT(*) FILTER (WHERE alert_type = 'low_stock' AND status = 'open') as low_stock_count,
-        COUNT(*) FILTER (WHERE alert_type = 'expiring_soon' AND status = 'open') as expiring_count,
-        COUNT(*) FILTER (WHERE alert_type = 'temperature_excursion' AND status = 'open') as temp_excursion_count
-      FROM acc_inventory_alert
-      ${whereClause}
-    `, params);
-
-    const stats = result.rows[0] || {};
-
-    res.json({
-      success: true,
-      data: {
-        open: parseInt(stats.open_count || 0),
-        acknowledged: parseInt(stats.acknowledged_count || 0),
-        resolved: parseInt(stats.resolved_count || 0),
-        bySeverity: {
-          critical: parseInt(stats.critical_count || 0),
-          warning: parseInt(stats.warning_count || 0)
-        },
-        byType: {
-          lowStock: parseInt(stats.low_stock_count || 0),
-          expiringSoon: parseInt(stats.expiring_count || 0),
-          temperatureExcursion: parseInt(stats.temp_excursion_count || 0)
-        }
-      }
-    });
-  } catch (error) {
-    logger.error('Failed to get alerts summary', { error });
     next(error);
   }
 });
@@ -1362,11 +1363,11 @@ router.post('/alerts/check-inventory', async (req: Part11Request, res: Response,
           AND kit_type_id = $3
           AND alert_type = 'low_stock'
           AND status IN ('open', 'acknowledged')
-      `, [studyId, row.site_id, row.kit_type_id]);
+      `, [studyId, row.siteId, row.kitTypeId]);
 
       if (existingAlert.rows.length === 0) {
         // Create new alert
-        const siteName = row.site_name || 'Depot';
+        const siteName = row.siteName || 'Depot';
         const result = await pool.query(`
           INSERT INTO acc_inventory_alert (
             study_id, site_id, kit_type_id, alert_type, severity,
@@ -1375,20 +1376,20 @@ router.post('/alerts/check-inventory', async (req: Part11Request, res: Response,
           RETURNING alert_id
         `, [
           studyId,
-          row.site_id,
-          row.kit_type_id,
-          parseInt(row.available_count) === 0 ? 'critical' : 'warning',
-          `Low stock: ${row.kit_type_name} at ${siteName} (${row.available_count} available, threshold: ${row.reorder_threshold})`,
-          row.reorder_threshold,
-          parseInt(row.available_count)
+          row.siteId,
+          row.kitTypeId,
+          parseInt(row.availableCount) === 0 ? 'critical' : 'warning',
+          `Low stock: ${row.kitTypeName} at ${siteName} (${row.availableCount} available, threshold: ${row.reorderThreshold})`,
+          row.reorderThreshold,
+          parseInt(row.availableCount)
         ]);
 
         createdAlerts.push({
-          alertId: result.rows[0].alert_id,
-          kitType: row.kit_type_name,
+          alertId: result.rows[0].alertId,
+          kitType: row.kitTypeName,
           site: siteName,
-          available: parseInt(row.available_count),
-          threshold: row.reorder_threshold
+          available: parseInt(row.availableCount),
+          threshold: row.reorderThreshold
         });
 
         // Part 11 Audit
@@ -1397,10 +1398,10 @@ router.post('/alerts/check-inventory', async (req: Part11Request, res: Response,
           userName,
           Part11EventTypes.INVENTORY_ALERT_CREATED || 'INVENTORY_ALERT_CREATED',
           'acc_inventory_alert',
-          result.rows[0].alert_id,
+          result.rows[0].alertId,
           'low_stock alert',
           null,
-          { kitTypeId: row.kit_type_id, available: parseInt(row.available_count), threshold: row.reorder_threshold },
+          { kitTypeId: row.kitTypeId, available: parseInt(row.availableCount), threshold: row.reorderThreshold },
           'Low stock alert auto-generated',
           { ipAddress: req.ip }
         );
@@ -1446,9 +1447,9 @@ router.post('/alerts/check-expiry', async (req: Part11Request, res: Response, ne
       LEFT JOIN study site ON k.current_site_id = site.study_id
       WHERE kt.study_id = $1 
         AND k.status = 'available'
-        AND k.expiration_date <= NOW() + INTERVAL '${parseInt(String(daysAhead))} days'
+        AND k.expiration_date <= NOW() + make_interval(days => $2)
       GROUP BY kt.kit_type_id, kt.name, k.current_site_id, site.name
-    `, [studyId]);
+    `, [studyId, parseInt(String(daysAhead)) || 30]);
 
     const createdAlerts = [];
 
@@ -1461,11 +1462,11 @@ router.post('/alerts/check-expiry', async (req: Part11Request, res: Response, ne
           AND kit_type_id = $3
           AND alert_type = 'expiring_soon'
           AND status IN ('open', 'acknowledged')
-      `, [studyId, row.site_id, row.kit_type_id]);
+      `, [studyId, row.siteId, row.kitTypeId]);
 
       if (existingAlert.rows.length === 0) {
-        const siteName = row.site_name || 'Depot';
-        const daysUntilExpiry = Math.ceil((new Date(row.earliest_expiry).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+        const siteName = row.siteName || 'Depot';
+        const daysUntilExpiry = Math.ceil((new Date(row.earliestExpiry).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 
         const result = await pool.query(`
           INSERT INTO acc_inventory_alert (
@@ -1475,19 +1476,19 @@ router.post('/alerts/check-expiry', async (req: Part11Request, res: Response, ne
           RETURNING alert_id
         `, [
           studyId,
-          row.site_id,
-          row.kit_type_id,
+          row.siteId,
+          row.kitTypeId,
           daysUntilExpiry <= 7 ? 'critical' : 'warning',
-          `Expiring kits: ${row.expiring_count} ${row.kit_type_name} kits at ${siteName} expire within ${daysAhead} days (earliest: ${row.earliest_expiry})`,
-          parseInt(row.expiring_count)
+          `Expiring kits: ${row.expiringCount} ${row.kitTypeName} kits at ${siteName} expire within ${daysAhead} days (earliest: ${row.earliestExpiry})`,
+          parseInt(row.expiringCount)
         ]);
 
         createdAlerts.push({
-          alertId: result.rows[0].alert_id,
-          kitType: row.kit_type_name,
+          alertId: result.rows[0].alertId,
+          kitType: row.kitTypeName,
           site: siteName,
-          count: parseInt(row.expiring_count),
-          earliestExpiry: row.earliest_expiry
+          count: parseInt(row.expiringCount),
+          earliestExpiry: row.earliestExpiry
         });
 
         // Part 11 Audit
@@ -1496,10 +1497,10 @@ router.post('/alerts/check-expiry', async (req: Part11Request, res: Response, ne
           userName,
           Part11EventTypes.INVENTORY_ALERT_CREATED || 'INVENTORY_ALERT_CREATED',
           'acc_inventory_alert',
-          result.rows[0].alert_id,
+          result.rows[0].alertId,
           'expiring_soon alert',
           null,
-          { kitTypeId: row.kit_type_id, count: parseInt(row.expiring_count), earliestExpiry: row.earliest_expiry },
+          { kitTypeId: row.kitTypeId, count: parseInt(row.expiringCount), earliestExpiry: row.earliestExpiry },
           'Expiring kits alert auto-generated',
           { ipAddress: req.ip }
         );

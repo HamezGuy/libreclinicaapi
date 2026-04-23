@@ -8,6 +8,7 @@
 import express, { Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { validate, studyParameterSchemas } from '../middleware/validation.middleware';
 import * as studyParamsService from '../services/database/studyParameters.service';
 import { logger } from '../config/logger';
 
@@ -82,7 +83,7 @@ router.get('/:studyId/raw', async (req: Request, res: Response) => {
  * PUT /api/study-parameters/:studyId
  * Update study parameters (admin/coordinator only)
  */
-router.put('/:studyId', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
+router.put('/:studyId', requireRole('admin', 'data_manager'), validate({ body: studyParameterSchemas.update }), async (req: Request, res: Response) => {
   try {
     const studyId = parseInt(req.params.studyId);
     const user = (req as any).user;

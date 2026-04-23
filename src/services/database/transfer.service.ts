@@ -88,7 +88,7 @@ async function getUserName(userId: number): Promise<string> {
     [userId]
   );
   if (result.rows[0]) {
-    return `${result.rows[0].first_name} ${result.rows[0].last_name}`;
+    return `${result.rows[0].firstName} ${result.rows[0].lastName}`;
   }
   return 'Unknown User';
 }
@@ -112,7 +112,7 @@ async function getSubjectSiteId(studySubjectId: number): Promise<number | null> 
     'SELECT study_id FROM study_subject WHERE study_subject_id = $1',
     [studySubjectId]
   );
-  return result.rows[0]?.study_id || null;
+  return result.rows[0]?.studyId || null;
 }
 
 /**
@@ -124,7 +124,7 @@ async function getParentStudyId(siteId: number): Promise<number | null> {
     [siteId]
   );
   // If parent_study_id is null, this is the parent study itself
-  return result.rows[0]?.parent_study_id || result.rows[0]?.study_id || null;
+  return result.rows[0]?.parentStudyId || result.rows[0]?.studyId || null;
 }
 
 // ============================================================================
@@ -159,8 +159,8 @@ export async function initiateTransfer(request: TransferRequest): Promise<Transf
     }
 
     const subject = subjectResult.rows[0];
-    const sourceSiteId = subject.study_id;
-    const studyId = subject.parent_study_id || sourceSiteId;
+    const sourceSiteId = subject.studyId;
+    const studyId = subject.parentStudyId || sourceSiteId;
 
     // 2. Verify destination site is in the same study
     const destSiteResult = await client.query(`
@@ -171,7 +171,7 @@ export async function initiateTransfer(request: TransferRequest): Promise<Transf
       throw new Error('Destination site not found');
     }
 
-    const destParentId = destSiteResult.rows[0].parent_study_id;
+    const destParentId = destSiteResult.rows[0].parentStudyId;
     if (destParentId !== studyId && request.destinationSiteId !== studyId) {
       throw new Error('Destination site is not in the same study');
     }
@@ -211,7 +211,7 @@ export async function initiateTransfer(request: TransferRequest): Promise<Transf
       request.notes || null
     ]);
 
-    const transferId = insertResult.rows[0].transfer_id;
+    const transferId = insertResult.rows[0].transferId;
 
     // 5. Log audit event
     await client.query(`
@@ -268,8 +268,8 @@ export async function approveTransfer(approval: TransferApproval): Promise<Trans
 
     const transfer = transferResult.rows[0];
 
-    if (transfer.transfer_status !== 'pending') {
-      throw new Error(`Transfer is not pending (status: ${transfer.transfer_status})`);
+    if (transfer.transferStatus !== 'pending') {
+      throw new Error(`Transfer is not pending (status: ${transfer.transferStatus})`);
     }
 
     // 2. Get user info for e-signature
@@ -283,8 +283,8 @@ export async function approveTransfer(approval: TransferApproval): Promise<Trans
     }
     
     const user = userResult.rows[0];
-    const username = user.user_name;
-    const userFullName = `${user.first_name} ${user.last_name}`;
+    const username = user.userName;
+    const userFullName = `${user.firstName} ${user.lastName}`;
 
     // 3. Apply e-signature (includes password verification)
     const signatureRequest: SignatureRequest = {
@@ -292,10 +292,10 @@ export async function approveTransfer(approval: TransferApproval): Promise<Trans
       username: username,
       userFullName: userFullName,
       entityType: 'study_subject', // Use valid entity type for LibreClinica
-      entityId: transfer.study_subject_id,
+      entityId: transfer.studySubjectId,
       password: approval.password,
       meaning: 'approval',
-      reasonForSigning: `Approved ${approval.approvalType} site transfer for subject ${transfer.study_subject_id}`
+      reasonForSigning: `Approved ${approval.approvalType} site transfer for subject ${transfer.studySubjectId}`
     };
 
     const signatureResult = await applyElectronicSignature(signatureRequest);
@@ -333,8 +333,8 @@ export async function approveTransfer(approval: TransferApproval): Promise<Trans
     const updated = updatedResult.rows[0];
     
     // If approvals not required, or both approvals received, mark as approved
-    if (!updated.requires_approvals || 
-        (updated.source_approved_by && updated.destination_approved_by)) {
+    if (!updated.requiresApprovals || 
+        (updated.sourceApprovedBy && updated.destinationApprovedBy)) {
       await client.query(`
         UPDATE acc_transfer_log
         SET transfer_status = 'approved',
@@ -411,17 +411,17 @@ export async function completeTransfer(
     const transfer = transferResult.rows[0];
 
     // 2. Verify transfer is approved (or doesn't require approvals)
-    if (transfer.requires_approvals) {
-      if (!transfer.source_approved_by || !transfer.destination_approved_by) {
+    if (transfer.requiresApprovals) {
+      if (!transfer.sourceApprovedBy || !transfer.destinationApprovedBy) {
         throw new Error('All approvals required before completing transfer');
       }
     }
 
-    if (transfer.transfer_status === 'completed') {
+    if (transfer.transferStatus === 'completed') {
       throw new Error('Transfer already completed');
     }
 
-    if (transfer.transfer_status === 'cancelled') {
+    if (transfer.transferStatus === 'cancelled') {
       throw new Error('Transfer was cancelled');
     }
 
@@ -432,7 +432,7 @@ export async function completeTransfer(
           date_updated = CURRENT_TIMESTAMP,
           update_id = $2
       WHERE study_subject_id = $3
-    `, [transfer.destination_site_id, completedBy, transfer.study_subject_id]);
+    `, [transfer.destinationSiteId, completedBy, transfer.studySubjectId]);
 
     // 4. Update transfer log
     await client.query(`
@@ -457,19 +457,19 @@ export async function completeTransfer(
       )
     `, [
       completedBy,
-      transfer.study_subject_id,
-      transfer.source_site_name,
-      transfer.dest_site_name,
-      transfer.reason_for_transfer
+      transfer.studySubjectId,
+      transfer.sourceSiteName,
+      transfer.destSiteName,
+      transfer.reasonForTransfer
     ]);
 
     await client.query('COMMIT');
 
     logger.info('Transfer completed', {
       transferId,
-      subjectId: transfer.study_subject_id,
-      fromSite: transfer.source_site_name,
-      toSite: transfer.dest_site_name
+      subjectId: transfer.studySubjectId,
+      fromSite: transfer.sourceSiteName,
+      toSite: transfer.destSiteName
     });
 
     return await getTransferDetails(transferId);
@@ -508,11 +508,11 @@ export async function cancelTransfer(cancellation: TransferCancellation): Promis
 
     const transfer = transferResult.rows[0];
 
-    if (transfer.transfer_status === 'completed') {
+    if (transfer.transferStatus === 'completed') {
       throw new Error('Cannot cancel a completed transfer');
     }
 
-    if (transfer.transfer_status === 'cancelled') {
+    if (transfer.transferStatus === 'cancelled') {
       throw new Error('Transfer already cancelled');
     }
 
@@ -540,8 +540,8 @@ export async function cancelTransfer(cancellation: TransferCancellation): Promis
       )
     `, [
       cancellation.cancelledBy,
-      transfer.study_subject_id,
-      transfer.transfer_status,
+      transfer.studySubjectId,
+      transfer.transferStatus,
       cancellation.cancelReason
     ]);
 
@@ -751,8 +751,8 @@ export async function getAvailableSites(
     return [];
   }
 
-  const currentSiteId = subjectResult.rows[0].current_site_id;
-  const parentStudyId = subjectResult.rows[0].parent_study_id || currentSiteId;
+  const currentSiteId = subjectResult.rows[0].currentSiteId;
+  const parentStudyId = subjectResult.rows[0].parentStudyId || currentSiteId;
 
   // Get all sites in the same study, excluding current site
   const sitesResult = await pool.query(`
@@ -765,7 +765,7 @@ export async function getAvailableSites(
   `, [parentStudyId, currentSiteId]);
 
   return sitesResult.rows.map(row => ({
-    siteId: row.study_id,
+    siteId: row.studyId,
     siteName: row.name
   }));
 }
@@ -776,33 +776,33 @@ export async function getAvailableSites(
 
 function mapRowToTransfer(row: any): Transfer {
   return {
-    transferId: row.transfer_id,
-    studySubjectId: row.study_subject_id,
-    studyId: row.study_id,
-    subjectLabel: row.subject_label,
-    sourceSiteId: row.source_site_id,
-    sourceSiteName: row.source_site_name,
-    destinationSiteId: row.destination_site_id,
-    destinationSiteName: row.destination_site_name,
-    reasonForTransfer: row.reason_for_transfer,
-    transferStatus: row.transfer_status,
-    requiresApprovals: row.requires_approvals,
-    initiatedBy: row.initiated_by,
-    initiatedByName: row.initiated_by_name,
-    initiatedAt: row.initiated_at,
-    sourceApprovedBy: row.source_approved_by,
-    sourceApprovedByName: row.source_approved_by_name,
-    sourceApprovedAt: row.source_approved_at,
-    destinationApprovedBy: row.destination_approved_by,
-    destinationApprovedByName: row.destination_approved_by_name,
-    destinationApprovedAt: row.destination_approved_at,
-    completedBy: row.completed_by,
-    completedByName: row.completed_by_name,
-    completedAt: row.completed_at,
-    cancelledBy: row.cancelled_by,
-    cancelledByName: row.cancelled_by_name,
-    cancelledAt: row.cancelled_at,
-    cancelReason: row.cancel_reason,
+    transferId: row.transferId,
+    studySubjectId: row.studySubjectId,
+    studyId: row.studyId,
+    subjectLabel: row.subjectLabel,
+    sourceSiteId: row.sourceSiteId,
+    sourceSiteName: row.sourceSiteName,
+    destinationSiteId: row.destinationSiteId,
+    destinationSiteName: row.destinationSiteName,
+    reasonForTransfer: row.reasonForTransfer,
+    transferStatus: row.transferStatus,
+    requiresApprovals: row.requiresApprovals,
+    initiatedBy: row.initiatedBy,
+    initiatedByName: row.initiatedByName,
+    initiatedAt: row.initiatedAt,
+    sourceApprovedBy: row.sourceApprovedBy,
+    sourceApprovedByName: row.sourceApprovedByName,
+    sourceApprovedAt: row.sourceApprovedAt,
+    destinationApprovedBy: row.destinationApprovedBy,
+    destinationApprovedByName: row.destinationApprovedByName,
+    destinationApprovedAt: row.destinationApprovedAt,
+    completedBy: row.completedBy,
+    completedByName: row.completedByName,
+    completedAt: row.completedAt,
+    cancelledBy: row.cancelledBy,
+    cancelledByName: row.cancelledByName,
+    cancelledAt: row.cancelledAt,
+    cancelReason: row.cancelReason,
     notes: row.notes
   };
 }

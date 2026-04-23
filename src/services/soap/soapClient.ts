@@ -76,10 +76,14 @@ export class SoapClient {
     this.config = {
       baseUrl: config.libreclinica.soapUrl || 'http://localhost:8090/libreclinica-ws/ws',
       username: config.libreclinica.soapUsername || 'root',
-      password: config.libreclinica.soapPassword || '25d55ad283aa400af464c76d713c07ad',
+      password: config.libreclinica.soapPassword,
       timeout: 15000,  // Reduced - LC 1.4 is more responsive with fixed WS-Security
       maxRetries: 2    // Reduced - LC 1.4 WS-Security works reliably now
     };
+
+    if (!this.config.password) {
+      throw new Error('SOAP password (libreclinica.soapPassword) is not configured');
+    }
 
     // Create HTTP client
     this.httpClient = axios.create({
@@ -153,7 +157,8 @@ export class SoapClient {
         // If the value looks like raw XML (starts with <?xml or <ODM), wrap in CDATA
         // to prevent double-escaping. This is critical for ODM XML import payloads.
         if (strValue.trimStart().startsWith('<?xml') || strValue.trimStart().startsWith('<ODM') || strValue.trimStart().startsWith('<odm')) {
-          xml += `<${prefix}:${key}><![CDATA[${strValue}]]></${prefix}:${key}>`;
+          const safeCdata = strValue.replace(/]]>/g, ']]]]><![CDATA[>');
+          xml += `<${prefix}:${key}><![CDATA[${safeCdata}]]></${prefix}:${key}>`;
         } else {
           xml += `<${prefix}:${key}>${this.escapeXml(strValue)}</${prefix}:${key}>`;
         }
@@ -163,15 +168,10 @@ export class SoapClient {
   }
 
   /**
-   * Escape special XML characters
+   * Escape special XML characters (delegates to module-level export)
    */
   private escapeXml(str: string): string {
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
+    return escapeXml(str);
   }
 
   /**
@@ -381,6 +381,19 @@ export class SoapClient {
       passwordSet: !!this.config.password
     };
   }
+}
+
+/**
+ * Escape special XML characters.
+ * Exported so other SOAP service modules can reuse this.
+ */
+export function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 /**

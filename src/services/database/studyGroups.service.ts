@@ -85,7 +85,7 @@ export const getStudyGroupClasses = async (studyId: number): Promise<StudyGroupC
     // Get parent study ID if this is a site
     const parentQuery = `SELECT parent_study_id FROM study WHERE study_id = $1`;
     const parentResult = await pool.query(parentQuery, [studyId]);
-    const parentStudyId = parentResult.rows[0]?.parent_study_id;
+    const parentStudyId = parentResult.rows[0]?.parentStudyId;
 
     // Get group classes - from this study or parent study
     const classQuery = `
@@ -126,25 +126,25 @@ export const getStudyGroupClasses = async (studyId: number): Promise<StudyGroupC
         ORDER BY name
       `;
       
-      const groupResult = await pool.query(groupQuery, [row.study_group_class_id]);
+      const groupResult = await pool.query(groupQuery, [row.studyGroupClassId]);
       
       groupClasses.push({
-        studyGroupClassId: row.study_group_class_id,
+        studyGroupClassId: row.studyGroupClassId,
         name: row.name,
-        studyId: row.study_id,
-        groupClassTypeId: row.group_class_type_id,
-        groupClassTypeName: row.group_class_type_name,
-        customTypeName: row.custom_type_name || undefined,
-        subjectAssignment: row.subject_assignment || 'Optional',
-        statusId: row.status_id,
-        statusName: row.status_name,
-        dateCreated: row.date_created,
-        ownerId: row.owner_id,
+        studyId: row.studyId,
+        groupClassTypeId: row.groupClassTypeId,
+        groupClassTypeName: row.groupClassTypeName,
+        customTypeName: row.customTypeName || undefined,
+        subjectAssignment: row.subjectAssignment || 'Optional',
+        statusId: row.statusId,
+        statusName: row.statusName,
+        dateCreated: row.dateCreated,
+        ownerId: row.ownerId,
         groups: groupResult.rows.map(g => ({
-          studyGroupId: g.study_group_id,
+          studyGroupId: g.studyGroupId,
           name: g.name,
           description: g.description,
-          studyGroupClassId: g.study_group_class_id
+          studyGroupClassId: g.studyGroupClassId
         }))
       });
     }
@@ -200,7 +200,7 @@ export const createStudyGroupClass = async (
     await client.query('COMMIT');
 
     logger.info('Study group class created', { 
-      studyGroupClassId: result.rows[0].study_group_class_id,
+      studyGroupClassId: result.rows[0].studyGroupClassId,
       name: data.name 
     });
 
@@ -241,7 +241,7 @@ export const createStudyGroup = async (
     ]);
 
     logger.info('Study group created', { 
-      studyGroupId: result.rows[0].study_group_id,
+      studyGroupId: result.rows[0].studyGroupId,
       name: data.name 
     });
 
@@ -356,14 +356,14 @@ export const getSubjectGroupAssignments = async (
   try {
     const result = await pool.query(query, [studySubjectId]);
     return result.rows.map(row => ({
-      subjectGroupMapId: row.subject_group_map_id,
-      studySubjectId: row.study_subject_id,
-      studyGroupClassId: row.study_group_class_id,
-      studyGroupId: row.study_group_id,
+      subjectGroupMapId: row.subjectGroupMapId,
+      studySubjectId: row.studySubjectId,
+      studyGroupClassId: row.studyGroupClassId,
+      studyGroupId: row.studyGroupId,
       notes: row.notes,
-      dateCreated: row.date_created,
-      className: row.class_name,
-      groupName: row.group_name
+      dateCreated: row.dateCreated,
+      className: row.className,
+      groupName: row.groupName
     }));
   } catch (error: any) {
     logger.error('Failed to get subject group assignments', { 
@@ -394,7 +394,7 @@ export const getSubjectsInGroup = async (
   try {
     const result = await pool.query(query, [studyGroupId]);
     return result.rows.map(row => ({
-      studySubjectId: row.study_subject_id,
+      studySubjectId: row.studySubjectId,
       label: row.label,
       notes: row.notes
     }));

@@ -269,12 +269,12 @@ class TestDatabase {
 
       // 7b. Ensure completion_status lookup exists
       await this.pool.query(`
-        INSERT INTO completion_status (completion_status_id, status_id, name, description) VALUES
-          (1, 1, 'initial_data_entry', 'Initial Data Entry'),
-          (2, 1, 'data_entry_started', 'Data Entry Started'),
-          (3, 1, 'double_data_entry', 'Double Data Entry'),
-          (4, 1, 'complete', 'Complete'),
-          (5, 1, 'signed', 'Signed')
+        INSERT INTO completion_status (completion_status_id, name) VALUES
+          (1, 'initial_data_entry'),
+          (2, 'data_entry_started'),
+          (3, 'double_data_entry'),
+          (4, 'complete'),
+          (5, 'signed')
         ON CONFLICT (completion_status_id) DO NOTHING
       `);
 

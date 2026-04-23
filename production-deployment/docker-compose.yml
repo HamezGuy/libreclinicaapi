@@ -113,6 +113,11 @@ services:
       DISABLE_SOAP: "true"
       # Auth
       JWT_SECRET: ${JWT_SECRET:-change_this_to_a_secure_random_string}
+      # 21 CFR Part 11 §11.10(a) — Data-at-rest encryption
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY}
+      ENCRYPTION_SALT: ${ENCRYPTION_SALT}
+      # DB_SSL: not needed — postgres is on the same Docker bridge network.
+      # If you move to a remote/managed database (e.g. RDS), set DB_SSL=true.
       # CORS - all allowed frontend origins
       ALLOWED_ORIGINS: https://www.accuratrials.com,https://accuratrials.com,https://api.accuratrials.com,https://edc-real.vercel.app,https://edc-real-james-guis-projects.vercel.app,https://edc-real-git-main-james-guis-projects.vercel.app,http://localhost:4200,http://localhost:3000
       # Backup container name (must match postgres container_name)

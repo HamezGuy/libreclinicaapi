@@ -27,7 +27,7 @@ describe('Form Service', () => {
       RETURNING study_id
     `, [`FORM-TEST-${Date.now()}`, 'Form Test Study', userId, `S_FORM_${Date.now()}`]);
     
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
 
     // Create a test CRF
     const crfResult = await testDb.pool.query(`
@@ -39,7 +39,7 @@ describe('Form Service', () => {
       RETURNING crf_id
     `, [`Test CRF ${Date.now()}`, userId, `F_TEST_${Date.now()}`, testStudyId]);
 
-    testCrfId = crfResult.rows[0].crf_id;
+    testCrfId = crfResult.rows[0].crfId;
 
     // Create CRF version
     await testDb.pool.query(`
@@ -70,9 +70,9 @@ describe('Form Service', () => {
       expect(Array.isArray(forms)).toBe(true);
       expect(forms.length).toBeGreaterThan(0);
       
-      const testForm = forms.find(f => f.crf_id === testCrfId);
+      const testForm = forms.find(f => f.crfId === testCrfId);
       expect(testForm).toBeDefined();
-      expect(testForm.status_id).toBe(1);
+      expect(testForm.statusId).toBe(1);
     });
   });
 
@@ -82,7 +82,7 @@ describe('Form Service', () => {
 
       expect(Array.isArray(forms)).toBe(true);
       expect(forms.length).toBeGreaterThan(0);
-      expect(forms[0].crf_id).toBe(testCrfId);
+      expect(forms[0].crfId).toBe(testCrfId);
     });
   });
 
@@ -91,8 +91,8 @@ describe('Form Service', () => {
       const form = await formService.getFormById(testCrfId);
 
       expect(form).toBeDefined();
-      expect(form.crf_id).toBe(testCrfId);
-      expect(form.version_count).toBeGreaterThan(0);
+      expect(form.crfId).toBe(testCrfId);
+      expect(form.versionCount).toBeGreaterThan(0);
     });
 
     it('should return null for non-existent form', async () => {
@@ -143,7 +143,7 @@ describe('Form Service', () => {
         RETURNING study_event_definition_id
       `, [testStudyId, `SE_FORMDATA_${Date.now()}`]);
 
-      const eventDefId = eventDefResult.rows[0].study_event_definition_id;
+      const eventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
       // Create subject for this test
       const subjectResult = await testDb.pool.query(`
@@ -152,7 +152,7 @@ describe('Form Service', () => {
         RETURNING subject_id
       `);
 
-      const subjectId = subjectResult.rows[0].subject_id;
+      const subjectId = subjectResult.rows[0].subjectId;
 
       const studySubjectResult = await testDb.pool.query(`
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
@@ -160,7 +160,7 @@ describe('Form Service', () => {
         RETURNING study_subject_id
       `, [`FORMDATA-SUB-${Date.now()}`, subjectId, testStudyId, `SS_FD_${Date.now()}`]);
 
-      const studySubjectId = studySubjectResult.rows[0].study_subject_id;
+      const studySubjectId = studySubjectResult.rows[0].studySubjectId;
 
       // Create study event
       const eventResult = await testDb.pool.query(`
@@ -169,7 +169,7 @@ describe('Form Service', () => {
         RETURNING study_event_id
       `, [eventDefId, studySubjectId, userId]);
 
-      const studyEventId = eventResult.rows[0].study_event_id;
+      const studyEventId = eventResult.rows[0].studyEventId;
 
       // Create CRF version for event CRF
       const crfVersionResult = await testDb.pool.query(`
@@ -178,7 +178,7 @@ describe('Form Service', () => {
         RETURNING crf_version_id
       `, [testCrfId, userId, `FV_FD_${Date.now()}`]);
 
-      const crfVersionId = crfVersionResult.rows[0].crf_version_id;
+      const crfVersionId = crfVersionResult.rows[0].crfVersionId;
 
       // Create event CRF
       const eventCrfResult = await testDb.pool.query(`
@@ -187,7 +187,7 @@ describe('Form Service', () => {
         RETURNING event_crf_id
       `, [studyEventId, crfVersionId, userId, studySubjectId]);
 
-      testEventCrfId = eventCrfResult.rows[0].event_crf_id;
+      testEventCrfId = eventCrfResult.rows[0].eventCrfId;
 
       // Create item
       const itemResult = await testDb.pool.query(`
@@ -196,7 +196,7 @@ describe('Form Service', () => {
         RETURNING item_id
       `, [`test_item_${Date.now()}`, userId, `I_FD_${Date.now()}`]);
 
-      testItemId = itemResult.rows[0].item_id;
+      testItemId = itemResult.rows[0].itemId;
 
       // Create item data
       await testDb.pool.query(`
@@ -215,8 +215,8 @@ describe('Form Service', () => {
       const data = await formService.getFormData(testEventCrfId);
 
       if (data.length > 0) {
-        expect(data[0].item_data_id).toBeDefined();
-        expect(data[0].item_name).toBeDefined();
+        expect(data[0].itemDataId).toBeDefined();
+        expect(data[0].itemName).toBeDefined();
         expect(data[0].value).toBeDefined();
       }
     });
@@ -254,7 +254,7 @@ describe('Form Service', () => {
         RETURNING study_event_definition_id
       `, [testStudyId, `SE_FORMST_${Date.now()}`]);
 
-      const eventDefId = eventDefResult.rows[0].study_event_definition_id;
+      const eventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
       const subjectResult = await testDb.pool.query(`
         INSERT INTO subject (status_id, date_created, owner_id)
@@ -262,7 +262,7 @@ describe('Form Service', () => {
         RETURNING subject_id
       `);
 
-      const subjectId = subjectResult.rows[0].subject_id;
+      const subjectId = subjectResult.rows[0].subjectId;
 
       const studySubjectResult = await testDb.pool.query(`
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
@@ -270,7 +270,7 @@ describe('Form Service', () => {
         RETURNING study_subject_id
       `, [`FORMST-SUB-${Date.now()}`, subjectId, testStudyId, `SS_FS_${Date.now()}`]);
 
-      const studySubjectId = studySubjectResult.rows[0].study_subject_id;
+      const studySubjectId = studySubjectResult.rows[0].studySubjectId;
 
       const eventResult = await testDb.pool.query(`
         INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id)
@@ -278,7 +278,7 @@ describe('Form Service', () => {
         RETURNING study_event_id
       `, [eventDefId, studySubjectId, userId]);
 
-      const studyEventId = eventResult.rows[0].study_event_id;
+      const studyEventId = eventResult.rows[0].studyEventId;
 
       const crfVersionResult = await testDb.pool.query(`
         INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
@@ -286,7 +286,7 @@ describe('Form Service', () => {
         RETURNING crf_version_id
       `, [testCrfId, userId, `FV_FS_${Date.now()}`]);
 
-      const crfVersionId = crfVersionResult.rows[0].crf_version_id;
+      const crfVersionId = crfVersionResult.rows[0].crfVersionId;
 
       const eventCrfResult = await testDb.pool.query(`
         INSERT INTO event_crf (study_event_id, crf_version_id, status_id, owner_id, date_created, study_subject_id, completion_status_id, sdv_status)
@@ -294,39 +294,39 @@ describe('Form Service', () => {
         RETURNING event_crf_id
       `, [studyEventId, crfVersionId, userId, studySubjectId]);
 
-      testEventCrfId = eventCrfResult.rows[0].event_crf_id;
+      testEventCrfId = eventCrfResult.rows[0].eventCrfId;
     });
 
     it('should return form status for event CRF', async () => {
       const status = await formService.getFormStatus(testEventCrfId);
 
       expect(status).toBeDefined();
-      expect(status.event_crf_id).toBe(testEventCrfId);
+      expect(status.eventCrfId).toBe(testEventCrfId);
     });
 
     it('should include completion status', async () => {
       const status = await formService.getFormStatus(testEventCrfId);
 
-      expect(status.completion_status_id).toBeDefined();
-      expect(status.completion_status).toBeDefined();
+      expect(status.completionStatusId).toBeDefined();
+      expect(status.completionStatus).toBeDefined();
     });
 
     it('should include SDV status', async () => {
       const status = await formService.getFormStatus(testEventCrfId);
 
-      expect(status.sdv_status).toBeDefined();
+      expect(status.sdvStatus).toBeDefined();
     });
 
     it('should include date information', async () => {
       const status = await formService.getFormStatus(testEventCrfId);
 
-      expect(status.date_created).toBeDefined();
+      expect(status.dateCreated).toBeDefined();
     });
 
     it('should include user information', async () => {
       const status = await formService.getFormStatus(testEventCrfId);
 
-      expect(status.created_by).toBeDefined();
+      expect(status.createdBy).toBeDefined();
     });
 
     it('should return null for non-existent event CRF', async () => {
@@ -376,7 +376,7 @@ describe('Form Service', () => {
       expect(dbCheck.rows.length).toBe(1);
       expect(dbCheck.rows[0].name).toBe(formData.name);
       expect(dbCheck.rows[0].description).toBe(formData.description);
-      expect(dbCheck.rows[0].status_id).toBe(1); // available
+      expect(dbCheck.rows[0].statusId).toBe(1); // available
     });
 
     it('should create initial version when creating form', async () => {
@@ -431,7 +431,7 @@ describe('Form Service', () => {
         [result.crfId]
       );
 
-      expect(dbCheck.rows[0].source_study_id).toBe(testStudyId);
+      expect(dbCheck.rows[0].sourceStudyId).toBe(testStudyId);
     });
   });
 
@@ -446,7 +446,7 @@ describe('Form Service', () => {
         RETURNING crf_id
       `, [`Update Test Form ${Date.now()}`, userId, `F_UPDATE_${Date.now()}`]);
 
-      updateTestCrfId = result.rows[0].crf_id;
+      updateTestCrfId = result.rows[0].crfId;
     });
 
     afterAll(async () => {
@@ -501,7 +501,7 @@ describe('Form Service', () => {
         [updateTestCrfId]
       );
 
-      expect(dbCheck.rows[0].status_id).toBe(1); // published = available
+      expect(dbCheck.rows[0].statusId).toBe(1); // published = available
     });
 
     it('should update status to draft (status_id = 2)', async () => {
@@ -515,7 +515,7 @@ describe('Form Service', () => {
         [updateTestCrfId]
       );
 
-      expect(dbCheck.rows[0].status_id).toBe(2); // draft = unavailable
+      expect(dbCheck.rows[0].statusId).toBe(2); // draft = unavailable
     });
 
     it('should update status to archived (status_id = 5)', async () => {
@@ -529,7 +529,7 @@ describe('Form Service', () => {
         [updateTestCrfId]
       );
 
-      expect(dbCheck.rows[0].status_id).toBe(5); // archived = removed
+      expect(dbCheck.rows[0].statusId).toBe(5); // archived = removed
     });
 
     it('should update date_updated timestamp', async () => {
@@ -548,8 +548,8 @@ describe('Form Service', () => {
       );
 
       // date_updated should be more recent
-      expect(new Date(afterUpdate.rows[0].date_updated).getTime())
-        .toBeGreaterThanOrEqual(new Date(beforeUpdate.rows[0].date_updated || 0).getTime());
+      expect(new Date(afterUpdate.rows[0].dateUpdated).getTime())
+        .toBeGreaterThanOrEqual(new Date(beforeUpdate.rows[0].dateUpdated || 0).getTime());
     });
 
     it('should update the update_id to the updating user', async () => {
@@ -562,7 +562,7 @@ describe('Form Service', () => {
         [updateTestCrfId]
       );
 
-      expect(dbCheck.rows[0].update_id).toBe(userId);
+      expect(dbCheck.rows[0].updateId).toBe(userId);
     });
   });
 
@@ -577,7 +577,7 @@ describe('Form Service', () => {
         RETURNING crf_id
       `, [`Delete Test Form ${Date.now()}`, userId, `F_DELETE_${Date.now()}`]);
 
-      deleteTestCrfId = result.rows[0].crf_id;
+      deleteTestCrfId = result.rows[0].crfId;
     });
 
     afterEach(async () => {
@@ -599,7 +599,7 @@ describe('Form Service', () => {
       );
 
       expect(dbCheck.rows.length).toBe(1);
-      expect(dbCheck.rows[0].status_id).toBe(5); // removed
+      expect(dbCheck.rows[0].statusId).toBe(5); // removed
     });
 
     it('should prevent deletion of form in use by subjects', async () => {
@@ -610,7 +610,7 @@ describe('Form Service', () => {
         RETURNING crf_version_id
       `, [deleteTestCrfId, userId, `FV_DEL_${Date.now()}`]);
 
-      const crfVersionId = versionResult.rows[0].crf_version_id;
+      const crfVersionId = versionResult.rows[0].crfVersionId;
 
       // Create minimal event_crf (form in use)
       const subjectResult = await testDb.pool.query(`
@@ -623,7 +623,7 @@ describe('Form Service', () => {
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
         VALUES ($1, $2, $3, 1, NOW(), $4)
         RETURNING study_subject_id
-      `, [`DEL-SUB-${Date.now()}`, subjectResult.rows[0].subject_id, testStudyId, `SS_DEL_${Date.now()}`]);
+      `, [`DEL-SUB-${Date.now()}`, subjectResult.rows[0].subjectId, testStudyId, `SS_DEL_${Date.now()}`]);
 
       const eventDefResult = await testDb.pool.query(`
         INSERT INTO study_event_definition (study_id, name, repeating, type, ordinal, status_id, date_created, oc_oid)
@@ -635,12 +635,12 @@ describe('Form Service', () => {
         INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id)
         VALUES ($1, $2, NOW(), 1, $3, NOW(), 1)
         RETURNING study_event_id
-      `, [eventDefResult.rows[0].study_event_definition_id, studySubjectResult.rows[0].study_subject_id, userId]);
+      `, [eventDefResult.rows[0].studyEventDefinitionId, studySubjectResult.rows[0].studySubjectId, userId]);
 
       await testDb.pool.query(`
         INSERT INTO event_crf (study_event_id, crf_version_id, status_id, owner_id, date_created, study_subject_id, completion_status_id)
         VALUES ($1, $2, 1, $3, NOW(), $4, 1)
-      `, [eventResult.rows[0].study_event_id, crfVersionId, userId, studySubjectResult.rows[0].study_subject_id]);
+      `, [eventResult.rows[0].studyEventId, crfVersionId, userId, studySubjectResult.rows[0].studySubjectId]);
 
       // Now try to delete - should fail
       const result = await formService.deleteForm(deleteTestCrfId, userId);
@@ -680,7 +680,7 @@ describe('Form Service', () => {
       // Verify creation in database
       let dbCheck = await testDb.pool.query('SELECT * FROM crf WHERE crf_id = $1', [e2eCrfId]);
       expect(dbCheck.rows[0].name).toBe(createData.name);
-      expect(dbCheck.rows[0].status_id).toBe(1);
+      expect(dbCheck.rows[0].statusId).toBe(1);
       console.log('✓ Form created successfully');
 
       // 2. READ
@@ -706,7 +706,7 @@ describe('Form Service', () => {
       expect(draftResult.success).toBe(true);
 
       dbCheck = await testDb.pool.query('SELECT status_id FROM crf WHERE crf_id = $1', [e2eCrfId]);
-      expect(dbCheck.rows[0].status_id).toBe(2);
+      expect(dbCheck.rows[0].statusId).toBe(2);
       console.log('✓ Status set to draft (status_id=2)');
 
       // 5. UPDATE - Status to published
@@ -715,7 +715,7 @@ describe('Form Service', () => {
       expect(publishResult.success).toBe(true);
 
       dbCheck = await testDb.pool.query('SELECT status_id FROM crf WHERE crf_id = $1', [e2eCrfId]);
-      expect(dbCheck.rows[0].status_id).toBe(1);
+      expect(dbCheck.rows[0].statusId).toBe(1);
       console.log('✓ Status set to published (status_id=1)');
 
       // 6. DELETE
@@ -724,7 +724,7 @@ describe('Form Service', () => {
       expect(deleteResult.success).toBe(true);
 
       dbCheck = await testDb.pool.query('SELECT status_id FROM crf WHERE crf_id = $1', [e2eCrfId]);
-      expect(dbCheck.rows[0].status_id).toBe(5); // soft deleted
+      expect(dbCheck.rows[0].statusId).toBe(5); // soft deleted
       console.log('✓ Form deleted (soft delete, status_id=5)');
 
       console.log('\n✅ End-to-End CRUD lifecycle complete!');

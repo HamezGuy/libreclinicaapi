@@ -52,8 +52,10 @@ export interface LockEligibility {
  * - All queries are closed (resolution_status_id = 4 means closed)
  * - All required forms are complete (status_id in (2, 6) = data complete or already locked)
  */
-export const checkSubjectLockEligibility = async (studySubjectId: number): Promise<LockEligibility> => {
+export const checkSubjectLockEligibility = async (studySubjectId: number, client?: any): Promise<LockEligibility> => {
   logger.info('Checking lock eligibility for subject', { studySubjectId });
+
+  const queryRunner = client || pool;
 
   try {
     // Get open queries for this subject
@@ -89,11 +91,11 @@ export const checkSubjectLockEligibility = async (studySubjectId: number): Promi
           )
         )
     `;
-    const openQueriesResult = await pool.query(openQueriesQuery, [studySubjectId]);
+    const openQueriesResult = await queryRunner.query(openQueriesQuery, [studySubjectId]);
     const openQueries = parseInt(openQueriesResult.rows[0]?.count || '0');
 
-    // Get form completion status
-    // completion_status_id >= 4 means all fields filled, status_id=2 means explicitly marked complete, status_id=6 means locked
+    // Get form completion status (with FOR UPDATE when inside a transaction)
+    const forUpdateClause = client ? 'FOR UPDATE OF ec' : '';
     const formsQuery = `
       SELECT 
         COUNT(*) as total_forms,
@@ -104,11 +106,12 @@ export const checkSubjectLockEligibility = async (studySubjectId: number): Promi
       WHERE se.study_subject_id = $1
         AND ec.status_id != 5  -- Exclude removed
         AND ec.status_id != 7  -- Exclude auto-removed
+      ${forUpdateClause}
     `;
-    const formsResult = await pool.query(formsQuery, [studySubjectId]);
-    const totalForms = parseInt(formsResult.rows[0]?.total_forms || '0');
-    const completedForms = parseInt(formsResult.rows[0]?.completed_forms || '0');
-    const incompleteForms = parseInt(formsResult.rows[0]?.incomplete_forms || '0');
+    const formsResult = await queryRunner.query(formsQuery, [studySubjectId]);
+    const totalForms = parseInt(formsResult.rows[0]?.totalForms || '0');
+    const completedForms = parseInt(formsResult.rows[0]?.completedForms || '0');
+    const incompleteForms = parseInt(formsResult.rows[0]?.incompleteForms || '0');
 
     // Get SDV status (if SDV is enabled - check for acc_sdv_status table)
     let pendingSDV = 0;
@@ -121,10 +124,9 @@ export const checkSubjectLockEligibility = async (studySubjectId: number): Promi
         WHERE se.study_subject_id = $1
           AND sdv.sdv_status = 'pending'
       `;
-      const sdvResult = await pool.query(sdvQuery, [studySubjectId]);
+      const sdvResult = await queryRunner.query(sdvQuery, [studySubjectId]);
       pendingSDV = parseInt(sdvResult.rows[0]?.count || '0');
     } catch (sdvError) {
-      // acc_sdv_status table might not exist - ignore
       logger.debug('SDV table not found, skipping SDV check');
     }
 
@@ -161,14 +163,16 @@ export const checkSubjectLockEligibility = async (studySubjectId: number): Promi
 /**
  * Check if a specific study event (visit) is eligible for locking
  */
-export const checkEventLockEligibility = async (studyEventId: number): Promise<LockEligibility> => {
+export const checkEventLockEligibility = async (studyEventId: number, client?: any): Promise<LockEligibility> => {
   logger.info('Checking lock eligibility for event', { studyEventId });
+
+  const queryRunner = client || pool;
 
   try {
     // Get subject ID for this event
     const subjectQuery = `SELECT study_subject_id FROM study_event WHERE study_event_id = $1`;
-    const subjectResult = await pool.query(subjectQuery, [studyEventId]);
-    const subjectId = subjectResult.rows[0]?.study_subject_id;
+    const subjectResult = await queryRunner.query(subjectQuery, [studyEventId]);
+    const subjectId = subjectResult.rows[0]?.studySubjectId;
 
     // Count open queries for this event via ALL mapping tables
     const openQueriesQuery = `
@@ -192,10 +196,11 @@ export const checkEventLockEligibility = async (studyEventId: number): Promise<L
           )
         )
     `;
-    const openQueriesResult = await pool.query(openQueriesQuery, [studyEventId]);
+    const openQueriesResult = await queryRunner.query(openQueriesQuery, [studyEventId]);
     const openQueries = parseInt(openQueriesResult.rows[0]?.count || '0');
 
-    // Get form completion status for this event
+    // Get form completion status for this event (with FOR UPDATE when inside a transaction)
+    const forUpdateClause = client ? 'FOR UPDATE OF ec' : '';
     const formsQuery = `
       SELECT 
         COUNT(*) as total_forms,
@@ -204,11 +209,12 @@ export const checkEventLockEligibility = async (studyEventId: number): Promise<L
       FROM event_crf ec
       WHERE ec.study_event_id = $1
         AND ec.status_id NOT IN (5, 7)
+      ${forUpdateClause}
     `;
-    const formsResult = await pool.query(formsQuery, [studyEventId]);
-    const totalForms = parseInt(formsResult.rows[0]?.total_forms || '0');
-    const completedForms = parseInt(formsResult.rows[0]?.completed_forms || '0');
-    const incompleteForms = parseInt(formsResult.rows[0]?.incomplete_forms || '0');
+    const formsResult = await queryRunner.query(formsQuery, [studyEventId]);
+    const totalForms = parseInt(formsResult.rows[0]?.totalForms || '0');
+    const completedForms = parseInt(formsResult.rows[0]?.completedForms || '0');
+    const incompleteForms = parseInt(formsResult.rows[0]?.incompleteForms || '0');
 
     const reasons: string[] = [];
     if (openQueries > 0) {
@@ -254,18 +260,19 @@ export const lockSubjectData = async (
   const client = await pool.connect();
 
   try {
-    // Check eligibility first (unless skipped by admin)
-    const eligibility = await checkSubjectLockEligibility(studySubjectId);
+    await client.query('BEGIN');
+
+    // Check eligibility inside the transaction (unless skipped by admin)
+    const eligibility = await checkSubjectLockEligibility(studySubjectId, client);
     
     if (!skipValidation && !eligibility.canLock) {
+      await client.query('ROLLBACK');
       return {
         success: false,
         message: `Cannot lock data: ${eligibility.reasons.join('; ')}`,
         eligibility
       };
     }
-
-    await client.query('BEGIN');
 
     // Lock all event CRFs for this subject
     const lockQuery = `
@@ -324,17 +331,18 @@ export const lockEventData = async (
   const client = await pool.connect();
 
   try {
-    const eligibility = await checkEventLockEligibility(studyEventId);
+    await client.query('BEGIN');
+
+    const eligibility = await checkEventLockEligibility(studyEventId, client);
 
     if (!skipValidation && !eligibility.canLock) {
+      await client.query('ROLLBACK');
       return {
         success: false,
         message: `Cannot lock data: ${eligibility.reasons.join('; ')}`,
         eligibility
       };
     }
-
-    await client.query('BEGIN');
 
     // Lock all event CRFs for this event
     const lockQuery = `
@@ -358,7 +366,7 @@ export const lockEventData = async (
     `;
     const eventResult = await client.query(eventQuery, [studyEventId]);
     const eventName = eventResult.rows[0]?.name || studyEventId;
-    const subjectLabel = eventResult.rows[0]?.subject_label;
+    const subjectLabel = eventResult.rows[0]?.subjectLabel;
 
     // Audit log
     await client.query(`
@@ -514,8 +522,8 @@ export const getLockedRecords = async (filters: {
       data: result.rows.map((row: any) => ({
         ...row,
         locked: true,
-        lock_date: row.lock_date,
-        locked_by_name: row.locked_by
+        lock_date: row.lockDate,
+        locked_by_name: row.lockedBy
       })),
       pagination: {
         page,
@@ -555,6 +563,7 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
       FROM event_crf ec
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
       WHERE ec.event_crf_id = $1
+      FOR UPDATE OF ec
     `, [eventCrfId]);
 
     if (ecResult.rows.length === 0) {
@@ -565,7 +574,7 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
     }
 
     const ec = ecResult.rows[0];
-    if (ec.status_id === 6) {
+    if (ec.statusId === 6) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Record is already locked' };
     }
@@ -581,11 +590,11 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
         WHERE crf_id = $1
         ORDER BY study_id DESC NULLS LAST
         LIMIT 1
-      `, [ec.crf_id]);
+      `, [ec.crfId]);
       if (cfgResult.rows.length > 0) {
-        requiresSDV = cfgResult.rows[0].requires_sdv;
-        requiresSignature = cfgResult.rows[0].requires_signature;
-        requiresDDE = cfgResult.rows[0].requires_dde;
+        requiresSDV = cfgResult.rows[0].requiresSdv;
+        requiresSignature = cfgResult.rows[0].requiresSignature;
+        requiresDDE = cfgResult.rows[0].requiresDde;
       }
     } catch { /* table may not exist */ }
 
@@ -593,15 +602,15 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
     const blockingReasons: string[] = [];
 
     // Must be at least data_entry_complete (completion_status_id >= 4 or status_id = 2)
-    if (ec.completion_status_id < 4 && ec.status_id !== 2) {
+    if (ec.completionStatusId < 4 && ec.statusId !== 2) {
       blockingReasons.push('Form must be marked as complete before locking');
     }
 
-    if (requiresSDV && !ec.sdv_verified) {
+    if (requiresSDV && !ec.sdvVerified) {
       blockingReasons.push('Source Data Verification (SDV) is required but not yet completed');
     }
 
-    if (requiresSignature && ec.completion_status_id < 5 && !ec.is_signed) {
+    if (requiresSignature && ec.completionStatusId < 5 && !ec.isSigned) {
       blockingReasons.push('PI electronic signature is required but not yet applied');
     }
 
@@ -632,7 +641,7 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
     const openQueries = queryResult.rows.length;
     if (openQueries > 0) {
       const queryDetails = queryResult.rows.slice(0, 5).map(
-        (q: any) => `#${q.discrepancy_note_id} (${q.status_name || 'open'})`
+        (q: any) => `#${q.discrepancyNoteId} (${q.statusName || 'open'})`
       ).join(', ');
       const suffix = openQueries > 5 ? ` and ${openQueries - 5} more` : '';
       blockingReasons.push(
@@ -835,7 +844,7 @@ export const freezeRecord = async (
 
     // Check current state
     const ecResult = await client.query(
-      `SELECT status_id, completion_status_id, frozen FROM event_crf WHERE event_crf_id = $1`,
+      `SELECT status_id, completion_status_id, frozen FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`,
       [eventCrfId]
     );
     if (ecResult.rows.length === 0) {
@@ -843,7 +852,7 @@ export const freezeRecord = async (
       return { success: false, message: 'CRF instance not found' };
     }
     const ec = ecResult.rows[0];
-    if (ec.status_id === 6) {
+    if (ec.statusId === 6) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Form is already locked — cannot freeze a locked form' };
     }
@@ -853,7 +862,7 @@ export const freezeRecord = async (
     }
 
     // Must be at least data complete
-    if (ec.completion_status_id < 4 && ec.status_id !== 2) {
+    if (ec.completionStatusId < 4 && ec.statusId !== 2) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Form must be marked as complete before freezing' };
     }
@@ -1086,9 +1095,9 @@ export const getStudySanitationReport = async (
     const subjectStatusResult = await pool.query(subjectStatusQuery, [studyId]);
     const s = subjectStatusResult.rows[0] || {};
 
-    const totalSubjects = parseInt(s.total_subjects || '0');
-    const noData = parseInt(s.no_data || '0');
-    const inProgress = parseInt(s.in_progress || '0');
+    const totalSubjects = parseInt(s.totalSubjects || '0');
+    const noData = parseInt(s.noData || '0');
+    const inProgress = parseInt(s.inProgress || '0');
     const complete = parseInt(s.complete || '0');
     const frozen = parseInt(s.frozen || '0');
     const locked = parseInt(s.locked || '0');
@@ -1262,12 +1271,12 @@ export const getSanitationSubjects = async (
     const total = parseInt(countResult.rows[0]?.total || '0');
 
     const data: SanitationSubjectRow[] = result.rows.map((r: any) => {
-      const totalForms = parseInt(r.total_forms || '0');
-      const completeForms = parseInt(r.complete_forms || '0');
-      const frozenForms = parseInt(r.frozen_forms || '0');
-      const lockedForms = parseInt(r.locked_forms || '0');
-      const openQueries = parseInt(r.open_queries || '0');
-      const pendingSDV = parseInt(r.pending_sdv || '0');
+      const totalForms = parseInt(r.totalForms || '0');
+      const completeForms = parseInt(r.completeForms || '0');
+      const frozenForms = parseInt(r.frozenForms || '0');
+      const lockedForms = parseInt(r.lockedForms || '0');
+      const openQueries = parseInt(r.openQueries || '0');
+      const pendingSDV = parseInt(r.pendingSdv || '0');
 
       let overallStatus: SanitationSubjectRow['overallStatus'] = 'no_data';
       if (totalForms === 0) overallStatus = 'no_data';
@@ -1277,8 +1286,8 @@ export const getSanitationSubjects = async (
       else overallStatus = 'in_progress';
 
       return {
-        studySubjectId: r.study_subject_id,
-        subjectLabel: r.subject_label,
+        studySubjectId: r.studySubjectId,
+        subjectLabel: r.subjectLabel,
         totalForms,
         completeForms,
         frozenForms,
@@ -1334,9 +1343,9 @@ export const getStudyLockStatus = async (studyId: number): Promise<StudyLockStat
   const row = result.rows[0];
   return {
     studyId,
-    isLocked: !!row.database_lock_date,
-    databaseLockDate: row.database_lock_date,
-    lockedByName: row.locked_by_name
+    isLocked: !!row.databaseLockDate,
+    databaseLockDate: row.databaseLockDate,
+    lockedByName: row.lockedByName
   };
 };
 
@@ -1372,7 +1381,7 @@ export const lockStudy = async (
       await client.query('ROLLBACK');
       return { success: false, message: 'Study not found' };
     }
-    if (studyResult.rows[0].database_lock_date) {
+    if (studyResult.rows[0].databaseLockDate) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Study is already locked' };
     }
@@ -1553,7 +1562,7 @@ export const unlockEventData = async (
         `INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
          VALUES (NOW(), 'event_crf', $1, $2, 'Data Unlocked', $3,
            (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))`,
-        [userId, row.event_crf_id, reason]
+        [userId, row.eventCrfId, reason]
       );
     }
 
@@ -1624,12 +1633,12 @@ export const getSubjectCasebookReadiness = async (
   `, [studySubjectId]);
 
   const r = result.rows[0] || {};
-  const totalForms = parseInt(r.total_forms || '0');
-  const completedForms = parseInt(r.completed_forms || '0');
-  const sdvForms = parseInt(r.sdv_forms || '0');
-  const signedForms = parseInt(r.signed_forms || '0');
-  const lockedForms = parseInt(r.locked_forms || '0');
-  const frozenForms = parseInt(r.frozen_forms || '0');
+  const totalForms = parseInt(r.totalForms || '0');
+  const completedForms = parseInt(r.completedForms || '0');
+  const sdvForms = parseInt(r.sdvForms || '0');
+  const signedForms = parseInt(r.signedForms || '0');
+  const lockedForms = parseInt(r.lockedForms || '0');
+  const frozenForms = parseInt(r.frozenForms || '0');
 
   let readinessPercent = 0;
   if (totalForms > 0) {
@@ -1665,7 +1674,7 @@ export const getStudyCasebookReadiness = async (
   let aggTotal = 0, aggCompleted = 0, aggSdv = 0, aggSigned = 0, aggLocked = 0, aggFrozen = 0;
 
   for (const row of subjectsResult.rows) {
-    const readiness = await getSubjectCasebookReadiness(row.study_subject_id);
+    const readiness = await getSubjectCasebookReadiness(row.studySubjectId);
     subjects.push(readiness);
     aggTotal += readiness.totalForms;
     aggCompleted += readiness.completedForms;
@@ -1730,11 +1739,11 @@ export const getFormLockHistory = async (
   `, [eventCrfId]);
 
   return result.rows.map((r: any) => ({
-    auditDate: r.audit_date,
-    userName: r.user_name,
+    auditDate: r.auditDate,
+    userName: r.userName,
     action: r.action,
     reason: r.reason,
-    entityId: r.entity_id
+    entityId: r.entityId
   }));
 };
 
@@ -1770,11 +1779,11 @@ export const getSubjectLockHistory = async (
   `, [studySubjectId]);
 
   return result.rows.map((r: any) => ({
-    auditDate: r.audit_date,
-    userName: r.user_name,
+    auditDate: r.auditDate,
+    userName: r.userName,
     action: r.action,
     reason: r.reason,
-    entityId: r.entity_id
+    entityId: r.entityId
   }));
 };
 
@@ -1792,6 +1801,16 @@ export const freezeSubjectData = async (
 
   try {
     await client.query('BEGIN');
+
+    // Lock rows to prevent concurrent freeze/lock operations
+    await client.query(`
+      SELECT ec.event_crf_id
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      WHERE se.study_subject_id = $1
+        AND ec.status_id NOT IN (5, 6, 7)
+      FOR UPDATE OF ec
+    `, [studySubjectId]);
 
     const freezeResult = await client.query(`
       UPDATE event_crf ec
@@ -1816,7 +1835,7 @@ export const freezeSubjectData = async (
         INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
         VALUES (NOW(), 'event_crf', $1, $2, 'Data Frozen', $3,
           (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
-      `, [userId, row.event_crf_id, reason || null]);
+      `, [userId, row.eventCrfId, reason || null]);
     }
 
     await client.query(`
@@ -1876,7 +1895,7 @@ export const unfreezeSubjectData = async (
         INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
         VALUES (NOW(), 'event_crf', $1, $2, 'Data Unfrozen', $3,
           (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
-      `, [userId, row.event_crf_id, reason]);
+      `, [userId, row.eventCrfId, reason]);
     }
 
     await client.query(`

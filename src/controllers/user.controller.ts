@@ -68,11 +68,7 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
 export const getRoles = asyncHandler(async (req: Request, res: Response) => {
   const roles = userService.getAvailableRoles();
 
-  res.json({
-    success: true,
-    data: roles,
-    message: 'Available LibreClinica roles'
-  });
+  res.json({ success: true, data: roles });
 });
 
 /**

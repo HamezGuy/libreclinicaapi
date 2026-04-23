@@ -99,7 +99,7 @@ export const getUserCustomPermissions = async (
     );
     const perms: Record<string, boolean> = {};
     for (const row of result.rows) {
-      perms[row.permission_key] = row.granted;
+      perms[row.permissionKey] = row.granted;
     }
     return perms;
   } catch (error: any) {
@@ -124,43 +124,61 @@ export const setUserCustomPermissions = async (
   permissions: Record<string, boolean | null>,
   grantedBy: number
 ): Promise<{ success: boolean; message: string; updated: number }> => {
+  const client = await pool.connect();
   try {
     await ensureTable();
-    
-    let updated = 0;
+
+    const keysToDelete: string[] = [];
+    const upsertKeys: string[] = [];
+    const upsertValues: boolean[] = [];
 
     for (const [key, value] of Object.entries(permissions)) {
       if (!VALID_PERMISSION_KEYS.has(key)) {
         logger.warn('Ignoring invalid permission key', { key, userId });
         continue;
       }
-
       if (value === null) {
-        // Remove override
-        const delResult = await pool.query(
-          `DELETE FROM user_custom_permissions WHERE user_id = $1 AND permission_key = $2`,
-          [userId, key]
-        );
-        if (delResult.rowCount && delResult.rowCount > 0) updated++;
+        keysToDelete.push(key);
       } else {
-        // Upsert override
-        await pool.query(
-          `INSERT INTO user_custom_permissions (user_id, permission_key, granted, granted_by, date_created, date_updated)
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (user_id, permission_key)
-           DO UPDATE SET granted = EXCLUDED.granted, granted_by = EXCLUDED.granted_by, date_updated = NOW()`,
-          [userId, key, value, grantedBy]
-        );
-        updated++;
+        upsertKeys.push(key);
+        upsertValues.push(value);
       }
     }
+
+    await client.query('BEGIN');
+
+    let updated = 0;
+
+    if (keysToDelete.length > 0) {
+      const delResult = await client.query(
+        `DELETE FROM user_custom_permissions WHERE user_id = $1 AND permission_key = ANY($2::text[])`,
+        [userId, keysToDelete]
+      );
+      updated += delResult.rowCount || 0;
+    }
+
+    if (upsertKeys.length > 0) {
+      const upsertResult = await client.query(`
+        INSERT INTO user_custom_permissions (user_id, permission_key, granted, granted_by, date_created, date_updated)
+        SELECT $1, key, val, $4, NOW(), NOW()
+        FROM unnest($2::text[], $3::boolean[]) AS t(key, val)
+        ON CONFLICT (user_id, permission_key)
+        DO UPDATE SET granted = EXCLUDED.granted, granted_by = EXCLUDED.granted_by, date_updated = NOW()
+      `, [userId, upsertKeys, upsertValues, grantedBy]);
+      updated += upsertResult.rowCount || 0;
+    }
+
+    await client.query('COMMIT');
 
     logger.info('Custom permissions updated', { userId, updated, grantedBy });
 
     return { success: true, message: `Updated ${updated} permission(s)`, updated };
   } catch (error: any) {
+    await client.query('ROLLBACK');
     logger.error('Failed to set custom permissions', { error: error.message, userId });
     return { success: false, message: 'Failed to update permissions: ' + error.message, updated: 0 };
+  } finally {
+    client.release();
   }
 };
 

@@ -323,24 +323,15 @@ export const recordElectronicSignature = async (
 
 /**
  * Get audit statistics
- * Uses database for aggregation queries
+ * Re-exported from database service
  */
-export const getAuditStats = async (
-  days: number = 30
-): Promise<ApiResponse<any>> => {
-  return auditDb.getAuditStats(days);
-};
+export { getAuditStats } from '../database/audit.service';
 
 /**
  * Export audit logs
- * Uses database for complete data export
+ * Re-exported from database service
  */
-export const exportAuditLogs = async (
-  params: AuditQueryParams,
-  format: 'csv' | 'json' = 'csv'
-): Promise<ApiResponse<any>> => {
-  return auditDb.exportAuditLogs(params, format);
-};
+export { exportAuditLogs } from '../database/audit.service';
 
 /**
  * Get compliance report
@@ -383,8 +374,6 @@ export default {
   getSubjectAuditTrail,
   getFormAuditTrail,
   recordElectronicSignature,
-  getAuditStats,
-  exportAuditLogs,
   getComplianceReport,
   getServiceStatus
 };

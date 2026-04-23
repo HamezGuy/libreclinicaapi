@@ -42,8 +42,7 @@ export class WorkflowController {
       
       const response: ApiResponse = {
         success: true,
-        data: result.data,
-        message: 'Workflows retrieved successfully'
+        data: result.data
       };
       
       res.json(response);

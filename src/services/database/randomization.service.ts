@@ -87,12 +87,22 @@ export const createRandomization = async (data: {
   try {
     await client.query('BEGIN');
 
+    // Prevent duplicate randomization (race condition guard)
+    const existingResult = await client.query(
+      'SELECT 1 FROM subject_group_map WHERE study_subject_id = $1 AND status_id = 1 FOR UPDATE',
+      [data.studySubjectId]
+    );
+    if (existingResult.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return { success: false, data: null, message: 'Subject is already randomized' };
+    }
+
     // Get the study_group_class_id from the study_group
     const groupQuery = `
       SELECT study_group_class_id FROM study_group WHERE study_group_id = $1
     `;
     const groupResult = await client.query(groupQuery, [data.studyGroupId]);
-    const studyGroupClassId = groupResult.rows[0]?.study_group_class_id;
+    const studyGroupClassId = groupResult.rows[0]?.studyGroupClassId;
 
     // Insert with all required fields including study_group_class_id and status_id
     const insertQuery = `
@@ -107,7 +117,7 @@ export const createRandomization = async (data: {
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
       VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Randomized', 28)
-    `, [userId, result.rows[0].subject_group_map_id]);
+    `, [userId, result.rows[0].subjectGroupMapId]);
 
     await client.query('COMMIT');
 
@@ -143,19 +153,19 @@ export const getRandomizationStats = async (studyId: number) => {
 
     const result = await pool.query(query, [studyId]);
     
-    const totalRandomized = result.rows.reduce((sum, row) => sum + parseInt(row.subject_count || 0), 0);
+    const totalRandomized = result.rows.reduce((sum, row) => sum + parseInt(row.subjectCount || 0), 0);
 
     return {
       success: true,
       data: {
         totalRandomized,
         groups: result.rows.map(row => ({
-          groupId: row.study_group_id,
-          groupName: row.group_name,
-          className: row.class_name,
-          subjectCount: parseInt(row.subject_count) || 0,
+          groupId: row.studyGroupId,
+          groupName: row.groupName,
+          className: row.className,
+          subjectCount: parseInt(row.subjectCount) || 0,
           percentage: totalRandomized > 0 
-            ? Math.round((parseInt(row.subject_count) / totalRandomized) * 100) 
+            ? Math.round((parseInt(row.subjectCount) / totalRandomized) * 100) 
             : 0
         }))
       }
@@ -192,7 +202,7 @@ export const canRandomize = async (subjectId: number) => {
     `;
 
     const subject = await pool.query(subjectQuery, [subjectId]);
-    const isActive = subject.rows[0]?.status_name === 'available';
+    const isActive = subject.rows[0]?.statusName === 'available';
 
     return {
       success: true,
@@ -266,7 +276,7 @@ export const removeRandomization = async (subjectId: number, userId: number) => 
       await client.query(`
         INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
         VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Randomization Removed', 29)
-      `, [userId, result.rows[0].subject_group_map_id]);
+      `, [userId, result.rows[0].subjectGroupMapId]);
     }
 
     await client.query('COMMIT');
@@ -345,7 +355,7 @@ export const unblindSubject = async (subjectId: number, userId: number, reason: 
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
       VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Unblinded', 'Blinded', $3, 29)
-    `, [userId, randomization.data.subject_group_map_id, `Unblinded - Reason: ${reason}`]);
+    `, [userId, randomization.data.subjectGroupMapId, `Unblinded - Reason: ${reason}`]);
 
     await client.query('COMMIT');
 
@@ -353,8 +363,8 @@ export const unblindSubject = async (subjectId: number, userId: number, reason: 
       success: true, 
       data: {
         subjectId,
-        groupName: randomization.data.group_name,
-        className: randomization.data.class_name,
+        groupName: randomization.data.groupName,
+        className: randomization.data.className,
         unblindedAt: new Date(),
         reason
       }

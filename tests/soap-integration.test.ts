@@ -370,7 +370,7 @@ describe('SOAP Integration: API → LibreClinica SOAP Services', () => {
 
       expect(studyCheck.rows.length).toBe(1);
       expect(subjectCheck.rows.length).toBe(1);
-      expect(subjectCheck.rows[0].study_id).toBe(studyId);
+      expect(subjectCheck.rows[0].studyId).toBe(studyId);
     });
   });
 });

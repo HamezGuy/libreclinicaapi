@@ -20,4 +20,4 @@ END $$;
 UPDATE discrepancy_note
 SET generation_type = 'automatic'
 WHERE discrepancy_note_type_id = 1
-  AND generation_type IS NULL OR generation_type = 'manual';
+  AND (generation_type IS NULL OR generation_type = 'manual');

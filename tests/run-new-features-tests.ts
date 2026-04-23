@@ -204,7 +204,7 @@ async function verifyTableSchema(pool: Pool, tableName: string, expectedColumns:
       `SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position`,
       [tableName]
     );
-    const actualColumns = result.rows.map(r => r.column_name);
+    const actualColumns = result.rows.map(r => r.columnName);
     
     const missing = expectedColumns.filter(col => !actualColumns.includes(col));
     const extra = actualColumns.filter(col => !expectedColumns.includes(col));
@@ -309,9 +309,9 @@ async function runTests() {
           INSERT INTO acc_email_queue (template_id, recipient_email, subject, html_body, status, priority, date_created, scheduled_for)
           VALUES ($1, 'test@test.com', 'Test Subject', '<p>Test</p>', 'pending', 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
           RETURNING queue_id
-        `, [templateResult.rows[0].template_id]);
+        `, [templateResult.rows[0].templateId]);
 
-        const queueId = insertResult.rows[0].queue_id;
+        const queueId = insertResult.rows[0].queueId;
         const retrieveResult = await client.query(`SELECT * FROM acc_email_queue WHERE queue_id = $1`, [queueId]);
 
         if (retrieveResult.rows.length !== 1) {
@@ -341,7 +341,7 @@ async function runTests() {
         throw new Error('No study subjects found in database');
       }
 
-      const { study_subject_id, study_id } = subjectResult.rows[0];
+      const { studySubjectId: study_subject_id, studyId: study_id } = subjectResult.rows[0];
 
       // Find two valid sites (studies that are children of a parent study or standalone studies)
       const sitesResult = await client.query(`
@@ -350,7 +350,7 @@ async function runTests() {
       
       // Use study_id itself as source and destination for simplicity (or first available)
       const sourceSiteId = study_id;
-      const destSiteId = sitesResult.rows.length > 0 ? sitesResult.rows[0].study_id : study_id;
+      const destSiteId = sitesResult.rows.length > 0 ? sitesResult.rows[0].studyId : study_id;
 
       // Insert transfer log with valid foreign keys
       const insertResult = await client.query(`
@@ -361,7 +361,7 @@ async function runTests() {
         RETURNING transfer_id
       `, [study_subject_id, study_id, sourceSiteId, destSiteId]);
 
-      const transferId = insertResult.rows[0].transfer_id;
+      const transferId = insertResult.rows[0].transferId;
       const verifyResult = await client.query(`SELECT * FROM acc_transfer_log WHERE transfer_id = $1`, [transferId]);
 
       if (verifyResult.rows.length !== 1) {
@@ -395,7 +395,7 @@ async function runTests() {
         return;
       }
 
-      const eventCrfId = eventCrfResult.rows[0].event_crf_id;
+      const eventCrfId = eventCrfResult.rows[0].eventCrfId;
 
       // Insert DDE status
       const statusResult = await client.query(`
@@ -405,11 +405,11 @@ async function runTests() {
         RETURNING status_id
       `, [eventCrfId]);
 
-      const statusId = statusResult.rows[0].status_id;
+      const statusId = statusResult.rows[0].statusId;
 
       // Get a valid item_id
       const itemResult = await client.query(`SELECT item_id FROM item LIMIT 1`);
-      const itemId = itemResult.rows.length > 0 ? itemResult.rows[0].item_id : 1;
+      const itemId = itemResult.rows.length > 0 ? itemResult.rows[0].itemId : 1;
 
       // Insert DDE entry (using correct column names)
       const entryResult = await client.query(`
@@ -418,7 +418,7 @@ async function runTests() {
         RETURNING dde_entry_id
       `, [eventCrfId, itemId]);
 
-      const ddeEntryId = entryResult.rows[0].dde_entry_id;
+      const ddeEntryId = entryResult.rows[0].ddeEntryId;
 
       // Insert discrepancy (using correct column names: first_value, second_value)
       await client.query(`
@@ -459,7 +459,7 @@ async function runTests() {
         RETURNING document_id
       `, [uniqueName]);
 
-      const documentId = docResult.rows[0].document_id;
+      const documentId = docResult.rows[0].documentId;
 
       // Create version (effective_date is NOT NULL)
       const versionResult = await client.query(`
@@ -469,7 +469,7 @@ async function runTests() {
         RETURNING version_id
       `, [documentId]);
 
-      const versionId = versionResult.rows[0].version_id;
+      const versionId = versionResult.rows[0].versionId;
 
       // Get a valid subject
       const subjectResult = await client.query(`SELECT study_subject_id FROM study_subject LIMIT 1`);
@@ -480,7 +480,7 @@ async function runTests() {
             subject_name, subject_signature_data, subject_signed_at, time_spent_reading, pages_viewed,
             acknowledgments_checked, consented_by, date_created, date_updated)
           VALUES ($1, $2, 'subject', 'consented', 'Test Subject', '{}', CURRENT_TIMESTAMP, 60, '[]', '[]', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        `, [subjectResult.rows[0].study_subject_id, versionId]);
+        `, [subjectResult.rows[0].studySubjectId, versionId]);
       }
 
       // Verify
@@ -515,12 +515,12 @@ async function runTests() {
         RETURNING instrument_id
       `, [uniqueShortName]);
 
-      const instrumentId = instrumentResult.rows[0].instrument_id;
+      const instrumentId = instrumentResult.rows[0].instrumentId;
 
       // Get a valid subject
       const subjectResult = await client.query(`SELECT study_subject_id FROM study_subject LIMIT 1`);
       if (subjectResult.rows.length > 0) {
-        const subjectId = subjectResult.rows[0].study_subject_id;
+        const subjectId = subjectResult.rows[0].studySubjectId;
 
         // Create assignment
         const assignResult = await client.query(`
@@ -530,7 +530,7 @@ async function runTests() {
           RETURNING assignment_id
         `, [subjectId, instrumentId]);
 
-        const assignmentId = assignResult.rows[0].assignment_id;
+        const assignmentId = assignResult.rows[0].assignmentId;
 
         // Submit response (using correct column names: answers, raw_score)
         await client.query(`
@@ -568,7 +568,7 @@ async function runTests() {
         RETURNING kit_type_id
       `);
 
-      const kitTypeId = kitTypeResult.rows[0].kit_type_id;
+      const kitTypeId = kitTypeResult.rows[0].kitTypeId;
 
       // Register kit with unique kit_number (NO study_id column!)
       const uniqueKitNumber = 'TK-' + Date.now();
@@ -579,7 +579,7 @@ async function runTests() {
         RETURNING kit_id
       `, [kitTypeId, uniqueKitNumber]);
 
-      const kitId = kitResult.rows[0].kit_id;
+      const kitId = kitResult.rows[0].kitId;
 
       // Log temperature (NO study_id column!)
       await client.query(`

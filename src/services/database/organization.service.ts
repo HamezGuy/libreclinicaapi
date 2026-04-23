@@ -31,7 +31,7 @@ export const registerOrganization = async (
       RETURNING organization_id
     `, [org.name, org.type || 'sponsor', org.email, org.phone, org.website, org.street, org.city, org.state, org.postalCode, org.country]);
 
-    const organizationId = orgResult.rows[0].organization_id;
+    const organizationId = orgResult.rows[0].organizationId;
 
     // 2. Create admin user in user_account (LibreClinica native table)
     const passwordHash = crypto.createHash('md5').update(admin.password).digest('hex');
@@ -55,7 +55,7 @@ export const registerOrganization = async (
       RETURNING user_id
     `, [username, passwordHash, admin.firstName, admin.lastName, admin.email, admin.phone, org.name]);
 
-    const userId = userResult.rows[0].user_id;
+    const userId = userResult.rows[0].userId;
 
     // 3. Set organization owner
     await client.query(`UPDATE acc_organization SET owner_id = $1, approved_by = $1, approved_at = NOW() WHERE organization_id = $2`, [userId, organizationId]);
@@ -68,14 +68,25 @@ export const registerOrganization = async (
 
     // 5. Store role permissions if provided
     if (data.rolePermissions && Array.isArray(data.rolePermissions)) {
+      const roleNames: string[] = [];
+      const permKeys: string[] = [];
+      const allowedVals: boolean[] = [];
+
       for (const rp of data.rolePermissions) {
         for (const [key, value] of Object.entries(rp.permissions || {})) {
-          await client.query(`
-            INSERT INTO acc_role_permission (organization_id, role_name, permission_key, allowed, date_created)
-            VALUES ($1, $2, $3, $4, NOW())
-            ON CONFLICT (organization_id, role_name, permission_key) DO UPDATE SET allowed = $4, date_updated = NOW()
-          `, [organizationId, rp.roleName, key, value]);
+          roleNames.push(rp.roleName);
+          permKeys.push(key);
+          allowedVals.push(value as boolean);
         }
+      }
+
+      if (roleNames.length > 0) {
+        await client.query(`
+          INSERT INTO acc_role_permission (organization_id, role_name, permission_key, allowed, date_created)
+          SELECT $1, rn, pk, av, NOW()
+          FROM unnest($2::text[], $3::text[], $4::boolean[]) AS t(rn, pk, av)
+          ON CONFLICT (organization_id, role_name, permission_key) DO UPDATE SET allowed = EXCLUDED.allowed, date_updated = NOW()
+        `, [organizationId, roleNames, permKeys, allowedVals]);
       }
     }
 
@@ -130,7 +141,7 @@ export const getMyOrganizations = async (userId: number): Promise<{ success: boo
       WHERE m.user_id = $1 AND m.status = 'active'
       ORDER BY o.name
     `, [userId]);
-    return { success: true, data: result.rows.map(r => ({ organizationId: r.organization_id, name: r.name, type: r.type, orgStatus: r.org_status, role: r.role, status: r.status })) };
+    return { success: true, data: result.rows.map(r => ({ organizationId: r.organizationId, name: r.name, type: r.type, orgStatus: r.orgStatus, role: r.role, status: r.status })) };
   } catch (error: any) {
     logger.error('getMyOrganizations error', { error: error.message, userId });
     return { success: false, data: [], message: error.message };
@@ -149,7 +160,7 @@ export const listOrganizations = async (filters: any, callerUserId?: number): Pr
         `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
         [callerUserId]
       );
-      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
       if (callerOrgIds.length > 0) {
         where.push(`o.organization_id = ANY($${idx++}::int[])`);
         params.push(callerOrgIds);
@@ -188,7 +199,7 @@ export const listPublicOrganizations = async (): Promise<{ success: boolean; dat
     return {
       success: true,
       data: result.rows.map(r => ({
-        organizationId: r.organization_id,
+        organizationId: r.organizationId,
         name: r.name,
         type: r.type,
         city: r.city,
@@ -247,7 +258,7 @@ export const addMember = async (orgId: number, memberData: any, creatorId: numbe
       VALUES ($1, $2, $3, $4, $5, $6, (SELECT name FROM acc_organization WHERE organization_id = $7), 2, 1, $8, NOW(), true, true)
       RETURNING user_id
     `, [memberData.username, passwordHash, memberData.firstName, memberData.lastName, memberData.email, memberData.phone, orgId, creatorId]);
-    const userId = userResult.rows[0].user_id;
+    const userId = userResult.rows[0].userId;
 
     const memResult = await client.query(`
       INSERT INTO acc_organization_member (organization_id, user_id, role, status, date_joined)
@@ -255,7 +266,7 @@ export const addMember = async (orgId: number, memberData: any, creatorId: numbe
     `, [orgId, userId, memberData.role || 'member']);
 
     await client.query('COMMIT');
-    return { success: true, data: { userId, membershipId: memResult.rows[0].member_id } };
+    return { success: true, data: { userId, membershipId: memResult.rows[0].memberId } };
   } catch (error: any) {
     await client.query('ROLLBACK');
     if (error.constraint === 'user_account_user_name_key') return { success: false, message: 'Username already exists' };
@@ -274,7 +285,7 @@ export const getMembers = async (orgId: number): Promise<{ success: boolean; dat
       INNER JOIN user_account u ON m.user_id = u.user_id
       WHERE m.organization_id = $1 AND m.status = 'active' ORDER BY m.date_joined
     `, [orgId]);
-    return { success: true, data: result.rows.map(r => ({ userId: r.user_id, username: r.username, firstName: r.first_name, lastName: r.last_name, email: r.email, role: r.role, status: r.status, dateJoined: r.date_joined })) };
+    return { success: true, data: result.rows.map(r => ({ userId: r.userId, username: r.username, firstName: r.firstName, lastName: r.lastName, email: r.email, role: r.role, status: r.status, dateJoined: r.dateJoined })) };
   } catch (error: any) {
     logger.error('getMembers error', { error: error.message, orgId });
     return { success: false, data: [], message: error.message };
@@ -292,8 +303,10 @@ export const updateMemberRole = async (orgId: number, userId: number, role: stri
 
 export const removeMember = async (orgId: number, userId: number, reason: string): Promise<{ success: boolean; message?: string }> => {
   try {
-    await pool.query(`UPDATE acc_organization_member SET status = 'removed', date_updated = NOW() WHERE organization_id = $1 AND user_id = $2`, [orgId, userId]);
-    await pool.query(`UPDATE user_account SET status_id = 5, date_updated = CURRENT_DATE WHERE user_id = $1`, [userId]);
+    await pool.transaction(async (client) => {
+      await client.query(`UPDATE acc_organization_member SET status = 'removed', date_updated = NOW() WHERE organization_id = $1 AND user_id = $2`, [orgId, userId]);
+      await client.query(`UPDATE user_account SET status_id = 5, date_updated = CURRENT_DATE WHERE user_id = $1`, [userId]);
+    });
     logger.info('Member removed', { orgId, userId, reason });
     return { success: true, message: 'Member removed' };
   } catch (error: any) {
@@ -315,9 +328,9 @@ export const validateCode = async (code: string): Promise<{ success: boolean; is
     `, [code.toUpperCase().replace(/[-\s]/g, '')]);
     if (result.rows.length === 0) return { success: true, isValid: false, message: 'Invalid code' };
     const row = result.rows[0];
-    if (row.max_uses && row.current_uses >= row.max_uses) return { success: true, isValid: false, message: 'Code has reached maximum uses' };
-    if (row.expires_at && new Date(row.expires_at) < new Date()) return { success: true, isValid: false, message: 'Code has expired' };
-    return { success: true, isValid: true, organizationId: row.organization_id, organizationName: row.organization_name, defaultRole: row.default_role };
+    if (row.maxUses && row.currentUses >= row.maxUses) return { success: true, isValid: false, message: 'Code has reached maximum uses' };
+    if (row.expiresAt && new Date(row.expiresAt) < new Date()) return { success: true, isValid: false, message: 'Code has expired' };
+    return { success: true, isValid: true, organizationId: row.organizationId, organizationName: row.organizationName, defaultRole: row.defaultRole };
   } catch (error: any) {
     return { success: false, isValid: false, message: error.message };
   }
@@ -344,10 +357,10 @@ export const registerWithCode = async (data: any): Promise<{ success: boolean; d
       INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
       VALUES ($1, $2, $3, $4, $5, $6, 2, 1, 1, NOW(), true, true) RETURNING user_id
     `, [username, passwordHash, data.firstName, data.lastName, data.email, data.phone]);
-    const userId = userResult.rows[0].user_id;
+    const userId = userResult.rows[0].userId;
 
-    await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [codeRow.organization_id, userId, codeRow.default_role || 'data_entry']);
-    await client.query(`UPDATE acc_organization_code SET current_uses = current_uses + 1 WHERE code_id = $1`, [codeRow.code_id]);
+    await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [codeRow.organizationId, userId, codeRow.defaultRole || 'data_entry']);
+    await client.query(`UPDATE acc_organization_code SET current_uses = current_uses + 1 WHERE code_id = $1`, [codeRow.codeId]);
 
     // Generate JWT tokens for auto-login
     let accessToken: string | undefined;
@@ -359,7 +372,7 @@ export const registerWithCode = async (data: any): Promise<{ success: boolean; d
       const payload = await buildJwtPayload(user);
       // buildJwtPayload queries outside the transaction, so org membership
       // isn't visible yet. Manually set it since we just created it above.
-      payload.organizationIds = [codeRow.organization_id];
+      payload.organizationIds = [codeRow.organizationId];
       const tokens = generateTokenPair(payload);
       accessToken = tokens.accessToken;
       refreshToken = tokens.refreshToken;
@@ -369,9 +382,9 @@ export const registerWithCode = async (data: any): Promise<{ success: boolean; d
 
     await client.query('COMMIT');
 
-    logger.info('User registered with code', { userId, username, organizationId: codeRow.organization_id });
+    logger.info('User registered with code', { userId, username, organizationId: codeRow.organizationId });
 
-    return { success: true, data: { userId, username, organizationId: codeRow.organization_id, accessToken, refreshToken } };
+    return { success: true, data: { userId, username, organizationId: codeRow.organizationId, accessToken, refreshToken } };
   } catch (error: any) {
     await client.query('ROLLBACK');
     return { success: false, message: error.message };
@@ -388,7 +401,7 @@ export const generateCode = async (orgId: number, creatorId: number, data: any):
       INSERT INTO acc_organization_code (code, organization_id, max_uses, expires_at, default_role, created_by, date_created)
       VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING code_id
     `, [code, orgId, data.maxUses, data.expiresAt, data.defaultRole || 'data_entry', creatorId]);
-    return { success: true, data: { code: formatted, codeId: result.rows[0].code_id } };
+    return { success: true, data: { code: formatted, codeId: result.rows[0].codeId } };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
@@ -423,7 +436,7 @@ export const createAccessRequest = async (data: any): Promise<{ success: boolean
       INSERT INTO acc_access_request (email, first_name, last_name, phone, organization_name, professional_title, credentials, reason, organization_id, requested_role, date_created)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING request_id
     `, [data.email, data.firstName, data.lastName, data.phone, data.organizationName, data.professionalTitle, data.credentials, data.reason, data.organizationId, data.requestedRole || 'data_entry']);
-    return { success: true, data: { requestId: result.rows[0].request_id } };
+    return { success: true, data: { requestId: result.rows[0].requestId } };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
@@ -441,7 +454,7 @@ export const listAccessRequests = async (filters: any, callerUserId?: number): P
         `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
         [callerUserId]
       );
-      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
       if (callerOrgIds.length > 0) {
         where.push(`organization_id = ANY($${idx++}::int[])`);
         params.push(callerOrgIds);
@@ -494,17 +507,17 @@ export const reviewAccessRequest = async (requestId: number, decision: string, r
         const userResult = await client.query(`
           INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
           VALUES ($1, $2, $3, $4, $5, $6, 2, 1, $7, NOW(), true, true) RETURNING user_id
-        `, [username, passwordHash, r.first_name, r.last_name, r.email, r.phone, reviewerId]);
+        `, [username, passwordHash, r.firstName, r.lastName, r.email, r.phone, reviewerId]);
         userId = userResult.rows[0].user_id;
         await client.query(`UPDATE acc_access_request SET user_id = $1 WHERE request_id = $2`, [userId, requestId]);
 
-        if (r.organization_id) {
-          await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [r.organization_id, userId, r.requested_role || 'data_entry']);
+        if (r.organizationId) {
+          await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [r.organizationId, userId, r.requestedRole || 'data_entry']);
         }
       }
     }
     await client.query('COMMIT');
-    return { success: true, data: { userId, username: userId ? (await pool.query(`SELECT user_name FROM user_account WHERE user_id = $1`, [userId])).rows[0]?.user_name : undefined, tempPassword }, message: `Request ${decision}` };
+    return { success: true, data: { userId, username: userId ? (await pool.query(`SELECT user_name FROM user_account WHERE user_id = $1`, [userId])).rows[0]?.userName : undefined, tempPassword }, message: `Request ${decision}` };
   } catch (error: any) {
     await client.query('ROLLBACK');
     return { success: false, message: error.message };
@@ -526,7 +539,7 @@ export const createInvitation = async (data: any, invitedById: number): Promise<
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING invitation_id
     `, [data.email, token, data.organizationId, data.studyId, data.role || 'data_entry', expiresAt, invitedById, data.message]);
     const invitationLink = `${process.env.FRONTEND_URL || 'http://localhost:4200'}/register/invitation/${token}`;
-    return { success: true, data: { token, invitationId: result.rows[0].invitation_id, invitationLink } };
+    return { success: true, data: { token, invitationId: result.rows[0].invitationId, invitationLink } };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
@@ -545,8 +558,8 @@ export const validateInvitation = async (token: string): Promise<any> => {
     if (result.rows.length === 0) return { success: true, isValid: false, message: 'Invalid invitation' };
     const inv = result.rows[0];
     if (inv.status !== 'pending') return { success: true, isValid: false, message: 'Invitation already used' };
-    if (new Date(inv.expires_at) < new Date()) return { success: true, isValid: false, message: 'Invitation expired' };
-    return { success: true, isValid: true, email: inv.email, organizationId: inv.organization_id, organizationName: inv.organization_name, studyId: inv.study_id, studyName: inv.study_name, role: inv.role, inviterName: inv.inviter_name };
+    if (new Date(inv.expiresAt) < new Date()) return { success: true, isValid: false, message: 'Invitation expired' };
+    return { success: true, isValid: true, email: inv.email, organizationId: inv.organizationId, organizationName: inv.organizationName, studyId: inv.studyId, studyName: inv.studyName, role: inv.role, inviterName: inv.inviterName };
   } catch (error: any) {
     return { success: false, isValid: false, message: error.message };
   }
@@ -559,7 +572,7 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
     const inv = await client.query(`SELECT * FROM acc_user_invitation WHERE token = $1 AND status = 'pending'`, [token]);
     if (inv.rows.length === 0) { await client.query('ROLLBACK'); return { success: false, message: 'Invalid or expired invitation' }; }
     const invitation = inv.rows[0];
-    if (new Date(invitation.expires_at) < new Date()) { await client.query('ROLLBACK'); return { success: false, message: 'Invitation expired' }; }
+    if (new Date(invitation.expiresAt) < new Date()) { await client.query('ROLLBACK'); return { success: false, message: 'Invitation expired' }; }
 
     const passwordHash = crypto.createHash('md5').update(data.password).digest('hex');
     const username = invitation.email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
@@ -574,12 +587,12 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
       INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
       VALUES ($1, $2, $3, $4, $5, $6, 2, 1, 1, NOW(), true, true) RETURNING user_id
     `, [username, passwordHash, data.firstName, data.lastName, invitation.email, data.phone]);
-    const userId = userResult.rows[0].user_id;
+    const userId = userResult.rows[0].userId;
 
-    await client.query(`UPDATE acc_user_invitation SET status = 'accepted', accepted_by = $1, accepted_at = NOW() WHERE invitation_id = $2`, [userId, invitation.invitation_id]);
+    await client.query(`UPDATE acc_user_invitation SET status = 'accepted', accepted_by = $1, accepted_at = NOW() WHERE invitation_id = $2`, [userId, invitation.invitationId]);
 
-    if (invitation.organization_id) {
-      await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [invitation.organization_id, userId, invitation.role || 'data_entry']);
+    if (invitation.organizationId) {
+      await client.query(`INSERT INTO acc_organization_member (organization_id, user_id, role, status) VALUES ($1, $2, $3, 'active')`, [invitation.organizationId, userId, invitation.role || 'data_entry']);
     }
 
     // Generate JWT tokens for auto-login
@@ -592,8 +605,8 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
       const payload = await buildJwtPayload(user);
       // buildJwtPayload queries outside the transaction, so org membership
       // isn't visible yet. Manually set it since we just created it above.
-      if (invitation.organization_id) {
-        payload.organizationIds = [invitation.organization_id];
+      if (invitation.organizationId) {
+        payload.organizationIds = [invitation.organizationId];
       }
       const tokens = generateTokenPair(payload);
       accessToken = tokens.accessToken;
@@ -604,9 +617,9 @@ export const acceptInvitation = async (token: string, data: any): Promise<{ succ
 
     await client.query('COMMIT');
 
-    logger.info('Invitation accepted', { userId, username, organizationId: invitation.organization_id });
+    logger.info('Invitation accepted', { userId, username, organizationId: invitation.organizationId });
 
-    return { success: true, data: { userId, username, organizationId: invitation.organization_id, accessToken, refreshToken } };
+    return { success: true, data: { userId, username, organizationId: invitation.organizationId, accessToken, refreshToken } };
   } catch (error: any) {
     await client.query('ROLLBACK');
     return { success: false, message: error.message };
@@ -625,8 +638,8 @@ export const getRolePermissions = async (orgId: number): Promise<{ success: bool
     // Group by role
     const grouped: Record<string, any> = {};
     for (const row of result.rows) {
-      if (!grouped[row.role_name]) grouped[row.role_name] = { roleName: row.role_name, displayName: row.role_name, permissions: {} };
-      grouped[row.role_name].permissions[row.permission_key] = row.allowed;
+      if (!grouped[row.roleName]) grouped[row.roleName] = { roleName: row.roleName, displayName: row.roleName, permissions: {} };
+      grouped[row.roleName].permissions[row.permissionKey] = row.allowed;
     }
     return { success: true, data: Object.values(grouped) };
   } catch (error: any) {
@@ -638,16 +651,30 @@ export const getRolePermissions = async (orgId: number): Promise<{ success: bool
 export const updateRolePermissions = async (orgId: number, rolePermissions: any[]): Promise<{ success: boolean; message?: string }> => {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    const roleNames: string[] = [];
+    const permKeys: string[] = [];
+    const allowedVals: boolean[] = [];
+
     for (const rp of rolePermissions) {
       for (const [key, value] of Object.entries(rp.permissions || {})) {
-        await client.query(`
-          INSERT INTO acc_role_permission (organization_id, role_name, permission_key, allowed, date_created)
-          VALUES ($1, $2, $3, $4, NOW())
-          ON CONFLICT (organization_id, role_name, permission_key) DO UPDATE SET allowed = $4, date_updated = NOW()
-        `, [orgId, rp.roleName, key, value]);
+        roleNames.push(rp.roleName);
+        permKeys.push(key);
+        allowedVals.push(value as boolean);
       }
     }
+
+    await client.query('BEGIN');
+
+    if (roleNames.length > 0) {
+      await client.query(`
+        INSERT INTO acc_role_permission (organization_id, role_name, permission_key, allowed, date_created)
+        SELECT $1, rn, pk, av, NOW()
+        FROM unnest($2::text[], $3::text[], $4::boolean[]) AS t(rn, pk, av)
+        ON CONFLICT (organization_id, role_name, permission_key)
+        DO UPDATE SET allowed = EXCLUDED.allowed, date_updated = NOW()
+      `, [orgId, roleNames, permKeys, allowedVals]);
+    }
+
     await client.query('COMMIT');
     return { success: true, message: 'Permissions updated' };
   } catch (error: any) {

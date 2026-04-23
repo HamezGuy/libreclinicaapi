@@ -5,6 +5,7 @@
 import express from 'express';
 import * as controller from '../controllers/dashboard.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import { validate, dashboardSchemas } from '../middleware/validation.middleware';
 
 const router = express.Router();
@@ -23,16 +24,16 @@ router.get('/activity', validate({ query: dashboardSchemas.activity }), controll
 // New enhanced dashboard endpoints
 router.get('/enrollment-trend', controller.getEnrollmentTrend);
 router.get('/completion-trend', controller.getCompletionTrend);
-router.get('/site-performance', controller.getSitePerformance);
+router.get('/site-performance', requireRole('admin', 'data_manager', 'monitor'), controller.getSitePerformance);
 router.get('/form-completion-rates', controller.getFormCompletionRates);
 router.get('/data-quality', controller.getDataQualityMetrics);
 router.get('/subject-status-distribution', controller.getSubjectStatusDistribution);
 router.get('/activity-feed', controller.getActivityFeed);
 router.get('/health-score', controller.getStudyHealthScore);
 
-// User Analytics endpoints
-router.get('/user-analytics', controller.getUserAnalytics);
-router.get('/top-performers', controller.getTopPerformers);
+// User Analytics endpoints (admin/data_manager only)
+router.get('/user-analytics', requireRole('admin', 'data_manager'), controller.getUserAnalytics);
+router.get('/top-performers', requireRole('admin', 'data_manager'), controller.getTopPerformers);
 
 // Advanced Analytics endpoints
 router.get('/query-aging', controller.getQueryAgingAnalysis);

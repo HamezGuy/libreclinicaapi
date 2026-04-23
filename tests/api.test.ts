@@ -168,7 +168,7 @@ describe('LibreClinica API - Comprehensive Test Suite', () => {
         .set('Authorization', `Bearer ${authToken}`);
 
       if (listResponse.body.data.length > 0) {
-        const subjectId = listResponse.body.data[0].study_subject_id;
+        const subjectId = listResponse.body.data[0].studySubjectId;
 
         const response = await request(app)
           .get(`/api/subjects/${subjectId}`)
@@ -176,7 +176,7 @@ describe('LibreClinica API - Comprehensive Test Suite', () => {
           .expect(200);
 
         expect(response.body.success).toBe(true);
-        expect(response.body.data).toHaveProperty('study_subject_id');
+        expect(response.body.data).toHaveProperty('studySubjectId');
         expect(response.body.data).toHaveProperty('events');
       }
     });
@@ -205,7 +205,7 @@ describe('LibreClinica API - Comprehensive Test Suite', () => {
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(response.body.data).toHaveProperty('study_id');
+      expect(response.body.data).toHaveProperty('studyId');
     });
 
     it('GET /api/studies/:id/forms - should list study forms', async () => {
@@ -225,7 +225,7 @@ describe('LibreClinica API - Comprehensive Test Suite', () => {
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(response.body.data).toHaveProperty('study_id');
+      expect(response.body.data).toHaveProperty('studyId');
       expect(response.body.data).toHaveProperty('name');
     });
 
@@ -327,7 +327,7 @@ describe('LibreClinica API - Comprehensive Test Suite', () => {
           .expect(200);
 
         expect(response.body.success).toBe(true);
-        expect(response.body.data).toHaveProperty('discrepancy_note_id');
+        expect(response.body.data).toHaveProperty('discrepancyNoteId');
         expect(response.body.data).toHaveProperty('thread');
       }
     });
@@ -495,8 +495,8 @@ describe('LibreClinica API - Comprehensive Test Suite', () => {
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(response.body.data).toHaveProperty('user_id');
-      expect(response.body.data).toHaveProperty('user_name');
+      expect(response.body.data).toHaveProperty('userId');
+      expect(response.body.data).toHaveProperty('userName');
     });
 
     // Note: User creation test disabled to avoid creating test users

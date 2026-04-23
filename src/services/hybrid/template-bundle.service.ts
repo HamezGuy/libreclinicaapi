@@ -37,8 +37,8 @@ import { resolveFieldType } from '../../utils/field-type.utils';
 function buildIdToNameMap(fields: any[]): Map<string, string> {
   const map = new Map<string, string>();
   for (const f of fields) {
-    const id = String(f.item_id ?? f.id ?? '');
-    const refKey = f.oc_oid || f.name || `field_${f.item_id}`;
+    const id = String(f.itemId ?? f.id ?? '');
+    const refKey = f.ocOid || f.name || `field_${f.itemId}`;
     
     // Map numeric ID -> refKey
     if (id) map.set(id, refKey);
@@ -55,7 +55,7 @@ function buildIdToNameMap(fields: any[]): Map<string, string> {
 function buildFormIdToRefKeyMap(formRows: any[]): Map<number, string> {
   const map = new Map<number, string>();
   for (const row of formRows) {
-    map.set(row.crf_id, row.oc_oid || `F_${row.name?.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}`);
+    map.set(row.crfId, row.ocOid || `F_${row.name?.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}`);
   }
   return map;
 }
@@ -80,7 +80,7 @@ function convertConditions(conditions: any, idToName: Map<string, string>): Expo
 }
 
 function exportField(field: any, idToName: Map<string, string>, formIdToRef: Map<number, string>): ExportedField {
-  const refKey = field.oc_oid || field.name || `field_${field.item_id}`;
+  const refKey = field.ocOid || field.name || `field_${field.itemId}`;
 
   const exported: ExportedField = {
     refKey,
@@ -138,7 +138,7 @@ function exportField(field: any, idToName: Map<string, string>, formIdToRef: Map
     order: field.ordinal ?? field.order,
     ordinal: field.ordinal,
     section: field.section,
-    group: field.group_name || field.group,
+    group: field.groupName || field.group,
     groupId: field.groupId
   };
 
@@ -185,7 +185,7 @@ export async function exportBundle(
   const forms: ExportedForm[] = [];
 
   for (const crfRow of crfRows.rows) {
-    const crfId = crfRow.crf_id;
+    const crfId = crfRow.crfId;
 
     // Load full metadata (fields, sections, etc.)
     const metadata = await formService.getFormMetadata(crfId, { includeHidden: true });
@@ -229,7 +229,7 @@ export async function exportBundle(
 
     // Convert sections
     const sections: ExportedSection[] = (metadata.sections || []).map((s: any) => ({
-      id: String(s.section_id || s.id || ''),
+      id: String(s.sectionId || s.id || ''),
       name: s.label || s.name || '',
       description: s.instructions || s.description || undefined,
       order: s.ordinal ?? s.order ?? 0
@@ -295,7 +295,7 @@ export async function exportBundle(
         exportedFormLinks.push({
           name: link.name || `link_${link.id}`,
           description: link.description,
-          sourceFieldRef: idToName.get(String(f.item_id ?? f.id)) || f.name || '',
+          sourceFieldRef: idToName.get(String(f.itemId ?? f.id)) || f.name || '',
           targetFormRef: formIdToRefKey.get(Number(link.targetFormId)) || String(link.targetFormId),
           triggerConditions: (link.triggerConditions || []).map((c: any) => convertCondition(c, idToName)),
           linkType: link.linkType || 'modal',
@@ -310,7 +310,7 @@ export async function exportBundle(
       }
     }
 
-    const refKey = crfRow.oc_oid || `F_${crfRow.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}`;
+    const refKey = crfRow.ocOid || `F_${crfRow.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}`;
 
     forms.push({
       refKey,
@@ -326,7 +326,7 @@ export async function exportBundle(
     });
   }
 
-  const sourceStudy = crfRows.rows[0]?.study_name || undefined;
+  const sourceStudy = crfRows.rows[0]?.studyName || undefined;
 
   return {
     formatVersion: BUNDLE_FORMAT_VERSION,
@@ -511,7 +511,7 @@ export async function importBundle(
           [formName, form.description || '', userId, ocOid, targetStudyId]
         );
       }
-      const newCrfId = crfResult.rows[0].crf_id;
+      const newCrfId = crfResult.rows[0].crfId;
 
       // Create version
       const vOid = `${ocOid}_V1`;
@@ -520,7 +520,7 @@ export async function importBundle(
          VALUES ($1,$2,$3,2,$4,NOW(),$5) RETURNING crf_version_id`,
         [newCrfId, form.version || 'v1.0', form.description || 'Imported version', userId, vOid]
       );
-      const newCrfVersionId = vResult.rows[0].crf_version_id;
+      const newCrfVersionId = vResult.rows[0].crfVersionId;
 
       formRefToCrfId.set(form.refKey, newCrfId);
       createdForms.push({ refKey: form.refKey, newCrfId, newCrfVersionId });
@@ -535,9 +535,9 @@ export async function importBundle(
              VALUES ($1,1,$2,$3,$4,$5,NOW()) RETURNING section_id`,
             [newCrfVersionId, sec.name, sec.name, si + 1, userId]
           );
-          sectionIdMap.set(sec.name, sRes.rows[0].section_id);
-          sectionIdMap.set(sec.name.toLowerCase(), sRes.rows[0].section_id);
-          if (sec.id) sectionIdMap.set(sec.id, sRes.rows[0].section_id);
+          sectionIdMap.set(sec.name, sRes.rows[0].sectionId);
+          sectionIdMap.set(sec.name.toLowerCase(), sRes.rows[0].sectionId);
+          if (sec.id) sectionIdMap.set(sec.id, sRes.rows[0].sectionId);
         }
       }
       // Default section
@@ -548,7 +548,7 @@ export async function importBundle(
            VALUES ($1,1,$2,$3,1,$4,NOW()) RETURNING section_id`,
           [newCrfVersionId, form.category || 'Form Fields', formName, userId]
         );
-        defaultSectionId = dsRes.rows[0].section_id;
+        defaultSectionId = dsRes.rows[0].sectionId;
       } else {
         defaultSectionId = sectionIdMap.values().next().value!;
       }
@@ -561,7 +561,7 @@ export async function importBundle(
          VALUES ($1,$2,1,$3,NOW(),$4) RETURNING item_group_id`,
         [form.category || 'Form Fields', newCrfId, userId, grpOid]
       );
-      const itemGroupId = igRes.rows[0].item_group_id;
+      const itemGroupId = igRes.rows[0].itemGroupId;
 
       // Create fields — track refKey -> newItemId for remapping
       const fieldRefKeys: string[] = [];
@@ -595,7 +595,7 @@ export async function importBundle(
             iOid
           ]
         );
-        const newItemId = itemRes.rows[0].item_id;
+        const newItemId = itemRes.rows[0].itemId;
         fieldRefKeys.push(ef.refKey);
         newItemIds.push(newItemId);
 
@@ -617,7 +617,7 @@ export async function importBundle(
              VALUES ($1,$2,$3,$4,$5) RETURNING response_set_id`,
             [rTypeId, ef.label || ef.name, optText, optVals, newCrfVersionId]
           );
-          responseSetId = rsRes.rows[0].response_set_id;
+          responseSetId = rsRes.rows[0].responseSetId;
         }
 
         const sectionId = (ef.section ? sectionIdMap.get(ef.section) ?? sectionIdMap.get(ef.section.toLowerCase()) : null) || defaultSectionId;
@@ -682,7 +682,7 @@ export async function importBundle(
             `SELECT item_form_metadata_id FROM item_form_metadata WHERE item_id=$1 AND crf_version_id=$2 LIMIT 1`,
             [itemId, newCrfVersionId]
           );
-          const targetIfmId = targetIfmRow.rows[0]?.item_form_metadata_id;
+          const targetIfmId = targetIfmRow.rows[0]?.itemFormMetadataId;
           if (targetIfmId) {
             for (const cond of ef.showWhen) {
               const controlItemId = nameToId.get(cond.fieldRef);
@@ -694,7 +694,7 @@ export async function importBundle(
                  WHERE ifm.item_id=$1 AND ifm.crf_version_id=$2 LIMIT 1`,
                 [parseInt(controlItemId), newCrfVersionId]
               );
-              const controlIfmId = controlIfmRow.rows[0]?.item_form_metadata_id || null;
+              const controlIfmId = controlIfmRow.rows[0]?.itemFormMetadataId || null;
               const controlName = controlIfmRow.rows[0]?.name || cond.fieldRef;
               const scdMessage = JSON.stringify({
                 operator: cond.operator || 'equals',
@@ -826,7 +826,7 @@ export async function importBundle(
       const nameToFieldName = new Map<string, string>();
       for (let i = 0; i < form.fields.length && i < itemRows.rows.length; i++) {
         const ef = form.fields[i];
-        nameToId.set(ef.refKey, String(itemRows.rows[i].item_id));
+        nameToId.set(ef.refKey, String(itemRows.rows[i].itemId));
         const fieldName = ef.name || ef.label || ef.refKey;
         nameToFieldName.set(ef.refKey, fieldName);
         if (ef.label && ef.label !== fieldName) nameToFieldName.set(ef.label, fieldName);

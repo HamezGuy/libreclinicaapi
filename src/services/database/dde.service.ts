@@ -129,7 +129,7 @@ export async function isDDERequired(eventCrfId: number): Promise<boolean> {
     `;
 
     const result = await pool.query(query, [eventCrfId]);
-    return result.rows[0]?.double_entry === true;
+    return result.rows[0]?.doubleEntry === true;
   } catch (error: any) {
     logger.error('Error checking DDE requirement', { error: error.message, eventCrfId });
     return false;
@@ -294,6 +294,16 @@ export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDESt
   try {
     await client.query('BEGIN');
 
+    // Lock the event_crf row for this transaction
+    const ecLock = await client.query(
+      'SELECT event_crf_id FROM event_crf WHERE event_crf_id = $1 FOR UPDATE',
+      [request.eventCrfId]
+    );
+    if (ecLock.rows.length === 0) {
+      await client.query('ROLLBACK');
+      throw new Error('Event CRF not found');
+    }
+
     // Verify user can perform second entry
     const canDo = await canUserPerformDDE(request.eventCrfId, request.userId);
     if (!canDo.allowed || canDo.entryType !== 'second') {
@@ -380,8 +390,8 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
   let secondEntries: { itemId: number; value: string }[] = [];
   
   try {
-    if (eventCrf.validator_annotations) {
-      secondEntries = JSON.parse(eventCrf.validator_annotations);
+    if (eventCrf.validatorAnnotations) {
+      secondEntries = JSON.parse(eventCrf.validatorAnnotations);
     }
   } catch (e) {
     logger.warn('Could not parse validator_annotations', { eventCrfId });
@@ -404,7 +414,7 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
     await client.query('BEGIN');
 
     for (const first of firstEntriesResult.rows) {
-      const secondValue = secondEntriesMap[first.item_id] ?? '';
+      const secondValue = secondEntriesMap[first.itemId] ?? '';
       const matches = normalizeForComparison(first.value) === normalizeForComparison(secondValue);
 
       if (matches) {
@@ -433,7 +443,7 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
         `, [
           eventCrfId,
           JSON.stringify({ firstValue: first.value, secondValue }),
-          first.item_data_id
+          first.itemDataId
         ]);
 
         // Link to item_data via dn_item_data_map
@@ -447,7 +457,7 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
             JOIN study_event se ON ec.study_event_id = se.study_event_id
             JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
             WHERE ec.event_crf_id = $3
-          `, [discResult.rows[0].discrepancy_note_id, first.item_data_id, eventCrfId]);
+          `, [discResult.rows[0].discrepancyNoteId, first.itemDataId, eventCrfId]);
         }
       }
 
@@ -461,20 +471,20 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
         WHERE dim.item_data_id = $1 AND dn.discrepancy_note_type_id = 4
         ORDER BY dn.date_created DESC
         LIMIT 1
-      `, [first.item_data_id]);
+      `, [first.itemDataId]);
 
       const disc = existingDiscResult.rows[0];
 
       comparisons.push({
-        itemId: first.item_id,
-        itemName: first.item_name,
+        itemId: first.itemId,
+        itemName: first.itemName,
         itemDescription: stripExtendedProps(first.description),
         firstValue: first.value,
         secondValue: secondValue,
         matches,
-        discrepancyId: disc?.discrepancy_note_id,
-        resolutionStatus: disc?.resolution_status_id === 4 ? 'resolved' : 'open',
-        resolvedBy: disc?.resolved_by
+        discrepancyId: disc?.discrepancyNoteId,
+        resolutionStatus: disc?.resolutionStatusId === 4 ? 'resolved' : 'open',
+        resolvedBy: disc?.resolvedBy
       });
     }
 
@@ -504,8 +514,8 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
 
   return {
     eventCrfId,
-    subjectLabel: eventCrf.subject_label || '',
-    formName: eventCrf.form_name || '',
+    subjectLabel: eventCrf.subjectLabel || '',
+    formName: eventCrf.formName || '',
     items: comparisons,
     summary: {
       total: comparisons.length,
@@ -547,14 +557,14 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
     const disc = discResult.rows[0];
     let detailedNotes: any = {};
     try {
-      detailedNotes = JSON.parse(disc.detailed_notes || '{}');
+      detailedNotes = JSON.parse(disc.detailedNotes || '{}');
     } catch (e) {}
 
     // Determine resolved value
     let resolvedValue: string;
     switch (resolution.resolution) {
       case 'first_correct':
-        resolvedValue = disc.first_value;
+        resolvedValue = disc.firstValue;
         break;
       case 'second_correct':
         resolvedValue = detailedNotes.secondValue || '';
@@ -585,12 +595,12 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
     ]);
 
     // Update the actual item_data with resolved value
-    if (disc.item_data_id) {
+    if (disc.itemDataId) {
       await client.query(`
         UPDATE item_data
         SET value = $1, date_updated = CURRENT_TIMESTAMP, update_id = $2
         WHERE item_data_id = $3
-      `, [resolvedValue, resolution.resolvedBy, disc.item_data_id]);
+      `, [resolvedValue, resolution.resolvedBy, disc.itemDataId]);
 
       // Log to audit trail
       await client.query(`
@@ -604,17 +614,17 @@ export async function resolveDiscrepancy(resolution: DDEResolution): Promise<voi
         )
       `, [
         resolution.resolvedBy,
-        disc.item_data_id,
-        disc.first_value,
+        disc.itemDataId,
+        disc.firstValue,
         resolvedValue,
         resolution.adjudicationNotes || `DDE resolved as ${resolution.resolution}`,
-        disc.event_crf_id
+        disc.eventCrfId
       ]);
     }
 
     // Update denormalized query counts on patient_event_form
-    if (disc.event_crf_id) {
-      await updateFormQueryCounts(client, disc.event_crf_id);
+    if (disc.eventCrfId) {
+      await updateFormQueryCounts(client, disc.eventCrfId);
     }
 
     await client.query('COMMIT');
@@ -649,7 +659,7 @@ export async function finalizeDDE(eventCrfId: number, userId: number): Promise<D
         AND dn.resolution_status_id != 4
     `, [eventCrfId]);
 
-    const openCount = parseInt(openResult.rows[0]?.open_count || '0');
+    const openCount = parseInt(openResult.rows[0]?.openCount || '0');
     if (openCount > 0) {
       throw new Error(`Cannot finalize: ${openCount} unresolved discrepancies remain`);
     }
@@ -837,7 +847,7 @@ function mapRowToDDEStatus(row: any): DDEStatus {
   // 1 = not_started, 2 = initial_data_entry, 3 = initial_data_entry_complete,
   // 4 = double_data_entry, 5 = double_data_entry_complete
   
-  const completionStatus = row.completion_status_id;
+  const completionStatus = row.completionStatusId;
   
   let firstEntryStatus: 'pending' | 'in_progress' | 'complete' = 'pending';
   let secondEntryStatus: 'pending' | 'in_progress' | 'complete' = 'pending';
@@ -847,27 +857,27 @@ function mapRowToDDEStatus(row: any): DDEStatus {
   if (completionStatus >= 2) firstEntryStatus = 'in_progress';
   if (completionStatus >= 3) firstEntryStatus = 'complete';
   if (completionStatus >= 4) secondEntryStatus = 'complete';
-  if (completionStatus === 4) comparisonStatus = row.open_discrepancies > 0 ? 'discrepancies' : 'matched';
+  if (completionStatus === 4) comparisonStatus = row.openDiscrepancies > 0 ? 'discrepancies' : 'matched';
   if (completionStatus === 5) {
     comparisonStatus = 'resolved';
     ddeComplete = true;
   }
 
   return {
-    statusId: row.event_crf_id,
-    eventCrfId: row.event_crf_id,
+    statusId: row.eventCrfId,
+    eventCrfId: row.eventCrfId,
     firstEntryStatus,
-    firstEntryBy: row.first_entry_by,
-    firstEntryByName: row.first_entry_by_name,
-    firstEntryAt: row.first_entry_at,
+    firstEntryBy: row.firstEntryBy,
+    firstEntryByName: row.firstEntryByName,
+    firstEntryAt: row.firstEntryAt,
     secondEntryStatus,
-    secondEntryBy: row.second_entry_by,
-    secondEntryByName: row.second_entry_by_name,
-    secondEntryAt: row.second_entry_at,
+    secondEntryBy: row.secondEntryBy,
+    secondEntryByName: row.secondEntryByName,
+    secondEntryAt: row.secondEntryAt,
     comparisonStatus,
-    totalItems: parseInt(row.total_items || '0'),
-    matchedItems: parseInt(row.total_items || '0') - parseInt(row.open_discrepancies || '0'),
-    discrepancyCount: parseInt(row.open_discrepancies || '0'),
+    totalItems: parseInt(row.totalItems || '0'),
+    matchedItems: parseInt(row.totalItems || '0') - parseInt(row.openDiscrepancies || '0'),
+    discrepancyCount: parseInt(row.openDiscrepancies || '0'),
     resolvedCount: 0,
     ddeComplete
   };
@@ -875,15 +885,15 @@ function mapRowToDDEStatus(row: any): DDEStatus {
 
 function mapRowToDashboardItem(row: any): DDEDashboardItem {
   return {
-    eventCrfId: row.event_crf_id,
-    studySubjectId: row.study_subject_id,
-    subjectLabel: row.subject_label,
-    studyName: row.study_name,
-    siteName: row.site_name,
-    formName: row.form_name,
-    eventName: row.event_name,
+    eventCrfId: row.eventCrfId,
+    studySubjectId: row.studySubjectId,
+    subjectLabel: row.subjectLabel,
+    studyName: row.studyName,
+    siteName: row.siteName,
+    formName: row.formName,
+    eventName: row.eventName,
     ddeStatus: mapRowToDDEStatus(row),
-    daysWaiting: parseInt(row.days_waiting || '0')
+    daysWaiting: parseInt(row.daysWaiting || '0')
   };
 }
 

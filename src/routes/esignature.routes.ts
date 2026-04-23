@@ -20,6 +20,7 @@ import express from 'express';
 import * as controller from '../controllers/esignature.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { validate, esignatureSchemas } from '../middleware/validation.middleware';
 
 const router = express.Router();
 
@@ -31,14 +32,14 @@ router.use(authMiddleware);
  * Verify user's password for e-signature (21 CFR Part 11 §11.200)
  * Used before applying electronic signature
  */
-router.post('/verify-password', controller.verifyPassword);
+router.post('/verify-password', validate({ body: esignatureSchemas.verifyPassword }), controller.verifyPassword);
 
 /**
  * POST /api/esignature/sign
  * Apply electronic signature to an entity
  * Requires password re-entry per 21 CFR Part 11 §11.200
  */
-router.post('/sign', controller.applySignature);
+router.post('/sign', validate({ body: esignatureSchemas.sign }), controller.applySignature);
 
 /**
  * GET /api/esignature/status/:entityType/:entityId
@@ -62,7 +63,7 @@ router.get('/pending', controller.getPendingSignatures);
  * POST /api/esignature/certify
  * User certification that e-signature is legally binding (21 CFR Part 11 §11.100(c))
  */
-router.post('/certify', controller.certifySignature);
+router.post('/certify', validate({ body: esignatureSchemas.certify }), controller.certifySignature);
 
 /**
  * GET /api/esignature/requirements/:studyId
@@ -75,7 +76,7 @@ router.get('/requirements/:studyId', controller.getStudyRequirements);
  * Invalidate a signature when the signed record is modified
  * 21 CFR Part 11 §11.70 - Signature/record linking
  */
-router.post('/invalidate', controller.invalidateSignature);
+router.post('/invalidate', validate({ body: esignatureSchemas.invalidate }), controller.invalidateSignature);
 
 /**
  * GET /api/esignature/certification-status
@@ -89,7 +90,7 @@ router.get('/certification-status', controller.getCertificationStatus);
  * Log a failed signature attempt from the frontend
  * 21 CFR Part 11 §11.10(e) - Audit trail
  */
-router.post('/audit/failed-attempt', controller.logFailedAttempt);
+router.post('/audit/failed-attempt', validate({ body: esignatureSchemas.logFailedAttempt }), controller.logFailedAttempt);
 
 export default router;
 

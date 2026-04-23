@@ -16,18 +16,17 @@ export const listEvents = asyncHandler(async (req: Request, res: Response) => {
   
   if (subjectId) {
     const result = await eventService.getSubjectEvents(parseInt(subjectId as string));
-    res.json({ success: true, data: result, total: result.length });
+    res.json({ success: true, data: result });
     return;
   }
   
   if (studyId) {
     const result = await eventService.getStudyEvents(parseInt(studyId as string));
-    res.json({ success: true, data: result, total: result.length });
+    res.json({ success: true, data: result });
     return;
   }
   
-  // Return empty array if no filters provided
-  res.json({ success: true, data: [], total: 0 });
+  res.json({ success: true, data: [] });
 });
 
 export const getStudyEvents = asyncHandler(async (req: Request, res: Response) => {
@@ -35,11 +34,7 @@ export const getStudyEvents = asyncHandler(async (req: Request, res: Response) =
 
   const result = await eventService.getStudyEvents(parseInt(studyId));
 
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length 
-  });
+  res.json({ success: true, data: result });
 });
 
 export const getEvent = asyncHandler(async (req: Request, res: Response) => {
@@ -60,11 +55,7 @@ export const getSubjectEvents = asyncHandler(async (req: Request, res: Response)
 
   const result = await eventService.getSubjectEvents(parseInt(subjectId));
 
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length 
-  });
+  res.json({ success: true, data: result });
 });
 
 export const getEventCRFs = asyncHandler(async (req: Request, res: Response) => {
@@ -72,11 +63,7 @@ export const getEventCRFs = asyncHandler(async (req: Request, res: Response) => 
 
   const result = await eventService.getEventCRFs(parseInt(id));
 
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length 
-  });
+  res.json({ success: true, data: result });
 });
 
 /**
@@ -88,11 +75,7 @@ export const getPatientEventCRFs = asyncHandler(async (req: Request, res: Respon
 
   const result = await eventService.getPatientEventCRFs(parseInt(studyEventId));
 
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length 
-  });
+  res.json({ success: true, data: result });
 });
 
 /**
@@ -105,20 +88,16 @@ export const getPatientEventCRFStatuses = asyncHandler(async (req: Request, res:
   const eventCrfs = await eventService.getPatientEventCRFs(parseInt(studyEventId));
 
   const statuses = eventCrfs.map((ec: any) => ({
-    crf_id: ec.crf_id,
-    crf_name: ec.crf_name,
-    event_crf_id: ec.event_crf_id,
-    status: ec.completion_status || 'not_started',
-    status_id: ec.completion_status_id,
-    completed_fields: parseInt(ec.filled_fields) || 0,
-    total_fields: parseInt(ec.total_fields) || 0
+    crf_id: ec.crfId,
+    crf_name: ec.crfName,
+    event_crf_id: ec.eventCrfId,
+    status: ec.completionStatus || 'not_started',
+    status_id: ec.completionStatusId,
+    completed_fields: parseInt(ec.filledFields) || 0,
+    total_fields: parseInt(ec.totalFields) || 0
   }));
 
-  res.json({ 
-    success: true, 
-    data: statuses,
-    total: statuses.length 
-  });
+  res.json({ success: true, data: statuses });
 });
 
 /**
@@ -131,32 +110,32 @@ export const getVisitForms = asyncHandler(async (req: Request, res: Response) =>
   const rows = await eventService.getVisitForms(parseInt(studyEventId));
 
   const forms = rows.map((r: any) => ({
-    crfId: r.crf_id,
-    crfName: r.crf_name,
-    crfDescription: r.crf_description || '',
-    required: r.required_crf || false,
-    doubleEntry: r.double_entry || false,
-    electronicSignature: r.electronic_signature || false,
+    crfId: r.crfId,
+    crfName: r.crfName,
+    crfDescription: r.crfDescription || '',
+    required: r.requiredCrf || false,
+    doubleEntry: r.doubleEntry || false,
+    electronicSignature: r.electronicSignature || false,
     ordinal: r.ordinal || 1,
-    defaultVersionId: r.default_version_id,
-    defaultVersionName: r.default_version_name,
+    defaultVersionId: r.defaultVersionId,
+    defaultVersionName: r.defaultVersionName,
     // Patient-specific
-    eventCrfId: r.event_crf_id || null,
-    patientVersionId: r.patient_version_id || null,
-    statusId: r.status_id ?? null,
+    eventCrfId: r.eventCrfId || null,
+    patientVersionId: r.patientVersionId || null,
+    statusId: r.statusId ?? null,
     frozen: r.frozen || false,
-    completionStatus: r.status_id === 6 ? 'locked' : (r.completion_status || 'not_started'),
-    completionStatusId: r.completion_status_id || null,
-    startedAt: r.started_at || null,
-    completedAt: r.completed_at || null,
-    filledFields: parseInt(r.filled_fields) || 0,
-    totalFields: parseInt(r.total_fields) || 0,
-    progress: r.total_fields > 0
-      ? Math.round((parseInt(r.filled_fields) || 0) / parseInt(r.total_fields) * 100)
+    completionStatus: r.statusId === 6 ? 'locked' : (r.completionStatus || 'not_started'),
+    completionStatusId: r.completionStatusId || null,
+    startedAt: r.startedAt || null,
+    completedAt: r.completedAt || null,
+    filledFields: parseInt(r.filledFields) || 0,
+    totalFields: parseInt(r.totalFields) || 0,
+    progress: r.totalFields > 0
+      ? Math.round((parseInt(r.filledFields) || 0) / parseInt(r.totalFields) * 100)
       : null
   }));
 
-  res.json({ success: true, data: forms, total: forms.length });
+  res.json({ success: true, data: forms });
 });
 
 /**
@@ -229,11 +208,7 @@ export const getAvailableCrfs = asyncHandler(async (req: Request, res: Response)
     user?.userId
   );
 
-  res.json({
-    success: true,
-    data: result,
-    total: result.length
-  });
+  res.json({ success: true, data: result });
 });
 
 /**
@@ -390,7 +365,7 @@ export const getPatientFormSnapshots = asyncHandler(async (req: Request, res: Re
 
   const result = await eventService.getPatientFormSnapshots(parseInt(studyEventId));
 
-  res.json({ success: true, data: result, total: result.length });
+  res.json({ success: true, data: result });
 });
 
 /**

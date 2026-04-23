@@ -15,6 +15,7 @@ import { logger } from '../config/logger';
 import { pool } from '../config/database';
 import { v4 as uuidv4 } from 'uuid';
 import { verifyAndUpgrade } from '../utils/password.util';
+import { trackUserAction } from '../services/database/audit.service';
 
 /**
  * Extended Express Request with audit information
@@ -166,50 +167,23 @@ export const logAuditEvent = async (
   }
 ): Promise<void> => {
   try {
-    // First, get or create the event type ID
-    const eventTypeResult = await pool.query(
-      `SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $1 LIMIT 1`,
-      [`%${eventType.split(' ')[0]}%`]
-    );
-    
-    const eventTypeId = eventTypeResult.rows[0]?.audit_log_event_type_id || 1;
-
-    // Insert using CORRECT column names from LibreClinica schema
-    // Note: audit_log_event does NOT have study_id column - only study_event_id, event_crf_id
-    const query = `
-      INSERT INTO audit_log_event (
-        audit_date,
-        audit_table,
-        user_id,
-        entity_id,
-        entity_name,
-        old_value,
-        new_value,
-        audit_log_event_type_id,
-        reason_for_change,
-        event_crf_id,
-        study_event_id
-      ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-      )
-    `;
-
-    await pool.query(query, [
-      details.entityName || 'api_request',  // audit_table
-      userId,                                // user_id
-      details.entityId || null,              // entity_id
-      details.entityName || null,            // entity_name
-      details.oldValue || null,              // old_value
-      details.newValue || null,              // new_value
-      eventTypeId,                           // audit_log_event_type_id
-      details.reasonForChange || null,       // reason_for_change
-      details.eventCrfId || null,            // event_crf_id
-      details.studyEventId || null           // study_event_id
-    ]);
+    await trackUserAction({
+      userId,
+      username,
+      action: eventType,
+      entityType: details.entityName || 'api_request',
+      entityId: details.entityId,
+      entityName: details.entityName,
+      oldValue: details.oldValue,
+      newValue: details.newValue,
+      details: details.reasonForChange,
+      studyId: details.studyId,
+      eventCrfId: details.eventCrfId,
+      studyEventId: details.studyEventId
+    });
 
     logger.info('Audit event logged', {
       eventType,
-      eventTypeId,
       userId,
       username,
       entityId: details.entityId
@@ -389,13 +363,13 @@ export const electronicSignatureMiddleware = async (
     const verification = await verifyAndUpgrade(
       password,
       user.passwd,
-      user.bcrypt_passwd || null
+      user.bcryptPasswd || null
     );
 
     if (!verification.valid) {
       await logAuditEvent(
         AuditEventType.FAILED_LOGIN,
-        user.user_id,
+        user.userId,
         username,
         {
           entityName: 'electronic_signature',
@@ -417,13 +391,13 @@ export const electronicSignatureMiddleware = async (
         INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
         VALUES ($1, $2, NOW(), 2)
         ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW(), password_version = 2
-      `, [user.user_id, verification.upgradedBcryptHash]).catch(() => {});
+      `, [user.userId, verification.upgradedBcryptHash]).catch(() => {});
     }
 
     // Log electronic signature
     await logAuditEvent(
       AuditEventType.DATA_ENTERED,
-      user.user_id,
+      user.userId,
       username,
       {
         entityName: 'electronic_signature',
@@ -435,7 +409,7 @@ export const electronicSignatureMiddleware = async (
 
     // Add signature info to request
     (req as any).electronicSignature = {
-      userId: user.user_id,
+      userId: user.userId,
       username,
       meaning,
       timestamp: new Date()

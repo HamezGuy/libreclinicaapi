@@ -285,7 +285,7 @@ export async function activateConsentVersion(
       UPDATE acc_consent_version
       SET status = 'superseded', date_updated = CURRENT_TIMESTAMP
       WHERE document_id = $1 AND status = 'active'
-    `, [version.document_id]);
+    `, [version.documentId]);
 
     // Activate this version
     await client.query(`
@@ -302,7 +302,7 @@ export async function activateConsentVersion(
       UPDATE acc_consent_document
       SET status = 'active', date_updated = CURRENT_TIMESTAMP
       WHERE document_id = $1
-    `, [version.document_id]);
+    `, [version.documentId]);
 
     // Log audit event
     await client.query(`
@@ -364,7 +364,7 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
           'content_hash','device_info','page_view_records','consent_form_data','template_id'
         )
     `);
-    const existingCols = new Set(colCheck.rows.map((r: any) => r.column_name));
+    const existingCols = new Set(colCheck.rows.map((r: any) => r.columnName));
 
     // Build column lists dynamically
     const columns: string[] = [
@@ -438,7 +438,7 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
 
     const result = await client.query(query, values);
 
-    const consentId = result.rows[0].consent_id;
+    const consentId = result.rows[0].consentId;
 
     // Link scanned consent files to this consent record
     if (consent.scannedConsentFileIds && consent.scannedConsentFileIds.length > 0) {
@@ -477,7 +477,7 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
         `SELECT ss.study_id FROM study_subject ss WHERE ss.study_subject_id = $1 LIMIT 1`,
         [consent.studySubjectId]
       );
-      const studyId = studyRow.rows[0]?.study_id;
+      const studyId = studyRow.rows[0]?.studyId;
       if (studyId) {
         const monitors = await pool.query(
           `SELECT DISTINCT ua.user_id FROM user_account ua
@@ -486,7 +486,7 @@ export async function recordConsent(consent: SubjectConsentCreate): Promise<Subj
            AND ua.user_id != $2`,
           [studyId, consent.consentedBy]
         );
-        const monitorIds = monitors.rows.map((r: any) => r.user_id);
+        const monitorIds = monitors.rows.map((r: any) => r.userId);
         if (monitorIds.length > 0) {
           await notifyConsentEvent(monitorIds, 'recorded', subjectLabel, studyId, consentId);
         }
@@ -556,16 +556,16 @@ export async function getConsentAuditTrail(consentId: number): Promise<any[]> {
 
   const result = await pool.query(query, [consentId]);
   return result.rows.map(row => ({
-    auditId: row.audit_id,
-    auditDate: row.audit_date,
-    table: row.audit_table,
-    entityId: row.entity_id,
-    entityName: row.entity_name,
-    oldValue: row.old_value,
-    newValue: row.new_value,
-    reasonForChange: row.reason_for_change,
-    eventType: row.event_type,
-    userName: row.user_name,
+    auditId: row.auditId,
+    auditDate: row.auditDate,
+    table: row.auditTable,
+    entityId: row.entityId,
+    entityName: row.entityName,
+    oldValue: row.oldValue,
+    newValue: row.newValue,
+    reasonForChange: row.reasonForChange,
+    eventType: row.eventType,
+    userName: row.userName,
     username: row.username
   }));
 }
@@ -642,7 +642,7 @@ export async function withdrawConsent(
 
     const consent = consentResult.rows[0];
 
-    if (consent.consent_status === 'withdrawn') {
+    if (consent.consentStatus === 'withdrawn') {
       throw new Error('Consent already withdrawn');
     }
 
@@ -668,7 +668,7 @@ export async function withdrawConsent(
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
         $3
       )
-    `, [userId, consent.study_subject_id, reason]);
+    `, [userId, consent.studySubjectId, reason]);
 
     await client.query('COMMIT');
 
@@ -702,7 +702,7 @@ export async function requestReconsent(request: ReconsentRequestCreate): Promise
     ORDER BY date_created DESC LIMIT 1
   `, [request.studySubjectId]);
 
-  const previousConsentId = previousConsentResult.rows[0]?.consent_id;
+  const previousConsentId = previousConsentResult.rows[0]?.consentId;
 
   const query = `
     INSERT INTO acc_reconsent_request (
@@ -723,7 +723,7 @@ export async function requestReconsent(request: ReconsentRequestCreate): Promise
     request.requestedBy
   ]);
 
-  return (await getReconsentRequest(result.rows[0].request_id))!;
+  return (await getReconsentRequest(result.rows[0].requestId))!;
 }
 
 /**
@@ -846,19 +846,19 @@ export async function getConsentDashboard(studyId: number): Promise<ConsentDashb
 
   return {
     stats: {
-      totalSubjects: parseInt(stats?.total_subjects || '0'),
+      totalSubjects: parseInt(stats?.totalSubjects || '0'),
       consented: parseInt(stats?.consented || '0'),
-      pending: parseInt(stats?.total_subjects || '0') - parseInt(stats?.consented || '0'),
+      pending: parseInt(stats?.totalSubjects || '0') - parseInt(stats?.consented || '0'),
       declined: 0, // Would need additional query
       withdrawn: 0, // Would need additional query
-      pendingReconsent: parseInt(stats?.pending_reconsent || '0')
+      pendingReconsent: parseInt(stats?.pendingReconsent || '0')
     },
     pendingConsents: pendingResult.rows.map(row => ({
-      studySubjectId: row.study_subject_id,
-      subjectLabel: row.subject_label,
-      siteName: row.site_name,
-      enrolledAt: row.enrolled_at,
-      daysWithoutConsent: parseInt(row.days_without_consent || '0')
+      studySubjectId: row.studySubjectId,
+      subjectLabel: row.subjectLabel,
+      siteName: row.siteName,
+      enrolledAt: row.enrolledAt,
+      daysWithoutConsent: parseInt(row.daysWithoutConsent || '0')
     })),
     pendingReconsents: reconsentResult,
     recentConsents: recentResult.rows.map(mapRowToSubjectConsent),
@@ -872,116 +872,123 @@ export async function getConsentDashboard(studyId: number): Promise<ConsentDashb
 
 function mapRowToDocument(row: any): ConsentDocument {
   return {
-    documentId: row.document_id,
-    studyId: row.study_id,
+    documentId: row.documentId,
+    studyId: row.studyId,
     name: row.name,
     description: row.description,
-    documentType: row.document_type,
-    languageCode: row.language_code,
+    documentType: row.documentType,
+    languageCode: row.languageCode,
     status: row.status,
-    requiresWitness: row.requires_witness,
-    requiresLAR: row.requires_lar,
-    ageOfMajority: row.age_of_majority,
-    minReadingTime: row.min_reading_time,
-    ownerId: row.owner_id,
-    ownerName: row.owner_name,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated
+    requiresWitness: row.requiresWitness,
+    requiresLAR: row.requiresLar,
+    ageOfMajority: row.ageOfMajority,
+    minReadingTime: row.minReadingTime,
+    ownerId: row.ownerId,
+    ownerName: row.ownerName,
+    dateCreated: row.dateCreated,
+    dateUpdated: row.dateUpdated
   };
 }
 
 function mapRowToVersion(row: any): ConsentVersion {
   return {
-    versionId: row.version_id,
-    documentId: row.document_id,
-    versionNumber: row.version_number,
-    versionName: row.version_name,
-    content: typeof row.content === 'string' ? JSON.parse(row.content) : row.content,
-    pdfTemplate: row.pdf_template,
-    effectiveDate: row.effective_date,
-    expirationDate: row.expiration_date,
-    irbApprovalDate: row.irb_approval_date,
-    irbApprovalNumber: row.irb_approval_number,
-    changeSummary: row.change_summary,
+    versionId: row.versionId,
+    documentId: row.documentId,
+    versionNumber: row.versionNumber,
+    versionName: row.versionName,
+    content: (() => {
+      if (typeof row.content !== 'string') return row.content;
+      try { return JSON.parse(row.content); }
+      catch (e: any) {
+        logger.error('Corrupted JSON in consent version content', { versionId: row.versionId, error: e.message });
+        return row.content;
+      }
+    })(),
+    pdfTemplate: row.pdfTemplate,
+    effectiveDate: row.effectiveDate,
+    expirationDate: row.expirationDate,
+    irbApprovalDate: row.irbApprovalDate,
+    irbApprovalNumber: row.irbApprovalNumber,
+    changeSummary: row.changeSummary,
     status: row.status,
-    approvedBy: row.approved_by,
-    approvedByName: row.approved_by_name,
-    approvedAt: row.approved_at,
-    createdBy: row.created_by,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated
+    approvedBy: row.approvedBy,
+    approvedByName: row.approvedByName,
+    approvedAt: row.approvedAt,
+    createdBy: row.createdBy,
+    dateCreated: row.dateCreated,
+    dateUpdated: row.dateUpdated
   };
 }
 
 function mapRowToSubjectConsent(row: any): SubjectConsent {
   return {
-    consentId: row.consent_id,
-    studySubjectId: row.study_subject_id,
-    subjectLabel: row.subject_label,
-    versionId: row.version_id,
-    versionNumber: row.version_number,
-    documentName: row.document_name,
-    consentType: row.consent_type,
-    consentStatus: row.consent_status,
-    subjectName: row.subject_name,
-    subjectSignatureData: row.subject_signature_data,
-    subjectSignedAt: row.subject_signed_at,
-    subjectIpAddress: row.subject_ip_address,
-    witnessName: row.witness_name,
-    witnessRelationship: row.witness_relationship,
-    witnessSignatureData: row.witness_signature_data,
-    witnessSignedAt: row.witness_signed_at,
-    larName: row.lar_name,
-    larRelationship: row.lar_relationship,
-    larSignatureData: row.lar_signature_data,
-    larSignedAt: row.lar_signed_at,
-    larReason: row.lar_reason,
-    presentedAt: row.presented_at,
-    timeSpentReading: row.time_spent_reading || 0,
-    pagesViewed: row.pages_viewed,
-    acknowledgementsChecked: row.acknowledgments_checked,
-    questionsAsked: row.questions_asked,
-    copyEmailedTo: row.copy_emailed_to,
-    copyEmailedAt: row.copy_emailed_at,
-    pdfFilePath: row.pdf_file_path,
-    withdrawnAt: row.withdrawn_at,
-    withdrawalReason: row.withdrawal_reason,
-    withdrawnByName: row.withdrawn_by_name,
-    consentedBy: row.consented_by,
-    consentedByName: row.consented_by_name,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    isScannedConsent: row.is_scanned_consent,
-    scannedConsentFileIds: row.scanned_consent_file_ids,
-    subjectSignatureId: row.subject_signature_id,
-    witnessSignatureId: row.witness_signature_id,
-    larSignatureId: row.lar_signature_id,
-    investigatorSignatureId: row.investigator_signature_id,
-    contentHash: row.content_hash,
-    deviceInfo: row.device_info,
-    templateId: row.template_id,
+    consentId: row.consentId,
+    studySubjectId: row.studySubjectId,
+    subjectLabel: row.subjectLabel,
+    versionId: row.versionId,
+    versionNumber: row.versionNumber,
+    documentName: row.documentName,
+    consentType: row.consentType,
+    consentStatus: row.consentStatus,
+    subjectName: row.subjectName,
+    subjectSignatureData: row.subjectSignatureData,
+    subjectSignedAt: row.subjectSignedAt,
+    subjectIpAddress: row.subjectIpAddress,
+    witnessName: row.witnessName,
+    witnessRelationship: row.witnessRelationship,
+    witnessSignatureData: row.witnessSignatureData,
+    witnessSignedAt: row.witnessSignedAt,
+    larName: row.larName,
+    larRelationship: row.larRelationship,
+    larSignatureData: row.larSignatureData,
+    larSignedAt: row.larSignedAt,
+    larReason: row.larReason,
+    presentedAt: row.presentedAt,
+    timeSpentReading: row.timeSpentReading || 0,
+    pagesViewed: row.pagesViewed,
+    acknowledgementsChecked: row.acknowledgementsChecked,
+    questionsAsked: row.questionsAsked,
+    copyEmailedTo: row.copyEmailedTo,
+    copyEmailedAt: row.copyEmailedAt,
+    pdfFilePath: row.pdfFilePath,
+    withdrawnAt: row.withdrawnAt,
+    withdrawalReason: row.withdrawalReason,
+    withdrawnByName: row.withdrawnByName,
+    consentedBy: row.consentedBy,
+    consentedByName: row.consentedByName,
+    dateCreated: row.dateCreated,
+    dateUpdated: row.dateUpdated,
+    isScannedConsent: row.isScannedConsent,
+    scannedConsentFileIds: row.scannedConsentFileIds,
+    subjectSignatureId: row.subjectSignatureId,
+    witnessSignatureId: row.witnessSignatureId,
+    larSignatureId: row.larSignatureId,
+    investigatorSignatureId: row.investigatorSignatureId,
+    contentHash: row.contentHash,
+    deviceInfo: row.deviceInfo,
+    templateId: row.templateId,
   };
 }
 
 function mapRowToReconsentRequest(row: any): ReconsentRequest {
   return {
-    requestId: row.request_id,
-    versionId: row.version_id,
-    versionNumber: row.version_number,
-    studySubjectId: row.study_subject_id,
-    subjectLabel: row.subject_label,
-    previousConsentId: row.previous_consent_id,
-    previousVersionNumber: row.previous_version_number,
+    requestId: row.requestId,
+    versionId: row.versionId,
+    versionNumber: row.versionNumber,
+    studySubjectId: row.studySubjectId,
+    subjectLabel: row.subjectLabel,
+    previousConsentId: row.previousConsentId,
+    previousVersionNumber: row.previousVersionNumber,
     reason: row.reason,
-    requestedAt: row.requested_at,
-    requestedBy: row.requested_by,
-    requestedByName: row.requested_by_name,
-    dueDate: row.due_date,
-    completedConsentId: row.completed_consent_id,
+    requestedAt: row.requestedAt,
+    requestedBy: row.requestedBy,
+    requestedByName: row.requestedByName,
+    dueDate: row.dueDate,
+    completedConsentId: row.completedConsentId,
     status: row.status,
-    waivedBy: row.waived_by,
-    waivedReason: row.waived_reason,
-    dateUpdated: row.date_updated
+    waivedBy: row.waivedBy,
+    waivedReason: row.waivedReason,
+    dateUpdated: row.dateUpdated
   };
 }
 

@@ -255,7 +255,7 @@ export async function createTestUser(
   if (existingUser.rows.length > 0) {
     console.log(`ℹ️ Test user '${username}' already exists`);
     return {
-      userId: existingUser.rows[0].user_id,
+      userId: existingUser.rows[0].userId,
       username,
       password,
       email: `${username}@test.local`,
@@ -281,7 +281,7 @@ export async function createTestUser(
     RETURNING user_id
   `, [username, passwordHash, `${username}@test.local`]);
 
-  const userId = result.rows[0].user_id;
+  const userId = result.rows[0].userId;
 
   console.log(`✅ Created test user '${username}' with ID ${userId}`);
 
@@ -372,10 +372,10 @@ export async function createTestStudy(
   if (existingStudy.rows.length > 0) {
     console.log(`ℹ️ Test study '${identifier}' already exists`);
     return {
-      studyId: existingStudy.rows[0].study_id,
+      studyId: existingStudy.rows[0].studyId,
       uniqueIdentifier: identifier,
       name,
-      ocOid: existingStudy.rows[0].oc_oid
+      ocOid: existingStudy.rows[0].ocOid
     };
   }
 
@@ -392,7 +392,7 @@ export async function createTestStudy(
     RETURNING study_id
   `, [identifier, name, ocOid]);
 
-  const studyId = result.rows[0].study_id;
+  const studyId = result.rows[0].studyId;
 
   console.log(`✅ Created test study '${identifier}' with ID ${studyId}`);
 
@@ -421,7 +421,7 @@ export async function deleteTestStudy(
 
   if (study.rows.length === 0) return;
 
-  const studyId = study.rows[0].study_id;
+  const studyId = study.rows[0].studyId;
 
   // Delete in order of dependencies
   await db.query('DELETE FROM study_user_role WHERE study_id = $1', [studyId]);

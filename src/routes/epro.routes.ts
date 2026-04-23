@@ -12,6 +12,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import { logger } from '../config/logger';
 import {
   Part11EventTypes,
@@ -54,21 +55,21 @@ router.get('/dashboard', async (req: Request, res: Response, next: NextFunction)
     const stats = statsResult.rows[0] || {};
 
     // Calculate completion rate
-    const total = parseInt(stats.pending_assignments || 0) + 
-                  parseInt(stats.completed_assignments || 0) + 
-                  parseInt(stats.overdue_assignments || 0);
+    const total = parseInt(stats.pendingAssignments || 0) + 
+                  parseInt(stats.completedAssignments || 0) + 
+                  parseInt(stats.overdueAssignments || 0);
     const completionRate = total > 0 
-      ? Math.round((parseInt(stats.completed_assignments || 0) / total) * 100) 
+      ? Math.round((parseInt(stats.completedAssignments || 0) / total) * 100) 
       : 0;
 
     res.json({
       success: true,
       data: {
         stats: {
-          totalPatients: parseInt(stats.total_patients || 0),
-          pendingAssignments: parseInt(stats.pending_assignments || 0),
-          overdueAssignments: parseInt(stats.overdue_assignments || 0),
-          completedAssignments: parseInt(stats.completed_assignments || 0),
+          totalPatients: parseInt(stats.totalPatients || 0),
+          pendingAssignments: parseInt(stats.pendingAssignments || 0),
+          overdueAssignments: parseInt(stats.overdueAssignments || 0),
+          completedAssignments: parseInt(stats.completedAssignments || 0),
           completionRate
         }
       }
@@ -115,16 +116,16 @@ router.get('/instruments', async (req: Request, res: Response, next: NextFunctio
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        instrumentId: row.instrument_id,
+        instrumentId: row.instrumentId,
         name: row.name,
-        shortName: row.short_name,
+        shortName: row.shortName,
         description: row.description,
         category: row.category,
-        estimatedMinutes: row.estimated_minutes,
-        statusId: row.status_id,
+        estimatedMinutes: row.estimatedMinutes,
+        statusId: row.statusId,
         content: row.content,
-        languageCode: row.language_code,
-        assignmentCount: parseInt(row.assignment_count || 0)
+        languageCode: row.languageCode,
+        assignmentCount: parseInt(row.assignmentCount || 0)
       }))
     });
   } catch (error) {
@@ -141,7 +142,7 @@ router.get('/instruments', async (req: Request, res: Response, next: NextFunctio
  * - Records audit event for instrument creation
  * - Captures user, timestamp, and instrument details
  */
-router.post('/instruments', async (req: Part11Request, res: Response, next: NextFunction) => {
+router.post('/instruments', requireRole('admin', 'investigator'), async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { name, shortName, description, content, category, estimatedMinutes, languageCode } = req.body;
     const userId = req.user?.userId;
@@ -158,7 +159,7 @@ router.post('/instruments', async (req: Part11Request, res: Response, next: Next
       RETURNING *
     `, [name, finalShortName, description, category || 'general', estimatedMinutes || 10, languageCode || 'en', content]);
 
-    const instrumentId = result.rows[0].instrument_id;
+    const instrumentId = result.rows[0].instrumentId;
 
     // Part 11 Audit: Record instrument creation (§11.10(e))
     await recordPart11Audit(
@@ -179,7 +180,7 @@ router.post('/instruments', async (req: Part11Request, res: Response, next: Next
       data: {
         instrumentId,
         name: result.rows[0].name,
-        shortName: result.rows[0].short_name
+        shortName: result.rows[0].shortName
       }
     });
   } catch (error) {
@@ -263,14 +264,14 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        assignmentId: row.assignment_id,
-        subjectId: row.study_subject_id,
-        subjectLabel: row.subject_label,
-        instrumentId: row.instrument_id,
-        instrumentName: row.instrument_name,
+        assignmentId: row.assignmentId,
+        subjectId: row.studySubjectId,
+        subjectLabel: row.subjectLabel,
+        instrumentId: row.instrumentId,
+        instrumentName: row.instrumentName,
         status: row.status,
-        scheduledDate: row.scheduled_date,
-        completedAt: row.completed_at,
+        scheduledDate: row.scheduledDate,
+        completedAt: row.completedAt,
         notes: row.notes
       }))
     });
@@ -288,7 +289,7 @@ router.get('/assignments', async (req: Request, res: Response, next: NextFunctio
  * - Records audit event for assignment creation
  * - Links to study subject for traceability
  */
-router.post('/assignments', async (req: Part11Request, res: Response, next: NextFunction) => {
+router.post('/assignments', requireRole('admin', 'investigator', 'coordinator'), async (req: Part11Request, res: Response, next: NextFunction) => {
   try {
     const { subjectId, instrumentId, dueDate, studyId } = req.body;
     const userId = req.user?.userId;
@@ -302,7 +303,7 @@ router.post('/assignments', async (req: Part11Request, res: Response, next: Next
       RETURNING *
     `, [subjectId, instrumentId, dueDate, userId]);
 
-    const assignmentId = result.rows[0].assignment_id;
+    const assignmentId = result.rows[0].assignmentId;
 
     // Part 11 Audit: Record assignment creation (§11.10(e))
     await recordPart11Audit(
@@ -357,7 +358,7 @@ router.post('/assignments/:id/remind', async (req: Part11Request, res: Response,
 
     const assignment = assignmentResult.rows[0];
     
-    if (!assignment.patient_account_id) {
+    if (!assignment.patientAccountId) {
       return res.status(400).json({ 
         success: false, 
         message: 'No patient account linked to this subject' 
@@ -373,12 +374,12 @@ router.post('/assignments/:id/remind', async (req: Part11Request, res: Response,
       RETURNING reminder_id
     `, [
       id, 
-      assignment.patient_account_id,
-      `Reminder: ${assignment.instrument_name || 'Questionnaire'}`,
+      assignment.patientAccountId,
+      `Reminder: ${assignment.instrumentName || 'Questionnaire'}`,
       `This is a reminder to complete your questionnaire.`
     ]);
 
-    const reminderId = reminderResult.rows[0].reminder_id;
+    const reminderId = reminderResult.rows[0].reminderId;
 
     // Part 11 Audit: Record reminder sent (§11.10(e))
     await recordPart11Audit(
@@ -389,7 +390,7 @@ router.post('/assignments/:id/remind', async (req: Part11Request, res: Response,
       reminderId,
       `Reminder for assignment ${id}`,
       null,
-      { assignmentId: id, patientAccountId: assignment.patient_account_id, status: 'sent' },
+      { assignmentId: id, patientAccountId: assignment.patientAccountId, status: 'sent' },
       'PRO reminder sent to patient',
       { ipAddress: req.ip }
     );
@@ -448,14 +449,14 @@ router.post('/assignments/:id/respond', async (req: Part11Request, res: Response
         RETURNING *
       `, [
         id, 
-        assignment?.study_subject_id, 
-        assignment?.instrument_id,
+        assignment?.studySubjectId, 
+        assignment?.instrumentId,
         JSON.stringify(responses), 
         startedAt || new Date(), 
         completedAt
       ]);
 
-      const responseId = responseResult.rows[0].response_id;
+      const responseId = responseResult.rows[0].responseId;
 
       // Update assignment status
       await client.query(`
@@ -478,8 +479,8 @@ router.post('/assignments/:id/respond', async (req: Part11Request, res: Response
         {
           status: 'completed',
           responseId,
-          subjectId: assignment?.study_subject_id,
-          instrumentId: assignment?.instrument_id,
+          subjectId: assignment?.studySubjectId,
+          instrumentId: assignment?.instrumentId,
           startedAt,
           completedAt: completedAt || formatPart11Timestamp()
         },
@@ -574,14 +575,14 @@ router.get('/patients', async (req: Request, res: Response, next: NextFunction) 
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        patientAccountId: row.patient_account_id,
-        studySubjectId: row.study_subject_id,
-        subjectLabel: row.subject_label,
+        patientAccountId: row.patientAccountId,
+        studySubjectId: row.studySubjectId,
+        subjectLabel: row.subjectLabel,
         email: row.email,
         phone: row.phone,
         status: row.status,
-        lastLogin: row.last_login,
-        pendingForms: parseInt(row.pending_forms || 0)
+        lastLogin: row.lastLogin,
+        pendingForms: parseInt(row.pendingForms || 0)
       }))
     });
   } catch (error) {
@@ -678,22 +679,22 @@ router.get('/reminders', async (req: Request, res: Response, next: NextFunction)
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        reminderId: row.reminder_id,
-        assignmentId: row.assignment_id,
-        patientAccountId: row.patient_account_id,
-        studySubjectId: row.study_subject_id,
-        subjectLabel: row.subject_label,
-        instrumentName: row.instrument_name,
-        patientEmail: row.patient_email,
-        patientPhone: row.patient_phone,
-        reminderType: row.reminder_type,
-        scheduledFor: row.scheduled_for,
-        sentAt: row.sent_at,
+        reminderId: row.reminderId,
+        assignmentId: row.assignmentId,
+        patientAccountId: row.patientAccountId,
+        studySubjectId: row.studySubjectId,
+        subjectLabel: row.subjectLabel,
+        instrumentName: row.instrumentName,
+        patientEmail: row.patientEmail,
+        patientPhone: row.patientPhone,
+        reminderType: row.reminderType,
+        scheduledFor: row.scheduledFor,
+        sentAt: row.sentAt,
         status: row.status,
-        messageSubject: row.message_subject,
-        messageBody: row.message_body,
-        errorMessage: row.error_message,
-        dateCreated: row.date_created
+        messageSubject: row.messageSubject,
+        messageBody: row.messageBody,
+        errorMessage: row.errorMessage,
+        dateCreated: row.dateCreated
       }))
     });
   } catch (error) {
@@ -734,22 +735,22 @@ router.get('/reminders/:id', async (req: Request, res: Response, next: NextFunct
     res.json({
       success: true,
       data: {
-        reminderId: row.reminder_id,
-        assignmentId: row.assignment_id,
-        patientAccountId: row.patient_account_id,
-        studySubjectId: row.study_subject_id,
-        subjectLabel: row.subject_label,
-        instrumentName: row.instrument_name,
-        patientEmail: row.patient_email,
-        patientPhone: row.patient_phone,
-        reminderType: row.reminder_type,
-        scheduledFor: row.scheduled_for,
-        sentAt: row.sent_at,
+        reminderId: row.reminderId,
+        assignmentId: row.assignmentId,
+        patientAccountId: row.patientAccountId,
+        studySubjectId: row.studySubjectId,
+        subjectLabel: row.subjectLabel,
+        instrumentName: row.instrumentName,
+        patientEmail: row.patientEmail,
+        patientPhone: row.patientPhone,
+        reminderType: row.reminderType,
+        scheduledFor: row.scheduledFor,
+        sentAt: row.sentAt,
         status: row.status,
-        messageSubject: row.message_subject,
-        messageBody: row.message_body,
-        errorMessage: row.error_message,
-        dateCreated: row.date_created
+        messageSubject: row.messageSubject,
+        messageBody: row.messageBody,
+        errorMessage: row.errorMessage,
+        dateCreated: row.dateCreated
       }
     });
   } catch (error) {
@@ -793,7 +794,7 @@ router.post('/reminders', async (req: Part11Request, res: Response, next: NextFu
       RETURNING *
     `, [assignmentId, patientAccountId, reminderType, scheduledFor, messageSubject, messageBody]);
 
-    const reminderId = result.rows[0].reminder_id;
+    const reminderId = result.rows[0].reminderId;
 
     // Part 11 Audit: Record reminder creation (§11.10(e))
     await recordPart11Audit(
@@ -819,8 +820,8 @@ router.post('/reminders', async (req: Part11Request, res: Response, next: NextFu
       success: true,
       data: {
         reminderId,
-        assignmentId: result.rows[0].assignment_id,
-        scheduledFor: result.rows[0].scheduled_for,
+        assignmentId: result.rows[0].assignmentId,
+        scheduledFor: result.rows[0].scheduledFor,
         status: result.rows[0].status
       }
     });
@@ -862,7 +863,7 @@ router.post('/reminders/:id/send', async (req: Part11Request, res: Response, nex
     // Get patient contact info
     const patientResult = await pool.query(
       'SELECT email, phone FROM acc_patient_account WHERE patient_account_id = $1',
-      [reminder.patient_account_id]
+      [reminder.patientAccountId]
     );
     const patient = patientResult.rows[0];
 
@@ -870,17 +871,17 @@ router.post('/reminders/:id/send', async (req: Part11Request, res: Response, nex
     let errorMessage = null;
 
     // Email/SMS/push integration not yet configured — always report not sent
-    if (reminder.reminder_type === 'email' && patient?.email) {
+    if (reminder.reminderType === 'email' && patient?.email) {
       sent = false;
       errorMessage = 'Email integration not yet configured';
-    } else if (reminder.reminder_type === 'sms' && patient?.phone) {
+    } else if (reminder.reminderType === 'sms' && patient?.phone) {
       sent = false;
       errorMessage = 'SMS integration not yet configured';
-    } else if (reminder.reminder_type === 'push') {
+    } else if (reminder.reminderType === 'push') {
       sent = false;
       errorMessage = 'Push notification integration not yet configured';
     } else {
-      errorMessage = `No valid contact method for ${reminder.reminder_type}`;
+      errorMessage = `No valid contact method for ${reminder.reminderType}`;
     }
 
     // Update reminder status
@@ -1006,17 +1007,17 @@ router.get('/reminders/pending/due', async (req: Request, res: Response, next: N
     res.json({
       success: true,
       data: result.rows.map(row => ({
-        reminderId: row.reminder_id,
-        assignmentId: row.assignment_id,
-        patientAccountId: row.patient_account_id,
-        subjectLabel: row.subject_label,
-        instrumentName: row.instrument_name,
-        patientEmail: row.patient_email,
-        patientPhone: row.patient_phone,
-        reminderType: row.reminder_type,
-        scheduledFor: row.scheduled_for,
-        messageSubject: row.message_subject,
-        messageBody: row.message_body
+        reminderId: row.reminderId,
+        assignmentId: row.assignmentId,
+        patientAccountId: row.patientAccountId,
+        subjectLabel: row.subjectLabel,
+        instrumentName: row.instrumentName,
+        patientEmail: row.patientEmail,
+        patientPhone: row.patientPhone,
+        reminderType: row.reminderType,
+        scheduledFor: row.scheduledFor,
+        messageSubject: row.messageSubject,
+        messageBody: row.messageBody
       }))
     });
   } catch (error) {
@@ -1051,14 +1052,14 @@ router.post('/assignments/:id/schedule-reminders', async (req: Part11Request, re
 
     const assignment = assignmentResult.rows[0];
 
-    if (!assignment.patient_account_id) {
+    if (!assignment.patientAccountId) {
       return res.status(400).json({ 
         success: false, 
         message: 'No patient account linked to this assignment' 
       });
     }
 
-    if (!assignment.scheduled_date) {
+    if (!assignment.scheduledDate) {
       return res.status(400).json({ 
         success: false, 
         message: 'Assignment has no scheduled date' 
@@ -1073,7 +1074,7 @@ router.post('/assignments/:id/schedule-reminders', async (req: Part11Request, re
     const createdReminders = [];
 
     for (const schedule of defaultSchedule) {
-      const scheduledFor = new Date(assignment.scheduled_date);
+      const scheduledFor = new Date(assignment.scheduledDate);
       scheduledFor.setDate(scheduledFor.getDate() - (schedule.daysBefore || 0));
 
       // Don't create reminders in the past
@@ -1087,14 +1088,14 @@ router.post('/assignments/:id/schedule-reminders', async (req: Part11Request, re
         RETURNING reminder_id
       `, [
         id,
-        assignment.patient_account_id,
+        assignment.patientAccountId,
         schedule.type || 'email',
         scheduledFor,
         `Reminder: Questionnaire Due`,
-        `You have a questionnaire that is due on ${assignment.scheduled_date}. Please complete it at your earliest convenience.`
+        `You have a questionnaire that is due on ${assignment.scheduledDate}. Please complete it at your earliest convenience.`
       ]);
 
-      createdReminders.push(result.rows[0].reminder_id);
+      createdReminders.push(result.rows[0].reminderId);
     }
 
     res.json({

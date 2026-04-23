@@ -8,6 +8,7 @@
 import express, { Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { validate, studyGroupSchemas } from '../middleware/validation.middleware';
 import * as studyGroupsService from '../services/database/studyGroups.service';
 import { logger } from '../config/logger';
 
@@ -58,7 +59,7 @@ router.get('/study/:studyId', async (req: Request, res: Response) => {
  * POST /api/study-groups/class
  * Create a new study group class (admin/coordinator only)
  */
-router.post('/class', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
+router.post('/class', requireRole('admin', 'data_manager'), validate({ body: studyGroupSchemas.createClass }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { studyId, name, groupClassTypeId, subjectAssignment } = req.body;
@@ -93,7 +94,7 @@ router.post('/class', requireRole('admin', 'data_manager'), async (req: Request,
  * POST /api/study-groups/group
  * Create a new group within a class (admin/coordinator only)
  */
-router.post('/group', requireRole('admin', 'data_manager'), async (req: Request, res: Response) => {
+router.post('/group', requireRole('admin', 'data_manager'), validate({ body: studyGroupSchemas.createGroup }), async (req: Request, res: Response) => {
   try {
     const { studyGroupClassId, name, description } = req.body;
     
@@ -150,7 +151,7 @@ router.get('/subject/:studySubjectId', async (req: Request, res: Response) => {
  * POST /api/study-groups/subject/:studySubjectId/assign
  * Assign a subject to groups
  */
-router.post('/subject/:studySubjectId/assign', async (req: Request, res: Response) => {
+router.post('/subject/:studySubjectId/assign', validate({ body: studyGroupSchemas.assignSubject }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const studySubjectId = parseInt(req.params.studySubjectId);

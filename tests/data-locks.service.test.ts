@@ -63,7 +63,7 @@ describe('Data Locks Service', () => {
       RETURNING study_event_definition_id
     `, [testStudyId, `SE_LOCK_${Date.now()}`]);
 
-    const eventDefId = eventDefResult.rows[0].study_event_definition_id;
+    const eventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
     // Create study event
     const eventResult = await testDb.pool.query(`
@@ -72,7 +72,7 @@ describe('Data Locks Service', () => {
       RETURNING study_event_id
     `, [eventDefId, testSubjectId, rootUserId]);
 
-    const studyEventId = eventResult.rows[0].study_event_id;
+    const studyEventId = eventResult.rows[0].studyEventId;
 
     // Create CRF and version
     const crfResult = await testDb.pool.query(`
@@ -81,7 +81,7 @@ describe('Data Locks Service', () => {
       RETURNING crf_id
     `, [testStudyId, rootUserId, `F_LOCK_${Date.now()}`]);
 
-    const crfId = crfResult.rows[0].crf_id;
+    const crfId = crfResult.rows[0].crfId;
 
     const crfVersionResult = await testDb.pool.query(`
       INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
@@ -89,7 +89,7 @@ describe('Data Locks Service', () => {
       RETURNING crf_version_id
     `, [crfId, rootUserId, `FV_LOCK_${Date.now()}`]);
 
-    const crfVersionId = crfVersionResult.rows[0].crf_version_id;
+    const crfVersionId = crfVersionResult.rows[0].crfVersionId;
 
     // Create event CRF (unlocked)
     const eventCrfResult = await testDb.pool.query(`
@@ -98,7 +98,7 @@ describe('Data Locks Service', () => {
       RETURNING event_crf_id
     `, [studyEventId, crfVersionId, rootUserId, testSubjectId]);
 
-    testEventCrfId = eventCrfResult.rows[0].event_crf_id;
+    testEventCrfId = eventCrfResult.rows[0].eventCrfId;
   });
 
   afterEach(async () => {
@@ -138,7 +138,7 @@ describe('Data Locks Service', () => {
         limit: 100
       });
 
-      expect(result.data.every((r: any) => r.status_id === 6)).toBe(true);
+      expect(result.data.every((r: any) => r.statusId === 6)).toBe(true);
     });
 
     it('should include CRF and event details', async () => {
@@ -150,8 +150,8 @@ describe('Data Locks Service', () => {
 
       if (result.data.length > 0) {
         const record = result.data[0];
-        expect(record.crf_name).toBeDefined();
-        expect(record.event_name).toBeDefined();
+        expect(record.crfName).toBeDefined();
+        expect(record.eventName).toBeDefined();
       }
     });
 
@@ -163,7 +163,7 @@ describe('Data Locks Service', () => {
       });
 
       if (result.data.length > 0) {
-        expect(result.data[0].subject_label).toBeDefined();
+        expect(result.data[0].subjectLabel).toBeDefined();
       }
     });
 
@@ -195,7 +195,7 @@ describe('Data Locks Service', () => {
         [testEventCrfId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(6);
+      expect(dbResult.rows[0].statusId).toBe(6);
     });
 
     it('should set update_id to locking user', async () => {
@@ -206,7 +206,7 @@ describe('Data Locks Service', () => {
         [testEventCrfId]
       );
 
-      expect(dbResult.rows[0].update_id).toBe(rootUserId);
+      expect(dbResult.rows[0].updateId).toBe(rootUserId);
     });
 
     it('should return error for already locked record', async () => {
@@ -233,8 +233,8 @@ describe('Data Locks Service', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].entity_name).toBe('Data Locked');
-      expect(auditResult.rows[0].reason_for_change).toBe('Locking for review');
+      expect(auditResult.rows[0].entityName).toBe('Data Locked');
+      expect(auditResult.rows[0].reasonForChange).toBe('Locking for review');
     });
 
     it('should accept lock without reason (reason is optional)', async () => {
@@ -263,7 +263,7 @@ describe('Data Locks Service', () => {
         [testEventCrfId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(2);
+      expect(dbResult.rows[0].statusId).toBe(2);
     });
 
     it('should set update_id to unlocking user', async () => {
@@ -274,7 +274,7 @@ describe('Data Locks Service', () => {
         [testEventCrfId]
       );
 
-      expect(dbResult.rows[0].update_id).toBe(rootUserId);
+      expect(dbResult.rows[0].updateId).toBe(rootUserId);
     });
 
     it('should return error for not locked record', async () => {
@@ -303,8 +303,8 @@ describe('Data Locks Service', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].entity_name).toBe('Data Unlocked');
-      expect(auditResult.rows[0].reason_for_change).toBe('Data correction needed');
+      expect(auditResult.rows[0].entityName).toBe('Data Unlocked');
+      expect(auditResult.rows[0].reasonForChange).toBe('Data correction needed');
     });
 
     it('should clear frozen flag when unlocking', async () => {
@@ -339,7 +339,7 @@ describe('Data Locks Service', () => {
         [testEventCrfId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(6);
+      expect(dbResult.rows[0].statusId).toBe(6);
       expect(dbResult.rows[0].frozen).toBe(false);
     });
   });
@@ -363,7 +363,7 @@ describe('Data Locks Service', () => {
       `, [testEventCrfId]);
 
       if (itemResult.rows.length > 0) {
-        const itemId = itemResult.rows[0].item_id;
+        const itemId = itemResult.rows[0].itemId;
 
         // Insert item_data
         const idResult = await testDb.pool.query(`
@@ -371,7 +371,7 @@ describe('Data Locks Service', () => {
           VALUES ($1, $2, 'test', 1, $3, NOW(), 1)
           RETURNING item_data_id
         `, [itemId, testEventCrfId, rootUserId]);
-        const itemDataId = idResult.rows[0].item_data_id;
+        const itemDataId = idResult.rows[0].itemDataId;
 
         // Create open query
         const dnResult = await testDb.pool.query(`
@@ -379,7 +379,7 @@ describe('Data Locks Service', () => {
           VALUES ('Test query', 3, 1, $1, 'itemData', $2, NOW())
           RETURNING discrepancy_note_id
         `, [testStudyId, rootUserId]);
-        const dnId = dnResult.rows[0].discrepancy_note_id;
+        const dnId = dnResult.rows[0].discrepancyNoteId;
 
         // Map it via dn_item_data_map
         await testDb.pool.query(`
@@ -596,7 +596,7 @@ describe('Data Locks Service', () => {
         'SELECT study_event_id FROM event_crf WHERE event_crf_id = $1',
         [testEventCrfId]
       );
-      testStudyEventId = seResult.rows[0]?.study_event_id;
+      testStudyEventId = seResult.rows[0]?.studyEventId;
 
       // Lock the form
       await testDb.pool.query(
@@ -615,7 +615,7 @@ describe('Data Locks Service', () => {
         'SELECT status_id FROM event_crf WHERE event_crf_id = $1',
         [testEventCrfId]
       );
-      expect(dbResult.rows[0].status_id).toBe(2);
+      expect(dbResult.rows[0].statusId).toBe(2);
     });
 
     it('should log audit entries with reason', async () => {
@@ -627,7 +627,7 @@ describe('Data Locks Service', () => {
         [testEventCrfId]
       );
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].reason_for_change).toBe('Audit reason test');
+      expect(auditResult.rows[0].reasonForChange).toBe('Audit reason test');
     });
 
     it('should return 0 unlocked when no locked forms exist', async () => {
@@ -658,7 +658,7 @@ describe('Data Locks Service', () => {
         'SELECT sdv_status FROM event_crf WHERE event_crf_id = $1',
         [testEventCrfId]
       );
-      expect(dbResult.rows[0].sdv_status).toBe(true);
+      expect(dbResult.rows[0].sdvStatus).toBe(true);
     });
 
     it('should return success with 0 verified for empty array', async () => {

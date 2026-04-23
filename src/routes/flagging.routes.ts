@@ -9,6 +9,7 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { validate, flaggingSchemas } from '../middleware/validation.middleware';
 import { logger } from '../config/logger';
 import { pool } from '../config/database';
 
@@ -38,7 +39,7 @@ router.get('/crfs/:eventCrfId', async (req: Request, res: Response) => {
 });
 
 // POST /api/flagging/crfs/:eventCrfId - Flag a CRF
-router.post('/crfs/:eventCrfId', requireRole('monitor', 'data_manager', 'admin'), async (req: Request, res: Response) => {
+router.post('/crfs/:eventCrfId', requireRole('monitor', 'data_manager', 'admin'), validate({ body: flaggingSchemas.flagCrf }), async (req: Request, res: Response) => {
   try {
     const eventCrfId = parseInt(req.params.eventCrfId);
     const { flagType, comment } = req.body;
@@ -80,7 +81,7 @@ router.get('/items/:itemDataId', async (req: Request, res: Response) => {
 });
 
 // POST /api/flagging/items/:itemDataId - Flag an item
-router.post('/items/:itemDataId', requireRole('monitor', 'data_manager', 'admin'), async (req: Request, res: Response) => {
+router.post('/items/:itemDataId', requireRole('monitor', 'data_manager', 'admin'), validate({ body: flaggingSchemas.flagItem }), async (req: Request, res: Response) => {
   try {
     const itemDataId = parseInt(req.params.itemDataId);
     const { flagType, comment } = req.body;

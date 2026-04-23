@@ -309,7 +309,7 @@ describe('Subject Service', () => {
     it.skip('should create subject via SOAP and verify in database', async () => {
       const result = await subjectService.createSubject({
         studyId: testStudyId,
-        studySubjectId: `NEW-SUB-${Date.now()}`,
+        label: `NEW-SUB-${Date.now()}`,
         enrollmentDate: new Date().toISOString().split('T')[0]
       }, rootUserId, 'root');
 
@@ -335,7 +335,7 @@ describe('Subject Service', () => {
       // This test expects SOAP to fail with invalid credentials
       const result = await subjectService.createSubject({
         studyId: 999999, // Invalid study
-        studySubjectId: `INVALID-${Date.now()}`,
+        label: `INVALID-${Date.now()}`,
         enrollmentDate: new Date().toISOString().split('T')[0]
       }, rootUserId, 'root');
 

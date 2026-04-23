@@ -84,18 +84,18 @@ export async function getTemplate(templateName: string): Promise<EmailTemplate |
     
     const row = result.rows[0];
     return {
-      templateId: row.template_id,
+      templateId: row.templateId,
       name: row.name,
       subject: row.subject,
-      htmlBody: row.html_body,
-      textBody: row.text_body,
+      htmlBody: row.htmlBody,
+      textBody: row.textBody,
       description: row.description,
       variables: row.variables,
       version: row.version,
-      statusId: row.status_id,
-      ownerId: row.owner_id,
-      dateCreated: row.date_created,
-      dateUpdated: row.date_updated
+      statusId: row.statusId,
+      ownerId: row.ownerId,
+      dateCreated: row.dateCreated,
+      dateUpdated: row.dateUpdated
     };
   } catch (error: any) {
     logger.error('Error getting email template', { error: error.message, templateName });
@@ -121,18 +121,18 @@ export async function listTemplates(): Promise<EmailTemplate[]> {
     const result = await pool.query(query);
     
     return result.rows.map(row => ({
-      templateId: row.template_id,
+      templateId: row.templateId,
       name: row.name,
       subject: row.subject,
-      htmlBody: row.html_body,
-      textBody: row.text_body,
+      htmlBody: row.htmlBody,
+      textBody: row.textBody,
       description: row.description,
       variables: row.variables,
       version: row.version,
-      statusId: row.status_id,
-      ownerId: row.owner_id,
-      dateCreated: row.date_created,
-      dateUpdated: row.date_updated
+      statusId: row.statusId,
+      ownerId: row.ownerId,
+      dateCreated: row.dateCreated,
+      dateUpdated: row.dateUpdated
     }));
   } catch (error: any) {
     logger.error('Error listing email templates', { error: error.message });
@@ -204,7 +204,7 @@ export async function queueEmail(request: EmailRequest): Promise<number | null> 
       request.scheduledFor || null
     ]);
 
-    const queueId = result.rows[0].queue_id;
+    const queueId = result.rows[0].queueId;
     logger.info('Email queued', { queueId, recipientEmail: request.recipientEmail });
 
     return queueId;
@@ -245,7 +245,7 @@ export async function queueDirectEmail(request: DirectEmailRequest): Promise<num
       request.entityId || null
     ]);
 
-    return result.rows[0].queue_id;
+    return result.rows[0].queueId;
   } catch (error: any) {
     logger.error('Error queueing direct email', { error: error.message });
     return null;
@@ -328,10 +328,10 @@ export async function processEmailQueue(batchSize: number = 10): Promise<QueuePr
       result.processed++;
 
       const sendResult = await sendEmailDirect(
-        email.recipient_email,
+        email.recipientEmail,
         email.subject,
-        email.html_body,
-        email.text_body
+        email.htmlBody,
+        email.textBody
       );
 
       if (sendResult.success) {
@@ -339,7 +339,7 @@ export async function processEmailQueue(batchSize: number = 10): Promise<QueuePr
           UPDATE acc_email_queue
           SET status = 'sent', sent_at = CURRENT_TIMESTAMP, last_attempt = CURRENT_TIMESTAMP
           WHERE queue_id = $1
-        `, [email.queue_id]);
+        `, [email.queueId]);
 
         result.sent++;
       } else {
@@ -350,11 +350,11 @@ export async function processEmailQueue(batchSize: number = 10): Promise<QueuePr
           UPDATE acc_email_queue
           SET status = $1, attempts = $2, last_attempt = CURRENT_TIMESTAMP, error_message = $3
           WHERE queue_id = $4
-        `, [newStatus, newAttempts, sendResult.error, email.queue_id]);
+        `, [newStatus, newAttempts, sendResult.error, email.queueId]);
 
         if (newStatus === 'failed') {
           result.failed++;
-          result.errors.push(`Email ${email.queue_id}: ${sendResult.error}`);
+          result.errors.push(`Email ${email.queueId}: ${sendResult.error}`);
         }
       }
     }
@@ -389,15 +389,15 @@ export async function getUserPreferences(userId: number): Promise<NotificationPr
     const result = await pool.query(query, [userId]);
 
     return result.rows.map(row => ({
-      preferenceId: row.preference_id,
-      userId: row.user_id,
-      studyId: row.study_id,
-      notificationType: row.notification_type as NotificationType,
-      emailEnabled: row.email_enabled,
-      digestEnabled: row.digest_enabled,
-      inAppEnabled: row.in_app_enabled,
-      dateCreated: row.date_created,
-      dateUpdated: row.date_updated
+      preferenceId: row.preferenceId,
+      userId: row.userId,
+      studyId: row.studyId,
+      notificationType: row.notificationType as NotificationType,
+      emailEnabled: row.emailEnabled,
+      digestEnabled: row.digestEnabled,
+      inAppEnabled: row.inAppEnabled,
+      dateCreated: row.dateCreated,
+      dateUpdated: row.dateUpdated
     }));
   } catch (error: any) {
     logger.error('Error getting user preferences', { error: error.message, userId });
@@ -444,15 +444,15 @@ export async function getPreference(
 
     const row = result.rows[0];
     return {
-      preferenceId: row.preference_id,
-      userId: row.user_id,
-      studyId: row.study_id,
-      notificationType: row.notification_type as NotificationType,
-      emailEnabled: row.email_enabled,
-      digestEnabled: row.digest_enabled,
-      inAppEnabled: row.in_app_enabled,
-      dateCreated: row.date_created,
-      dateUpdated: row.date_updated
+      preferenceId: row.preferenceId,
+      userId: row.userId,
+      studyId: row.studyId,
+      notificationType: row.notificationType as NotificationType,
+      emailEnabled: row.emailEnabled,
+      digestEnabled: row.digestEnabled,
+      inAppEnabled: row.inAppEnabled,
+      dateCreated: row.dateCreated,
+      dateUpdated: row.dateUpdated
     };
   } catch (error: any) {
     logger.error('Error getting user preference', { error: error.message, userId, notificationType });

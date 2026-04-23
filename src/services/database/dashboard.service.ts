@@ -86,7 +86,7 @@ export const getEnrollmentStats = async (
 
     // Calculate enrollment rate (subjects per month)
     const monthsActive = Math.max(1, (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24 * 30));
-    const enrollmentRate = parseInt(counts.total_subjects) / monthsActive;
+    const enrollmentRate = parseInt(counts.totalSubjects) / monthsActive;
 
     // Get target enrollment from study table
     const targetQuery = `
@@ -96,14 +96,14 @@ export const getEnrollmentStats = async (
     `;
 
     const targetResult = await pool.query(targetQuery, [studyId]);
-    const targetEnrollment = targetResult.rows[0]?.expected_total_enrollment || null;
+    const targetEnrollment = targetResult.rows[0]?.expectedTotalEnrollment || null;
 
     const stats: EnrollmentStats = {
-      totalSubjects: parseInt(counts.total_subjects),
-      activeSubjects: parseInt(counts.active_subjects),
-      completedSubjects: parseInt(counts.completed_subjects),
-      withdrawnSubjects: parseInt(counts.withdrawn_subjects),
-      screenedSubjects: parseInt(counts.screened_subjects),
+      totalSubjects: parseInt(counts.totalSubjects),
+      activeSubjects: parseInt(counts.activeSubjects),
+      completedSubjects: parseInt(counts.completedSubjects),
+      withdrawnSubjects: parseInt(counts.withdrawnSubjects),
+      screenedSubjects: parseInt(counts.screenedSubjects),
       enrollmentByMonth,
       enrollmentRate: Math.round(enrollmentRate * 100) / 100,
       targetEnrollment
@@ -157,47 +157,12 @@ export const getCompletionStats = async (studyId: number): Promise<CompletionSta
     const overallResult = await pool.query(overallQuery, [studyId]);
     const overall = overallResult.rows[0];
 
-    const totalCRFs = parseInt(overall.total_crfs);
-    const completedCRFs = parseInt(overall.completed_crfs);
-    const incompleteCRFs = parseInt(overall.incomplete_crfs);
+    const totalCRFs = parseInt(overall.totalCrfs);
+    const completedCRFs = parseInt(overall.completedCrfs);
+    const incompleteCRFs = parseInt(overall.incompleteCrfs);
     const completionPercentage = totalCRFs > 0 
       ? Math.round((completedCRFs / totalCRFs) * 100) 
       : 0;
-
-    // Get completion by form - properly scoped and excluding soft-deleted
-    const byFormQuery = `
-      SELECT 
-        c.crf_id,
-        c.name as crf_name,
-        COUNT(*) as total_expected,
-        COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END) as completed,
-        ROUND(
-          COUNT(CASE WHEN cs.name IN ('complete', 'signed') THEN 1 END)::numeric 
-          / NULLIF(COUNT(*)::numeric, 0) * 100, 2
-        ) as completion_percentage
-      FROM event_crf ec
-      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-      INNER JOIN crf c ON cv.crf_id = c.crf_id
-      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
-      WHERE ss.study_id = $1
-        AND ss.status_id NOT IN (5, 7)
-        AND ec.status_id NOT IN (5, 7)
-        AND c.status_id NOT IN (5, 7)
-      GROUP BY c.crf_id, c.name
-      ORDER BY completion_percentage DESC
-    `;
-
-    const byFormResult = await pool.query(byFormQuery, [studyId]);
-
-    const completionByForm = byFormResult.rows.map(row => ({
-      crfId: row.crf_id,
-      crfName: row.crf_name,
-      totalExpected: parseInt(row.total_expected),
-      completed: parseInt(row.completed),
-      completionPercentage: parseFloat(row.completion_percentage) || 0
-    }));
 
     // Calculate average completion time - only for completed, non-deleted records
     const avgTimeQuery = `
@@ -215,14 +180,14 @@ export const getCompletionStats = async (studyId: number): Promise<CompletionSta
     `;
 
     const avgTimeResult = await pool.query(avgTimeQuery, [studyId]);
-    const averageCompletionTime = parseFloat(avgTimeResult.rows[0].avg_days) || 0;
+    const averageCompletionTime = parseFloat(avgTimeResult.rows[0].avgDays) || 0;
 
     const stats: CompletionStats = {
       totalCRFs,
       completedCRFs,
       incompleteCRFs,
       completionPercentage,
-      completionByForm,
+      completionByForm: [],
       averageCompletionTime: Math.round(averageCompletionTime * 10) / 10
     };
 
@@ -345,7 +310,7 @@ export const getQueryStatistics = async (
     `;
 
     const resolutionTimeResult = await pool.query(resolutionTimeQuery, [studyId]);
-    const averageResolutionTime = parseFloat(resolutionTimeResult.rows[0].avg_days) || 0;
+    const averageResolutionTime = parseFloat(resolutionTimeResult.rows[0].avgDays) || 0;
 
     // Calculate query rate (queries per subject)
     // Note: discrepancy_note does NOT have study_subject_id - use study_id filter instead
@@ -356,12 +321,12 @@ export const getQueryStatistics = async (
     `;
 
     const rateResult = await pool.query(rateQuery, [studyId]);
-    const queryRate = parseFloat(rateResult.rows[0].query_rate) || 0;
+    const queryRate = parseFloat(rateResult.rows[0].queryRate) || 0;
 
     const stats: QueryStats = {
-      totalQueries: parseInt(overall.total_queries),
-      openQueries: parseInt(overall.open_queries),
-      closedQueries: parseInt(overall.closed_queries),
+      totalQueries: parseInt(overall.totalQueries),
+      openQueries: parseInt(overall.openQueries),
+      closedQueries: parseInt(overall.closedQueries),
       queriesByType,
       queriesByStatus,
       averageResolutionTime: Math.round(averageResolutionTime * 10) / 10,
@@ -411,7 +376,7 @@ export const getUserActivityStats = async (
     `;
 
     const activeUsersResult = await pool.query(activeUsersQuery, [studyId, startDate]);
-    const activeUsers = parseInt(activeUsersResult.rows[0].active_users) || 0;
+    const activeUsers = parseInt(activeUsersResult.rows[0].activeUsers) || 0;
 
     // Get login statistics from audit_user_login table
     // Note: audit_user_login has columns: id, user_name, user_account_id, login_attempt_date, login_status_code, version, details
@@ -448,11 +413,11 @@ export const getUserActivityStats = async (
     const byUserResult = await pool.query(byUserQuery, [studyId, startDate]);
 
     const activityByUser = byUserResult.rows.map(row => ({
-      userId: row.user_id,
-      username: row.user_name,
-      loginCount: parseInt(row.activity_count) || 0,
-      lastLogin: row.last_activity,
-      dataEntryCount: parseInt(row.data_entry_count) || 0
+      userId: row.userId,
+      username: row.userName,
+      loginCount: parseInt(row.activityCount) || 0,
+      lastLogin: row.lastActivity,
+      dataEntryCount: parseInt(row.dataEntryCount) || 0
     }));
 
     // Get activity by day (global, filtered by date)
@@ -475,13 +440,13 @@ export const getUserActivityStats = async (
     const activityByDay = byDayResult.rows.map(row => ({
       date: formatDate(row.date),
       logins: parseInt(row.logins) || 0,
-      dataEntries: parseInt(row.data_entries) || 0,
+      dataEntries: parseInt(row.dataEntries) || 0,
       queries: parseInt(row.queries) || 0
     }));
 
     const stats: UserActivityStats = {
       activeUsers,
-      totalLogins: parseInt(loginStats.total_logins) || 0,
+      totalLogins: parseInt(loginStats.totalLogins) || 0,
       averageSessionDuration: 0, // audit_user_login doesn't track session duration
       activityByUser,
       activityByDay
@@ -520,12 +485,12 @@ export const getEnrollmentTrend = async (
         SUM(COUNT(*)) OVER (ORDER BY DATE(ss.enrollment_date)) as cumulative
       FROM study_subject ss
       WHERE ss.study_id = $1
-        AND ss.enrollment_date >= CURRENT_DATE - INTERVAL '${days} days'
+        AND ss.enrollment_date >= CURRENT_DATE - make_interval(days => $2)
       GROUP BY DATE(ss.enrollment_date)
       ORDER BY date
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, [studyId, days]);
     return result.rows.map(row => ({
       date: formatDate(row.date),
       enrolled: parseInt(row.enrolled),
@@ -559,14 +524,14 @@ export const getCompletionTrend = async (
       INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       WHERE ss.study_id = $1
         AND cs.name IN ('complete', 'signed')
-        AND ec.date_updated >= CURRENT_DATE - INTERVAL '${days} days'
+        AND ec.date_updated >= CURRENT_DATE - make_interval(days => $2)
         AND ss.status_id NOT IN (5, 7)
         AND ec.status_id NOT IN (5, 7)
       GROUP BY DATE(ec.date_updated)
       ORDER BY date
     `;
 
-    const result = await pool.query(query, [studyId]);
+    const result = await pool.query(query, [studyId, days]);
     return result.rows.map(row => ({
       date: formatDate(row.date),
       completed: parseInt(row.completed)
@@ -609,16 +574,16 @@ export const getSitePerformance = async (studyId: number): Promise<any[]> => {
 
     const result = await pool.query(query, [studyId]);
     return result.rows.map(row => ({
-      siteId: row.site_id,
-      siteName: row.site_name,
-      siteNumber: row.site_number,
-      enrolledSubjects: parseInt(row.enrolled_subjects) || 0,
-      totalForms: parseInt(row.total_forms) || 0,
-      completedForms: parseInt(row.completed_forms) || 0,
-      completionRate: row.total_forms > 0 
-        ? Math.round((parseInt(row.completed_forms) / parseInt(row.total_forms)) * 100) 
+      siteId: row.siteId,
+      siteName: row.siteName,
+      siteNumber: row.siteNumber,
+      enrolledSubjects: parseInt(row.enrolledSubjects) || 0,
+      totalForms: parseInt(row.totalForms) || 0,
+      completedForms: parseInt(row.completedForms) || 0,
+      completionRate: row.totalForms > 0 
+        ? Math.round((parseInt(row.completedForms) / parseInt(row.totalForms)) * 100) 
         : 0,
-      openQueries: parseInt(row.open_queries) || 0
+      openQueries: parseInt(row.openQueries) || 0
     }));
   } catch (error: any) {
     logger.error('Site performance error', { error: error.message });
@@ -651,12 +616,12 @@ export const getFormCompletionRates = async (studyId: number, callerUserId?: num
         [callerUserId]
       );
       if (orgCheck.rows.length > 0) {
-        const orgIds = orgCheck.rows.map((r: any) => r.organization_id);
+        const orgIds = orgCheck.rows.map((r: any) => r.organizationId);
         const memberResult = await pool.query(
           `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
           [orgIds]
         );
-        const orgUserIds = memberResult.rows.map((r: any) => r.user_id);
+        const orgUserIds = memberResult.rows.map((r: any) => r.userId);
         if (orgUserIds.length > 0) {
           orgFilter = ` AND c.owner_id = ANY($${paramIdx}::int[])`;
           params.push(orgUserIds);
@@ -699,12 +664,12 @@ export const getFormCompletionRates = async (studyId: number, callerUserId?: num
 
     const result = await pool.query(query, params);
     return result.rows.map(row => {
-      const total = parseInt(row.total_instances) || 0;
+      const total = parseInt(row.totalInstances) || 0;
       const completed = parseInt(row.completed) || 0;
       const incomplete = parseInt(row.incomplete) || 0;
       return {
-        formId: row.crf_id,
-        formName: row.form_name,
+        formId: row.crfId,
+        formName: row.formName,
         totalInstances: total,
         completed,
         incomplete,
@@ -748,18 +713,18 @@ export const getDataQualityMetrics = async (studyId: number): Promise<any> => {
     const row = result.rows[0];
 
     return {
-      totalQueries: parseInt(row.total_queries) || 0,
-      openQueries: parseInt(row.open_queries) || 0,
-      resolvedQueries: parseInt(row.resolved_queries) || 0,
-      queryResolutionRate: row.total_queries > 0 
-        ? Math.round((parseInt(row.resolved_queries) / parseInt(row.total_queries)) * 100) 
+      totalQueries: parseInt(row.totalQueries) || 0,
+      openQueries: parseInt(row.openQueries) || 0,
+      resolvedQueries: parseInt(row.resolvedQueries) || 0,
+      queryResolutionRate: row.totalQueries > 0 
+        ? Math.round((parseInt(row.resolvedQueries) / parseInt(row.totalQueries)) * 100) 
         : 0,
-      sdvVerified: parseInt(row.sdv_verified) || 0,
-      totalCRFs: parseInt(row.total_crfs) || 0,
-      sdvRate: row.total_crfs > 0 
-        ? Math.round((parseInt(row.sdv_verified) / parseInt(row.total_crfs)) * 100) 
+      sdvVerified: parseInt(row.sdvVerified) || 0,
+      totalCRFs: parseInt(row.totalCrfs) || 0,
+      sdvRate: row.totalCrfs > 0 
+        ? Math.round((parseInt(row.sdvVerified) / parseInt(row.totalCrfs)) * 100) 
         : 0,
-      auditEvents30Days: parseInt(row.audit_events_30d) || 0
+      auditEvents30Days: parseInt(row.auditEvents30d) || 0
     };
   } catch (error: any) {
     logger.error('Data quality metrics error', { error: error.message });
@@ -823,15 +788,15 @@ export const getActivityFeed = async (studyId: number, limit: number = 20): Prom
 
     const result = await pool.query(query, [limit]);
     return result.rows.map(row => ({
-      id: row.audit_id,
-      timestamp: row.audit_date,
-      table: row.audit_table,
-      entityName: row.entity_name,
-      eventType: row.event_type,
-      oldValue: row.old_value,
-      newValue: row.new_value,
-      userName: row.user_name,
-      userFullName: row.user_full_name
+      id: row.auditId,
+      timestamp: row.auditDate,
+      table: row.auditTable,
+      entityName: row.entityName,
+      eventType: row.eventType,
+      oldValue: row.oldValue,
+      newValue: row.newValue,
+      userName: row.userName,
+      userFullName: row.userFullName
     }));
   } catch (error: any) {
     logger.error('Activity feed error', { error: error.message });
@@ -997,31 +962,31 @@ export const getUserAnalytics = async (
     const userStatsResult = await pool.query(userStatsQuery, [startDate, studyId]);
 
     const users = userStatsResult.rows.map(row => ({
-      userId: row.user_id,
-      userName: row.user_name,
-      firstName: row.first_name,
-      lastName: row.last_name,
-      fullName: `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.user_name,
+      userId: row.userId,
+      userName: row.userName,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      fullName: `${row.firstName || ''} ${row.lastName || ''}`.trim() || row.userName,
       email: row.email,
-      institution: row.institutional_affiliation,
+      institution: row.institutionalAffiliation,
       status: row.status,
-      role: row.role_name,
+      role: row.roleName,
       logins: {
-        total: parseInt(row.total_logins) || 0,
-        last7Days: parseInt(row.logins_last_7_days) || 0,
-        today: parseInt(row.logins_today) || 0,
-        firstLogin: row.first_login,
-        lastLogin: row.last_login,
-        avgDaysBetweenLogins: parseFloat(row.avg_days_between_logins) || 0
+        total: parseInt(row.totalLogins) || 0,
+        last7Days: parseInt(row.loginsLast7Days) || 0,
+        today: parseInt(row.loginsToday) || 0,
+        firstLogin: row.firstLogin,
+        lastLogin: row.lastLogin,
+        avgDaysBetweenLogins: parseFloat(row.avgDaysBetweenLogins) || 0
       },
       activity: {
-        totalActions: parseInt(row.total_actions) || 0,
-        createActions: parseInt(row.create_actions) || 0,
-        updateActions: parseInt(row.update_actions) || 0,
-        dataEntryActions: parseInt(row.data_entry_actions) || 0,
-        actionsToday: parseInt(row.actions_today) || 0,
-        actionsLast7Days: parseInt(row.actions_last_7_days) || 0,
-        lastActivity: row.last_activity
+        totalActions: parseInt(row.totalActions) || 0,
+        createActions: parseInt(row.createActions) || 0,
+        updateActions: parseInt(row.updateActions) || 0,
+        dataEntryActions: parseInt(row.dataEntryActions) || 0,
+        actionsToday: parseInt(row.actionsToday) || 0,
+        actionsLast7Days: parseInt(row.actionsLast7Days) || 0,
+        lastActivity: row.lastActivity
       }
     }));
 
@@ -1083,12 +1048,12 @@ export const getUserAnalytics = async (
 
     const roleActivityResult = await pool.query(roleActivityQuery, [startDate, studyId]);
     const activityByRole = roleActivityResult.rows.map(row => ({
-      role: row.role_name,
-      userCount: parseInt(row.user_count) || 0,
-      totalActions: parseInt(row.total_actions) || 0,
-      totalLogins: parseInt(row.total_logins) || 0,
-      avgActionsPerUser: row.user_count > 0 
-        ? Math.round(parseInt(row.total_actions) / parseInt(row.user_count)) 
+      role: row.roleName,
+      userCount: parseInt(row.userCount) || 0,
+      totalActions: parseInt(row.totalActions) || 0,
+      totalLogins: parseInt(row.totalLogins) || 0,
+      avgActionsPerUser: row.userCount > 0 
+        ? Math.round(parseInt(row.totalActions) / parseInt(row.userCount)) 
         : 0
     }));
 
@@ -1112,7 +1077,7 @@ export const getUserAnalytics = async (
     
     loginPatternResult.rows.forEach(row => {
       const hour = parseInt(row.hour);
-      loginsByHour[hour].count = parseInt(row.login_count) || 0;
+      loginsByHour[hour].count = parseInt(row.loginCount) || 0;
     });
 
     // Get activity trend by day
@@ -1131,18 +1096,18 @@ export const getUserAnalytics = async (
     const activityTrendResult = await pool.query(activityTrendQuery, [startDate]);
     const activityTrend = activityTrendResult.rows.map(row => ({
       date: formatDate(row.date),
-      actionCount: parseInt(row.action_count) || 0,
-      uniqueUsers: parseInt(row.unique_users) || 0
+      actionCount: parseInt(row.actionCount) || 0,
+      uniqueUsers: parseInt(row.uniqueUsers) || 0
     })).reverse();
 
     return {
       summary: {
-        totalUsers: parseInt(summary.total_users) || 0,
-        activeToday: parseInt(summary.active_today) || 0,
-        activeLast7Days: parseInt(summary.active_last_7_days) || 0,
-        activeLast30Days: parseInt(summary.active_last_30_days) || 0,
-        avgActionsPerUser: parseFloat(summary.avg_actions_per_user) || 0,
-        avgLoginsPerUser: parseFloat(summary.avg_logins_per_user) || 0
+        totalUsers: parseInt(summary.totalUsers) || 0,
+        activeToday: parseInt(summary.activeToday) || 0,
+        activeLast7Days: parseInt(summary.activeLast7Days) || 0,
+        activeLast30Days: parseInt(summary.activeLast30Days) || 0,
+        avgActionsPerUser: parseFloat(summary.avgActionsPerUser) || 0,
+        avgLoginsPerUser: parseFloat(summary.avgLoginsPerUser) || 0
       },
       users,
       activityByRole,
@@ -1207,17 +1172,17 @@ export const getTopPerformers = async (
     
     return result.rows.map((row, index) => ({
       rank: index + 1,
-      userId: row.user_id,
-      userName: row.user_name,
-      fullName: `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.user_name,
-      role: row.role_name,
-      totalActions: parseInt(row.total_actions) || 0,
-      dataEntryCount: parseInt(row.data_entry_count) || 0,
-      activeDays: parseInt(row.active_days) || 0,
-      firstActivity: row.first_activity,
-      lastActivity: row.last_activity,
-      avgActionsPerDay: row.active_days > 0 
-        ? Math.round(parseInt(row.total_actions) / parseInt(row.active_days)) 
+      userId: row.userId,
+      userName: row.userName,
+      fullName: `${row.firstName || ''} ${row.lastName || ''}`.trim() || row.userName,
+      role: row.roleName,
+      totalActions: parseInt(row.totalActions) || 0,
+      dataEntryCount: parseInt(row.dataEntryCount) || 0,
+      activeDays: parseInt(row.activeDays) || 0,
+      firstActivity: row.firstActivity,
+      lastActivity: row.lastActivity,
+      avgActionsPerDay: row.activeDays > 0 
+        ? Math.round(parseInt(row.totalActions) / parseInt(row.activeDays)) 
         : 0
     }));
   } catch (error: any) {
@@ -1238,15 +1203,15 @@ export const getQueryAgingAnalysis = async (studyId: number): Promise<any> => {
       SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'discrepancy_note') as has_dn,
              EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'discrepancy_note_type') as has_dnt
     `);
-    const { has_dn, has_dnt } = tableCheck.rows[0] || {};
-    if (!has_dn) {
+    const { hasDn, hasDnt } = tableCheck.rows[0] || {};
+    if (!hasDn) {
       return { buckets: [], totalOpen: 0, overallAvgDays: 0, oldestDays: 0 };
     }
 
-    const dntJoin = has_dnt
+    const dntJoin = hasDnt
       ? `LEFT JOIN discrepancy_note_type dnt ON dn.discrepancy_note_type_id = dnt.discrepancy_note_type_id`
       : '';
-    const dntCols = has_dnt
+    const dntCols = hasDnt
       ? `, COUNT(*) FILTER (WHERE dnt.name = 'Query') as manual_queries,
          COUNT(*) FILTER (WHERE dnt.name = 'Failed Validation Check') as validation_queries`
       : `, 0 as manual_queries, 0 as validation_queries`;
@@ -1280,7 +1245,7 @@ export const getQueryAgingAnalysis = async (studyId: number): Promise<any> => {
     `;
     const result = await pool.query(query, [studyId]);
 
-    const totalOpen = result.rows.reduce((sum: number, r: any) => sum + parseInt(r.query_count), 0);
+    const totalOpen = result.rows.reduce((sum: number, r: any) => sum + parseInt(r.queryCount), 0);
     const overallAvgQuery = `
       SELECT ROUND(AVG(EXTRACT(DAY FROM NOW() - dn.date_created))::numeric, 1) as overall_avg
       FROM discrepancy_note dn
@@ -1290,15 +1255,15 @@ export const getQueryAgingAnalysis = async (studyId: number): Promise<any> => {
 
     return {
       buckets: result.rows.map((r: any) => ({
-        ageBucket: r.age_bucket,
-        count: parseInt(r.query_count),
-        avgAgeDays: parseFloat(r.avg_age_days) || 0,
-        manualQueries: parseInt(r.manual_queries) || 0,
-        validationQueries: parseInt(r.validation_queries) || 0,
-        percentage: totalOpen > 0 ? Math.round((parseInt(r.query_count) / totalOpen) * 100) : 0
+        ageBucket: r.ageBucket,
+        count: parseInt(r.queryCount),
+        avgAgeDays: parseFloat(r.avgAgeDays) || 0,
+        manualQueries: parseInt(r.manualQueries) || 0,
+        validationQueries: parseInt(r.validationQueries) || 0,
+        percentage: totalOpen > 0 ? Math.round((parseInt(r.queryCount) / totalOpen) * 100) : 0
       })),
       totalOpenQueries: totalOpen,
-      overallAvgAgeDays: parseFloat(avgResult.rows[0]?.overall_avg) || 0
+      overallAvgAgeDays: parseFloat(avgResult.rows[0]?.overallAvg) || 0
     };
   } catch (error: any) {
     logger.error('Query aging analysis error', { error: error.message });
@@ -1345,14 +1310,14 @@ export const getVisitWindowCompliance = async (studyId: number): Promise<any> =>
     const result = await pool.query(query, [studyId]);
 
     const visits = result.rows.map((r: any) => ({
-      visitName: r.visit_name,
+      visitName: r.visitName,
       ordinal: r.ordinal,
-      totalVisits: parseInt(r.total_visits) || 0,
-      visitsWithDate: parseInt(r.visits_with_date) || 0,
-      totalForms: parseInt(r.total_forms) || 0,
-      completedForms: parseInt(r.completed_forms) || 0,
-      completionRate: r.total_forms > 0 ? Math.round((parseInt(r.completed_forms) / parseInt(r.total_forms)) * 100) : 0,
-      avgDaysToComplete: parseFloat(r.avg_days_to_complete) || 0
+      totalVisits: parseInt(r.totalVisits) || 0,
+      visitsWithDate: parseInt(r.visitsWithDate) || 0,
+      totalForms: parseInt(r.totalForms) || 0,
+      completedForms: parseInt(r.completedForms) || 0,
+      completionRate: r.totalForms > 0 ? Math.round((parseInt(r.completedForms) / parseInt(r.totalForms)) * 100) : 0,
+      avgDaysToComplete: parseFloat(r.avgDaysToComplete) || 0
     }));
 
     const totals = visits.reduce((acc: any, v: any) => ({
@@ -1441,20 +1406,20 @@ export const getSubjectProgressMatrix = async (
     ]);
 
     const subjects = subjectsResult.rows.map((row: any) => {
-      const totalForms = parseInt(row.total_forms) || 0;
-      const completedForms = parseInt(row.completed_forms) || 0;
+      const totalForms = parseInt(row.totalForms) || 0;
+      const completedForms = parseInt(row.completedForms) || 0;
       return {
-        studySubjectId: row.study_subject_id,
+        studySubjectId: row.studySubjectId,
         label: row.label,
-        siteName: row.site_name || 'Main Study',
-        siteId: row.site_id || studyId,
-        enrollmentDate: row.enrollment_date ? formatDate(row.enrollment_date) : null,
+        siteName: row.siteName || 'Main Study',
+        siteId: row.siteId || studyId,
+        enrollmentDate: row.enrollmentDate ? formatDate(row.enrollmentDate) : null,
         status: row.status || 'available',
-        currentVisit: row.current_visit || null,
+        currentVisit: row.currentVisit || null,
         totalForms,
         completedForms,
         percentComplete: totalForms > 0 ? Math.round((completedForms / totalForms) * 100) : 0,
-        openQueries: parseInt(row.open_queries) || 0
+        openQueries: parseInt(row.openQueries) || 0
       };
     });
 
@@ -1506,15 +1471,15 @@ export const getOverdueForms = async (studyId: number): Promise<any> => {
     const result = await pool.query(query, [studyId]);
 
     return result.rows.map((row: any) => ({
-      studySubjectId: row.study_subject_id,
-      subjectLabel: row.subject_label,
-      siteName: row.site_name || 'Main Study',
-      visitName: row.visit_name,
-      formName: row.form_name,
-      eventCrfId: row.event_crf_id,
-      daysOverdue: parseInt(row.days_since_start) || 0,
-      visitStartDate: row.visit_start_date ? formatDate(row.visit_start_date) : null,
-      formCreatedDate: row.form_created_date ? formatDate(row.form_created_date) : null
+      studySubjectId: row.studySubjectId,
+      subjectLabel: row.subjectLabel,
+      siteName: row.siteName || 'Main Study',
+      visitName: row.visitName,
+      formName: row.formName,
+      eventCrfId: row.eventCrfId,
+      daysOverdue: parseInt(row.daysSinceStart) || 0,
+      visitStartDate: row.visitStartDate ? formatDate(row.visitStartDate) : null,
+      formCreatedDate: row.formCreatedDate ? formatDate(row.formCreatedDate) : null
     }));
   } catch (error: any) {
     logger.error('Overdue forms error', { error: error.message, studyId });
@@ -1533,7 +1498,7 @@ export const getDataLockProgress = async (studyId: number): Promise<any> => {
         COUNT(DISTINCT ec.event_crf_id) as total_crfs,
         COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.date_completed IS NOT NULL) as completed_crfs,
         COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.sdv_status = true) as sdvd_count,
-        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.electronic_signature_status IS NOT NULL AND ec.electronic_signature_status != '') as signed_count,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.electronic_signature_status = true) as signed_count,
         COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.frozen = true) as frozen_count,
         COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.status_id = 4) as locked_count
       FROM event_crf ec
@@ -1560,7 +1525,7 @@ export const getDataLockProgress = async (studyId: number): Promise<any> => {
         COUNT(DISTINCT ec.event_crf_id) as total_forms,
         COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.date_completed IS NOT NULL) as completed_forms,
         COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.sdv_status = true) as sdvd_forms,
-        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.electronic_signature_status IS NOT NULL AND ec.electronic_signature_status != '') as signed_forms,
+        COUNT(DISTINCT ec.event_crf_id) FILTER (WHERE ec.electronic_signature_status = true) as signed_forms,
         (SELECT COUNT(*) FROM discrepancy_note dn
          INNER JOIN dn_study_subject_map dssm ON dn.discrepancy_note_id = dssm.discrepancy_note_id
          WHERE dssm.study_subject_id = ss.study_subject_id AND dn.resolution_status_id IN (1,2,3) AND dn.parent_dn_id IS NULL) as open_queries
@@ -1583,17 +1548,17 @@ export const getDataLockProgress = async (studyId: number): Promise<any> => {
     ]);
 
     const row = mainResult.rows[0] || {};
-    const totalCRFs = parseInt(row.total_crfs) || 0;
+    const totalCRFs = parseInt(row.totalCrfs) || 0;
 
     const subjectReadiness = readinessResult.rows.map((r: any) => {
-      const total = parseInt(r.total_forms) || 0;
-      const completed = parseInt(r.completed_forms) || 0;
-      const sdvd = parseInt(r.sdvd_forms) || 0;
-      const signed = parseInt(r.signed_forms) || 0;
-      const openQ = parseInt(r.open_queries) || 0;
+      const total = parseInt(r.totalForms) || 0;
+      const completed = parseInt(r.completedForms) || 0;
+      const sdvd = parseInt(r.sdvdForms) || 0;
+      const signed = parseInt(r.signedForms) || 0;
+      const openQ = parseInt(r.openQueries) || 0;
       return {
-        subjectLabel: r.subject_label,
-        siteName: r.site_name,
+        subjectLabel: r.subjectLabel,
+        siteName: r.siteName,
         allComplete: total > 0 && completed === total,
         allQueriesResolved: openQ === 0,
         allSdvd: total > 0 && sdvd === total,
@@ -1604,12 +1569,12 @@ export const getDataLockProgress = async (studyId: number): Promise<any> => {
 
     return {
       totalCRFs,
-      completedCount: parseInt(row.completed_crfs) || 0,
-      sdvdCount: parseInt(row.sdvd_count) || 0,
-      signedCount: parseInt(row.signed_count) || 0,
-      frozenCount: parseInt(row.frozen_count) || 0,
-      lockedCount: parseInt(row.locked_count) || 0,
-      withOpenQueries: parseInt(queriesResult.rows[0]?.with_open_queries) || 0,
+      completedCount: parseInt(row.completedCrfs) || 0,
+      sdvdCount: parseInt(row.sdvdCount) || 0,
+      signedCount: parseInt(row.signedCount) || 0,
+      frozenCount: parseInt(row.frozenCount) || 0,
+      lockedCount: parseInt(row.lockedCount) || 0,
+      withOpenQueries: parseInt(queriesResult.rows[0]?.withOpenQueries) || 0,
       subjectReadiness
     };
   } catch (error: any) {
@@ -1628,12 +1593,12 @@ export const getCrfLifecycleSummary = async (studyId: number): Promise<any> => {
       SELECT
         COUNT(*) FILTER (WHERE ec.date_completed IS NULL AND ec.date_created IS NOT NULL) as data_entry_in_progress,
         COUNT(*) FILTER (WHERE ec.date_completed IS NOT NULL AND COALESCE(ec.sdv_status, false) = false
-          AND (ec.electronic_signature_status IS NULL OR ec.electronic_signature_status = '')
+          AND COALESCE(ec.electronic_signature_status, false) = false
           AND COALESCE(ec.frozen, false) = false) as data_entry_complete,
         COUNT(*) FILTER (WHERE ec.sdv_status = true
-          AND (ec.electronic_signature_status IS NULL OR ec.electronic_signature_status = '')
+          AND COALESCE(ec.electronic_signature_status, false) = false
           AND COALESCE(ec.frozen, false) = false) as sdv_complete,
-        COUNT(*) FILTER (WHERE ec.electronic_signature_status IS NOT NULL AND ec.electronic_signature_status != ''
+        COUNT(*) FILTER (WHERE ec.electronic_signature_status = true
           AND COALESCE(ec.frozen, false) = false) as signed,
         COUNT(*) FILTER (WHERE ec.frozen = true AND ec.status_id != 4) as frozen,
         COUNT(*) FILTER (WHERE ec.status_id = 4) as locked,
@@ -1669,19 +1634,19 @@ export const getCrfLifecycleSummary = async (studyId: number): Promise<any> => {
 
     const [lifecycleResult, expectedResult] = await Promise.all([
       pool.query(query, [studyId]),
-      pool.query(expectedQuery, [studyId]).catch(() => ({ rows: [{ not_started: 0 }] }))
+      pool.query(expectedQuery, [studyId]).catch(() => ({ rows: [{ notStarted: 0 }] }))
     ]);
 
     const row = lifecycleResult.rows[0] || {};
     const total = parseInt(row.total) || 0;
-    const notStarted = parseInt(expectedResult.rows[0]?.not_started) || 0;
+    const notStarted = parseInt(expectedResult.rows[0]?.notStarted) || 0;
     const grandTotal = total + notStarted;
 
     const stages = [
       { stage: 'Not Started', count: notStarted, percentage: grandTotal > 0 ? Math.round((notStarted / grandTotal) * 100) : 0 },
-      { stage: 'Data Entry', count: parseInt(row.data_entry_in_progress) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.data_entry_in_progress) || 0) / grandTotal) * 100) : 0 },
-      { stage: 'Complete', count: parseInt(row.data_entry_complete) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.data_entry_complete) || 0) / grandTotal) * 100) : 0 },
-      { stage: 'SDV Verified', count: parseInt(row.sdv_complete) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.sdv_complete) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'Data Entry', count: parseInt(row.dataEntryInProgress) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.dataEntryInProgress) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'Complete', count: parseInt(row.dataEntryComplete) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.dataEntryComplete) || 0) / grandTotal) * 100) : 0 },
+      { stage: 'SDV Verified', count: parseInt(row.sdvComplete) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.sdvComplete) || 0) / grandTotal) * 100) : 0 },
       { stage: 'Signed', count: parseInt(row.signed) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.signed) || 0) / grandTotal) * 100) : 0 },
       { stage: 'Frozen', count: parseInt(row.frozen) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.frozen) || 0) / grandTotal) * 100) : 0 },
       { stage: 'Locked', count: parseInt(row.locked) || 0, percentage: grandTotal > 0 ? Math.round(((parseInt(row.locked) || 0) / grandTotal) * 100) : 0 }
@@ -1733,7 +1698,7 @@ export const getActionItems = async (studyId: number): Promise<any> => {
         LEFT JOIN study site ON ss.study_id = site.study_id AND site.parent_study_id IS NOT NULL
         WHERE (ss.study_id = $1 OR site.parent_study_id = $1)
           AND ec.date_completed IS NOT NULL AND ec.sdv_status = true
-          AND (ec.electronic_signature_status IS NULL OR ec.electronic_signature_status = '')
+          AND COALESCE(ec.electronic_signature_status, false) = false
           AND ec.status_id NOT IN (5,7) AND ss.status_id NOT IN (5,7)
       `, [studyId]),
 

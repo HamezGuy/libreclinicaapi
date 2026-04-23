@@ -80,7 +80,7 @@ describe('Comprehensive E2E Integration Tests', () => {
         return;
       }
 
-      const existingIdentifier = existingResult.rows[0].unique_identifier;
+      const existingIdentifier = existingResult.rows[0].uniqueIdentifier;
 
       const result = await studyService.createStudy({
         name: 'Duplicate Test',
@@ -99,7 +99,7 @@ describe('Comprehensive E2E Integration Tests', () => {
       // Study may be null if test DB is isolated
       if (study) {
         expect(study.name).toBeDefined();
-        expect(study.study_id).toBeDefined();
+        expect(study.studyId).toBeDefined();
         console.log('✅ Study retrieved:', study.name);
       } else {
         console.log('⚠️ No study found (expected in isolated test DB)');
@@ -134,16 +134,16 @@ describe('Comprehensive E2E Integration Tests', () => {
         const patient = result.data[0];
         
         // Verify required fields are present
-        expect(patient.study_subject_id || (patient as any).studySubjectId).toBeDefined();
+        expect(patient.studySubjectId).toBeDefined();
         expect(patient.label).toBeDefined();
         
         // Verify field mapping works
         console.log('✅ Patient data structure:', {
-          studySubjectId: patient.study_subject_id || (patient as any).studySubjectId,
+          studySubjectId: patient.studySubjectId,
           label: patient.label,
           status: patient.status,
           gender: patient.gender,
-          enrollmentDate: patient.enrollment_date || (patient as any).enrollmentDate
+          enrollmentDate: patient.enrollmentDate
         });
       }
     });
@@ -153,7 +153,7 @@ describe('Comprehensive E2E Integration Tests', () => {
       const patientsResult = await subjectService.getSubjectList(1, { limit: 1 });
       
       if (patientsResult.success && patientsResult.data && patientsResult.data.length > 0) {
-        const patientId = patientsResult.data[0].study_subject_id || (patientsResult.data[0] as any).studySubjectId;
+        const patientId = patientsResult.data[0].studySubjectId;
         const progressResult = await subjectService.getSubjectProgress(patientId);
 
         expect(progressResult).toBeDefined();
@@ -168,7 +168,7 @@ describe('Comprehensive E2E Integration Tests', () => {
       const patientsResult = await subjectService.getSubjectList(1, { limit: 1 });
       
       if (patientsResult.success && patientsResult.data && patientsResult.data.length > 0) {
-        const patientId = patientsResult.data[0].study_subject_id || (patientsResult.data[0] as any).studySubjectId;
+        const patientId = patientsResult.data[0].studySubjectId;
         const eventsResult = await eventService.getSubjectEvents(patientId);
 
         expect(eventsResult).toBeDefined();
@@ -207,8 +207,8 @@ describe('Comprehensive E2E Integration Tests', () => {
         return;
       }
 
-      const subjectId = subjectsResult.data[0].study_subject_id || (subjectsResult.data[0] as any).studySubjectId;
-      const studyId = subjectsResult.data[0].study_id || (subjectsResult.data[0] as any).studyId || 1;
+      const subjectId = subjectsResult.data[0].studySubjectId;
+      const studyId = subjectsResult.data[0].studyId || 1;
 
       const result = await queryService.createQuery({
         entityType: 'studySubject',
@@ -234,7 +234,7 @@ describe('Comprehensive E2E Integration Tests', () => {
       const query = await queryService.getQueryById(createdQueryId);
 
       expect(query).toBeDefined();
-      expect(query.discrepancy_note_id).toBe(createdQueryId);
+      expect(query.discrepancyNoteId).toBe(createdQueryId);
     });
 
     test('should get query statistics', async () => {
@@ -415,7 +415,7 @@ describe('Comprehensive E2E Integration Tests', () => {
       expect(result.rows.length).toBeGreaterThan(0);
       
       // Verify key columns exist
-      const columns = result.rows.map(r => r.column_name);
+      const columns = result.rows.map(r => r.columnName);
       expect(columns).toContain('event_crf_id');
       expect(columns).toContain('study_event_id');
       expect(columns).toContain('crf_version_id');

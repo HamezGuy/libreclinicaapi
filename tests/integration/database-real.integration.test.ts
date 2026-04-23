@@ -81,7 +81,7 @@ beforeAll(async () => {
       "SELECT user_id FROM user_account WHERE user_name = 'root'"
     );
     if (rootUser.rows.length > 0) {
-      testUserId = rootUser.rows[0].user_id;
+      testUserId = rootUser.rows[0].userId;
     } else {
       throw new Error('Root user not found - database not properly initialized');
     }
@@ -91,7 +91,7 @@ beforeAll(async () => {
       "SELECT study_id FROM study WHERE unique_identifier = 'INT-TEST-STUDY'"
     );
     if (existingStudy.rows.length > 0) {
-      testStudyId = existingStudy.rows[0].study_id;
+      testStudyId = existingStudy.rows[0].studyId;
     } else {
       const newStudy = await pool.query(`
         INSERT INTO study (
@@ -102,7 +102,7 @@ beforeAll(async () => {
           1, $1, NOW(), 'S_INT_TEST', 'interventional'
         ) RETURNING study_id
       `, [testUserId]);
-      testStudyId = newStudy.rows[0].study_id;
+      testStudyId = newStudy.rows[0].studyId;
     }
 
     console.log(`✅ Test study ready (ID: ${testStudyId})`);
@@ -159,7 +159,7 @@ describe('Schema Validation (Part 11 Compliance)', () => {
       WHERE table_schema = 'public'
     `);
 
-    const tableNames = tables.rows.map((r: any) => r.table_name);
+    const tableNames = tables.rows.map((r: any) => r.tableName);
 
     for (const table of requiredTables) {
       expect(tableNames).toContain(table);
@@ -173,7 +173,7 @@ describe('Schema Validation (Part 11 Compliance)', () => {
       WHERE table_name = 'user_account'
     `);
 
-    const columnNames = columns.rows.map((r: any) => r.column_name);
+    const columnNames = columns.rows.map((r: any) => r.columnName);
 
     // Part 11 required columns for user management
     expect(columnNames).toContain('user_name');
@@ -191,7 +191,7 @@ describe('Schema Validation (Part 11 Compliance)', () => {
       WHERE table_name = 'audit_log_event'
     `);
 
-    const columnNames = columns.rows.map((r: any) => r.column_name);
+    const columnNames = columns.rows.map((r: any) => r.columnName);
 
     // Part 11 required columns for audit trail
     expect(columnNames).toContain('audit_date');
@@ -227,10 +227,10 @@ describe('Study Service (Real Database)', () => {
     if (result.data && result.data.length > 0) {
       const study = result.data[0];
       // Verify schema fields exist
-      expect(study).toHaveProperty('study_id');
-      expect(study).toHaveProperty('unique_identifier');
+      expect(study).toHaveProperty('studyId');
+      expect(study).toHaveProperty('uniqueIdentifier');
       expect(study).toHaveProperty('name');
-      expect(study).toHaveProperty('status_id');
+      expect(study).toHaveProperty('statusId');
     }
   });
 
@@ -238,10 +238,10 @@ describe('Study Service (Real Database)', () => {
     const study = await studyService.getStudyById(testStudyId, testUserId);
 
     expect(study).toBeDefined();
-    expect(study.study_id).toBe(testStudyId);
-    expect(study.unique_identifier).toBe('INT-TEST-STUDY');
-    expect(study).toHaveProperty('total_subjects');
-    expect(study).toHaveProperty('total_events');
+    expect(study.studyId).toBe(testStudyId);
+    expect(study.uniqueIdentifier).toBe('INT-TEST-STUDY');
+    expect(study).toHaveProperty('totalSubjects');
+    expect(study).toHaveProperty('totalEvents');
   });
 
   it('should create study with correct schema constraints', async () => {
@@ -262,8 +262,8 @@ describe('Study Service (Real Database)', () => {
       );
 
       expect(dbStudy.rows.length).toBe(1);
-      expect(dbStudy.rows[0].owner_id).toBe(testUserId);
-      expect(dbStudy.rows[0].status_id).toBe(1); // Available
+      expect(dbStudy.rows[0].ownerId).toBe(testUserId);
+      expect(dbStudy.rows[0].statusId).toBe(1); // Available
 
       // Cleanup
       await pool.query('DELETE FROM study_user_role WHERE study_id = $1', [result.studyId]);
@@ -298,7 +298,7 @@ describe('Audit Service (Part 11 Critical)', () => {
       RETURNING audit_id
     `, [testUserId, testStudyId]);
 
-    const auditId = insertResult.rows[0].audit_id;
+    const auditId = insertResult.rows[0].auditId;
 
     // Verify it can be retrieved
     const dbAudit = await pool.query(
@@ -307,9 +307,9 @@ describe('Audit Service (Part 11 Critical)', () => {
     );
 
     expect(dbAudit.rows.length).toBe(1);
-    expect(dbAudit.rows[0].user_id).toBe(testUserId);
-    expect(dbAudit.rows[0].audit_table).toBe('study');
-    expect(dbAudit.rows[0].audit_date).toBeDefined();
+    expect(dbAudit.rows[0].userId).toBe(testUserId);
+    expect(dbAudit.rows[0].auditTable).toBe('study');
+    expect(dbAudit.rows[0].auditDate).toBeDefined();
   });
 
   it('should retrieve audit trail with date filtering', async () => {
@@ -411,7 +411,7 @@ describe('User Service (Part 11 Authentication)', () => {
     );
 
     if (user.rows.length > 0) {
-      expect(user.rows[0].passwd_timestamp).toBeDefined();
+      expect(user.rows[0].passwdTimestamp).toBeDefined();
     }
   });
 
@@ -423,8 +423,8 @@ describe('User Service (Part 11 Authentication)', () => {
 
     if (user.rows.length > 0) {
       expect(user.rows[0].enabled).toBe(true);
-      expect(user.rows[0].account_non_locked).toBe(true);
-      expect(user.rows[0].lock_counter).toBe(0);
+      expect(user.rows[0].accountNonLocked).toBe(true);
+      expect(user.rows[0].lockCounter).toBe(0);
     }
   });
 });
@@ -449,14 +449,14 @@ describe('Query Service (Data Integrity)', () => {
       VALUES ($1, 'm', 1, $2, NOW())
       RETURNING subject_id
     `, [`INT-TEST-SUBJ-${Date.now()}`, testUserId]);
-    const subjectId = subjectResult.rows[0].subject_id;
+    const subjectId = subjectResult.rows[0].subjectId;
 
     const studySubjectResult = await pool.query(`
       INSERT INTO study_subject (label, study_id, subject_id, status_id, owner_id, date_created)
       VALUES ($1, $2, $3, 1, $4, NOW())
       RETURNING study_subject_id
     `, [`INT-SUBJ-${Date.now()}`, testStudyId, subjectId, testUserId]);
-    const studySubjectId = studySubjectResult.rows[0].study_subject_id;
+    const studySubjectId = studySubjectResult.rows[0].studySubjectId;
 
     // For studySubject type, the entityId IS the study_subject_id, so don't pass studySubjectId separately
     const result = await queryService.createQuery({
@@ -486,9 +486,9 @@ describe('Query Service (Data Integrity)', () => {
       );
 
       expect(dbQuery.rows.length).toBe(1);
-      expect(dbQuery.rows[0].study_id).toBe(testStudyId);
-      expect(dbQuery.rows[0].owner_id).toBe(testUserId);
-      expect(dbQuery.rows[0].resolution_status_id).toBe(1); // New
+      expect(dbQuery.rows[0].studyId).toBe(testStudyId);
+      expect(dbQuery.rows[0].ownerId).toBe(testUserId);
+      expect(dbQuery.rows[0].resolutionStatusId).toBe(1); // New
 
       // Cleanup
       await pool.query('DELETE FROM dn_study_subject_map WHERE discrepancy_note_id = $1', [testQueryId]);
@@ -516,7 +516,7 @@ describe('Query Service (Data Integrity)', () => {
       [testQueryId]
     );
 
-    expect(dbQuery.rows[0].resolution_status_id).toBe(2);
+    expect(dbQuery.rows[0].resolutionStatusId).toBe(2);
   });
 });
 

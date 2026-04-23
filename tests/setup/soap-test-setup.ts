@@ -183,7 +183,7 @@ export function addMockSubject(
   if (mockServer) {
     mockServer.addSubject({
       subjectKey,
-      studySubjectId: subjectId,
+      label: subjectId,
       studyOid,
       enrollmentDate: new Date().toISOString().split('T')[0]
     });

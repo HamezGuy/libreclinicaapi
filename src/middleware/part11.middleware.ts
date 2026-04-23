@@ -14,6 +14,7 @@ import { logger } from '../config/logger';
 import { pool } from '../config/database';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
+import { verifyAndUpgrade } from '../utils/password.util';
 
 /**
  * Extended Express Request with Part 11 audit information
@@ -59,6 +60,7 @@ export const SignatureMeanings = {
   CRF_UPDATE: 'I authorize the modification of this case report form',
   CRF_DELETE: 'I authorize the deletion of this case report form',
   CRF_ASSIGN: 'I authorize the assignment of this CRF to the study event',
+  CRF_FORK: 'I authorize copying this case report form to another study or organization',
 
   // Form data
   FORM_DATA_SAVE: 'I confirm the accuracy of the data entered in this form',
@@ -297,7 +299,7 @@ export function requireSignatureFor(meaning: string) {
     try {
       // Verify the signer's credentials against the database
       const result = await pool.query(
-        'SELECT user_id, user_name, passwd FROM user_account WHERE user_name = $1 AND status_id = 1',
+        'SELECT u.user_id, u.user_name, u.passwd, uae.bcrypt_passwd FROM user_account u LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id WHERE u.user_name = $1 AND u.status_id = 1',
         [signatureUsername]
       );
 
@@ -316,17 +318,13 @@ export function requireSignatureFor(meaning: string) {
 
       const signer = result.rows[0];
 
-      // Verify password (LibreClinica stores passwords as bcrypt or MD5 hashes)
-      let passwordValid = false;
-      if (signer.passwd) {
-        if (signer.passwd.startsWith('$2')) {
-          // bcrypt hash
-          passwordValid = await bcrypt.compare(signaturePassword, signer.passwd);
-        } else {
-          // MD5 hash comparison (legacy LibreClinica)
-          const md5 = require('md5');
-          passwordValid = md5(signaturePassword) === signer.passwd;
-        }
+      const verification = await verifyAndUpgrade(signaturePassword, signer.passwd, signer.bcrypt_passwd || null);
+      let passwordValid = verification.valid;
+      if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+        pool.query(
+          'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
+          [signer.user_id, verification.upgradedBcryptHash]
+        ).catch(() => {});
       }
 
       if (!passwordValid) {
@@ -453,7 +451,7 @@ export async function requireSignature(
 
   try {
     const result = await pool.query(
-      'SELECT passwd FROM user_account WHERE user_id = $1 AND status_id = 1',
+      'SELECT u.user_id, u.user_name, u.passwd, uae.bcrypt_passwd FROM user_account u LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id WHERE u.user_id = $1 AND u.status_id = 1',
       [userId]
     );
 
@@ -465,16 +463,15 @@ export async function requireSignature(
       return;
     }
 
-    const storedPassword = result.rows[0].passwd;
-    let passwordValid = false;
+    const signer = result.rows[0];
 
-    if (storedPassword) {
-      if (storedPassword.startsWith('$2')) {
-        passwordValid = await bcrypt.compare(sigPassword, storedPassword);
-      } else {
-        const md5 = require('md5');
-        passwordValid = md5(sigPassword) === storedPassword;
-      }
+    const verification = await verifyAndUpgrade(sigPassword, signer.passwd, signer.bcrypt_passwd || null);
+    let passwordValid = verification.valid;
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      pool.query(
+        'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
+        [signer.user_id, verification.upgradedBcryptHash]
+      ).catch(() => {});
     }
 
     if (!passwordValid) {
@@ -524,7 +521,7 @@ export async function verifyElectronicSignature(
 ): Promise<{ valid: boolean; userId?: number; message?: string }> {
   try {
     const result = await pool.query(
-      'SELECT user_id, passwd FROM user_account WHERE user_name = $1 AND status_id = 1',
+      'SELECT u.user_id, u.user_name, u.passwd, uae.bcrypt_passwd FROM user_account u LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id WHERE u.user_name = $1 AND u.status_id = 1',
       [username]
     );
 
@@ -532,23 +529,22 @@ export async function verifyElectronicSignature(
       return { valid: false, message: 'User not found or inactive' };
     }
 
-    const storedPassword = result.rows[0].passwd;
-    let passwordValid = false;
+    const signer = result.rows[0];
 
-    if (storedPassword) {
-      if (storedPassword.startsWith('$2')) {
-        passwordValid = await bcrypt.compare(password, storedPassword);
-      } else {
-        const md5 = require('md5');
-        passwordValid = md5(password) === storedPassword;
-      }
+    const verification = await verifyAndUpgrade(password, signer.passwd, signer.bcrypt_passwd || null);
+    let passwordValid = verification.valid;
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      pool.query(
+        'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
+        [signer.user_id, verification.upgradedBcryptHash]
+      ).catch(() => {});
     }
 
     if (!passwordValid) {
       return { valid: false, message: 'Invalid password' };
     }
 
-    return { valid: true, userId: result.rows[0].user_id };
+    return { valid: true, userId: signer.user_id };
   } catch (error: any) {
     logger.error('Electronic signature verification error', { error: error.message });
     return { valid: false, message: 'Verification failed' };

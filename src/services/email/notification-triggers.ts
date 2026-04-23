@@ -33,7 +33,7 @@ async function getUserName(userId: number): Promise<string> {
       [userId]
     );
     if (result.rows[0]) {
-      return `${result.rows[0].first_name} ${result.rows[0].last_name}`.trim();
+      return `${result.rows[0].firstName} ${result.rows[0].lastName}`.trim();
     }
     return 'Unknown User';
   } catch { return 'Unknown User'; }

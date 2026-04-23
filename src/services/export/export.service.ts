@@ -219,7 +219,7 @@ export const buildCsvExport = async (
     logger.warn('Study not found for CSV export', { studyOID: datasetConfig.studyOID });
     return 'No study found';
   }
-  const studyId = studyResult.rows[0].study_id;
+  const studyId = studyResult.rows[0].studyId;
 
   // Build dynamic WHERE clauses based on filters
   const params: any[] = [studyId];
@@ -321,7 +321,7 @@ export const buildCsvExport = async (
 
   for (const row of result.rows) {
     // Flatten JSON values (criteria_list, question_table) into readable text
-    let displayValue = row.item_value || '';
+    let displayValue = row.itemValue || '';
     if (displayValue.startsWith('{') && displayValue.endsWith('}')) {
       try {
         const parsed = JSON.parse(displayValue);
@@ -334,17 +334,17 @@ export const buildCsvExport = async (
     }
 
     const csvRow: string[] = [
-      csvEscape(row.subject_id || '')
+      csvEscape(row.subjectId || '')
     ];
-    if (datasetConfig.showSubjectDob) csvRow.push(csvEscape(row.date_of_birth || ''));
+    if (datasetConfig.showSubjectDob) csvRow.push(csvEscape(row.dateOfBirth || ''));
     if (datasetConfig.showSubjectGender) csvRow.push(csvEscape(row.gender || ''));
     csvRow.push(
-      csvEscape(row.event_name || ''),
-      csvEscape(row.visit_date ? formatDate(row.visit_date) : ''),
-      csvEscape(row.is_unscheduled ? 'Yes' : 'No'),
-      csvEscape(row.form_name || ''),
-      csvEscape(row.form_status || ''),
-      csvEscape(row.item_name || ''),
+      csvEscape(row.eventName || ''),
+      csvEscape(row.visitDate ? formatDate(row.visitDate) : ''),
+      csvEscape(row.isUnscheduled ? 'Yes' : 'No'),
+      csvEscape(row.formName || ''),
+      csvEscape(row.formStatus || ''),
+      csvEscape(row.itemName || ''),
       csvEscape(displayValue)
     );
     rows.push(csvRow.join(','));
@@ -392,7 +392,7 @@ export const executeExport = async (
           const sheet = workbook.addWorksheet('Export');
           const lines = csvData.split('\n').filter((l: string) => l.trim());
           for (let i = 0; i < lines.length; i++) {
-            const cells = lines[i].split(',').map((c: string) => c.replace(/^"|"$/g, ''));
+            const cells = parseCsvLine(lines[i]);
             sheet.addRow(cells);
           }
           // Style header row
@@ -453,6 +453,52 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * Parse a single CSV line respecting quoted fields that may contain commas.
+ * Handles RFC 4180 quoting: fields wrapped in double-quotes, with escaped
+ * double-quotes represented as "".
+ */
+function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let i = 0;
+  while (i <= line.length) {
+    if (i === line.length) {
+      fields.push('');
+      break;
+    }
+    if (line[i] === '"') {
+      let value = '';
+      i++; // skip opening quote
+      while (i < line.length) {
+        if (line[i] === '"') {
+          if (i + 1 < line.length && line[i + 1] === '"') {
+            value += '"';
+            i += 2;
+          } else {
+            i++; // skip closing quote
+            break;
+          }
+        } else {
+          value += line[i];
+          i++;
+        }
+      }
+      fields.push(value);
+      if (i < line.length && line[i] === ',') i++; // skip delimiter
+    } else {
+      const nextComma = line.indexOf(',', i);
+      if (nextComma === -1) {
+        fields.push(line.substring(i));
+        break;
+      } else {
+        fields.push(line.substring(i, nextComma));
+        i = nextComma + 1;
+      }
+    }
+  }
+  return fields;
+}
+
 function csvEscape(str: string): string {
   if (!str) return '';
   if (str.includes(',') || str.includes('"') || str.includes('\n')) {
@@ -481,7 +527,7 @@ export const createDataset = async (
       return { datasetId: 0, success: false, error: 'Study not found' };
     }
     
-    const studyId = studyResult.rows[0].study_id;
+    const studyId = studyResult.rows[0].studyId;
     
     // Insert into LibreClinica's dataset table
     const datasetResult = await pool.query(`
@@ -525,7 +571,7 @@ export const createDataset = async (
       userId
     ]);
     
-    const datasetId = datasetResult.rows[0].dataset_id;
+    const datasetId = datasetResult.rows[0].datasetId;
     
     // If CRF OIDs specified, insert into dataset_crf_version_map
     if (datasetConfig.crfOIDs && datasetConfig.crfOIDs.length > 0) {
@@ -544,7 +590,7 @@ export const createDataset = async (
           await pool.query(`
             INSERT INTO dataset_crf_version_map (dataset_id, event_definition_crf_id)
             VALUES ($1, $2)
-          `, [datasetId, edcResult.rows[0].event_definition_crf_id]);
+          `, [datasetId, edcResult.rows[0].eventDefinitionCrfId]);
         }
       }
     }
@@ -615,7 +661,7 @@ export const archiveExportedFile = async (
     
     let exportFormatId = 1; // Default
     if (formatResult.rows.length > 0) {
-      exportFormatId = formatResult.rows[0].export_format_id;
+      exportFormatId = formatResult.rows[0].exportFormatId;
     }
     
     await pool.query(`
@@ -686,11 +732,11 @@ export const buildFullOdmExport = async (
      Description="CDISC ODM Export"
      CreationDateTime="${timestamp}"
      ODMVersion="1.3">
-  <Study OID="${escapeXml(study.oc_oid)}">
+  <Study OID="${escapeXml(study.ocOid)}">
     <GlobalVariables>
       <StudyName>${escapeXml(study.name)}</StudyName>
       <StudyDescription>Exported from LibreClinica EDC</StudyDescription>
-      <ProtocolName>${escapeXml(study.unique_identifier || study.name)}</ProtocolName>
+      <ProtocolName>${escapeXml(study.uniqueIdentifier || study.name)}</ProtocolName>
     </GlobalVariables>
     <MetaDataVersion OID="v1.0.0" Name="Version 1.0.0">`;
   
@@ -701,12 +747,12 @@ export const buildFullOdmExport = async (
     INNER JOIN crf_version cv ON c.crf_id = cv.crf_id
     WHERE c.source_study_id = $1
     ORDER BY c.name
-  `, [study.study_id]);
+  `, [study.studyId]);
   
   // Add FormDef elements
   for (const crf of crfsResult.rows) {
     odmXml += `
-      <FormDef OID="${escapeXml(crf.oc_oid)}" Name="${escapeXml(crf.name)}" Repeating="No">`;
+      <FormDef OID="${escapeXml(crf.ocOid)}" Name="${escapeXml(crf.name)}" Repeating="No">`;
     
     // Get item groups for this CRF
     const itemGroupsResult = await pool.query(`
@@ -714,11 +760,11 @@ export const buildFullOdmExport = async (
       FROM item_group ig
       INNER JOIN item_group_metadata igm ON ig.item_group_id = igm.item_group_id
       WHERE igm.crf_version_id = $1
-    `, [crf.crf_version_id]);
+    `, [crf.crfVersionId]);
     
     for (const ig of itemGroupsResult.rows) {
       odmXml += `
-        <ItemGroupRef ItemGroupOID="${escapeXml(ig.oc_oid)}" Mandatory="No"/>`;
+        <ItemGroupRef ItemGroupOID="${escapeXml(ig.ocOid)}" Mandatory="No"/>`;
     }
     
     odmXml += `
@@ -728,7 +774,7 @@ export const buildFullOdmExport = async (
   odmXml += `
     </MetaDataVersion>
   </Study>
-  <ClinicalData StudyOID="${escapeXml(study.oc_oid)}" MetaDataVersionOID="v1.0.0">`;
+  <ClinicalData StudyOID="${escapeXml(study.ocOid)}" MetaDataVersionOID="v1.0.0">`;
   
   // Get all subjects with their data
   const subjectsResult = await pool.query(`
@@ -744,11 +790,11 @@ export const buildFullOdmExport = async (
     INNER JOIN subject s ON ss.subject_id = s.subject_id
     WHERE ss.study_id = $1
     ORDER BY ss.label
-  `, [study.study_id]);
+  `, [study.studyId]);
   
   for (const subject of subjectsResult.rows) {
     odmXml += `
-    <SubjectData SubjectKey="${escapeXml(subject.oc_oid)}" OpenClinica:StudySubjectID="${escapeXml(subject.study_subject_id_label)}">`;
+    <SubjectData SubjectKey="${escapeXml(subject.ocOid)}" OpenClinica:StudySubjectID="${escapeXml(subject.studySubjectIdLabel)}">`;
     
     // Get study events for this subject
     const eventsResult = await pool.query(`
@@ -764,11 +810,11 @@ export const buildFullOdmExport = async (
       INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
       WHERE se.study_subject_id = $1
       ORDER BY se.sample_ordinal
-    `, [subject.study_subject_id]);
+    `, [subject.studySubjectId]);
     
     for (const event of eventsResult.rows) {
       odmXml += `
-      <StudyEventData StudyEventOID="${escapeXml(event.event_oid)}" StudyEventRepeatKey="${event.sample_ordinal}">`;
+      <StudyEventData StudyEventOID="${escapeXml(event.eventOid)}" StudyEventRepeatKey="${event.sampleOrdinal}">`;
       
       // Get CRF data for this event
       const eventCrfsResult = await pool.query(`
@@ -780,11 +826,11 @@ export const buildFullOdmExport = async (
         INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
         INNER JOIN crf c ON cv.crf_id = c.crf_id
         WHERE ec.study_event_id = $1
-      `, [event.study_event_id]);
+      `, [event.studyEventId]);
       
       for (const eventCrf of eventCrfsResult.rows) {
         odmXml += `
-        <FormData FormOID="${escapeXml(eventCrf.form_oid)}">`;
+        <FormData FormOID="${escapeXml(eventCrf.formOid)}">`;
         
         // Get item data
         const itemDataResult = await pool.query(`
@@ -799,14 +845,14 @@ export const buildFullOdmExport = async (
           INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
           INNER JOIN item_group ig ON igm.item_group_id = ig.item_group_id
           WHERE id.event_crf_id = $1 AND id.deleted = false
-        `, [eventCrf.event_crf_id]);
+        `, [eventCrf.eventCrfId]);
         
         // Group items by item_group
         const itemsByGroup = new Map<string, any[]>();
         for (const item of itemDataResult.rows) {
-          const groupItems = itemsByGroup.get(item.item_group_oid) || [];
+          const groupItems = itemsByGroup.get(item.itemGroupOid) || [];
           groupItems.push(item);
-          itemsByGroup.set(item.item_group_oid, groupItems);
+          itemsByGroup.set(item.itemGroupOid, groupItems);
         }
         
         for (const [groupOid, items] of itemsByGroup) {
@@ -815,7 +861,7 @@ export const buildFullOdmExport = async (
           
           for (const item of items) {
             odmXml += `
-            <ItemData ItemOID="${escapeXml(item.item_oid)}" Value="${escapeXml(item.value || '')}"/>`;
+            <ItemData ItemOID="${escapeXml(item.itemOid)}" Value="${escapeXml(item.value || '')}"/>`;
           }
           
           odmXml += `

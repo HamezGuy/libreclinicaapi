@@ -35,7 +35,7 @@ async function getTestStudyId(): Promise<number> {
   const result = await pool.query(
     'SELECT study_id FROM study WHERE status_id = 1 LIMIT 1'
   );
-  return result.rows[0]?.study_id || 1;
+  return result.rows[0]?.studyId || 1;
 }
 
 // Helper to get test subject ID
@@ -44,7 +44,7 @@ async function getTestSubjectId(studyId: number): Promise<number> {
     'SELECT study_subject_id FROM study_subject WHERE study_id = $1 LIMIT 1',
     [studyId]
   );
-  return result.rows[0]?.study_subject_id || 1;
+  return result.rows[0]?.studySubjectId || 1;
 }
 
 describe('New Features Integration Tests', () => {
@@ -288,7 +288,7 @@ describe('Database Schema Verification', () => {
     `);
     
     if (result.rows.length > 0) {
-      const columns = result.rows.map(r => r.column_name);
+      const columns = result.rows.map(r => r.columnName);
       expect(columns).toContain('template_id');
       expect(columns).toContain('name');
       expect(columns).toContain('subject');
@@ -304,7 +304,7 @@ describe('Database Schema Verification', () => {
     `);
     
     if (result.rows.length > 0) {
-      const columns = result.rows.map(r => r.column_name);
+      const columns = result.rows.map(r => r.columnName);
       expect(columns).toContain('queue_id');
       expect(columns).toContain('recipient_email');
       expect(columns).toContain('status');
@@ -320,7 +320,7 @@ describe('Database Schema Verification', () => {
     `);
     
     if (result.rows.length > 0) {
-      const columns = result.rows.map(r => r.column_name);
+      const columns = result.rows.map(r => r.columnName);
       expect(columns).toContain('transfer_id');
       expect(columns).toContain('study_subject_id');
       expect(columns).toContain('transfer_status');
@@ -336,7 +336,7 @@ describe('Database Schema Verification', () => {
     `);
     
     if (result.rows.length > 0) {
-      const columns = result.rows.map(r => r.column_name);
+      const columns = result.rows.map(r => r.columnName);
       expect(columns).toContain('event_crf_id');
       expect(columns).toContain('first_entry_status');
       expect(columns).toContain('second_entry_status');
@@ -352,7 +352,7 @@ describe('Database Schema Verification', () => {
     `);
     
     if (result.rows.length > 0) {
-      const columns = result.rows.map(r => r.column_name);
+      const columns = result.rows.map(r => r.columnName);
       expect(columns).toContain('document_id');
       expect(columns).toContain('study_id');
       expect(columns).toContain('name');

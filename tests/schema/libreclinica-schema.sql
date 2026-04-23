@@ -634,6 +634,7 @@ CREATE TABLE dn_item_data_map (
     item_data_id INTEGER REFERENCES item_data(item_data_id),
     study_subject_id INTEGER REFERENCES study_subject(study_subject_id),
     column_name VARCHAR(255),
+    cell_target JSONB,
     PRIMARY KEY (discrepancy_note_id, item_data_id)
 );
 
@@ -642,6 +643,7 @@ CREATE TABLE dn_event_crf_map (
     event_crf_id INTEGER REFERENCES event_crf(event_crf_id),
     study_subject_id INTEGER REFERENCES study_subject(study_subject_id),
     column_name VARCHAR(255),
+    cell_target JSONB,
     PRIMARY KEY (discrepancy_note_id, event_crf_id)
 );
 

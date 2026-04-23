@@ -12,6 +12,15 @@ import { logger } from '../../config/logger';
 import { ReportRequest } from '../../types';
 import { formatDate, toISOTimestamp } from '../../utils/date.util';
 
+function escapeCSVField(value: any): string {
+  if (value == null) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
 /**
  * Generate enrollment report
  */
@@ -50,14 +59,14 @@ export const generateEnrollmentReport = async (
       return generateCSV(
         ['Subject ID', 'Secondary ID', 'Enrollment Date', 'Status', 'Gender', 'DOB', 'Enrolled By', 'Created'],
         result.rows.map(r => [
-          r.subject_id,
-          r.secondary_label || '',
-          formatDate(r.enrollment_date),
+          r.subjectId,
+          r.secondaryLabel || '',
+          formatDate(r.enrollmentDate),
           r.status,
           r.gender || '',
-          formatDate(r.date_of_birth),
-          r.enrolled_by,
-          toISOTimestamp(r.date_created)
+          formatDate(r.dateOfBirth),
+          r.enrolledBy,
+          toISOTimestamp(r.dateCreated)
         ])
       );
     }
@@ -107,13 +116,13 @@ export const generateCompletionReport = async (
       return generateCSV(
         ['Subject ID', 'Event', 'Form', 'Status', 'Created', 'Updated', 'Completed By'],
         result.rows.map(r => [
-          r.subject_id,
-          r.event_name,
-          r.form_name,
-          r.completion_status,
-          toISOTimestamp(r.date_created),
-          toISOTimestamp(r.date_updated),
-          r.completed_by || ''
+          r.subjectId,
+          r.eventName,
+          r.formName,
+          r.completionStatus,
+          toISOTimestamp(r.dateCreated),
+          toISOTimestamp(r.dateUpdated),
+          r.completedBy || ''
         ])
       );
     }
@@ -165,15 +174,15 @@ export const generateQueryReport = async (
       return generateCSV(
         ['Query ID', 'Subject', 'Type', 'Description', 'Status', 'Created By', 'Date', 'Assigned To', 'Responses'],
         result.rows.map(r => [
-          r.discrepancy_note_id.toString(),
-          r.subject_id || '',
-          r.query_type,
-          `"${r.description.replace(/"/g, '""')}"`,
+          r.discrepancyNoteId.toString(),
+          r.subjectId || '',
+          r.queryType,
+          r.description,
           r.status,
-          r.created_by,
-          toISOTimestamp(r.date_created),
-          r.assigned_to || '',
-          r.response_count.toString()
+          r.createdBy,
+          toISOTimestamp(r.dateCreated),
+          r.assignedTo || '',
+          r.responseCount.toString()
         ])
       );
     }
@@ -189,10 +198,10 @@ export const generateQueryReport = async (
  * Helper: Generate CSV from data
  */
 function generateCSV(headers: string[], rows: string[][]): string {
-  let csv = headers.join(',') + '\n';
+  let csv = headers.map(h => escapeCSVField(h)).join(',') + '\n';
   
   for (const row of rows) {
-    csv += row.join(',') + '\n';
+    csv += row.map(field => escapeCSVField(field)).join(',') + '\n';
   }
 
   return csv;

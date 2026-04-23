@@ -109,6 +109,8 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'form_folder_org_scoping', fn: addFormFolderOrgScoping },
     { name: 'audit_immutability_triggers', fn: createAuditImmutabilityTriggers },
     { name: 'audit_hash_chain_columns', fn: addAuditHashChainColumns },
+    { name: 'interop_audit_log', fn: createInteropAuditLogTable },
+    { name: 'crf_fork_provenance', fn: createCrfForkProvenanceColumns },
   ];
 
   let successCount = 0;
@@ -710,6 +712,12 @@ async function createOrganizationTables(pool: any): Promise<void> {
 
 // ============================================================================
 // Wound Scanner (acc_wound_*)
+// ============================================================================
+// DEPRECATED: The acc_wound_capture table below is superseded by the
+// wound_sessions / wound_images / wound_measurements schema, which is the
+// active implementation used by all services.  This CREATE TABLE statement is
+// retained solely for backward compatibility with existing databases that
+// already contain the table.  Do NOT add new functionality against this table.
 // ============================================================================
 async function createWoundTables(pool: any): Promise<void> {
   await pool.query(`
@@ -1770,7 +1778,7 @@ async function widenDescriptionColumns(pool: any): Promise<void> {
         WHERE table_name = $1 AND column_name = $2
       `, [table, column]);
       if (check.rows.length === 0) continue;
-      if (!check.rows[0].character_maximum_length) continue;
+      if (!check.rows[0].characterMaximumLength) continue;
 
       // ISSUE-414: skip silently when a view/rule depends on the column.
       // The ALTER would otherwise fail with "cannot alter type of a
@@ -1781,7 +1789,7 @@ async function widenDescriptionColumns(pool: any): Promise<void> {
       }
 
       await pool.query(`ALTER TABLE ${table} ALTER COLUMN ${column} TYPE TEXT`);
-      logger.info(`Widened ${table}.${column} from varchar(${check.rows[0].character_maximum_length}) to TEXT`);
+      logger.info(`Widened ${table}.${column} from varchar(${check.rows[0].characterMaximumLength}) to TEXT`);
       widened++;
     } catch (e: any) {
       // Column may not exist or already be TEXT
@@ -1820,7 +1828,7 @@ async function fixDoubleEncodedJson(pool: any): Promise<void> {
     `);
 
     for (const row of rows.rows) {
-      const data = row.form_data;
+      const data = row.formData;
       if (!data || typeof data !== 'object') continue;
 
       let changed = false;
@@ -1844,7 +1852,7 @@ async function fixDoubleEncodedJson(pool: any): Promise<void> {
       if (changed) {
         await pool.query(
           `UPDATE patient_event_form SET form_data = $1::jsonb WHERE patient_event_form_id = $2`,
-          [JSON.stringify(cleaned), row.patient_event_form_id]
+          [JSON.stringify(cleaned), row.patientEventFormId]
         );
         fixed++;
       }
@@ -1878,7 +1886,7 @@ async function fixDoubleEncodedJson(pool: any): Promise<void> {
           JSON.parse(parsed);
           await pool.query(
             `UPDATE item_data SET value = $1 WHERE item_data_id = $2`,
-            [parsed, row.item_data_id]
+            [parsed, row.itemDataId]
           );
           fixedItems++;
         }
@@ -2011,8 +2019,8 @@ async function widenStudyColumns(pool: any): Promise<void> {
       const row = check.rows[0];
       const isText = type === 'TEXT';
       const targetLen = isText ? null : parseInt(type.match(/\d+/)?.[0] || '0');
-      if (row.data_type === 'text' && isText) continue;
-      if (row.character_maximum_length && targetLen && row.character_maximum_length >= targetLen) continue;
+      if (row.dataType === 'text' && isText) continue;
+      if (row.characterMaximumLength && targetLen && row.characterMaximumLength >= targetLen) continue;
 
       // ISSUE-414: skip silently when a view/rule depends on the column.
       // The ALTER would otherwise fail with "cannot alter type of a
@@ -2343,4 +2351,169 @@ async function addAuditHashChainColumns(pool: any): Promise<void> {
   }
 
   logger.info('Hash chain columns verified on audit_log_event');
+}
+
+/**
+ * 21 CFR Part 11 §11.10(c, e) — Transport-layer audit log for the
+ * interop-middleware bridge.
+ *
+ * RATIONALE (no parallel audit chain):
+ *   The libreclinicaapi `audit_log_event` table records EDC business
+ *   events (subject created, form data saved, form locked, etc.). The
+ *   interop bridge needs an additional, distinct record of TRANSPORT
+ *   events that occur outside the EDC's purview:
+ *     - Authenticating to an EHR (Epic / Oracle Health) token endpoint
+ *     - Fetching FHIR demographics / vitals from the EHR
+ *     - Submitting an import payload to the EDC
+ *   These are not "EDC events"; they are bridge events. Conflating them
+ *   into `audit_log_event` would force every column to become nullable
+ *   and break the existing FK-style relationships in that table.
+ *
+ *   To keep ONE verifiable chain end-to-end:
+ *     - `interop_audit_log` uses the SAME SHA-256 hash format as
+ *       `audit_log_event` (see `recordPart11Audit` in
+ *       `middleware/part11.middleware.ts`)
+ *     - `edc_audit_id_refs` is an integer array of `audit_log_event.audit_id`
+ *       values that this transport event triggered. A single sync's full
+ *       chain is reconstructed by walking both tables once.
+ *   The `prevent_audit_delete()` trigger is reused via
+ *   `createAuditImmutabilityTriggers`, so no parallel tamper rules.
+ */
+async function createInteropAuditLogTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS interop_audit_log (
+      audit_id            UUID         PRIMARY KEY,
+      transaction_id      UUID         NOT NULL,
+      utc_timestamp       TIMESTAMPTZ  NOT NULL,
+      persisted_at_utc    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+      source_system       VARCHAR(64)  NOT NULL,
+      site_id             VARCHAR(128) NOT NULL,
+      clinician_id        VARCHAR(255) NOT NULL,
+      operation_type      VARCHAR(64)  NOT NULL
+        CHECK (operation_type IN (
+          'TOKEN_OBTAINED',
+          'DEMOGRAPHICS_FETCH',
+          'VITALS_FETCH',
+          'EDC_PUSH_BEGIN',
+          'EDC_PUSH_COMPLETE',
+          'FULL_SYNC',
+          'SIGNATURE_APPLIED'
+        )),
+      hash_algorithm      VARCHAR(32)  NOT NULL DEFAULT 'sha-256',
+      raw_payload_hash    VARCHAR(128) NOT NULL,
+      record_count        INTEGER      NOT NULL CHECK (record_count >= 0),
+      payload_summary     TEXT,
+      record_hash         VARCHAR(128),
+      previous_hash       VARCHAR(128),
+      application_version VARCHAR(64),
+      signer_certificate_fingerprint VARCHAR(255),
+      edc_audit_id_refs   INTEGER[]    NOT NULL DEFAULT '{}'
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_interop_audit_log_txn
+      ON interop_audit_log (transaction_id)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_interop_audit_log_site_time
+      ON interop_audit_log (site_id, utc_timestamp)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_interop_audit_log_record_hash
+      ON interop_audit_log (record_hash)
+  `);
+
+  // Apply the SAME prevent-delete trigger used by `audit_log_event` so
+  // tampering rules are unified (no parallel rule definitions).
+  try {
+    await pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.triggers
+          WHERE trigger_name = 'trg_prevent_delete_interop_audit_log'
+            AND event_object_table = 'interop_audit_log'
+        ) THEN
+          CREATE TRIGGER trg_prevent_delete_interop_audit_log
+            BEFORE DELETE ON interop_audit_log
+            FOR EACH ROW EXECUTE FUNCTION prevent_audit_delete();
+        END IF;
+      END $$
+    `);
+  } catch (err) {
+    logger.warn('Could not attach delete trigger to interop_audit_log', {
+      error: (err as Error).message,
+    });
+  }
+
+  // Prevent UPDATE as well — Part 11 audit records are append-only.
+  try {
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION prevent_interop_audit_update()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        RAISE EXCEPTION '21 CFR Part 11: interop_audit_log records are append-only';
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.triggers
+          WHERE trigger_name = 'trg_prevent_update_interop_audit_log'
+            AND event_object_table = 'interop_audit_log'
+        ) THEN
+          CREATE TRIGGER trg_prevent_update_interop_audit_log
+            BEFORE UPDATE ON interop_audit_log
+            FOR EACH ROW EXECUTE FUNCTION prevent_interop_audit_update();
+        END IF;
+      END $$
+    `);
+  } catch (err) {
+    logger.warn('Could not attach update trigger to interop_audit_log', {
+      error: (err as Error).message,
+    });
+  }
+
+  logger.info('interop_audit_log table verified (append-only, hash-chained)');
+}
+
+// ============================================================================
+// CRF Fork / Cross-Org Copy Provenance Columns
+//
+// When a user copies (forks) an eCRF — especially across organizations — we
+// MUST be able to trace the destination row back to its source for 21 CFR
+// Part 11 §11.10(e) audit-trail integrity. Free-text "Forked from CRF X" in
+// revision_notes is not query-able, so we add structured columns on the crf
+// table itself. These columns are NULL for hand-built CRFs and populated for
+// every forked CRF.
+//
+// `forked_from_org_id` records the SOURCE organization at the time of the
+// copy. The destination org is implicit (the new study's org), but the source
+// must be persisted explicitly because the source CRF could later move/be
+// archived and we'd lose the link.
+// ============================================================================
+async function createCrfForkProvenanceColumns(pool: any): Promise<void> {
+  const cols = [
+    { name: 'forked_from_crf_id',     type: 'INTEGER' },
+    { name: 'forked_from_version_id', type: 'INTEGER' },
+    { name: 'forked_from_study_id',   type: 'INTEGER' },
+    { name: 'forked_from_org_id',     type: 'INTEGER' },
+    { name: 'forked_by_user_id',      type: 'INTEGER' },
+    { name: 'forked_at',              type: 'TIMESTAMP' },
+  ];
+  for (const col of cols) {
+    try {
+      await pool.query(`ALTER TABLE crf ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
+    } catch (e: any) {
+      logger.warn('Could not add crf provenance column', { col: col.name, error: e.message });
+    }
+  }
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crf_forked_from ON crf(forked_from_crf_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_crf_forked_from_org ON crf(forked_from_org_id)`);
+  } catch (e: any) {
+    logger.warn('Could not index crf fork columns', { error: e.message });
+  }
+  logger.info('CRF fork provenance columns verified');
 }

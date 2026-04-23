@@ -35,11 +35,11 @@ router.get('/forms/:studyId', asyncHandler(async (req: Request, res: Response) =
     const result = await pool.query(query, [parseInt(studyId)]);
     
     const forms = result.rows.map(row => ({
-      crfId: row.crf_id,
+      crfId: row.crfId,
       name: row.name,
       description: row.description || '',
-      oid: row.oc_oid,
-      versionCount: parseInt(row.version_count) || 0
+      oid: row.ocOid,
+      versionCount: parseInt(row.versionCount) || 0
     }));
     
     res.json({ success: true, data: forms });
@@ -71,14 +71,14 @@ router.get('/events/:studyId', asyncHandler(async (req: Request, res: Response) 
     const result = await pool.query(query, [parseInt(studyId)]);
     
     const events = result.rows.map(row => ({
-      eventDefinitionId: row.study_event_definition_id,
+      eventDefinitionId: row.studyEventDefinitionId,
       name: row.name,
       description: row.description || '',
-      oid: row.oc_oid,
+      oid: row.ocOid,
       ordinal: row.ordinal,
       type: row.type || 'scheduled',
       repeating: row.repeating || false,
-      subjectCount: parseInt(row.subject_count) || 0
+      subjectCount: parseInt(row.subjectCount) || 0
     }));
     
     res.json({ success: true, data: events });

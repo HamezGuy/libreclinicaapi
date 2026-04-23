@@ -33,7 +33,7 @@ interface MockStudy {
 
 interface MockSubject {
   subjectKey: string;
-  studySubjectId: string;
+  label: string;
   studyOid: string;
   enrollmentDate: string;
   gender?: string;
@@ -73,7 +73,7 @@ class MockDataStore {
     // Add default test subjects
     this.subjects.set('SS_1', {
       subjectKey: 'SS_1',
-      studySubjectId: 'SUBJ-001',
+      label: 'SUBJ-001',
       studyOid: 'S_1',
       enrollmentDate: '2024-01-15',
       gender: 'M'
@@ -106,7 +106,7 @@ class MockDataStore {
 
   public subjectExists(studyOid: string, subjectId: string): boolean {
     return Array.from(this.subjects.values()).some(
-      s => s.studyOid === studyOid && s.studySubjectId === subjectId
+      s => s.studyOid === studyOid && s.label === subjectId
     );
   }
 
@@ -259,7 +259,7 @@ ${studyItems}
   public buildSubjectList(subjects: MockSubject[]): string {
     const odmSubjects = subjects.map(s => 
       `    <SubjectData SubjectKey="${s.subjectKey}">
-      <StudySubjectID>${s.studySubjectId}</StudySubjectID>
+      <StudySubjectID>${s.label}</StudySubjectID>
       <EnrollmentDate>${s.enrollmentDate}</EnrollmentDate>
       ${s.gender ? `<Sex>${s.gender}</Sex>` : ''}
     </SubjectData>`
@@ -404,7 +404,7 @@ class SoapRequestHandler {
           
           this.dataStore.addSubject({
             subjectKey,
-            studySubjectId: subjectId,
+            label: subjectId,
             studyOid,
             enrollmentDate: new Date().toISOString().split('T')[0]
           });

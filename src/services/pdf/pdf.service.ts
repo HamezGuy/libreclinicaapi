@@ -12,6 +12,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { stripExtendedProps, parseExtendedProps } from '../../utils/extended-props';
+import { parseResponseSetOptions } from '../../utils/query-correction.helper';
 import {
   PDFGenerationOptions,
   PrintableForm,
@@ -149,17 +150,12 @@ export async function getFormDataForPrint(eventCrfId: number): Promise<Printable
     // Build sections with fields
     const sections: PrintableSection[] = sectionsResult.rows.map(sec => {
       const sectionFields = fieldsResult.rows
-        .filter(f => f.section_id === sec.section_id)
+        .filter(f => f.sectionId === sec.sectionId)
         .map(f => {
           // Parse options if present
           let options: { label: string; value: string }[] | undefined;
-          if (f.options_text && f.options_values) {
-            const labels = f.options_text.split(',');
-            const values = f.options_values.split(',');
-            options = labels.map((label: string, idx: number) => ({
-              label: label.trim(),
-              value: values[idx]?.trim() || label.trim()
-            }));
+          if (f.optionsText && f.optionsValues) {
+            options = parseResponseSetOptions(f.optionsText, f.optionsValues);
           }
 
           // Format display value
@@ -173,7 +169,7 @@ export async function getFormDataForPrint(eventCrfId: number): Promise<Printable
           let status: 'entered' | 'missing' | 'sdv_verified' | 'queried' = 'entered';
           if (!f.value || f.value === '') {
             status = f.required ? 'missing' : 'entered';
-          } else if (f.open_query_id) {
+          } else if (f.openQueryId) {
             status = 'queried';
           }
 
@@ -181,11 +177,11 @@ export async function getFormDataForPrint(eventCrfId: number): Promise<Printable
           // the correct field type and clean label (single source of truth)
           const extProps = parseExtendedProps(f.description);
           const cleanLabel = stripExtendedProps(f.description) || f.name;
-          const fieldType = extProps.type || f.response_type || f.data_type || 'text';
+          const fieldType = extProps.type || f.responseType || f.dataType || 'text';
           const fieldName = extProps.fieldName || f.name;
 
           const field: PrintableField = {
-            fieldId: f.item_id,
+            fieldId: f.itemId,
             name: fieldName,
             label: cleanLabel,
             type: fieldType,
@@ -201,7 +197,7 @@ export async function getFormDataForPrint(eventCrfId: number): Promise<Printable
         });
 
       return {
-        sectionId: sec.section_id,
+        sectionId: sec.sectionId,
         title: sec.title || 'Section',
         subtitle: sec.subtitle,
         instructions: sec.instructions,
@@ -210,20 +206,20 @@ export async function getFormDataForPrint(eventCrfId: number): Promise<Printable
     });
 
     const form: PrintableForm = {
-      formId: header.event_crf_id,
-      formName: header.crf_name,
-      formVersion: header.version_name,
-      eventName: header.event_name,
-      subjectLabel: header.subject_label,
-      studyName: header.study_name,
-      siteName: header.site_name,
+      formId: header.eventCrfId,
+      formName: header.crfName,
+      formVersion: header.versionName,
+      eventName: header.eventName,
+      subjectLabel: header.subjectLabel,
+      studyName: header.studyName,
+      siteName: header.siteName,
       sections,
       status: header.status,
-      completedDate: header.date_completed,
-      completedBy: header.completed_by,
-      signatureStatus: header.electronic_signature_status,
-      sdvStatus: header.sdv_status,
-      lockStatus: header.is_locked
+      completedDate: header.dateCompleted,
+      completedBy: header.completedBy,
+      signatureStatus: header.electronicSignatureStatus,
+      sdvStatus: header.sdvStatus,
+      lockStatus: header.isLocked
     };
 
     return form;
@@ -309,32 +305,27 @@ export async function getBlankFormDataForPrint(crfVersionId: number): Promise<Pr
     // Build sections with fields
     const sections: PrintableSection[] = sectionsResult.rows.map(sec => {
       const sectionFields = fieldsResult.rows
-        .filter(f => f.section_id === sec.section_id)
+        .filter(f => f.sectionId === sec.sectionId)
         .map(f => {
           // Parse options if present
           let options: { label: string; value: string }[] | undefined;
-          if (f.options_text && f.options_values) {
-            const labels = f.options_text.split(',');
-            const values = f.options_values.split(',');
-            options = labels.map((label: string, idx: number) => ({
-              label: label.trim(),
-              value: values[idx]?.trim() || label.trim()
-            }));
+          if (f.optionsText && f.optionsValues) {
+            options = parseResponseSetOptions(f.optionsText, f.optionsValues);
           }
 
           // Parse extended properties for correct type and clean label
           const extProps = parseExtendedProps(f.description);
           const cleanLabel = stripExtendedProps(f.description) || f.name;
-          const fieldType = extProps.type || f.response_type || f.data_type || 'text';
+          const fieldType = extProps.type || f.responseType || f.dataType || 'text';
           const fieldName = extProps.fieldName || f.name;
 
           const field: PrintableField = {
-            fieldId: f.item_id,
+            fieldId: f.itemId,
             name: fieldName,
             label: cleanLabel,
             type: fieldType,
-            value: f.default_value || '',
-            displayValue: f.default_value || '',
+            value: f.defaultValue || '',
+            displayValue: f.defaultValue || '',
             unit: f.units || extProps.unit,
             options,
             required: f.required
@@ -344,7 +335,7 @@ export async function getBlankFormDataForPrint(crfVersionId: number): Promise<Pr
         });
 
       return {
-        sectionId: sec.section_id,
+        sectionId: sec.sectionId,
         title: sec.title || 'Section',
         subtitle: sec.subtitle,
         instructions: sec.instructions,
@@ -353,12 +344,12 @@ export async function getBlankFormDataForPrint(crfVersionId: number): Promise<Pr
     });
 
     const form: PrintableForm = {
-      formId: header.crf_version_id,
-      formName: header.crf_name,
-      formVersion: header.version_name,
+      formId: header.crfVersionId,
+      formName: header.crfName,
+      formVersion: header.versionName,
       eventName: 'Blank Form Template',
       subjectLabel: '________________',
-      studyName: header.study_name || 'Study',
+      studyName: header.studyName || 'Study',
       siteName: '________________',
       sections,
       status: 'BLANK TEMPLATE'
@@ -438,31 +429,31 @@ export async function getCasebookDataForPrint(
     const events: PrintableEvent[] = [];
 
     for (const event of eventsResult.rows) {
-      const eventCrfs = eventCrfsResult.rows.filter(ec => ec.study_event_id === event.study_event_id);
+      const eventCrfs = eventCrfsResult.rows.filter(ec => ec.studyEventId === event.studyEventId);
       const forms: PrintableForm[] = [];
 
       for (const eventCrf of eventCrfs) {
-        const formData = await getFormDataForPrint(eventCrf.event_crf_id);
+        const formData = await getFormDataForPrint(eventCrf.eventCrfId);
         if (formData) {
           forms.push(formData);
         }
       }
 
       events.push({
-        eventId: event.study_event_id,
-        eventName: event.event_name,
-        eventDate: event.date_started,
+        eventId: event.studyEventId,
+        eventName: event.eventName,
+        eventDate: event.dateStarted,
         status: event.status,
         forms
       });
     }
 
     const casebook: PrintableCasebook = {
-      studySubjectId: subject.study_subject_id,
-      subjectLabel: subject.subject_label,
-      studyName: subject.study_name,
-      siteName: subject.site_name,
-      enrollmentDate: subject.enrollment_date,
+      studySubjectId: subject.studySubjectId,
+      subjectLabel: subject.subjectLabel,
+      studyName: subject.studyName,
+      siteName: subject.siteName,
+      enrollmentDate: subject.enrollmentDate,
       status: subject.status,
       events,
       generatedAt: new Date(),
@@ -501,7 +492,7 @@ export async function getAuditTrailForPrint(
       `;
       const nameResult = await pool.query(nameQuery, [entityId]);
       if (nameResult.rows.length > 0) {
-        entityName = `${nameResult.rows[0].crf_name} - ${nameResult.rows[0].subject_label}`;
+        entityName = `${nameResult.rows[0].crfName} - ${nameResult.rows[0].subjectLabel}`;
       }
     } else if (entityType === 'study_subject') {
       const nameQuery = `
@@ -512,7 +503,7 @@ export async function getAuditTrailForPrint(
       `;
       const nameResult = await pool.query(nameQuery, [entityId]);
       if (nameResult.rows.length > 0) {
-        entityName = `${nameResult.rows[0].subject_label} - ${nameResult.rows[0].study_name}`;
+        entityName = `${nameResult.rows[0].subjectLabel} - ${nameResult.rows[0].studyName}`;
       }
     }
 
@@ -539,16 +530,16 @@ export async function getAuditTrailForPrint(
     const auditResult = await pool.query(auditQuery, [entityType, entityId]);
 
     const entries: AuditTrailEntry[] = auditResult.rows.map(row => ({
-      auditId: row.audit_id,
-      auditDate: row.audit_date,
+      auditId: row.auditId,
+      auditDate: row.auditDate,
       action: row.action,
-      entityType: row.entity_type,
-      entityId: row.entity_id,
-      oldValue: row.old_value,
-      newValue: row.new_value,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      oldValue: row.oldValue,
+      newValue: row.newValue,
       username: row.username,
-      userFullName: row.user_full_name,
-      reasonForChange: row.reason_for_change
+      userFullName: row.userFullName,
+      reasonForChange: row.reasonForChange
     }));
 
     return {

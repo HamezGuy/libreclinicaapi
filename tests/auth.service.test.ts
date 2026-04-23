@@ -60,7 +60,7 @@ describe('Auth Service', () => {
       expect(result.success).toBeDefined();
       if (result.success) {
         expect(result.data).toBeDefined();
-        expect(result.data?.user_name).toBe('root');
+        expect(result.data?.userName).toBe('root');
       }
     });
 
@@ -83,7 +83,7 @@ describe('Auth Service', () => {
       await testDb.pool.query('UPDATE user_account SET enabled = false WHERE user_id = $1', [testUserId]);
 
       const userQuery = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userQuery.rows[0]?.user_name;
+      const username = userQuery.rows[0]?.userName;
 
       if (username) {
         const result = await authService.authenticateUser(username, 'TestPassword123!', '127.0.0.1');
@@ -98,7 +98,7 @@ describe('Auth Service', () => {
       await testDb.pool.query('UPDATE user_account SET account_non_locked = false WHERE user_id = $1', [testUserId]);
 
       const userQuery = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userQuery.rows[0]?.user_name;
+      const username = userQuery.rows[0]?.userName;
 
       if (username) {
         const result = await authService.authenticateUser(username, 'TestPassword123!', '127.0.0.1');
@@ -113,7 +113,7 @@ describe('Auth Service', () => {
     beforeEach(async () => {
       // Assign test user to test study with admin role
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       if (username) {
         await testDb.pool.query(`
@@ -157,7 +157,7 @@ describe('Auth Service', () => {
     beforeEach(async () => {
       // Assign test user to test study
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       if (username) {
         await testDb.pool.query(`
@@ -198,8 +198,8 @@ describe('Auth Service', () => {
       if (user) {
         const payload = await authService.buildJwtPayload(user);
 
-        expect(payload.userId).toBe(user.user_id);
-        expect(payload.username).toBe(user.user_name);
+        expect(payload.userId).toBe(user.userId);
+        expect(payload.username).toBe(user.userName);
         expect(payload.email).toBeDefined();
         expect(payload.role).toBeDefined();
         expect(Array.isArray(payload.studyIds)).toBe(true);
@@ -208,7 +208,7 @@ describe('Auth Service', () => {
 
     it('should include all user study IDs in payload', async () => {
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       // Assign to multiple studies
       const study2Id = await createTestStudy(testDb.pool, rootUserId, {
@@ -242,7 +242,7 @@ describe('Auth Service', () => {
   describe('getUserRoleDetails', () => {
     beforeEach(async () => {
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       if (username) {
         await testDb.pool.query(`
@@ -271,7 +271,7 @@ describe('Auth Service', () => {
   describe('userHasPermission', () => {
     beforeEach(async () => {
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       if (username) {
         await testDb.pool.query(`
@@ -316,7 +316,7 @@ describe('Auth Service', () => {
   describe('isUserAdmin', () => {
     it('should return true for admin user', async () => {
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       if (username) {
         await testDb.pool.query(`
@@ -332,7 +332,7 @@ describe('Auth Service', () => {
 
     it('should return false for non-admin user', async () => {
       const userResult = await testDb.pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [testUserId]);
-      const username = userResult.rows[0]?.user_name;
+      const username = userResult.rows[0]?.userName;
 
       if (username) {
         await testDb.pool.query(`

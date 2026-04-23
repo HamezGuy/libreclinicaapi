@@ -9,6 +9,7 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as formService from '../services/hybrid/form.service';
 import * as templateBundleService from '../services/hybrid/template-bundle.service';
 import { trackDocumentAccess, trackUserAction } from '../services/database/audit.service';
+import { pool } from '../config/database';
 
 export const saveData = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
@@ -116,11 +117,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
   const result = await formService.getAllForms(user?.userId);
   console.log(`[form.controller.list] Returning ${result.length} forms`);
   
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length 
-  });
+  res.json({ success: true, data: result });
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
@@ -147,11 +144,7 @@ export const getByStudy = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await formService.getStudyForms(parseInt(studyId as string));
 
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length 
-  });
+  res.json({ success: true, data: result });
 });
 
 /**
@@ -302,12 +295,7 @@ export const getArchivedForms = asyncHandler(async (req: Request, res: Response)
     'view'
   );
 
-  res.json({ 
-    success: true, 
-    data: result,
-    total: result.length,
-    message: '21 CFR Part 11 compliant archived forms list'
-  });
+  res.json({ success: true, data: result });
 });
 
 // =============================================================================
@@ -374,8 +362,13 @@ export const createVersion = asyncHandler(async (req: Request, res: Response) =>
 });
 
 /**
- * Fork (copy) an entire form template to create a new independent form
- * This is "forking" at the CRF level - completely new CRF
+ * Fork (copy) an entire form template to create a new independent form.
+ *
+ * Resolves the caller's active organization memberships and passes them to
+ * forkForm() so the service can enforce org-isolation on BOTH the source
+ * CRF and the target study. Audit events are written transactionally inside
+ * the service (one row on the destination, one on the source) — no extra
+ * controller-level audit call (would have produced duplicate rows).
  */
 export const fork = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -388,22 +381,111 @@ export const fork = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
+  // Resolve caller's active org memberships for org-isolation checks.
+  let callerOrgIds: number[] = [];
+  try {
+    const orgRes = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [user.userId]
+    );
+    callerOrgIds = orgRes.rows.map((r: any) => r.organizationId);
+  } catch (e: any) {
+    // If the org table doesn't exist (very old installs), fall back to
+    // unrestricted — same behavior as the rest of the codebase.
+    callerOrgIds = [];
+  }
+
   const result = await formService.forkForm(
     parseInt(id),
     { newName, description, targetStudyId },
+    user.userId,
+    callerOrgIds
+  );
+
+  // Map service-level error codes to HTTP status. Default 201 on success,
+  // 400 on validation, 403 on org denial, 404 on missing source/target,
+  // 409 on name collision (was previously a SILENT data leak).
+  let status = 400;
+  if (result.success) {
+    status = 201;
+  } else if (result.code === 'NOT_FOUND' || result.code === 'NO_VERSION') {
+    status = 404;
+  } else if (result.code === 'FORBIDDEN_SOURCE' || result.code === 'FORBIDDEN_TARGET') {
+    status = 403;
+  } else if (result.code === 'NAME_CONFLICT') {
+    status = 409;
+  } else if (result.code === 'ERROR') {
+    status = 500;
+  }
+
+  res.status(status).json(result);
+});
+
+/**
+ * Relink broken form-link references after a fork.
+ *
+ * PATCH /forms/:id/relink
+ * Body: { relinks: [{ oldFormId, newFormId, newFormName? }] }
+ *
+ * After copying a form to a new study, some fields may reference linked forms
+ * that weren't present in the target study at fork time. Once the user copies
+ * those linked forms, they call this endpoint to reconnect the references.
+ */
+export const relinkFormLinks = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = (req as any).user;
+  const { relinks } = req.body;
+
+  if (!Array.isArray(relinks) || relinks.length === 0) {
+    res.status(400).json({ success: false, message: 'relinks array is required' });
+    return;
+  }
+
+  const result = await formService.relinkFormLinks(
+    parseInt(id),
+    relinks,
     user.userId
   );
 
-  if (result.success) {
-    await trackUserAction({
-      userId: user.userId,
-      username: user.username || user.userName,
-      action: 'FORM_FORKED',
-      entityType: 'crf',
-      entityId: result.newCrfId,
-      details: `Forked form ID ${id} as "${newName}"`
-    });
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+/**
+ * Batch-fork multiple forms into a target study.
+ *
+ * POST /forms/batch-fork
+ * Body: { sourceCrfIds: number[], targetStudyId: number, nameMap?: Record<string, string> }
+ *
+ * Copies all specified forms, then automatically relinks any cross-form
+ * references between them (Form A links to Form B — both are in the batch,
+ * so the link in the copied Form A is updated to point at the copied Form B).
+ *
+ * External links (to forms NOT in the batch) are reported with actionable
+ * recommendations.
+ */
+export const batchFork = asyncHandler(async (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { sourceCrfIds, targetStudyId, nameMap } = req.body;
+
+  // Resolve caller's org memberships
+  let callerOrgIds: number[] = [];
+  try {
+    const orgRes = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [user.userId]
+    );
+    callerOrgIds = orgRes.rows.map((r: any) => r.organizationId);
+  } catch {
+    callerOrgIds = [];
   }
+
+  const result = await formService.batchForkForms(
+    sourceCrfIds,
+    parseInt(targetStudyId),
+    nameMap || {},
+    user.userId,
+    callerOrgIds
+  );
 
   res.status(result.success ? 201 : 400).json(result);
 });
@@ -531,8 +613,11 @@ export const markComplete = asyncHandler(async (req: Request, res: Response) => 
     return;
   }
 
+  const hiddenFieldIds: number[] | undefined = Array.isArray(req.body.hiddenFieldIds) ? req.body.hiddenFieldIds : undefined;
+  const hiddenFields: string[] | undefined = Array.isArray(req.body.hiddenFields) ? req.body.hiddenFields : undefined;
+
   // markFormComplete throws on failure — asyncHandler converts to HTTP error
-  const result = await formService.markFormComplete(eventCrfId, user.userId);
+  const result = await formService.markFormComplete(eventCrfId, user.userId, hiddenFieldIds, hiddenFields);
 
   await trackUserAction({
     userId: user.userId,
@@ -612,7 +697,7 @@ export default {
   // 21 CFR Part 11 Archive Operations
   archive, restore, getArchivedForms,
   // Forking/Versioning
-  getVersions, createVersion, fork,
+  getVersions, createVersion, fork, relinkFormLinks, batchFork,
   // Field-level operations with validation
   updateField, validateField,
   // Mark form complete (prerequisite for data lock)

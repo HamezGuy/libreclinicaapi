@@ -90,7 +90,7 @@ describe('Query Service', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data.every((q: any) => q.study_id === testStudyId)).toBe(true);
+      expect(result.data.every((q: any) => q.studyId === testStudyId)).toBe(true);
     });
 
     it('should filter by status', async () => {
@@ -141,7 +141,7 @@ describe('Query Service', () => {
       });
 
       if (result.data.length > 0) {
-        expect(result.data[0].response_count).toBeDefined();
+        expect(result.data[0].responseCount).toBeDefined();
       }
     });
   });
@@ -160,15 +160,15 @@ describe('Query Service', () => {
       const query = await queryService.getQueryById(singleQueryId);
 
       expect(query).toBeDefined();
-      expect(query.discrepancy_note_id).toBe(singleQueryId);
+      expect(query.discrepancyNoteId).toBe(singleQueryId);
     });
 
     it('should include query details', async () => {
       const query = await queryService.getQueryById(singleQueryId);
 
       expect(query.description).toBeDefined();
-      expect(query.type_name).toBeDefined();
-      expect(query.status_name).toBeDefined();
+      expect(query.typeName).toBeDefined();
+      expect(query.statusName).toBeDefined();
     });
 
     it('should include responses array', async () => {
@@ -187,7 +187,7 @@ describe('Query Service', () => {
     it('should include study name', async () => {
       const query = await queryService.getQueryById(singleQueryId);
 
-      expect(query.study_name).toBeDefined();
+      expect(query.studyName).toBeDefined();
     });
   });
 
@@ -259,7 +259,7 @@ describe('Query Service', () => {
           [result.queryId]
         );
 
-        expect(queryResult.rows[0].discrepancy_note_type_id).toBe(3); // Query type
+        expect(queryResult.rows[0].discrepancyNoteTypeId).toBe(3); // Query type
       }
     });
   });
@@ -301,7 +301,7 @@ describe('Query Service', () => {
           [result.responseId]
         );
 
-        expect(responseResult.rows[0].parent_dn_id).toBe(parentQueryId);
+        expect(responseResult.rows[0].parentDnId).toBe(parentQueryId);
       }
     });
 
@@ -327,7 +327,7 @@ describe('Query Service', () => {
           [result.responseId]
         );
 
-        expect(responseResult.rows[0].study_id).toBe(testStudyId);
+        expect(responseResult.rows[0].studyId).toBe(testStudyId);
       }
     });
   });
@@ -356,7 +356,7 @@ describe('Query Service', () => {
         [statusQueryId]
       );
 
-      expect(queryResult.rows[0].resolution_status_id).toBe(4);
+      expect(queryResult.rows[0].resolutionStatusId).toBe(4);
     });
 
     it('should create audit log entry', async () => {

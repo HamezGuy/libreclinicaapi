@@ -25,12 +25,12 @@ const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | nul
     [callerUserId]
   );
   if (orgCheck.rows.length === 0) return null; // no org = root admin
-  const orgIds = orgCheck.rows.map((r: any) => r.organization_id);
+  const orgIds = orgCheck.rows.map((r: any) => r.organizationId);
   const memberCheck = await pool.query(
     `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
     [orgIds]
   );
-  return memberCheck.rows.map((r: any) => r.user_id);
+  return memberCheck.rows.map((r: any) => r.userId);
 };
 
 /**
@@ -75,9 +75,10 @@ export const getAuditTrail = async (
     if (studyId) {
       extraJoins.push(
         `LEFT JOIN event_crf ec_s ON ale.event_crf_id = ec_s.event_crf_id`,
-        `LEFT JOIN study_event se_s ON ec_s.study_event_id = se_s.study_event_id`
+        `LEFT JOIN study_event se_s ON ec_s.study_event_id = se_s.study_event_id`,
+        `LEFT JOIN study_subject ss_s ON se_s.study_subject_id = ss_s.study_subject_id`
       );
-      conditions.push(`se_s.study_id = $${paramIndex++}`);
+      conditions.push(`ss_s.study_id = $${paramIndex++}`);
       params.push(studyId);
     }
 
@@ -85,12 +86,10 @@ export const getAuditTrail = async (
       if (!studyId) {
         extraJoins.push(
           `LEFT JOIN event_crf ec_s ON ale.event_crf_id = ec_s.event_crf_id`,
-          `LEFT JOIN study_event se_s ON ec_s.study_event_id = se_s.study_event_id`
+          `LEFT JOIN study_event se_s ON ec_s.study_event_id = se_s.study_event_id`,
+          `LEFT JOIN study_subject ss_s ON se_s.study_subject_id = ss_s.study_subject_id`
         );
       }
-      extraJoins.push(
-        `LEFT JOIN study_subject ss_s ON se_s.study_subject_id = ss_s.study_subject_id`
-      );
       conditions.push(`ss_s.study_subject_id = $${paramIndex++}`);
       params.push(subjectId);
     }
@@ -355,16 +354,16 @@ export const exportAuditTrailCSV = async (
 
     for (const row of result.rows) {
       const values = [
-        row.audit_date,
-        row.user_name,
-        `"${row.user_full_name || ''}"`,
-        `"${row.event_type || ''}"`,
-        row.audit_table,
-        row.entity_id || '',
-        `"${row.entity_name || ''}"`,
-        `"${row.old_value || ''}"`,
-        `"${row.new_value || ''}"`,
-        `"${row.reason_for_change || ''}"`
+        row.auditDate,
+        row.userName,
+        `"${row.userFullName || ''}"`,
+        `"${row.eventType || ''}"`,
+        row.auditTable,
+        row.entityId || '',
+        `"${row.entityName || ''}"`,
+        `"${row.oldValue || ''}"`,
+        `"${row.newValue || ''}"`,
+        `"${row.reasonForChange || ''}"`
       ];
 
       csv += values.join(',') + '\n';
@@ -450,21 +449,21 @@ export const getAuditStatistics = async (
     const loginStats = loginResult.rows[0] || {};
 
     return {
-      total_events: parseInt(dataStats.total_data_events || 0) + parseInt(loginStats.total_login_events || 0),
+      total_events: parseInt(dataStats.totalDataEvents || 0) + parseInt(loginStats.totalLoginEvents || 0),
       unique_users: Math.max(
-        parseInt(dataStats.data_unique_users || 0),
-        parseInt(loginStats.login_unique_users || 0)
+        parseInt(dataStats.dataUniqueUsers || 0),
+        parseInt(loginStats.loginUniqueUsers || 0)
       ),
       active_days: days,
       // Login events (from audit_user_login)
-      login_events: parseInt(loginStats.successful_logins || 0),
-      failed_login_events: parseInt(loginStats.failed_logins || 0),
+      login_events: parseInt(loginStats.successfulLogins || 0),
+      failed_login_events: parseInt(loginStats.failedLogins || 0),
       logout_events: parseInt(loginStats.logouts || 0),
       // Data events (from audit_log_event)
-      data_events: parseInt(dataStats.data_entry_events || 0),
-      subject_events: parseInt(dataStats.subject_events || 0),
-      query_events: parseInt(dataStats.query_events || 0),
-      sdv_events: parseInt(dataStats.sdv_events || 0)
+      data_events: parseInt(dataStats.dataEntryEvents || 0),
+      subject_events: parseInt(dataStats.subjectEvents || 0),
+      query_events: parseInt(dataStats.queryEvents || 0),
+      sdv_events: parseInt(dataStats.sdvEvents || 0)
     };
   } catch (error: any) {
     logger.error('Audit statistics error', {
@@ -607,7 +606,7 @@ export const getAuditSummary = async (startDate: string, endDate: string, caller
       if (!summary[dateKey]) {
         summary[dateKey] = { date: dateKey, events: {}, total: 0 };
       }
-      summary[dateKey].events[row.event_type] = parseInt(row.count);
+      summary[dateKey].events[row.eventType] = parseInt(row.count);
       summary[dateKey].total += parseInt(row.count);
     }
 
@@ -697,7 +696,7 @@ export const getComplianceReport = async (request: {
       SELECT 
         aul.login_attempt_date,
         aul.user_name,
-        aul.login_status
+        aul.login_status_code
       FROM audit_user_login aul
       WHERE aul.login_attempt_date >= $1 AND aul.login_attempt_date <= $2${orgLoginFilter}
       ORDER BY aul.login_attempt_date DESC
@@ -712,20 +711,20 @@ export const getComplianceReport = async (request: {
         reportPeriod: { startDate, endDate },
         generatedAt: toISOTimestamp(),
         summary: {
-          totalEvents: parseInt(stats.total_events),
-          uniqueUsers: parseInt(stats.unique_users),
-          activeDays: parseInt(stats.active_days),
-          firstEvent: stats.first_event,
-          lastEvent: stats.last_event
+          totalEvents: parseInt(stats.totalEvents),
+          uniqueUsers: parseInt(stats.uniqueUsers),
+          activeDays: parseInt(stats.activeDays),
+          firstEvent: stats.firstEvent,
+          lastEvent: stats.lastEvent
         },
         eventsByType: typeResult.rows.map(r => ({
-          type: r.event_type,
+          type: r.eventType,
           count: parseInt(r.count)
         })),
         userActivity: userResult.rows.map(r => ({
-          userName: r.user_name,
-          fullName: r.user_full_name,
-          eventCount: parseInt(r.event_count)
+          userName: r.userName,
+          fullName: r.userFullName,
+          eventCount: parseInt(r.eventCount)
         })),
         recentLogins: loginResult.rows
       }
@@ -763,8 +762,7 @@ export const recordAuditEvent = async (data: {
     // LibreClinica's actual audit_log_event columns:
     // audit_id (SERIAL), audit_date, audit_table, user_id, entity_id, entity_name,
     // old_value, new_value, audit_log_event_type_id, reason_for_change,
-    // event_crf_id, study_event_id, event_crf_version_id, item_data_repeat_key
-    // NOTE: There is NO study_id column in audit_log_event!
+    // event_crf_id, study_event_id, event_crf_version_id, item_data_repeat_key, study_id
     const query = `
       INSERT INTO audit_log_event (
         audit_date, 
@@ -777,9 +775,10 @@ export const recordAuditEvent = async (data: {
         audit_log_event_type_id, 
         reason_for_change,
         event_crf_id,
-        study_event_id
+        study_event_id,
+        study_id
       ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
       ) RETURNING audit_id
     `;
 
@@ -793,12 +792,13 @@ export const recordAuditEvent = async (data: {
       data.audit_log_event_type_id,
       data.reason_for_change || null,
       data.event_crf_id || null,
-      data.study_event_id || null
+      data.study_event_id || null,
+      data.study_id || null
     ]);
 
     return {
       success: true,
-      data: { audit_id: result.rows[0].audit_id },
+      data: { audit_id: result.rows[0].auditId },
       message: 'Audit event recorded'
     };
   } catch (error: any) {
@@ -819,6 +819,15 @@ export const AuditEventTypes: Record<string, string> = {
   FORM_UPDATED: 'Form Updated',
   FORM_DELETED: 'Form Deleted',
   FORM_SIGNED: 'Form Signed',
+
+  // Template / CRF lifecycle (used by the fork/copy workflow)
+  // FORM_FORKED is recorded against the NEW (destination) CRF.
+  // FORM_COPIED_OUT is recorded against the SOURCE CRF so the lineage
+  // is visible from BOTH ends of the copy operation (21 CFR Part 11
+  // §11.10(e) — a regulator inspecting either form sees the link).
+  FORM_FORKED: 'Form Copied',
+  FORM_COPIED_OUT: 'Form Copied To Another Organization',
+  FORM_VERSION_CREATED: 'Form Version Created',
 
   // Subject access
   SUBJECT_VIEWED: 'Subject Viewed',
@@ -977,12 +986,11 @@ export const trackUserAction = async (data: {
         [eventTypeName]
       );
       if (etResult.rows.length > 0) {
-        eventTypeId = etResult.rows[0].audit_log_event_type_id;
+        eventTypeId = etResult.rows[0].auditLogEventTypeId;
       }
     } catch { /* use fallback */ }
     
     // Use LibreClinica's CORRECT column order
-    // NOTE: There is NO study_id column in audit_log_event!
     const query = `
       INSERT INTO audit_log_event (
         audit_date, 
@@ -995,9 +1003,10 @@ export const trackUserAction = async (data: {
         audit_log_event_type_id,
         reason_for_change,
         event_crf_id,
-        study_event_id
+        study_event_id,
+        study_id
       ) VALUES (
-        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
       ) RETURNING audit_id
     `;
 
@@ -1011,7 +1020,8 @@ export const trackUserAction = async (data: {
       eventTypeId,                                        // audit_log_event_type_id
       data.details || `${data.action} by ${data.username}`, // reason_for_change
       data.eventCrfId || null,                            // event_crf_id
-      data.studyEventId || null                           // study_event_id
+      data.studyEventId || null,                          // study_event_id
+      data.studyId || null                                // study_id
     ]);
 
     logger.info('User action tracked', {
@@ -1021,7 +1031,7 @@ export const trackUserAction = async (data: {
       userId: data.userId
     });
 
-    return { success: true, auditId: result.rows[0].audit_id };
+    return { success: true, auditId: result.rows[0].auditId };
   } catch (error: any) {
     logger.error('Failed to track user action', { 
       error: error.message,
@@ -1164,7 +1174,7 @@ export const recordElectronicSignature = async (data: {
 
     return {
       success: true,
-      data: { signature_id: result.rows[0].audit_id },
+      data: { signature_id: result.rows[0].auditId },
       message: 'Electronic signature recorded'
     };
   } catch (error: any) {
@@ -1428,10 +1438,10 @@ export const getLoginStatistics = async (days: number = 30, callerUserId?: numbe
     return {
       success: true,
       data: {
-        successfulLogins: parseInt(summary.successful_logins) || 0,
-        failedLogins: parseInt(summary.failed_logins) || 0,
+        successfulLogins: parseInt(summary.successfulLogins) || 0,
+        failedLogins: parseInt(summary.failedLogins) || 0,
         logouts: parseInt(summary.logouts) || 0,
-        uniqueUsers: parseInt(summary.unique_users) || 0,
+        uniqueUsers: parseInt(summary.uniqueUsers) || 0,
         byDay: dailyResult.rows.map(row => ({
           date: formatDate(row.date),
           success: parseInt(row.success) || 0,

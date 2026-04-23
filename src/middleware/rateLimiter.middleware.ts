@@ -265,13 +265,13 @@ export const uploadRateLimiter = rateLimit({
  *   - The 20/hr cap was chewed up within minutes by a single rule-author
  *     iterating on prompts (and by the test suite, which exercises ~15
  *     prompts per run). The Gemini 2.5-flash median cost per call is
- *     ~$0.0009, so 200/hr per user caps daily worst case at well under
- *     a dollar per author — fine for a 21 CFR Part 11 EDC where authors
- *     are paid clinical staff, not anonymous internet users.
+ *     ~$0.0009, so 2500/hr per user caps daily worst case at a few
+ *     dollars per author — acceptable for a 21 CFR Part 11 EDC where
+ *     authors are paid clinical staff, not anonymous internet users.
  */
 export const aiCompileRateLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: parseInt(process.env.AI_COMPILE_RATE_LIMIT_MAX || (isDevelopment ? '0' : '200')),
+  max: parseInt(process.env.AI_COMPILE_RATE_LIMIT_MAX || (isDevelopment ? '0' : '2500')),
   message: 'Too many AI rule-compile requests. Please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
@@ -307,6 +307,22 @@ export const userCreationRateLimiter = rateLimit({
 });
 
 /**
+ * Public registration rate limiter
+ * Limits unauthenticated registration and access request endpoints.
+ *
+ * Default: 20 requests per 15 minutes per IP.
+ */
+export const publicRegistrationRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: parseInt(process.env.PUBLIC_REGISTRATION_RATE_LIMIT_MAX || (isDevelopment ? '0' : '20')),
+  message: 'Too many registration attempts from this IP. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+  skip: () => isTestMode || isDevelopment
+});
+
+/**
  * Export all rate limiters
  */
 export default {
@@ -319,6 +335,7 @@ export default {
   auditExportRateLimiter,
   uploadRateLimiter,
   userCreationRateLimiter,
-  aiCompileRateLimiter
+  aiCompileRateLimiter,
+  publicRegistrationRateLimiter
 };
 

@@ -328,8 +328,8 @@ export const getAESummary = async (studyId: number): Promise<AESummary> => {
     const recentResult = await pool.query(recentQuery, [studyId]);
 
     return {
-      totalAEs: parseInt(row.total_aes) || 0,
-      seriousAEs: parseInt(row.serious_aes) || 0,
+      totalAEs: parseInt(row.totalAes) || 0,
+      seriousAEs: parseInt(row.seriousAes) || 0,
       openAEs: 0, // Would need outcome field query
       resolvedAEs: 0,
       bySeverity: severityResult.rows.map(r => ({
@@ -337,11 +337,11 @@ export const getAESummary = async (studyId: number): Promise<AESummary> => {
         count: parseInt(r.count) || 0
       })),
       recentAEs: recentResult.rows.map(r => ({
-        aeId: r.ae_id,
-        subjectLabel: r.subject_label,
-        aeTerm: r.ae_term,
-        onsetDate: r.onset_date,
-        isSerious: r.is_serious
+        aeId: r.aeId,
+        subjectLabel: r.subjectLabel,
+        aeTerm: r.aeTerm,
+        onsetDate: r.onsetDate,
+        isSerious: r.isSerious
       }))
     };
 
@@ -396,11 +396,11 @@ export const getSubjectAEs = async (
     const result = await pool.query(query, [studyId, subjectId]);
 
     return result.rows.map(row => ({
-      aeId: row.ae_id,
-      aeTerm: row.ae_term,
-      onsetDate: row.onset_date,
+      aeId: row.aeId,
+      aeTerm: row.aeTerm,
+      onsetDate: row.onsetDate,
       severity: row.severity,
-      isSerious: row.is_serious,
+      isSerious: row.isSerious,
       status: row.status
     }));
 

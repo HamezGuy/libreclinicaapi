@@ -13,7 +13,7 @@
 
 import { getSoapClient } from './soapClient';
 import { logger } from '../../config/logger';
-import { FormDataRequest, ApiResponse, ValidationError, ElectronicSignature } from '../../types';
+import { FormDataRequest, ApiResponse, ValidationError } from '../../types';
 import xml2js from 'xml2js';
 
 /**
@@ -127,7 +127,9 @@ export const buildOdmXml = async (request: FormDataRequest): Promise<string> => 
     studyEventDefinitionId,
     crfId,
     formData,
-    electronicSignature
+    signatureUsername,
+    signaturePassword,
+    signatureMeaning
   } = request;
 
   // Get study and subject OIDs (you may need to query these from database)
@@ -145,21 +147,21 @@ export const buildOdmXml = async (request: FormDataRequest): Promise<string> => 
      FileType="Transactional"
      FileOID="ODM-${Date.now()}"
      CreationDateTime="${timestamp}">
-  <ClinicalData StudyOID="${studyOid}" MetaDataVersionOID="v1.0.0">
-    <SubjectData SubjectKey="${subjectOid}">
-      <StudyEventData StudyEventOID="${eventOid}" StudyEventRepeatKey="1">
-        <FormData FormOID="${formOid}">`;
+  <ClinicalData StudyOID="${escapeXml(studyOid)}" MetaDataVersionOID="v1.0.0">
+    <SubjectData SubjectKey="${escapeXml(subjectOid)}">
+      <StudyEventData StudyEventOID="${escapeXml(eventOid)}" StudyEventRepeatKey="1">
+        <FormData FormOID="${escapeXml(formOid)}">`;
 
   // Build item groups and items from form data
   for (const [itemGroupOid, items] of Object.entries(formData)) {
     if (typeof items === 'object' && items !== null) {
       odmXml += `
-          <ItemGroupData ItemGroupOID="${itemGroupOid}" ItemGroupRepeatKey="1">`;
+          <ItemGroupData ItemGroupOID="${escapeXml(itemGroupOid)}" ItemGroupRepeatKey="1">`;
 
       for (const [itemOid, value] of Object.entries(items)) {
         const escapedValue = escapeXml(String(value));
         odmXml += `
-            <ItemData ItemOID="${itemOid}" Value="${escapedValue}"/>`;
+            <ItemData ItemOID="${escapeXml(itemOid)}" Value="${escapedValue}"/>`;
       }
 
       odmXml += `
@@ -171,8 +173,8 @@ export const buildOdmXml = async (request: FormDataRequest): Promise<string> => 
         </FormData>`;
 
   // Add electronic signature if provided
-  if (electronicSignature) {
-    odmXml += buildElectronicSignatureXml(electronicSignature, timestamp);
+  if (signatureUsername) {
+    odmXml += buildElectronicSignatureXml({ username: signatureUsername, meaning: signatureMeaning || 'Data Entry' }, timestamp);
   }
 
   odmXml += `
@@ -188,18 +190,18 @@ export const buildOdmXml = async (request: FormDataRequest): Promise<string> => 
  * Build electronic signature XML section
  */
 function buildElectronicSignatureXml(
-  signature: ElectronicSignature,
+  signature: { username: string; meaning: string },
   timestamp: string
 ): string {
   const { username, meaning } = signature;
 
   return `
         <AuditRecord>
-          <UserRef UserOID="${username}"/>
+          <UserRef UserOID="${escapeXml(username)}"/>
           <LocationRef LocationOID="API"/>
           <DateTimeStamp>${timestamp}</DateTimeStamp>
-          <ReasonForChange>Electronic Signature: ${meaning}</ReasonForChange>
-          <SourceID>${username}</SourceID>
+          <ReasonForChange>Electronic Signature: ${escapeXml(meaning)}</ReasonForChange>
+          <SourceID>${escapeXml(username)}</SourceID>
         </AuditRecord>`;
 }
 
@@ -349,12 +351,12 @@ export const buildItemDataOdm = (
      FileType="Transactional"
      FileOID="ODM-${Date.now()}"
      CreationDateTime="${timestamp}">
-  <ClinicalData StudyOID="${studyOid}" MetaDataVersionOID="v1.0.0">
-    <SubjectData SubjectKey="${subjectOid}">
-      <StudyEventData StudyEventOID="${eventOid}" StudyEventRepeatKey="1">
-        <FormData FormOID="${formOid}">
-          <ItemGroupData ItemGroupOID="${itemGroupOid}" ItemGroupRepeatKey="1">
-            <ItemData ItemOID="${itemOid}" Value="${escapedValue}"/>
+  <ClinicalData StudyOID="${escapeXml(studyOid)}" MetaDataVersionOID="v1.0.0">
+    <SubjectData SubjectKey="${escapeXml(subjectOid)}">
+      <StudyEventData StudyEventOID="${escapeXml(eventOid)}" StudyEventRepeatKey="1">
+        <FormData FormOID="${escapeXml(formOid)}">
+          <ItemGroupData ItemGroupOID="${escapeXml(itemGroupOid)}" ItemGroupRepeatKey="1">
+            <ItemData ItemOID="${escapeXml(itemOid)}" Value="${escapedValue}"/>
           </ItemGroupData>
         </FormData>
       </StudyEventData>

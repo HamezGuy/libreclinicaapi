@@ -10,8 +10,11 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import Joi from 'joi';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { validate } from '../middleware/validation.middleware';
 import { requireSignatureFor, verifyElectronicSignature, Part11Request } from '../middleware/part11.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import { logger } from '../config/logger';
 import {
   createConsentDocument,
@@ -349,7 +352,7 @@ router.post('/:consentId/withdraw',
  * GET /api/consent/:consentId/audit-trail
  * Get audit trail for a consent record
  */
-router.get('/:consentId/audit-trail', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:consentId/audit-trail', authMiddleware, requireRole('admin', 'monitor', 'investigator'), async (req: Request, res: Response) => {
   try {
     const consentId = parseInt(req.params.consentId);
     const trail = await getConsentAuditTrail(consentId);
@@ -368,7 +371,7 @@ router.get('/:consentId/audit-trail', authMiddleware, async (req: Request, res: 
  * POST /api/consent/reconsent/request
  * Request re-consent for a subject
  */
-router.post('/reconsent/request', authMiddleware, async (req: Request, res: Response) => {
+router.post('/reconsent/request', authMiddleware, requireAdminOrInvestigator, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId;
     const request = await requestReconsent({ ...req.body, requestedBy: userId });

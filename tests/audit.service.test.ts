@@ -34,7 +34,7 @@ describe('Audit Service', () => {
     const eventTypeResult = await testDb.pool.query(
       'SELECT audit_log_event_type_id FROM audit_log_event_type LIMIT 1'
     );
-    const eventTypeId = eventTypeResult.rows[0]?.audit_log_event_type_id || 1;
+    const eventTypeId = eventTypeResult.rows[0]?.auditLogEventTypeId || 1;
 
     const result = await testDb.pool.query(`
       INSERT INTO audit_log_event (
@@ -47,7 +47,7 @@ describe('Audit Service', () => {
       RETURNING audit_id
     `, [rootUserId, eventTypeId]);
 
-    testAuditIds = result.rows.map(r => r.audit_id);
+    testAuditIds = result.rows.map(r => r.auditId);
   });
 
   afterEach(async () => {
@@ -80,7 +80,7 @@ describe('Audit Service', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data.every((event: any) => event.user_id === rootUserId)).toBe(true);
+      expect(result.data.every((event: any) => event.userId === rootUserId)).toBe(true);
     });
 
     it('should filter by date range', async () => {
@@ -170,9 +170,9 @@ describe('Audit Service', () => {
 
       if (events.length > 0) {
         const event = events[0] as any; // Raw SQL result
-        expect(event.audit_id).toBeDefined();
-        expect(event.audit_date).toBeDefined();
-        expect(event.audit_table).toBeDefined();
+        expect(event.auditId).toBeDefined();
+        expect(event.auditDate).toBeDefined();
+        expect(event.auditTable).toBeDefined();
       }
     });
 
@@ -181,8 +181,8 @@ describe('Audit Service', () => {
 
       if (events.length > 1) {
         for (let i = 0; i < events.length - 1; i++) {
-          const current = new Date((events[i] as any).audit_date);
-          const next = new Date((events[i + 1] as any).audit_date);
+          const current = new Date((events[i] as any).auditDate);
+          const next = new Date((events[i + 1] as any).auditDate);
           expect(current.getTime()).toBeGreaterThanOrEqual(next.getTime());
         }
       }
@@ -254,20 +254,20 @@ describe('Audit Service', () => {
       const stats = await auditService.getAuditStatistics(30);
 
       expect(stats).toBeDefined();
-      expect(stats.total_events).toBeDefined();
-      expect(stats.unique_users).toBeDefined();
+      expect(stats.totalEvents).toBeDefined();
+      expect(stats.uniqueUsers).toBeDefined();
     });
 
     it('should count total events', async () => {
       const stats = await auditService.getAuditStatistics(30);
 
-      expect(typeof parseInt(stats.total_events)).toBe('number');
+      expect(typeof parseInt(stats.totalEvents)).toBe('number');
     });
 
     it('should count unique users', async () => {
       const stats = await auditService.getAuditStatistics(30);
 
-      expect(typeof parseInt(stats.unique_users)).toBe('number');
+      expect(typeof parseInt(stats.uniqueUsers)).toBe('number');
     });
 
     it('should respect days parameter', async () => {
@@ -275,7 +275,7 @@ describe('Audit Service', () => {
       const stats30Days = await auditService.getAuditStatistics(30);
 
       // 30 days should have >= 7 days events
-      expect(parseInt(stats30Days.total_events)).toBeGreaterThanOrEqual(parseInt(stats7Days.total_events));
+      expect(parseInt(stats30Days.totalEvents)).toBeGreaterThanOrEqual(parseInt(stats7Days.totalEvents));
     });
 
     it('should use default 30 days if not specified', async () => {

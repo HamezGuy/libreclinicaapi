@@ -8,13 +8,14 @@
  * 21 CFR Part 11 §11.10(e) - Audit Trail for document actions
  */
 
+import * as crypto from 'crypto';
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
 import * as dataSoap from '../soap/dataSoap.service';
 import {
   FormDataRequest, ApiResponse,
-  FormFieldOption, FieldValidationRule, ShowWhenCondition, FormLinkDefinition,
+  FormFieldOption, FieldValidationConstraint, ShowWhenCondition, FormLinkDefinition,
   TableColumnDefinition, TableRowDefinition, TableSettings,
   InlineFieldDefinition, InlineGroupSettings,
   CriteriaItem, CriteriaListSettings,
@@ -73,7 +74,12 @@ function stripDedupSuffix(fieldName: string, itemMap: Map<string, number>): stri
   for (const pat of patterns) {
     const stripped = fieldName.replace(pat, '');
     if (stripped !== fieldName) {
-      if (itemMap.has(stripped.toLowerCase()) || itemMap.has(stripped)) {
+      // Only accept the stripped name if:
+      // 1. The stripped name exists in itemMap (it's a real item name)
+      // 2. The original unstripped name does NOT exist (confirming it was a dedup suffix)
+      const strippedExists = itemMap.has(stripped.toLowerCase()) || itemMap.has(stripped);
+      const originalExists = itemMap.has(fieldName.toLowerCase()) || itemMap.has(fieldName);
+      if (strippedExists && !originalExists) {
         return stripped;
       }
     }
@@ -180,6 +186,10 @@ export const saveFormData = async (
   }
 
   // ===== PRE-SAVE VALIDATION (dry run - no query creation) =====
+  // Pass hiddenFieldIds so validation skips fields hidden by branching —
+  // hidden fields carry empty values for data clearing but must never
+  // trigger validation errors that would block the save.
+  const reqHiddenFieldIds: number[] = (request as any).hiddenFieldIds || [];
   let validationWarnings: any[] = [];
   if (request.crfId && request.formData) {
     try {
@@ -191,7 +201,9 @@ export const saveFormData = async (
           studyId: request.studyId,
           subjectId: request.subjectId,
           userId: userId,
-          eventCrfId: (request as any).eventCrfId || undefined
+          eventCrfId: (request as any).eventCrfId || undefined,
+          hiddenFieldIds: reqHiddenFieldIds.length > 0 ? reqHiddenFieldIds : undefined,
+          hiddenFieldNames: (request as any).hiddenFields || undefined
         }
       );
 
@@ -270,8 +282,37 @@ export const saveFormData = async (
     saveResult = await saveFormDataDirect(fullRequest, userId, username);
   }
 
-  // Post-save validation is handled inside saveFormDataDirect.
-  // Do NOT run it again here — that would create duplicate queries.
+  // Post-save validation: create queries for warning-severity rules.
+  // Runs after BOTH SOAP and direct-DB paths. The direct-DB path handles its
+  // own post-save internally, but the SOAP path previously skipped it entirely.
+  // Only run for SOAP-path results to avoid duplicate queries from the direct path.
+  if (saveResult?.success && validationWarnings.length > 0 && saveResult !== null) {
+    const eventCrfId = (saveResult as any).eventCrfId || (saveResult as any).data?.eventCrfId;
+    if (eventCrfId && !((saveResult as any)._postSaveValidationRan)) {
+      try {
+        const postSaveResult = await validationRulesService.validateFormData(
+          fullRequest.crfId,
+          fullRequest.formData,
+          {
+            createQueries: true,
+            severityFilter: 'warning',
+            studyId: fullRequest.studyId,
+            subjectId: fullRequest.subjectId,
+            userId,
+            eventCrfId,
+            hiddenFieldIds: reqHiddenFieldIds.length > 0 ? reqHiddenFieldIds : undefined
+          }
+        );
+        if (postSaveResult.warnings?.length) {
+          (saveResult as any).validationWarnings = postSaveResult.warnings;
+          (saveResult as any).queriesCreated = (postSaveResult as any).queriesCreated || 0;
+        }
+      } catch (postErr: any) {
+        logger.warn('Post-save validation failed (non-blocking)', { error: postErr.message });
+      }
+    }
+  }
+
   return saveResult;
 };
 
@@ -323,7 +364,7 @@ const saveFormDataDirect = async (
         LIMIT 1
       `, [request.studyEventId, request.subjectId]);
       if (verifyResult.rows.length > 0) {
-        studyEventId = verifyResult.rows[0].study_event_id;
+        studyEventId = verifyResult.rows[0].studyEventId;
         logger.debug('Using provided studyEventId', { studyEventId });
       } else {
         logger.warn('Provided studyEventId does not belong to subject, falling back', {
@@ -341,7 +382,7 @@ const saveFormDataDirect = async (
         LIMIT 1
       `, [request.eventCrfId, request.subjectId]);
       if (ecResult.rows.length > 0) {
-        studyEventId = ecResult.rows[0].study_event_id;
+        studyEventId = ecResult.rows[0].studyEventId;
         logger.debug('Resolved studyEventId from eventCrfId', { studyEventId, eventCrfId: request.eventCrfId });
       } else {
         logger.warn('eventCrfId does not belong to this subject — ignoring for safety', {
@@ -362,7 +403,7 @@ const saveFormDataDirect = async (
       `, [request.subjectId, request.studyEventDefinitionId]);
 
       if (studyEventResult.rows.length > 0) {
-        studyEventId = studyEventResult.rows[0].study_event_id;
+        studyEventId = studyEventResult.rows[0].studyEventId;
       }
     }
 
@@ -382,7 +423,7 @@ const saveFormDataDirect = async (
         ) VALUES ($1, $2, 1, CURRENT_DATE, $3, 1, 3, NOW())
         RETURNING study_event_id
       `, [request.studyEventDefinitionId, request.subjectId, userId]);
-      studyEventId = createEventResult.rows[0].study_event_id;
+      studyEventId = createEventResult.rows[0].studyEventId;
       logger.info('Created study event', { studyEventId });
     }
 
@@ -400,7 +441,7 @@ const saveFormDataDirect = async (
     if (crfVersionResult.rows.length === 0) {
       throw new Error(`No active version found for CRF ${request.crfId}`);
     }
-    const crfVersionId = crfVersionResult.rows[0].crf_version_id;
+    const crfVersionId = crfVersionResult.rows[0].crfVersionId;
 
     // 3. Find or create the event_crf
     // Priority: use provided eventCrfId > look up by study_event + crf_version > look up by study_event + crf_id > create
@@ -415,10 +456,10 @@ const saveFormDataDirect = async (
         LIMIT 1
       `, [request.eventCrfId]);
       if (verifyResult.rows.length > 0) {
-        eventCrfId = verifyResult.rows[0].event_crf_id;
+        eventCrfId = verifyResult.rows[0].eventCrfId;
         // Check lock/freeze status
         const ecRow = verifyResult.rows[0];
-        if (ecRow.status_id === 6) {
+        if (ecRow.statusId === 6) {
           await client.query('ROLLBACK');
           logger.warn('Attempted to edit locked record', { eventCrfId, userId });
           return {
@@ -449,7 +490,7 @@ const saveFormDataDirect = async (
       `, [studyEventId, crfVersionId]);
 
       if (eventCrfResult.rows.length > 0) {
-        eventCrfId = eventCrfResult.rows[0].event_crf_id;
+        eventCrfId = eventCrfResult.rows[0].eventCrfId;
 
         // CHECK IF RECORD IS LOCKED OR FROZEN
         const lockCheckResult = await client.query(`
@@ -457,7 +498,7 @@ const saveFormDataDirect = async (
         `, [eventCrfId]);
         if (lockCheckResult.rows.length > 0) {
           const ecRow = lockCheckResult.rows[0];
-          if (ecRow.status_id === 6) {
+          if (ecRow.statusId === 6) {
             await client.query('ROLLBACK');
             logger.warn('Attempted to edit locked record', { eventCrfId, userId });
             return {
@@ -490,10 +531,10 @@ const saveFormDataDirect = async (
       `, [studyEventId, request.crfId, request.subjectId]);
       if (eventCrfByAnyVersion.rows.length > 0) {
         const row = eventCrfByAnyVersion.rows[0];
-        eventCrfId = row.event_crf_id;
+        eventCrfId = row.eventCrfId;
         logger.info('Found event_crf with different version (using existing)', { eventCrfId });
 
-        if (row.status_id === 6) {
+        if (row.statusId === 6) {
           await client.query('ROLLBACK');
           return {
             success: false,
@@ -533,7 +574,7 @@ const saveFormDataDirect = async (
         ) VALUES ($1, $2, $3, CURRENT_DATE, $4, 1, 1, $5, NOW())
         RETURNING event_crf_id
       `, [studyEventId, crfVersionId, request.subjectId, interviewerName, userId]);
-      eventCrfId = createEventCrfResult.rows[0].event_crf_id;
+      eventCrfId = createEventCrfResult.rows[0].eventCrfId;
       logger.info('Created event_crf', { eventCrfId });
     }
 
@@ -546,8 +587,8 @@ const saveFormDataDirect = async (
       const ecVersionResult = await client.query(
         `SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1`, [eventCrfId]
       );
-      if (ecVersionResult.rows.length > 0 && ecVersionResult.rows[0].crf_version_id) {
-        resolvedVersionId = ecVersionResult.rows[0].crf_version_id;
+      if (ecVersionResult.rows.length > 0 && ecVersionResult.rows[0].crfVersionId) {
+        resolvedVersionId = ecVersionResult.rows[0].crfVersionId;
         logger.debug('Resolved crf_version_id from event_crf', { eventCrfId, resolvedVersionId });
       }
     }
@@ -568,24 +609,24 @@ const saveFormDataDirect = async (
     const itemTypeMap = new Map<number, string>();
     for (const item of itemsResult.rows) {
       // Primary: map by item_id (numeric as string) so frontend can send the id directly
-      itemMap.set(String(item.item_id), item.item_id);
+      itemMap.set(String(item.itemId), item.itemId);
       // Map by display label (item.name in DB)
       if (!itemMap.has(item.name.toLowerCase())) {
-        itemMap.set(item.name.toLowerCase(), item.item_id);
+        itemMap.set(item.name.toLowerCase(), item.itemId);
       }
       // Map by OID
-      if (item.oc_oid) {
-        itemMap.set(item.oc_oid.toLowerCase(), item.item_id);
+      if (item.ocOid) {
+        itemMap.set(item.ocOid.toLowerCase(), item.itemId);
       }
       // Map by technical fieldName from extended_properties
       const extProps = parseExtendedProps(item.description);
       if (extProps.fieldName && !itemMap.has(extProps.fieldName.toLowerCase())) {
-        itemMap.set(extProps.fieldName.toLowerCase(), item.item_id);
+        itemMap.set(extProps.fieldName.toLowerCase(), item.itemId);
       }
       // Store the canonical field type so the save loop can distinguish
       // structured types (table, question_table, ...) from scalar types.
       if (extProps.type) {
-        itemTypeMap.set(item.item_id, resolveFieldType(extProps.type));
+        itemTypeMap.set(item.itemId, resolveFieldType(extProps.type));
       }
     }
 
@@ -605,9 +646,9 @@ const saveFormDataDirect = async (
       SELECT item_id, item_data_id, value FROM item_data
       WHERE event_crf_id = $1 AND deleted = false
     `, [eventCrfId]);
-    const existingByItemId = new Map<number, { item_data_id: number; value: string }>();
+    const existingByItemId = new Map<number, { itemDataId: number; value: string }>();
     for (const row of existingItemDataResult.rows) {
-      existingByItemId.set(row.item_id, { item_data_id: row.item_data_id, value: row.value });
+      existingByItemId.set(row.itemId, { itemDataId: row.itemDataId, value: row.value });
     }
 
     for (const [fieldName, value] of Object.entries(formData)) {
@@ -688,7 +729,7 @@ const saveFormDataDirect = async (
               UPDATE item_data
               SET value = $1, date_updated = NOW(), update_id = $2
               WHERE item_data_id = $3
-            `, [marker, userId, existingRow.item_data_id]);
+            `, [marker, userId, existingRow.itemDataId]);
           }
         } else {
           await client.query(`
@@ -725,7 +766,7 @@ const saveFormDataDirect = async (
               UPDATE item_data
               SET value = '', date_updated = NOW(), update_id = $1
               WHERE item_data_id = $2
-            `, [userId, existingResult.rows[0].item_data_id]);
+            `, [userId, existingResult.rows[0].itemDataId]);
 
             // Log value clearing to audit trail
             await client.query(`
@@ -736,7 +777,7 @@ const saveFormDataDirect = async (
               ) VALUES (NOW(), 'item_data', $1, $2, $3, '',
                 (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
                 $4, 'Value cleared')
-            `, [userId, existingResult.rows[0].item_data_id, oldValue, eventCrfId]);
+            `, [userId, existingResult.rows[0].itemDataId, oldValue, eventCrfId]);
             
             savedCount++;
           }
@@ -774,7 +815,7 @@ const saveFormDataDirect = async (
             UPDATE item_data
             SET value = $1, date_updated = NOW(), update_id = $2
             WHERE item_data_id = $3
-          `, [stringValue, userId, existingResult.rows[0].item_data_id]);
+          `, [stringValue, userId, existingResult.rows[0].itemDataId]);
 
           // Log change to audit trail (21 CFR Part 11 §11.10(e) — include reason_for_change)
           await client.query(`
@@ -785,7 +826,7 @@ const saveFormDataDirect = async (
             ) VALUES (NOW(), 'item_data', $1, $2, $3, $4,
               (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
               $5, $6)
-          `, [userId, existingResult.rows[0].item_data_id, oldValue, stringValue, eventCrfId, request.reasonForChange || 'Reason not given']);
+          `, [userId, existingResult.rows[0].itemDataId, oldValue, stringValue, eventCrfId, request.reasonForChange || 'Reason not given']);
         }
       } else {
         // Insert new
@@ -804,7 +845,7 @@ const saveFormDataDirect = async (
           ) VALUES (NOW(), 'item_data', $1, $2, $3,
             (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%creat%' LIMIT 1),
             $4)
-        `, [userId, insertResult.rows[0].item_data_id, stringValue, eventCrfId]);
+        `, [userId, insertResult.rows[0].itemDataId, stringValue, eventCrfId]);
       }
 
       savedCount++;
@@ -814,13 +855,60 @@ const saveFormDataDirect = async (
     //    Fields hidden by branching/skip logic are excluded so they don't block completion.
     //    2 = initial_data_entry, 4 = complete
 
-    // Build a set of hidden field names sent by the frontend (branching logic).
-    // These are field names (matching item.name or extended_properties.fieldName)
-    // that should be excluded from the required-fields completion check.
-    const hiddenFieldNames: Set<string> = new Set();
+    // ── HIDDEN FIELD RESOLUTION ──
+    // Primary: hiddenFieldIds — numeric item.item_id values sent by the
+    // frontend. Authoritative, no casing/naming ambiguity. Each number maps
+    // directly to item.item_id in the database.
+    //
+    // Secondary: hiddenFields — string field names for any field that lacks
+    // an itemId on the frontend (edge case). Resolved to item IDs via itemMap.
+    const hiddenItemIds: Set<number> = new Set();
+
+    if ((request as any).hiddenFieldIds && Array.isArray((request as any).hiddenFieldIds)) {
+      for (const id of (request as any).hiddenFieldIds) {
+        const parsed = typeof id === 'number' ? id : parseInt(id, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          hiddenItemIds.add(parsed);
+        }
+      }
+    }
+
+    // Also resolve any string-based hiddenFields to item IDs
     if (request.hiddenFields && Array.isArray(request.hiddenFields)) {
       for (const hf of request.hiddenFields) {
-        if (hf) hiddenFieldNames.add(hf.toLowerCase());
+        if (!hf) continue;
+        // Try exact match, then lowercase, then stripped dedup suffix
+        const itemId = itemMap.get(hf) || itemMap.get(hf.toLowerCase());
+        if (itemId) {
+          hiddenItemIds.add(itemId);
+        } else {
+          const stripped = stripDedupSuffix(hf, itemMap);
+          const strippedId = itemMap.get(stripped) || itemMap.get(stripped.toLowerCase());
+          if (strippedId) hiddenItemIds.add(strippedId);
+        }
+      }
+    }
+
+    // Clear item_data for fields that are now hidden by branching logic.
+    if (hiddenItemIds.size > 0) {
+      for (const hiddenId of hiddenItemIds) {
+        const existingRow = existingByItemId.get(hiddenId);
+        if (existingRow && existingRow.value && existingRow.value !== '' && existingRow.value !== '__STRUCTURED_DATA__') {
+          await client.query(`
+            UPDATE item_data
+            SET value = '', date_updated = NOW(), update_id = $1
+            WHERE item_data_id = $2
+          `, [userId, existingRow.itemDataId]);
+          await client.query(`
+            INSERT INTO audit_log_event (
+              audit_date, audit_table, user_id, entity_id,
+              old_value, new_value, audit_log_event_type_id,
+              event_crf_id, reason_for_change
+            ) VALUES (NOW(), 'item_data', $1, $2, $3, '',
+              (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE '%updated%' LIMIT 1),
+              $4, 'Value cleared — field hidden by branching logic')
+          `, [userId, existingRow.itemDataId, existingRow.value, eventCrfId]);
+        }
       }
     }
 
@@ -828,25 +916,32 @@ const saveFormDataDirect = async (
     let requiredFilled = 0;
     let totalFilled = 0;
 
-    if (hiddenFieldNames.size > 0) {
-      // When branching is active, query items individually to exclude hidden ones
+    if (hiddenItemIds.size > 0) {
+      // Branching is active: use item IDs directly in SQL to exclude hidden
+      // fields from the required-fields completion check. This is an exact
+      // numeric match against item.item_id — no string comparison, no casing.
+      const hiddenIdArray = Array.from(hiddenItemIds);
+
       const allRequiredResult = await client.query(`
-        SELECT i.item_id, i.name, i.description
+        SELECT i.item_id, i.description
         FROM item i
         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
         INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
-        WHERE igm.crf_version_id = $1 AND ifm.required = true
-      `, [resolvedVersionId]);
+        WHERE igm.crf_version_id = $1
+          AND ifm.required = true
+          AND i.item_id != ALL($2::int[])
+      `, [resolvedVersionId, hiddenIdArray]);
 
       for (const row of allRequiredResult.rows) {
         const extProps = parseExtendedProps(row.description);
-        const fieldName = extProps.fieldName || row.name;
-        if (hiddenFieldNames.has(fieldName.toLowerCase()) || hiddenFieldNames.has(row.name.toLowerCase())) {
+        const fieldType = extProps.type ? resolveFieldType(extProps.type) : '';
+        if (fieldType === 'section_header' || fieldType === 'static_text') {
           continue;
         }
         requiredTotal++;
       }
 
+      // Count filled required fields (excluding hidden ones)
       const filledResult = await client.query(`
         SELECT COUNT(DISTINCT id2.item_id) AS cnt
         FROM item_data id2
@@ -855,9 +950,10 @@ const saveFormDataDirect = async (
         INNER JOIN item_form_metadata ifm2 ON i2.item_id = ifm2.item_id AND ifm2.crf_version_id = $1
         WHERE id2.event_crf_id = $2
           AND id2.deleted = false AND id2.value IS NOT NULL
-          AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}'
+          AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}' AND id2.value != '__STRUCTURED_DATA__'
           AND ifm2.required = true
-      `, [resolvedVersionId, eventCrfId]);
+          AND id2.item_id != ALL($3::int[])
+      `, [resolvedVersionId, eventCrfId, hiddenIdArray]);
       requiredFilled = parseInt(filledResult.rows[0]?.cnt) || 0;
 
       const totalFilledResult = await client.query(`
@@ -873,7 +969,9 @@ const saveFormDataDirect = async (
            INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
            INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id AND ifm.crf_version_id = $1
            WHERE igm.crf_version_id = $1
-             AND ifm.required = true) AS required_total,
+             AND ifm.required = true
+             AND i.description NOT LIKE '%"type":"section_header"%'
+             AND i.description NOT LIKE '%"type":"static_text"%') AS required_total,
           (SELECT COUNT(DISTINCT id2.item_id)
            FROM item_data id2
            INNER JOIN item i2 ON id2.item_id = i2.item_id
@@ -881,16 +979,18 @@ const saveFormDataDirect = async (
            INNER JOIN item_form_metadata ifm2 ON i2.item_id = ifm2.item_id AND ifm2.crf_version_id = $1
            WHERE id2.event_crf_id = $2
              AND id2.deleted = false AND id2.value IS NOT NULL
-             AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}'
-             AND ifm2.required = true) AS required_filled,
+             AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}' AND id2.value != '__STRUCTURED_DATA__'
+             AND ifm2.required = true
+             AND i2.description NOT LIKE '%"type":"section_header"%'
+             AND i2.description NOT LIKE '%"type":"static_text"%') AS required_filled,
           (SELECT COUNT(*)
            FROM item_data
            WHERE event_crf_id = $2 AND deleted = false AND value IS NOT NULL AND value != '' AND value != '[]' AND value != '{}') AS total_filled
       `, [resolvedVersionId, eventCrfId]);
 
-      requiredTotal = parseInt(completionCountResult.rows[0]?.required_total) || 0;
-      requiredFilled = parseInt(completionCountResult.rows[0]?.required_filled) || 0;
-      totalFilled = parseInt(completionCountResult.rows[0]?.total_filled) || 0;
+      requiredTotal = parseInt(completionCountResult.rows[0]?.requiredTotal) || 0;
+      requiredFilled = parseInt(completionCountResult.rows[0]?.requiredFilled) || 0;
+      totalFilled = parseInt(completionCountResult.rows[0]?.totalFilled) || 0;
     }
 
     const isComplete = requiredTotal > 0
@@ -931,7 +1031,9 @@ const saveFormDataDirect = async (
       WHERE study_event_id = $1 AND subject_event_status_id < 3
     `, [studyEventId]);
 
-    await client.query('COMMIT');
+    // 6b. Persist ALL form data to patient_event_form.form_data (JSONB).
+    // Moved inside the transaction so structured field data is atomic with
+    // scalar item_data writes. Previously used pool.query() outside the txn.
 
     // Associate orphaned file_uploads with this event_crf_id.
     // Files uploaded before the form's first save have event_crf_id = NULL.
@@ -1038,7 +1140,7 @@ const saveFormDataDirect = async (
         }
       }
 
-      await pool.query(`
+      await client.query(`
         INSERT INTO patient_event_form (
           study_event_id, event_crf_id, crf_id, crf_version_id,
           study_subject_id, form_name, form_structure, form_data,
@@ -1079,6 +1181,8 @@ const saveFormDataDirect = async (
       }
     }
 
+    await client.query('COMMIT');
+
     const saveWarnings: { fieldPath: string; message: string; queryId?: number }[] = [];
 
     // 7. AUTO-TRIGGER WORKFLOW — deduplicated
@@ -1097,8 +1201,8 @@ const saveFormDataDirect = async (
       `, [eventCrfId]);
       
       if (formDetailsResult.rows.length > 0) {
-        const formName = formDetailsResult.rows[0].form_name;
-        const subjectId = formDetailsResult.rows[0].subject_id;
+        const formName = formDetailsResult.rows[0].formName;
+        const subjectId = formDetailsResult.rows[0].subjectId;
         
         // Check if a 'form_submitted' event already exists for this CRF instance
         const existingEvent = await pool.query(`
@@ -1152,7 +1256,7 @@ const saveFormDataDirect = async (
             `SELECT crf_version_id FROM event_crf WHERE event_crf_id = $1`,
             [eventCrfId]
           );
-          if (cvResult.rows.length > 0) crfVersionId = cvResult.rows[0].crf_version_id;
+          if (cvResult.rows.length > 0) crfVersionId = cvResult.rows[0].crfVersionId;
         } catch { /* use undefined — service will resolve from crfId */ }
 
         const postSaveValidation = await validationRulesService.validateFormData(
@@ -1165,7 +1269,8 @@ const saveFormDataDirect = async (
             subjectId: request.subjectId,
             eventCrfId: eventCrfId,
             userId: userId,
-            crfVersionId
+            crfVersionId,
+            hiddenFieldIds: (request as any).hiddenFieldIds || undefined
           }
         );
         queriesCreated = postSaveValidation.queriesCreated || 0;
@@ -1202,7 +1307,8 @@ const saveFormDataDirect = async (
       data: { eventCrfId, studyEventId, savedCount },
       message: `Form data saved successfully (${savedCount} fields)`,
       queriesCreated,
-      validationWarnings: [...postSaveWarnings, ...saveWarnings]
+      validationWarnings: [...postSaveWarnings, ...saveWarnings],
+      _postSaveValidationRan: true
     } as any;
   } catch (error: any) {
     await client.query('ROLLBACK');
@@ -1232,11 +1338,11 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       WHERE ec.event_crf_id = $1
     `;
     const lockResult = await pool.query(lockQuery, [eventCrfId]);
-    const isLocked = lockResult.rows.length > 0 && lockResult.rows[0].status_id === 6;
+    const isLocked = lockResult.rows.length > 0 && lockResult.rows[0].statusId === 6;
     const lockInfo = isLocked ? {
       locked: true,
-      lockedAt: lockResult.rows[0].lock_date,
-      lockedBy: lockResult.rows[0].locked_by
+      lockedAt: lockResult.rows[0].lockDate,
+      lockedBy: lockResult.rows[0].lockedBy
     } : { locked: false };
 
     // ── Load item_data (scalar fields + markers for structured fields) ──
@@ -1276,8 +1382,8 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
         LIMIT 1
       `;
       const jsonbResult = await pool.query(jsonbQuery, [eventCrfId]);
-      if (jsonbResult.rows.length > 0 && jsonbResult.rows[0].form_data) {
-        jsonbData = jsonbResult.rows[0].form_data;
+      if (jsonbResult.rows.length > 0 && jsonbResult.rows[0].formData) {
+        jsonbData = jsonbResult.rows[0].formData;
       }
     } catch (jsonbErr: any) {
       logger.warn('Could not load form_data JSONB', { error: jsonbErr.message });
@@ -1287,9 +1393,9 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     const STRUCTURED_MARKER = '__STRUCTURED_DATA__';
 
     for (const row of result.rows) {
-      const extProps = parseExtendedProps(row.item_description);
+      const extProps = parseExtendedProps(row.itemDescription);
       if (extProps.fieldName) {
-        row.field_name = extProps.fieldName;
+        row.fieldName = extProps.fieldName;
       }
       const fieldType = extProps.type ? resolveFieldType(extProps.type) : '';
 
@@ -1297,11 +1403,11 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       // from the JSONB column.  The value is sent as-is (array or object) so
       // the frontend never needs to parse JSON strings.
       if (row.value === STRUCTURED_MARKER || isStructuredDataType(fieldType)) {
-        const lookupKey = extProps.fieldName || row.item_name;
+        const lookupKey = extProps.fieldName || row.itemName;
         const nativeValue = jsonbData[lookupKey]
           ?? jsonbData[lookupKey?.toLowerCase()]
-          ?? jsonbData[row.item_name]
-          ?? jsonbData[row.item_name?.toLowerCase()];
+          ?? jsonbData[row.itemName]
+          ?? jsonbData[row.itemName?.toLowerCase()];
 
         if (nativeValue !== undefined) {
           row.value = nativeValue; // native array or object — NOT a string
@@ -1321,7 +1427,7 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
       }
 
       // Clean up — don't send the raw description to the frontend
-      delete row.item_description;
+      delete row.itemDescription;
     }
 
     // 21 CFR Part 11 §11.10(a) - Decrypt encrypted form data
@@ -1332,7 +1438,7 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
           return { ...row, value: decryptField(row.value) };
         } catch (decryptError: any) {
           logger.error('Failed to decrypt form field', { 
-            itemDataId: row.item_data_id, 
+            itemDataId: row.itemDataId, 
             error: decryptError.message 
           });
           return { ...row, value: '[DECRYPTION_ERROR]', encryptedValue: row.value };
@@ -1368,7 +1474,7 @@ export const getFormData = async (eventCrfId: number): Promise<any> => {
     // Also build a convenience `formData` map keyed by field_name for easy lookup
     const formData: Record<string, any> = {};
     for (const row of decryptedRows) {
-      const key = row.field_name || row.item_name;
+      const key = row.fieldName || row.itemName;
       if (key) formData[key] = row.value;
     }
 
@@ -1410,7 +1516,7 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
       LIMIT 1
     `;
     const versionResult = await pool.query(versionQuery, [crfId]);
-    const versionId = versionResult.rows[0]?.crf_version_id;
+    const versionId = versionResult.rows[0]?.crfVersionId;
     if (!versionId) {
       throw new Error(`No CRF version found for crf_id=${crfId}. Cannot load form metadata.`);
     }
@@ -1510,7 +1616,7 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
     // Build a map of item_id -> SCD conditions for quick lookup
     const scdByItemId = new Map<number, any[]>();
     for (const scd of scdResult.rows) {
-      const conditions = scdByItemId.get(scd.target_item_id) || [];
+      const conditions = scdByItemId.get(scd.targetItemId) || [];
       
       // Parse operator from message field (stored as JSON by our API)
       let operator = 'equals';
@@ -1525,20 +1631,20 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         // Not JSON - legacy plain text message, default to equals
       }
       
-      const controlFieldId = scd.control_field_name || scd.control_item_name;
+      const controlFieldId = scd.controlFieldName || scd.controlItemName;
       if (!controlFieldId) {
-        console.warn(`[SCD] scd_item_metadata row ${scd.scd_item_metadata_id ?? '?'} has no control field name — skipping.`);
+        console.warn(`[SCD] scd_item_metadata row ${scd.scdItemMetadataId ?? '?'} has no control field name — skipping.`);
         continue;
       }
 
       conditions.push({
         fieldId: controlFieldId,
         operator,
-        value: scd.option_value,
+        value: scd.optionValue,
         message,
         logicalOperator: 'OR'
       });
-      scdByItemId.set(scd.target_item_id, conditions);
+      scdByItemId.set(scd.targetItemId, conditions);
     }
 
     // Get allowed null value types for this CRF version
@@ -1552,13 +1658,13 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         LIMIT 1
       `;
       const nullValueResult = await pool.query(nullValueQuery, [crfId]);
-      if (nullValueResult.rows.length > 0 && nullValueResult.rows[0].null_values) {
+      if (nullValueResult.rows.length > 0 && nullValueResult.rows[0].nullValues) {
         // Get the full null_value_type definitions for the allowed codes
-        const codes = nullValueResult.rows[0].null_values.split(',').map((c: string) => c.trim());
+        const codes = nullValueResult.rows[0].nullValues.split(',').map((c: string) => c.trim());
         const nvtQuery = `SELECT null_value_type_id, code, name, definition FROM null_value_type WHERE code = ANY($1) ORDER BY null_value_type_id`;
         const nvtResult = await pool.query(nvtQuery, [codes]);
         allowedNullValues = nvtResult.rows.map((nv: any) => ({
-          id: nv.null_value_type_id,
+          id: nv.nullValueTypeId,
           code: nv.code,
           name: nv.name,
           definition: nv.definition
@@ -1573,7 +1679,7 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
     try {
       const allNvtResult = await pool.query(`SELECT null_value_type_id, code, name, definition FROM null_value_type ORDER BY null_value_type_id`);
       nullValueTypes = allNvtResult.rows.map((nv: any) => ({
-        id: nv.null_value_type_id,
+        id: nv.nullValueTypeId,
         code: nv.code,
         name: nv.name,
         definition: nv.definition
@@ -1586,15 +1692,15 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
     const items = itemsResult.rows.map(item => {
       // Parse options — supports newline-delimited (new), pipe-delimited (LibreClinica native), and comma-delimited (legacy)
       let options = null;
-      if (item.options_text && item.options_values) {
-        const delimiter = item.options_text.includes('\n') ? '\n'
-          : item.options_text.includes('|') ? '|'
+      if (item.optionsText && item.optionsValues) {
+        const delimiter = item.optionsText.includes('\n') ? '\n'
+          : item.optionsText.includes('|') ? '|'
           : ',';
-        const labels = item.options_text.split(delimiter);
-        const valDelimiter = item.options_values.includes('\n') ? '\n'
-          : item.options_values.includes('|') ? '|'
+        const labels = item.optionsText.split(delimiter);
+        const valDelimiter = item.optionsValues.includes('\n') ? '\n'
+          : item.optionsValues.includes('|') ? '|'
           : ',';
-        const values = item.options_values.split(valDelimiter);
+        const values = item.optionsValues.split(valDelimiter);
         options = labels
           .map((label: string, idx: number) => ({
             label: label.trim(),
@@ -1613,8 +1719,8 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
       // Parse min/max from width_decimal if present
       let min = extendedProps.min;
       let max = extendedProps.max;
-      if (item.width_decimal && item.width_decimal.includes(',')) {
-        const [minVal, maxVal] = item.width_decimal.split(',');
+      if (item.widthDecimal && item.widthDecimal.includes(',')) {
+        const [minVal, maxVal] = item.widthDecimal.split(',');
         if (minVal && !isNaN(Number(minVal))) min = Number(minVal);
         if (maxVal && !isNaN(Number(maxVal))) max = Number(maxVal);
       }
@@ -1624,16 +1730,16 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
       if (item.required) {
         validationRules.push({ type: 'required', message: 'This field is required' });
       }
-      if (item.validation_pattern) {
+      if (item.validationPattern) {
         // Detect Excel formula rules stored with =FORMULA: prefix
-        const isFormula = item.validation_pattern.startsWith('=FORMULA:');
+        const isFormula = item.validationPattern.startsWith('=FORMULA:');
         const patternValue = isFormula 
-          ? item.validation_pattern.substring(9) // Strip =FORMULA: prefix
-          : item.validation_pattern;
+          ? item.validationPattern.substring(9) // Strip =FORMULA: prefix
+          : item.validationPattern;
         validationRules.push({ 
           type: isFormula ? 'formula' : 'pattern', 
           value: patternValue,
-          message: item.validation_message || 'Invalid format'
+          message: item.validationMessage || 'Invalid format'
         });
       }
       if (min !== undefined) {
@@ -1650,22 +1756,22 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
       // All paths run through resolveFieldType() — the single source of truth.
       // Priority: extendedProps.type > response_type > data_type_code > 'text'
       const fieldType = resolveFieldType(
-        extendedProps.type || item.response_type || item.data_type_code
+        extendedProps.type || item.responseType || item.dataTypeCode
       );
       
       return {
         // Core identifiers
-        id: item.item_id?.toString(),
-        item_id: item.item_id,
+        id: item.itemId?.toString(),
+        item_id: item.itemId,
         // Use the preserved technical field name from extended props, fall back to DB name
         name: extendedProps.fieldName || item.name,
-        oc_oid: item.oc_oid,
+        oc_oid: item.ocOid,
         
         // Type info
         type: fieldType,
-        data_type: item.data_type,
-        data_type_code: item.data_type_code,
-        response_type: item.response_type,
+        data_type: item.dataType,
+        data_type_code: item.dataTypeCode,
+        response_type: item.responseType,
         
         // Display — item.name in DB stores the display label
         label: item.name,
@@ -1677,15 +1783,15 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         // extended-prop fallbacks always produce a reliable true/false.
         required: item.required === true || extendedProps.required === true,
         readonly: extendedProps.readonly === true,
-        hidden: item.show_item === false,
+        hidden: item.showItem === false,
         
         // Value
-        defaultValue: item.default_value,
+        defaultValue: item.defaultValue,
         
         // Validation
         validationRules,
-        validationPattern: item.validation_pattern,
-        validationMessage: item.validation_message,
+        validationPattern: item.validationPattern,
+        validationMessage: item.validationMessage,
         
         // Options
         options,
@@ -1693,12 +1799,12 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         // Layout — ordinal is 1-based in DB. The frontend uses the array index
         // as the canonical order; do NOT send a separate 'order' field.
         ordinal: item.ordinal,
-        section: item.section_name,
-        section_id: item.section_id,
-        group_name: item.group_name,
+        section: item.sectionName,
+        section_id: item.sectionId,
+        group_name: item.groupName,
         width: extendedProps.width || 'full',
-        columnPosition: item.column_number || extendedProps.columnPosition || 1,
-        columnNumber: item.column_number || 1,
+        columnPosition: item.columnNumber || extendedProps.columnPosition || 1,
+        columnNumber: item.columnNumber || 1,
         groupId: extendedProps.groupId,
         
         // Clinical
@@ -1711,8 +1817,8 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         // PHI and Compliance — explicit boolean coercion prevents NULL
         // DB columns (original LibreClinica schema has no DEFAULT) from
         // silently dropping the flag via falsy || chaining.
-        isPhiField: item.phi_status === true || extendedProps.isPhiField === true,
-        phi_status: item.phi_status === true,
+        isPhiField: item.phiStatus === true || extendedProps.isPhiField === true,
+        phi_status: item.phiStatus === true,
         phiClassification: extendedProps.phiClassification,
         auditRequired: extendedProps.auditRequired === true,
         criticalDataPoint: extendedProps.criticalDataPoint === true,
@@ -1737,13 +1843,13 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         // Use extendedProps as primary source (preserves all operators), fall back to SCD (equals-only)
         // Always normalize to array — extendedProps may store a single object when
         // the form was created with one condition; the frontend expects an array.
-        showWhen: normalizeToArray(extendedProps.showWhen, scdByItemId.get(item.item_id) || []),
+        showWhen: normalizeToArray(extendedProps.showWhen, scdByItemId.get(item.itemId) || []),
         hideWhen: normalizeToArray(extendedProps.hideWhen),
         requiredWhen: normalizeToArray(extendedProps.requiredWhen),
         conditionalLogic: extendedProps.conditionalLogic,
         visibilityConditions: extendedProps.visibilityConditions,
         // Flag to indicate if using LibreClinica native SCD
-        hasNativeScd: scdByItemId.has(item.item_id),
+        hasNativeScd: scdByItemId.has(item.itemId),
         
         // Form Linking / Branch to Another Form
         linkedFormId: extendedProps.linkedFormId,
@@ -1873,9 +1979,9 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
       // Group by decision_condition_id
       const dcMap = new Map<number, any>();
       for (const row of dcResult.rows) {
-        if (!dcMap.has(row.decision_condition_id)) {
-          dcMap.set(row.decision_condition_id, {
-            id: row.decision_condition_id,
+        if (!dcMap.has(row.decisionConditionId)) {
+          dcMap.set(row.decisionConditionId, {
+            id: row.decisionConditionId,
             label: row.label,
             comments: row.comments,
             quantity: row.quantity,
@@ -1885,45 +1991,45 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
           });
         }
         
-        const dc = dcMap.get(row.decision_condition_id)!;
+        const dc = dcMap.get(row.decisionConditionId)!;
         
         // Add condition primitive
-        if (row.dc_primitive_id && !dc.conditions.some((c: any) => c.primitiveId === row.dc_primitive_id)) {
+        if (row.dcPrimitiveId && !dc.conditions.some((c: any) => c.primitiveId === row.dcPrimitiveId)) {
           dc.conditions.push({
-            primitiveId: row.dc_primitive_id,
-            itemId: row.item_id,
-            itemName: row.item_name,
-            itemOid: row.item_oid,
-            operator: row.comparison_operator,
-            value: row.comparison_value,
-            dynamicValueItemId: row.dynamic_value_item_id
+            primitiveId: row.dcPrimitiveId,
+            itemId: row.itemId,
+            itemName: row.itemName,
+            itemOid: row.itemOid,
+            operator: row.comparisonOperator,
+            value: row.comparisonValue,
+            dynamicValueItemId: row.dynamicValueItemId
           });
         }
         
         // Add action - section show/hide
-        if (row.section_id && !dc.actions.some((a: any) => a.sectionId === row.section_id)) {
+        if (row.sectionId && !dc.actions.some((a: any) => a.sectionId === row.sectionId)) {
           dc.actions.push({
             type: 'section',
-            sectionId: row.section_id,
-            sectionLabel: row.section_label
+            sectionId: row.sectionId,
+            sectionLabel: row.sectionLabel
           });
         }
         
         // Add action - computed/calculation
-        if (row.dc_summary_event_id && !dc.actions.some((a: any) => a.summaryEventId === row.dc_summary_event_id)) {
+        if (row.dcSummaryEventId && !dc.actions.some((a: any) => a.summaryEventId === row.dcSummaryEventId)) {
           dc.actions.push({
             type: 'calculation',
-            summaryEventId: row.dc_summary_event_id,
-            targetItemId: row.item_target_id
+            summaryEventId: row.dcSummaryEventId,
+            targetItemId: row.itemTargetId
           });
         }
         
         // Add action - substitution
-        if (row.substitution_item_id && !dc.actions.some((a: any) => a.substitutionItemId === row.substitution_item_id)) {
+        if (row.substitutionItemId && !dc.actions.some((a: any) => a.substitutionItemId === row.substitutionItemId)) {
           dc.actions.push({
             type: 'substitution',
-            substitutionItemId: row.substitution_item_id,
-            replacementValue: row.replacement_value
+            substitutionItemId: row.substitutionItemId,
+            replacementValue: row.replacementValue
           });
         }
       }
@@ -1963,7 +2069,7 @@ export const getNullValueTypes = async (): Promise<any[]> => {
   try {
     const result = await pool.query(`SELECT null_value_type_id, code, name, definition FROM null_value_type ORDER BY null_value_type_id`);
     return result.rows.map((nv: any) => ({
-      id: nv.null_value_type_id,
+      id: nv.nullValueTypeId,
       code: nv.code,
       name: nv.name,
       definition: nv.definition || nv.name
@@ -2124,7 +2230,7 @@ export const getAllForms = async (userId?: number): Promise<any[]> => {
         `SELECT organization_id, role FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
         [userId]
       );
-      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      const userOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
 
       if (userOrgIds.length > 0) {
         // User belongs to an org — only show forms owned by org members
@@ -2174,7 +2280,7 @@ export const getAllForms = async (userId?: number): Promise<any[]> => {
 
     const result = await pool.query(query, params);
     console.log(`[getAllForms] Query returned ${result.rows.length} forms for userId=${userId}`, 
-      result.rows.map((r: any) => ({ crf_id: r.crf_id, name: r.name, status_id: r.status_id }))
+      result.rows.map((r: any) => ({ crf_id: r.crfId, name: r.name, status_id: r.statusId }))
     );
     logger.info('Forms retrieved', { count: result.rows.length, userId });
     return result.rows;
@@ -2218,15 +2324,15 @@ export const getFormById = async (crfId: number, callerUserId?: number): Promise
         `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
         [callerUserId]
       );
-      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      const callerOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
 
       if (callerOrgIds.length > 0) {
         const form = result.rows[0];
-        const ownerIds = [form.owner_id];
+        const ownerIds = [form.ownerId];
         // Also check study owner if the form is linked to a study
-        if (form.source_study_id) {
-          const studyOwner = await pool.query(`SELECT owner_id FROM study WHERE study_id = $1`, [form.source_study_id]);
-          if (studyOwner.rows.length > 0) ownerIds.push(studyOwner.rows[0].owner_id);
+        if (form.sourceStudyId) {
+          const studyOwner = await pool.query(`SELECT owner_id FROM study WHERE study_id = $1`, [form.sourceStudyId]);
+          if (studyOwner.rows.length > 0) ownerIds.push(studyOwner.rows[0].ownerId);
         }
         const ownerInOrg = await pool.query(
           `SELECT 1 FROM acc_organization_member WHERE user_id = ANY($1::int[]) AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
@@ -2330,7 +2436,7 @@ interface FormField {
   isHidden?: boolean;
   
   // Validation
-  validationRules?: FieldValidationRule[];
+  validationRules?: FieldValidationConstraint[];
   
   // Options (for select, radio, checkbox)
   options?: FormFieldOption[];
@@ -2663,7 +2769,7 @@ export const createForm = async (
       [data.name, userId]
     );
     if (nameCheck.rows.length > 0) {
-      const existingId = nameCheck.rows[0].crf_id;
+      const existingId = nameCheck.rows[0].crfId;
       await client.query('ROLLBACK');
       
       logger.info('Form with same name already exists among active forms', { name: data.name, existingCrfId: existingId });
@@ -2752,7 +2858,7 @@ export const createForm = async (
       ]);
     }
 
-    const crfId = crfResult.rows[0].crf_id;
+    const crfId = crfResult.rows[0].crfId;
 
     // Create initial version with same status as CRF
     const versionOid = `${ocOid}_V1`;
@@ -2772,7 +2878,7 @@ export const createForm = async (
       versionOid
     ]);
 
-    const crfVersionId = versionResult.rows[0].crf_version_id;
+    const crfVersionId = versionResult.rows[0].crfVersionId;
 
     // Create fields if provided
     if (data.fields && data.fields.length > 0) {
@@ -2796,7 +2902,7 @@ export const createForm = async (
             )
             RETURNING section_id
           `, [crfVersionId, sec.name || `Section ${si + 1}`, sec.name || data.name, si + 1, userId]);
-          const dbId = secResult.rows[0].section_id;
+          const dbId = secResult.rows[0].sectionId;
           // Register by both client UUID and by display name so either format resolves
           if (sec.id) sectionIdMap.set(sec.id, dbId);
           if (sec.name) sectionIdMap.set(sec.name, dbId);
@@ -2820,7 +2926,7 @@ export const createForm = async (
           data.name,
           userId
         ]);
-        defaultSectionId = sectionResult.rows[0].section_id;
+        defaultSectionId = sectionResult.rows[0].sectionId;
       } else {
         defaultSectionId = sectionIdMap.values().next().value!;
       }
@@ -2850,7 +2956,7 @@ export const createForm = async (
         groupOid
       ]);
 
-      const itemGroupId = itemGroupResult.rows[0].item_group_id;
+      const itemGroupId = itemGroupResult.rows[0].itemGroupId;
 
       // Create each field as an item with full metadata
       for (let i = 0; i < data.fields.length; i++) {
@@ -2938,7 +3044,7 @@ export const createForm = async (
           itemOid
         ]);
 
-        const itemId = itemResult.rows[0].item_id;
+        const itemId = itemResult.rows[0].itemId;
 
         // Ordinal is purely positional — the array order IS the visual order.
         const fieldOrdinal = i + 1;
@@ -2978,7 +3084,7 @@ export const createForm = async (
             optionsValues,
             crfVersionId
           ]);
-          responseSetId = responseSetResult.rows[0].response_set_id;
+          responseSetId = responseSetResult.rows[0].responseSetId;
         } else {
           // Create a basic response set for non-option fields
           const responseSetResult = await client.query(`
@@ -2993,7 +3099,7 @@ export const createForm = async (
             field.label,
             crfVersionId
           ]);
-          responseSetId = responseSetResult.rows[0].response_set_id;
+          responseSetId = responseSetResult.rows[0].responseSetId;
         }
 
         // Extract validation pattern and message from validation rules
@@ -3060,7 +3166,7 @@ export const createForm = async (
           responseSetId,
           fieldOrdinal,
           field.placeholder || '',
-          field.required === true || field.isRequired === true,
+          (resolveFieldType(field.type) !== 'section_header' && resolveFieldType(field.type) !== 'static_text') && (field.required === true || field.isRequired === true),
           field.defaultValue !== undefined ? String(field.defaultValue) : null,
           regexpPattern,
           regexpErrorMsg,
@@ -3109,7 +3215,7 @@ export const createForm = async (
           }
           
           if (targetIfmResult.rows.length > 0) {
-            const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
+            const targetIfmId = targetIfmResult.rows[0].itemFormMetadataId;
             
             for (const condition of field.showWhen) {
               // Find the control item — resolve from the template fields to get itemId.
@@ -3142,7 +3248,7 @@ export const createForm = async (
                 `, [crfVersionId, condition.fieldId]);
               }
               
-              const controlIfmId = controlIfmResult?.rows[0]?.item_form_metadata_id || null;
+              const controlIfmId = controlIfmResult?.rows[0]?.itemFormMetadataId || null;
               const controlItemName = controlIfmResult?.rows[0]?.name || condition.fieldId || '';
               
               // Store operator metadata in message field as JSON so non-equals operators survive round-trip
@@ -3370,7 +3476,7 @@ export const updateForm = async (
         throw new Error('No version found for this form');
       }
 
-      const crfVersionId = versionResult.rows[0].crf_version_id;
+      const crfVersionId = versionResult.rows[0].crfVersionId;
 
       // ──────────────────────────────────────────────────────────────────────
       // SECTION SYNC for updateForm
@@ -3387,9 +3493,9 @@ export const updateForm = async (
 
       if (incomingSections.length > 0) {
         // Build dual-key lookup: by label (for existing data) and by section_id (future-proof)
-        const existingSecByLabel = new Map(existingSecResult.rows.map((r: any) => [r.label, r.section_id]));
-        const existingSecByLabelLower = new Map(existingSecResult.rows.map((r: any) => [r.label?.toLowerCase(), r.section_id]));
-        const existingSecIds = existingSecResult.rows.map((r: any) => r.section_id);
+        const existingSecByLabel = new Map(existingSecResult.rows.map((r: any) => [r.label, r.sectionId]));
+        const existingSecByLabelLower = new Map(existingSecResult.rows.map((r: any) => [r.label?.toLowerCase(), r.sectionId]));
+        const existingSecIds = existingSecResult.rows.map((r: any) => r.sectionId);
         const usedDbSectionIds = new Set<number>();
 
         for (let si = 0; si < incomingSections.length; si++) {
@@ -3415,7 +3521,7 @@ export const updateForm = async (
               ) VALUES ($1, 1, $2, $3, $4, $5, NOW())
               RETURNING section_id
             `, [crfVersionId, sec.name || `Section ${si + 1}`, sec.name || 'Form', si + 1, userId]);
-            const newDbId = newSecResult.rows[0].section_id;
+            const newDbId = newSecResult.rows[0].sectionId;
             if (sec.id) sectionIdMap.set(sec.id, newDbId);
             if (sec.name) sectionIdMap.set(sec.name, newDbId);
             if (sec.name) sectionIdMap.set(sec.name.toLowerCase(), newDbId);
@@ -3442,7 +3548,7 @@ export const updateForm = async (
       let defaultSectionId: number;
       if (sectionIdMap.size === 0) {
         if (existingSecResult.rows.length > 0) {
-          defaultSectionId = existingSecResult.rows[0].section_id;
+          defaultSectionId = existingSecResult.rows[0].sectionId;
         } else {
           const newSectionResult = await client.query(`
             INSERT INTO section (
@@ -3452,7 +3558,7 @@ export const updateForm = async (
             )
             RETURNING section_id
           `, [crfVersionId, data.category || 'Form Fields', data.name || 'Form', userId]);
-          defaultSectionId = newSectionResult.rows[0].section_id;
+          defaultSectionId = newSectionResult.rows[0].sectionId;
         }
       } else {
         defaultSectionId = sectionIdMap.values().next().value!;
@@ -3477,7 +3583,7 @@ export const updateForm = async (
       if (itemGroupResult.rows.length === 0) {
         // Get CRF OID for generating item group OID
         const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
-        const crfOid = crfOidResult.rows[0]?.oc_oid || `CRF_${crfId}`;
+        const crfOid = crfOidResult.rows[0]?.ocOid || `CRF_${crfId}`;
         const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
         const groupOid = `IG_${crfOid.substring(2, 16)}_${randomSuffix}`;
         
@@ -3489,9 +3595,9 @@ export const updateForm = async (
           )
           RETURNING item_group_id
         `, [data.category || 'Form Fields', crfId, userId, groupOid]);
-        itemGroupId = newGroupResult.rows[0].item_group_id;
+        itemGroupId = newGroupResult.rows[0].itemGroupId;
       } else {
-        itemGroupId = itemGroupResult.rows[0].item_group_id;
+        itemGroupId = itemGroupResult.rows[0].itemGroupId;
       }
 
       // Get existing items for this form — keyed by item_id for stable matching
@@ -3509,11 +3615,11 @@ export const updateForm = async (
 
       // Primary lookup by item_id (stable). No name-based fallback — fields with
       // the same label must not collide. If a field has no valid item_id it is new.
-      const existingItemsById = new Map(existingItemsResult.rows.map(row => [row.item_id, row]));
+      const existingItemsById = new Map(existingItemsResult.rows.map(row => [row.itemId, row]));
 
       // Get CRF OID for generating item OIDs
       const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
-      const ocOid = crfOidResult.rows[0]?.oc_oid || `CRF_${crfId}`;
+      const ocOid = crfOidResult.rows[0]?.ocOid || `CRF_${crfId}`;
 
       // Track which existing item_ids were matched so we can soft-delete the rest
       const matchedItemIds = new Set<number>();
@@ -3576,6 +3682,11 @@ export const updateForm = async (
           resolvedRequired = existingItem.required === true;
         } else {
           resolvedRequired = field.required === true || field.isRequired === true;
+        }
+        // Layout-only types are never required regardless of what was sent or stored
+        const ct = resolveFieldType(field.type);
+        if (ct === 'section_header' || ct === 'static_text') {
+          resolvedRequired = false;
         }
         // Stamp the resolved value back onto the field object so
         // serializeExtendedProperties also picks it up.
@@ -3645,13 +3756,13 @@ export const updateForm = async (
         if (existingItem) {
           // Update existing item — also update the name in case the label changed
           // Preserve phi_status if not explicitly provided (partial update)
-          const resolvedPhi = field.isPhiField !== undefined ? (field.isPhiField === true) : existingItem.phi_status;
+          const resolvedPhi = field.isPhiField !== undefined ? (field.isPhiField === true) : existingItem.phiStatus;
           await client.query(`
             UPDATE item
             SET name = $1, description = $2, units = $3, phi_status = $4, item_data_type_id = $5, date_updated = NOW()
             WHERE item_id = $6
-          `, [fieldName, description, field.unit !== undefined ? (field.unit || '') : (existingItem.units || ''), resolvedPhi, dataTypeId, existingItem.item_id]);
-          itemId = existingItem.item_id;
+          `, [fieldName, description, field.unit !== undefined ? (field.unit || '') : (existingItem.units || ''), resolvedPhi, dataTypeId, existingItem.itemId]);
+          itemId = existingItem.itemId;
           matchedItemIds.add(itemId); // Mark as still present
         } else {
           // Create new item
@@ -3667,7 +3778,7 @@ export const updateForm = async (
             )
             RETURNING item_id
           `, [fieldName, description, field.unit || '', field.isPhiField === true, dataTypeId, userId, itemOid]);
-          itemId = newItemResult.rows[0].item_id;
+          itemId = newItemResult.rows[0].itemId;
           matchedItemIds.add(itemId);
 
           // Link to item group
@@ -3690,7 +3801,7 @@ export const updateForm = async (
           WHERE item_id = $1 AND crf_version_id = $2
         `, [itemId, crfVersionId]);
 
-        if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].response_set_id) {
+        if (existingRsResult.rows.length > 0 && existingRsResult.rows[0].responseSetId) {
           // Decide whether to write, clear, or preserve options.
           //
           // Key distinction in JSON payloads:
@@ -3720,14 +3831,14 @@ export const updateForm = async (
               UPDATE response_set
               SET options_text = $1, options_values = $2, response_type_id = $3
               WHERE response_set_id = $4
-            `, [optionsText, optionsValues, responseTypeId, existingRsResult.rows[0].response_set_id]);
+            `, [optionsText, optionsValues, responseTypeId, existingRsResult.rows[0].responseSetId]);
           } else if (typeChangedAwayFromOptions) {
             // Case 2: Type changed from option-type to non-option-type — clear stale options
             await client.query(`
               UPDATE response_set
               SET options_text = NULL, options_values = NULL, response_type_id = $1
               WHERE response_set_id = $2
-            `, [responseTypeId, existingRsResult.rows[0].response_set_id]);
+            `, [responseTypeId, existingRsResult.rows[0].responseSetId]);
           } else if (optionsWereExplicitlySent && field.options.length === 0) {
             // Case 3: Caller explicitly sent options:[] — clear options
             // This covers: user deleted all options from a dropdown, or non-option type cleanup
@@ -3735,7 +3846,7 @@ export const updateForm = async (
               UPDATE response_set
               SET options_text = NULL, options_values = NULL, response_type_id = $1
               WHERE response_set_id = $2
-            `, [responseTypeId, existingRsResult.rows[0].response_set_id]);
+            `, [responseTypeId, existingRsResult.rows[0].responseSetId]);
           } else {
             // Case 4: Options key was omitted (undefined) — preserve existing options,
             // only update the response_type_id
@@ -3743,9 +3854,9 @@ export const updateForm = async (
               UPDATE response_set
               SET response_type_id = $1
               WHERE response_set_id = $2
-            `, [responseTypeId, existingRsResult.rows[0].response_set_id]);
+            `, [responseTypeId, existingRsResult.rows[0].responseSetId]);
           }
-          responseSetId = existingRsResult.rows[0].response_set_id;
+          responseSetId = existingRsResult.rows[0].responseSetId;
         } else {
           // Create new response set (required for all fields, not just option fields)
           if (field.options && field.options.length > 0) {
@@ -3757,7 +3868,7 @@ export const updateForm = async (
               VALUES ($1, $2, $3, $4, $5)
               RETURNING response_set_id
             `, [responseTypeId, field.label, optionsText, optionsValues, crfVersionId]);
-            responseSetId = rsResult.rows[0].response_set_id;
+            responseSetId = rsResult.rows[0].responseSetId;
           } else {
             // Create basic response set for non-option fields
             const rsResult = await client.query(`
@@ -3765,7 +3876,7 @@ export const updateForm = async (
               VALUES ($1, $2, $3)
               RETURNING response_set_id
             `, [responseTypeId, field.label || 'Field', crfVersionId]);
-            responseSetId = rsResult.rows[0].response_set_id;
+            responseSetId = rsResult.rows[0].responseSetId;
           }
         }
 
@@ -3858,11 +3969,11 @@ export const updateForm = async (
       // Any existing item whose item_id is not in matchedItemIds was removed by the user.
       for (const [itemIdKey, item] of existingItemsById) {
         if (!matchedItemIds.has(itemIdKey)) {
-          logger.info('Hiding removed field', { itemId: item.item_id, name: item.name });
+          logger.info('Hiding removed field', { itemId: item.itemId, name: item.name });
           await client.query(`
             UPDATE item_form_metadata SET show_item = false
             WHERE item_id = $1 AND crf_version_id = $2
-          `, [item.item_id, crfVersionId]);
+          `, [item.itemId, crfVersionId]);
         }
       }
 
@@ -3893,7 +4004,7 @@ export const updateForm = async (
       // Build a map: target_item_id -> showWhen conditions from existing DB
       const existingScdMap = new Map<number, any[]>();
       for (const row of existingScdResult.rows) {
-        const conditions = existingScdMap.get(row.target_item_id) || [];
+        const conditions = existingScdMap.get(row.targetItemId) || [];
         let operator = 'equals';
         let message = '';
         try {
@@ -3902,12 +4013,12 @@ export const updateForm = async (
           message = parsed.message || '';
         } catch { /* not JSON, ignore */ }
         conditions.push({
-          fieldId: row.control_item_name,
-          value: row.option_value || '',
+          fieldId: row.controlItemName,
+          value: row.optionValue || '',
           operator,
           message
         });
-        existingScdMap.set(row.target_item_id, conditions);
+        existingScdMap.set(row.targetItemId, conditions);
       }
 
       // For each incoming field missing showWhen, restore from existing DB
@@ -3968,7 +4079,7 @@ export const updateForm = async (
           }
           
           if (targetIfmResult.rows.length > 0) {
-            const targetIfmId = targetIfmResult.rows[0].item_form_metadata_id;
+            const targetIfmId = targetIfmResult.rows[0].itemFormMetadataId;
             
             for (const condition of field.showWhen) {
               // Find the control item's item_form_metadata_id.
@@ -4003,7 +4114,7 @@ export const updateForm = async (
                 `, [crfVersionId, condition.fieldId]);
               }
               
-              const controlIfmId = controlIfmResult?.rows[0]?.item_form_metadata_id || null;
+              const controlIfmId = controlIfmResult?.rows[0]?.itemFormMetadataId || null;
               const controlItemName = controlIfmResult?.rows[0]?.name || condition.fieldId || '';
               
               // Store operator in message as JSON for non-equals operators
@@ -4113,7 +4224,7 @@ export const archiveForm = async (
     }
 
     const form = formQuery.rows[0];
-    const oldStatus = form.status_id;
+    const oldStatus = form.statusId;
 
     // Check if already archived
     if (oldStatus === 6) {
@@ -4162,7 +4273,7 @@ export const archiveForm = async (
         $4, 'archived', $5,
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Archive%' OR name LIKE '%Update%' LIMIT 1)
       )
-    `, [userId, crfId, form.name, form.status_name, reason || 'Form archived for 21 CFR Part 11 compliance']);
+    `, [userId, crfId, form.name, form.statusName, reason || 'Form archived for 21 CFR Part 11 compliance']);
 
     await client.query('COMMIT');
 
@@ -4217,7 +4328,7 @@ export const restoreForm = async (
     const form = formQuery.rows[0];
 
     // Check if form is archived
-    if (form.status_id !== 6 && form.status_id !== 5) {
+    if (form.statusId !== 6 && form.statusId !== 5) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Form is not archived' };
     }
@@ -4331,7 +4442,7 @@ export const getArchivedForms = async (studyId?: number, userId?: number): Promi
         `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
         [userId]
       );
-      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      const userOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
 
       if (userOrgIds.length > 0) {
         params.push(userOrgIds);
@@ -4441,18 +4552,18 @@ export const getFormVersions = async (
     return {
       success: true,
       versions: result.rows.map(row => ({
-        crfVersionId: row.crf_version_id,
-        versionName: row.version_name,
+        crfVersionId: row.crfVersionId,
+        versionName: row.versionName,
         description: row.description,
-        revisionNotes: row.revision_notes,
-        oid: row.oc_oid,
-        statusId: row.status_id,
-        statusName: row.status_name,
-        createdBy: row.created_by,
-        dateCreated: row.date_created,
-        dateUpdated: row.date_updated,
-        usageCount: parseInt(row.usage_count) || 0,
-        isInUse: parseInt(row.usage_count) > 0
+        revisionNotes: row.revisionNotes,
+        oid: row.ocOid,
+        statusId: row.statusId,
+        statusName: row.statusName,
+        createdBy: row.createdBy,
+        dateCreated: row.dateCreated,
+        dateUpdated: row.dateUpdated,
+        usageCount: parseInt(row.usageCount) || 0,
+        isInUse: parseInt(row.usageCount) > 0
       }))
     };
   } catch (error: any) {
@@ -4515,7 +4626,7 @@ export const createFormVersion = async (
         await client.query('ROLLBACK');
         return { success: false, message: 'No existing version found to copy from' };
       }
-      sourceVersionId = latestResult.rows[0].crf_version_id;
+      sourceVersionId = latestResult.rows[0].crfVersionId;
     }
 
     // 2. Get CRF info for OID generation
@@ -4528,7 +4639,7 @@ export const createFormVersion = async (
       return { success: false, message: 'CRF not found' };
     }
 
-    const crfOid = crfResult.rows[0].oc_oid;
+    const crfOid = crfResult.rows[0].ocOid;
     const versionCount = await client.query(`
       SELECT COUNT(*) as count FROM crf_version WHERE crf_id = $1
     `, [crfId]);
@@ -4553,7 +4664,7 @@ export const createFormVersion = async (
       newVersionOid
     ]);
 
-    const newVersionId = newVersionResult.rows[0].crf_version_id;
+    const newVersionId = newVersionResult.rows[0].crfVersionId;
     logger.info('Created new version record', { newVersionId, sourceVersionId });
 
     // 4. Copy sections from source version
@@ -4579,13 +4690,13 @@ export const createFormVersion = async (
         section.title,
         section.instructions,
         section.subtitle,
-        section.page_number_label,
+        section.pageNumberLabel,
         section.ordinal,
         null, // parent_id will be mapped after
         section.borders,
         userId
       ]);
-      sectionMapping[section.section_id] = newSectionResult.rows[0].section_id;
+      sectionMapping[section.sectionId] = newSectionResult.rows[0].sectionId;
     }
 
     // 5. Copy item groups
@@ -4601,9 +4712,9 @@ export const createFormVersion = async (
 
     for (const group of itemGroupsResult.rows) {
       // Create new OID for item group
-      const newGroupOid = group.oc_oid ? 
-        `${group.oc_oid}_V${nextVersionNum}` : 
-        `IG_${newVersionId}_${group.item_group_id}`;
+      const newGroupOid = group.ocOid ? 
+        `${group.ocOid}_V${nextVersionNum}` : 
+        `IG_${newVersionId}_${group.itemGroupId}`;
 
       const newGroupResult = await client.query(`
         INSERT INTO item_group (
@@ -4614,8 +4725,8 @@ export const createFormVersion = async (
         RETURNING item_group_id
       `, [group.name, crfId, newGroupOid, userId]);
 
-      const newGroupId = newGroupResult.rows[0].item_group_id;
-      itemGroupMapping[group.item_group_id] = newGroupId;
+      const newGroupId = newGroupResult.rows[0].itemGroupId;
+      itemGroupMapping[group.itemGroupId] = newGroupId;
 
       // Create item_group_metadata for new version
       await client.query(`
@@ -4631,9 +4742,9 @@ export const createFormVersion = async (
         group.header,
         group.subheader,
         group.layout,
-        group.repeat_number,
-        group.repeat_max,
-        group.show_group,
+        group.repeatNumber,
+        group.repeatMax,
+        group.showGroup,
         group.ordinal,
         group.borders
       ]);
@@ -4656,9 +4767,9 @@ export const createFormVersion = async (
 
     for (const item of itemsResult.rows) {
       // Create new OID for item
-      const newItemOid = item.oc_oid ? 
-        `${item.oc_oid}_V${nextVersionNum}` : 
-        `I_${newVersionId}_${item.item_id}`;
+      const newItemOid = item.ocOid ? 
+        `${item.ocOid}_V${nextVersionNum}` : 
+        `I_${newVersionId}_${item.itemId}`;
 
       const newItemResult = await client.query(`
         INSERT INTO item (
@@ -4672,18 +4783,18 @@ export const createFormVersion = async (
         item.name,
         item.description,
         item.units,
-        item.phi_status,
-        item.item_data_type_id,
-        item.item_reference_type_id,
+        item.phiStatus,
+        item.itemDataTypeId,
+        item.itemReferenceTypeId,
         userId,
         newItemOid
       ]);
 
-      const newItemId = newItemResult.rows[0].item_id;
-      itemMapping[item.item_id] = newItemId;
+      const newItemId = newItemResult.rows[0].itemId;
+      itemMapping[item.itemId] = newItemId;
 
       // Create item_form_metadata for new version
-      const newSectionId = sectionMapping[item.section_id] || null;
+      const newSectionId = sectionMapping[item.sectionId] || null;
       
       await client.query(`
         INSERT INTO item_form_metadata (
@@ -4699,31 +4810,31 @@ export const createFormVersion = async (
         newVersionId,
         item.header,
         item.subheader,
-        item.left_item_text,
-        item.right_item_text,
+        item.leftItemText,
+        item.rightItemText,
         null, // parent_id mapping if needed
-        item.column_number,
+        item.columnNumber,
         newSectionId,
         item.ordinal,
-        item.response_set_id, // Response sets are shared
+        item.responseSetId, // Response sets are shared
         item.required,
         item.regexp,
-        item.regexp_error_msg,
-        item.show_item,
-        item.question_number_label,
-        item.default_value,
-        item.width_decimal,
-        item.response_layout
+        item.regexpErrorMsg,
+        item.showItem,
+        item.questionNumberLabel,
+        item.defaultValue,
+        item.widthDecimal,
+        item.responseLayout
       ]);
 
       // Copy item_group_map if exists
       const groupMapResult = await client.query(`
         SELECT item_group_id FROM item_group_map
         WHERE item_id = $1 AND crf_version_id = $2
-      `, [item.item_id, sourceVersionId]);
+      `, [item.itemId, sourceVersionId]);
 
       if (groupMapResult.rows.length > 0) {
-        const oldGroupId = groupMapResult.rows[0].item_group_id;
+        const oldGroupId = groupMapResult.rows[0].itemGroupId;
         const newGroupId = itemGroupMapping[oldGroupId];
         if (newGroupId) {
           await client.query(`
@@ -4794,13 +4905,22 @@ export const createFormVersion = async (
 };
 
 /**
- * Fork (copy) an entire CRF to create a new independent form
- * - Creates new CRF record
- * - Copies specified version (or latest)
- * - Copies all items/sections/item_groups
- * - Updates OIDs to be unique
- * 
- * This implements "forking" at the CRF level - completely new CRF
+ * Fork (copy) an entire CRF to create a new independent form.
+ *
+ * 21 CFR Part 11 §11.10(e) — every fork is recorded with structured
+ * provenance columns on the destination CRF (see crf_fork_provenance
+ * migration) AND an audit row on BOTH the destination ('Form Copied')
+ * and the source ('Form Copied To Another Organization') so the lineage
+ * is visible from either side of the copy.
+ *
+ * Org-isolation: callers must supply their resolved org IDs. The function
+ * verifies that:
+ *   - the source CRF's owner (or owning study's owner) is in one of those orgs
+ *   - if `targetStudyId` is supplied, the target study's owner is in one of
+ *     those orgs (we permit copying *into* an org you belong to)
+ *
+ * Returns a typed `code` field so the controller can map to the right
+ * HTTP status (409 for name collision, 403 for org denial, etc).
  */
 export const forkForm = async (
   sourceCrfId: number,
@@ -4809,68 +4929,234 @@ export const forkForm = async (
     description?: string;
     targetStudyId?: number;
   },
-  userId: number
-): Promise<{ success: boolean; newCrfId?: number; message?: string }> => {
-  logger.info('Forking form template', { sourceCrfId, newName: data.newName, userId });
+  userId: number,
+  callerOrgIds: number[] = []
+): Promise<{
+  success: boolean;
+  newCrfId?: number;
+  message?: string;
+  code?: 'OK' | 'NOT_FOUND' | 'NAME_CONFLICT' | 'FORBIDDEN_SOURCE' | 'FORBIDDEN_TARGET' | 'NO_VERSION' | 'ERROR';
+  copied?: { sections: number; itemGroups: number; items: number; scd: number; validationRules: number; responseSets: number };
+  linkedFormActions?: Array<{
+    fieldName: string;
+    fieldLabel?: string;
+    originalFormId: number;
+    originalFormName?: string;
+    status: 'auto_relinked' | 'self_relinked' | 'broken' | 'not_found';
+    resolvedFormId?: number;
+    resolvedFormName?: string;
+    recommendation: string;
+  }>;
+}> => {
+  logger.info('Forking form template', { sourceCrfId, newName: data.newName, userId, callerOrgIds });
 
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // 1. Get source CRF info
+    // 1. Get source CRF info (incl. fields needed for provenance)
     const sourceCrfResult = await client.query(`
-      SELECT crf_id, name, description, oc_oid, source_study_id
+      SELECT crf_id, name, description, oc_oid, source_study_id, owner_id
       FROM crf WHERE crf_id = $1
     `, [sourceCrfId]);
 
     if (sourceCrfResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Source CRF not found' };
+      return { success: false, message: 'Source CRF not found', code: 'NOT_FOUND' };
     }
 
     const sourceCrf = sourceCrfResult.rows[0];
 
-    // 2. Generate new OID for the forked CRF
-    const timestamp = Date.now().toString().slice(-6);
-    const newOid = `F_${data.newName.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase().substring(0, 24)}_${timestamp}`;
-
-    // Check if a form with this name already exists (any non-removed status)
-    const nameCheck = await client.query(
-      `SELECT crf_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 7) LIMIT 1`,
-      [data.newName]
-    );
-    if (nameCheck.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return { success: true, newCrfId: nameCheck.rows[0].crf_id, message: 'A form with this name already exists' };
+    // 1a. Resolve source organization (via crf owner). We snapshot this for
+    // the provenance row even when org-isolation is disabled (callerOrgIds
+    // empty) so historical lineage is always recorded. Wrapped in a savepoint
+    // so missing org tables on legacy installs don't kill the fork — we just
+    // record a NULL source org and proceed.
+    let sourceOrgId: number | null = null;
+    let sourceOrgName: string | null = null;
+    if (sourceCrf.ownerId) {
+      try {
+        await client.query('SAVEPOINT lookup_src_org');
+        const sourceOrgRow = await client.query(`
+          SELECT m.organization_id, o.name AS organization_name
+            FROM acc_organization_member m
+            JOIN acc_organization o ON o.organization_id = m.organization_id
+           WHERE m.user_id = $1 AND m.status = 'active'
+           LIMIT 1
+        `, [sourceCrf.ownerId]);
+        sourceOrgId = sourceOrgRow.rows[0]?.organizationId ?? null;
+        sourceOrgName = sourceOrgRow.rows[0]?.organizationName ?? null;
+        await client.query('RELEASE SAVEPOINT lookup_src_org');
+      } catch (orgErr: any) {
+        await client.query('ROLLBACK TO SAVEPOINT lookup_src_org');
+        logger.warn('forkForm: source org lookup failed (legacy schema?)', { error: orgErr.message });
+      }
     }
 
-    // Check if OID exists
+    // 1b. Org-isolation: caller must belong to the source's org. We treat an
+    // empty callerOrgIds as "isolation disabled" (used by integration tests
+    // and internal jobs); production callers always pass it.
+    //
+    // The membership lookup is wrapped in a savepoint so that on legacy
+    // schemas where acc_organization_member doesn't exist we fail OPEN
+    // (proceed with the fork) rather than 500. Same posture as the rest of
+    // the codebase — see getFormById's org-scoping block.
+    if (callerOrgIds.length > 0) {
+      const ownerIds: number[] = [];
+      if (sourceCrf.ownerId) ownerIds.push(sourceCrf.ownerId);
+      if (sourceCrf.sourceStudyId) {
+        const studyOwner = await client.query(
+          `SELECT owner_id FROM study WHERE study_id = $1`,
+          [sourceCrf.sourceStudyId]
+        );
+        if (studyOwner.rows.length > 0 && studyOwner.rows[0].ownerId) {
+          ownerIds.push(studyOwner.rows[0].ownerId);
+        }
+      }
+
+      if (ownerIds.length > 0) {
+        try {
+          await client.query('SAVEPOINT check_src_iso');
+          const ownerInOrg = await client.query(
+            `SELECT 1 FROM acc_organization_member
+              WHERE user_id = ANY($1::int[])
+                AND organization_id = ANY($2::int[])
+                AND status = 'active' LIMIT 1`,
+            [ownerIds, callerOrgIds]
+          );
+          await client.query('RELEASE SAVEPOINT check_src_iso');
+          if (ownerInOrg.rows.length === 0) {
+            await client.query('ROLLBACK');
+            logger.warn('forkForm: caller denied access to source CRF', { sourceCrfId, userId, callerOrgIds });
+            return { success: false, message: 'You do not have access to the source form', code: 'FORBIDDEN_SOURCE' };
+          }
+        } catch (isoErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT check_src_iso');
+          logger.warn('forkForm: source org-isolation check skipped (legacy schema?)', { error: isoErr.message });
+        }
+      }
+    }
+
+    // 1c. If a target study was specified, validate it exists and the caller
+    // can write into its organization. We also resolve the destination org
+    // for the audit record.
+    let targetOrgId: number | null = null;
+    let targetOrgName: string | null = null;
+    let targetStudyName: string | null = null;
+    let resolvedTargetStudyId: number | null = data.targetStudyId ?? sourceCrf.sourceStudyId ?? null;
+
+    if (resolvedTargetStudyId) {
+      const studyRow = await client.query(
+        `SELECT study_id, name, owner_id FROM study WHERE study_id = $1`,
+        [resolvedTargetStudyId]
+      );
+      if (studyRow.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { success: false, message: 'Target study not found', code: 'NOT_FOUND' };
+      }
+      targetStudyName = studyRow.rows[0].name;
+
+      if (studyRow.rows[0].ownerId) {
+        try {
+          await client.query('SAVEPOINT lookup_tgt_org');
+          const targetOrgRow = await client.query(`
+            SELECT m.organization_id, o.name AS organization_name
+              FROM acc_organization_member m
+              JOIN acc_organization o ON o.organization_id = m.organization_id
+             WHERE m.user_id = $1 AND m.status = 'active'
+             LIMIT 1
+          `, [studyRow.rows[0].ownerId]);
+          targetOrgId = targetOrgRow.rows[0]?.organizationId ?? null;
+          targetOrgName = targetOrgRow.rows[0]?.organizationName ?? null;
+          await client.query('RELEASE SAVEPOINT lookup_tgt_org');
+        } catch (orgErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT lookup_tgt_org');
+          logger.warn('forkForm: target org lookup failed (legacy schema?)', { error: orgErr.message });
+        }
+      }
+
+      if (callerOrgIds.length > 0 && targetOrgId !== null && !callerOrgIds.includes(targetOrgId)) {
+        await client.query('ROLLBACK');
+        logger.warn('forkForm: caller denied access to target study', {
+          sourceCrfId, targetStudyId: resolvedTargetStudyId, userId, callerOrgIds, targetOrgId
+        });
+        return {
+          success: false,
+          message: 'You do not have access to the target study/organization',
+          code: 'FORBIDDEN_TARGET'
+        };
+      }
+    }
+
+    // 2. Generate a collision-resistant OID. Hex from 6 random bytes gives
+    // ~2.8e14 entropy per name — practically eliminates the 6-digit
+    // millisecond collision risk on rapid sequential forks.
+    const oidSuffix = crypto.randomBytes(6).toString('hex').toUpperCase();
+    const newOid = `F_${data.newName.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase().substring(0, 24)}_${oidSuffix}`;
+
+    // Name uniqueness — scoped to the TARGET study so two organizations can
+    // legitimately have a form called "Adverse Events". Previously this was
+    // a global check that returned someone else's CRF on collision (data leak
+    // + audit pollution). Now we reject with a structured NAME_CONFLICT code.
+    //
+    // FOR UPDATE locks any matching row so a concurrent fork with the same
+    // name blocks until this transaction commits, preventing a TOCTOU race
+    // where two parallel forks both pass the check and both insert.
+    const nameCheckParams: any[] = [data.newName];
+    let nameCheckSql = `SELECT crf_id FROM crf WHERE name = $1 AND status_id NOT IN (5, 7)`;
+    if (resolvedTargetStudyId) {
+      nameCheckSql += ` AND source_study_id = $2`;
+      nameCheckParams.push(resolvedTargetStudyId);
+    }
+    nameCheckSql += ` LIMIT 1 FOR UPDATE`;
+    const nameCheck = await client.query(nameCheckSql, nameCheckParams);
+    if (nameCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        message: `A form named "${data.newName}" already exists in the target study`,
+        code: 'NAME_CONFLICT',
+      };
+    }
+
+    // OID collision is now astronomically unlikely but still belt-and-braces.
     const existsCheck = await client.query(`SELECT crf_id FROM crf WHERE oc_oid = $1`, [newOid]);
     if (existsCheck.rows.length > 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'Generated OID collision — try again' };
+      return { success: false, message: 'Generated OID collision — try again', code: 'ERROR' };
     }
 
-    // 3. Create new CRF
+    // 3. Create new CRF (with structured provenance columns)
     await repairSequence(client, 'crf_crf_id_seq', 'crf', 'crf_id');
     const newCrfResult = await client.query(`
       INSERT INTO crf (
-        name, description, status_id, owner_id, date_created, oc_oid, source_study_id
+        name, description, status_id, owner_id, date_created, oc_oid, source_study_id,
+        forked_from_crf_id, forked_from_version_id, forked_from_study_id, forked_from_org_id,
+        forked_by_user_id, forked_at
       ) VALUES (
-        $1, $2, 1, $3, NOW(), $4, $5
+        $1, $2, 1, $3, NOW(), $4, $5,
+        $6, $7, $8, $9,
+        $10, NOW()
       )
       RETURNING crf_id
     `, [
       data.newName,
-      data.description || `Forked from ${sourceCrf.name}`,
+      data.description || `Copied from "${sourceCrf.name}"${sourceOrgName ? ` (org: ${sourceOrgName})` : ''}`,
       userId,
       newOid,
-      data.targetStudyId || sourceCrf.source_study_id
+      resolvedTargetStudyId,
+      sourceCrfId,
+      null, // forked_from_version_id — set after we resolve the source version (step 4)
+      sourceCrf.sourceStudyId ?? null,
+      sourceOrgId,
+      userId,
     ]);
 
-    const newCrfId = newCrfResult.rows[0].crf_id;
-    logger.info('Created forked CRF record', { newCrfId, sourceCrfId });
+    const newCrfId = newCrfResult.rows[0].crfId;
+    logger.info('Created forked CRF record', {
+      newCrfId, sourceCrfId, sourceOrgId, targetOrgId, targetStudyId: resolvedTargetStudyId
+    });
 
     // 4. Get latest version from source to copy
     const sourceVersionResult = await client.query(`
@@ -4883,11 +5169,21 @@ export const forkForm = async (
 
     if (sourceVersionResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return { success: false, message: 'No version found in source CRF' };
+      return { success: false, message: 'No version found in source CRF', code: 'NO_VERSION' };
     }
 
     const sourceVersion = sourceVersionResult.rows[0];
-    const sourceVersionId = sourceVersion.crf_version_id;
+    const sourceVersionId = sourceVersion.crfVersionId;
+
+    // Backfill forked_from_version_id now that we know the source version.
+    // We deferred this from the INSERT above because the version is resolved
+    // after the CRF row is created.
+    try {
+      await client.query(
+        `UPDATE crf SET forked_from_version_id = $1 WHERE crf_id = $2`,
+        [sourceVersionId, newCrfId]
+      );
+    } catch { /* column may not exist on very old installs — non-fatal */ }
 
     // 5. Create initial version for new CRF
     await repairSequence(client, 'crf_version_crf_version_id_seq', 'crf_version', 'crf_version_id');
@@ -4901,15 +5197,33 @@ export const forkForm = async (
       RETURNING crf_version_id
     `, [
       newCrfId,
-      `Initial version (forked from ${sourceCrf.name})`,
-      `Forked from CRF ID ${sourceCrfId}, version ${sourceVersion.name}`,
+      `Initial version (copied from ${sourceCrf.name})`,
+      `Copied from CRF ID ${sourceCrfId}, version ${sourceVersion.name}` +
+        (sourceOrgName ? `, source org ${sourceOrgName}` : '') +
+        (targetOrgName ? `, target org ${targetOrgName}` : ''),
       userId,
       newVersionOid
     ]);
 
-    const newVersionId = newVersionResult.rows[0].crf_version_id;
+    const newVersionId = newVersionResult.rows[0].crfVersionId;
 
-    // 6. Copy sections
+    // Repair sequences for all child tables BEFORE bulk-inserting into them.
+    // Without this, a stale sequence (common after seed scripts that insert
+    // explicit IDs) produces "duplicate key violates unique constraint" on the
+    // very first INSERT. The crf and crf_version sequences were already
+    // repaired above; these cover the remaining tables the fork writes to.
+    await repairSequence(client, 'section_section_id_seq', 'section', 'section_id');
+    await repairSequence(client, 'item_group_item_group_id_seq', 'item_group', 'item_group_id');
+    await repairSequence(client, 'item_item_id_seq', 'item', 'item_id');
+    try {
+      await repairSequence(client, 'response_set_response_set_id_seq', 'response_set', 'response_set_id');
+    } catch { /* response_set sequence name may differ on some installs */ }
+
+    // 6. Copy sections — TWO-PASS so we can correctly remap parent_id.
+    // Previously parent_id was hard-coded to NULL which flattened nested
+    // section hierarchies (any sub-section lost its parent). Pass 1 inserts
+    // every section with parent_id NULL to obtain new IDs; pass 2 walks the
+    // mapping and patches parent_id to point at the freshly-inserted parent.
     const sectionMapping: Record<number, number> = {};
     const sectionsResult = await client.query(`
       SELECT section_id, label, title, instructions, subtitle, page_number_label,
@@ -4923,7 +5237,7 @@ export const forkForm = async (
           crf_version_id, status_id, label, title, instructions, subtitle,
           page_number_label, ordinal, parent_id, borders, owner_id, date_created
         ) VALUES (
-          $1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()
+          $1, 1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NOW()
         )
         RETURNING section_id
       `, [
@@ -4932,13 +5246,24 @@ export const forkForm = async (
         section.title,
         section.instructions,
         section.subtitle,
-        section.page_number_label,
+        section.pageNumberLabel,
         section.ordinal,
-        null,
         section.borders,
         userId
       ]);
-      sectionMapping[section.section_id] = newSectionResult.rows[0].section_id;
+      sectionMapping[section.sectionId] = newSectionResult.rows[0].sectionId;
+    }
+
+    // Pass 2: rewire parent_id using the now-known mapping.
+    for (const section of sectionsResult.rows) {
+      if (!section.parentId) continue;
+      const newParentId = sectionMapping[section.parentId];
+      const newSelfId = sectionMapping[section.sectionId];
+      if (!newParentId || !newSelfId) continue; // orphan parent in source data
+      await client.query(
+        `UPDATE section SET parent_id = $1 WHERE section_id = $2`,
+        [newParentId, newSelfId]
+      );
     }
 
     // 7. Copy item groups (create group records only — metadata is copied after items)
@@ -4951,7 +5276,9 @@ export const forkForm = async (
     `, [sourceVersionId]);
 
     for (const group of itemGroupsResult.rows) {
-      const newGroupOid = `IG_${newCrfId}_${Date.now().toString().slice(-4)}_${group.item_group_id}`;
+      // 8 random hex chars = 4.3 billion namespace per (newCrfId, source group) tuple.
+      const newGroupOid =
+        `IG_${newCrfId}_${crypto.randomBytes(4).toString('hex').toUpperCase()}_${group.itemGroupId}`;
 
       const newGroupResult = await client.query(`
         INSERT INTO item_group (name, crf_id, oc_oid, status_id, owner_id, date_created)
@@ -4959,10 +5286,82 @@ export const forkForm = async (
         RETURNING item_group_id
       `, [group.name, newCrfId, newGroupOid, userId]);
 
-      itemGroupMapping[group.item_group_id] = newGroupResult.rows[0].item_group_id;
+      itemGroupMapping[group.itemGroupId] = newGroupResult.rows[0].itemGroupId;
     }
 
-    // 8. Copy items
+    // 8. Copy items — preceded by deep-copying response_set rows.
+    //
+    // Previously, forked items shared the SAME response_set_id as the source.
+    // If org A edits a dropdown's option list, org B's forked form silently
+    // mutates too. Deep-copying isolates them. We build a mapping once across
+    // all items so duplicate refs to the same response_set share ONE new row.
+    const responseSetMapping: Record<number, number> = {};
+
+    async function cloneResponseSet(oldRsId: number): Promise<number> {
+      if (responseSetMapping[oldRsId] !== undefined) return responseSetMapping[oldRsId];
+      try {
+        const rs = await client.query(
+          `SELECT response_type_id, label, options_text, options_values, version_id
+             FROM response_set WHERE response_set_id = $1`,
+          [oldRsId]
+        );
+        if (rs.rows.length === 0) {
+          responseSetMapping[oldRsId] = oldRsId; // missing — fall back to shared
+          return oldRsId;
+        }
+        const r = rs.rows[0];
+        const newRs = await client.query(`
+          INSERT INTO response_set (response_type_id, label, options_text, options_values, version_id)
+          VALUES ($1, $2, $3, $4, $5)
+          RETURNING response_set_id
+        `, [r.responseTypeId, r.label, r.optionsText, r.optionsValues, newVersionId]);
+        const newId = newRs.rows[0].responseSetId;
+        responseSetMapping[oldRsId] = newId;
+        return newId;
+      } catch (rsErr: any) {
+        logger.warn('Failed to clone response_set — sharing with source', { oldRsId, error: rsErr.message });
+        responseSetMapping[oldRsId] = oldRsId;
+        return oldRsId;
+      }
+    }
+
+    // Track form-link references and resolve them. Fields may reference other
+    // CRF IDs via `linkedFormId` or `formLinks[].targetFormId` inside the
+    // item.description extended_props JSON. During fork we:
+    //   1. Self-references (linkedFormId === sourceCrfId): auto-remap to newCrfId
+    //   2. External references: look up whether a form with the SAME NAME exists
+    //      in the target study. If yes → auto-relink. If no → mark as broken
+    //      and return actionable guidance to the user.
+    //
+    // After the fork, the response includes a `linkedFormActions` array so the
+    // UI can show the user exactly what happened to each cross-form link and
+    // what they need to do.
+    const linkedFormActions: Array<{
+      fieldName: string;
+      fieldLabel?: string;
+      originalFormId: number;
+      originalFormName?: string;
+      status: 'auto_relinked' | 'self_relinked' | 'broken' | 'not_found';
+      resolvedFormId?: number;
+      resolvedFormName?: string;
+      recommendation: string;
+    }> = [];
+
+    // Pre-build a lookup of form names in the target study so we can auto-relink.
+    // Only query once, not per-field.
+    const targetStudyForms: Map<string, { crfId: number; name: string }> = new Map();
+    if (resolvedTargetStudyId) {
+      try {
+        const formsInTarget = await client.query(
+          `SELECT crf_id, name FROM crf WHERE source_study_id = $1 AND status_id NOT IN (5, 7)`,
+          [resolvedTargetStudyId]
+        );
+        for (const f of formsInTarget.rows) {
+          targetStudyForms.set(f.name.toLowerCase().trim(), { crfId: f.crfId, name: f.name });
+        }
+      } catch { /* target study forms lookup failed — non-fatal */ }
+    }
+
     const ifmMapping: Record<number, number> = {}; // old item_form_metadata_id -> new
     const itemIdMapping: Record<number, number> = {}; // old item_id -> new item_id
     const itemsResult = await client.query(`
@@ -4980,7 +5379,11 @@ export const forkForm = async (
     `, [sourceVersionId]);
 
     for (const item of itemsResult.rows) {
-      const newItemOid = `I_${newCrfId}_${Date.now().toString().slice(-4)}_${item.item_id}`;
+      // Crypto-random suffix — see group OID note above. Item OIDs MUST be
+      // globally unique for ODM export to work, and the previous 4-digit
+      // millisecond slice was demonstrably collision-prone in tight loops.
+      const newItemOid =
+        `I_${newCrfId}_${crypto.randomBytes(4).toString('hex').toUpperCase()}_${item.itemId}`;
 
       const newItemResult = await client.query(`
         INSERT INTO item (
@@ -4989,12 +5392,19 @@ export const forkForm = async (
         ) VALUES ($1, $2, $3, $4, $5, $6, 1, $7, NOW(), $8)
         RETURNING item_id
       `, [
-        item.name, item.description, item.units, item.phi_status,
-        item.item_data_type_id, item.item_reference_type_id, userId, newItemOid
+        item.name,
+        remapDescriptionFormLinks(item.description, item.name, sourceCrfId, newCrfId, targetStudyForms, linkedFormActions),
+        item.units, item.phiStatus,
+        item.itemDataTypeId, item.itemReferenceTypeId, userId, newItemOid
       ]);
 
-      const newItemId = newItemResult.rows[0].item_id;
-      const newSectionId = sectionMapping[item.section_id] || null;
+      const newItemId = newItemResult.rows[0].itemId;
+      const newSectionId = sectionMapping[item.sectionId] || null;
+
+      // Deep-copy response_set so edits in one org don't leak to the other.
+      const newResponseSetId = item.responseSetId
+        ? await cloneResponseSet(item.responseSetId)
+        : null;
 
       const newIfmResult = await client.query(`
         INSERT INTO item_form_metadata (
@@ -5005,25 +5415,25 @@ export const forkForm = async (
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         RETURNING item_form_metadata_id
       `, [
-        newItemId, newVersionId, item.header, item.subheader, item.left_item_text,
-        item.right_item_text, null, item.column_number, newSectionId, item.ordinal,
-        item.response_set_id, item.required, item.regexp, item.regexp_error_msg,
-        item.show_item, item.question_number_label, item.default_value,
-        item.width_decimal, item.response_layout
+        newItemId, newVersionId, item.header, item.subheader, item.leftItemText,
+        item.rightItemText, null, item.columnNumber, newSectionId, item.ordinal,
+        newResponseSetId, item.required, item.regexp, item.regexpErrorMsg,
+        item.showItem, item.questionNumberLabel, item.defaultValue,
+        item.widthDecimal, item.responseLayout
       ]);
 
-      ifmMapping[item.item_form_metadata_id] = newIfmResult.rows[0].item_form_metadata_id;
-      itemIdMapping[item.item_id] = newItemId;
+      ifmMapping[item.itemFormMetadataId] = newIfmResult.rows[0].itemFormMetadataId;
+      itemIdMapping[item.itemId] = newItemId;
 
       // Copy item_group_map (table may not exist on all installations)
       try {
         await client.query('SAVEPOINT copy_igm');
         const groupMapResult = await client.query(`
           SELECT item_group_id FROM item_group_map WHERE item_id = $1 AND crf_version_id = $2
-        `, [item.item_id, sourceVersionId]);
+        `, [item.itemId, sourceVersionId]);
 
         if (groupMapResult.rows.length > 0) {
-          const oldGroupId = groupMapResult.rows[0].item_group_id;
+          const oldGroupId = groupMapResult.rows[0].itemGroupId;
           const newGroupId = itemGroupMapping[oldGroupId];
           if (newGroupId) {
             await client.query(`
@@ -5035,8 +5445,23 @@ export const forkForm = async (
         await client.query('RELEASE SAVEPOINT copy_igm');
       } catch (igmError: any) {
         await client.query('ROLLBACK TO SAVEPOINT copy_igm');
-        logger.error('Failed to copy item_group_map entry', { itemId: item.item_id, error: igmError.message });
+        logger.error('Failed to copy item_group_map entry', { itemId: item.itemId, error: igmError.message });
       }
+    }
+
+    // 8a-extra: Remap item_form_metadata.parent_id (sub-item references).
+    // Same two-pass strategy as sections: items were inserted with parent_id=NULL
+    // so we now walk the source rows, look up the old parent_id in ifmMapping,
+    // and UPDATE the new row to point at its remapped parent.
+    for (const item of itemsResult.rows) {
+      if (!item.parentId) continue;
+      const newParentIfmId = ifmMapping[item.parentId];
+      const newSelfIfmId = ifmMapping[item.itemFormMetadataId];
+      if (!newParentIfmId || !newSelfIfmId) continue;
+      await client.query(
+        `UPDATE item_form_metadata SET parent_id = $1 WHERE item_form_metadata_id = $2`,
+        [newParentIfmId, newSelfIfmId]
+      );
     }
 
     // 8b. Copy item_group_metadata (now that we have item ID mappings)
@@ -5049,8 +5474,8 @@ export const forkForm = async (
     `, [sourceVersionId]);
 
     for (const igm of igmResult.rows) {
-      const newGroupId = itemGroupMapping[igm.item_group_id];
-      const newItemId = igm.item_id ? itemIdMapping[igm.item_id] : null;
+      const newGroupId = itemGroupMapping[igm.itemGroupId];
+      const newItemId = igm.itemId ? itemIdMapping[igm.itemId] : null;
       if (!newGroupId) continue;
 
       await client.query(`
@@ -5061,8 +5486,8 @@ export const forkForm = async (
       `, [
         newGroupId, newVersionId, newItemId,
         igm.header, igm.subheader, igm.layout,
-        igm.repeat_number, igm.repeat_max, igm.show_group,
-        igm.ordinal, igm.borders, igm.repeating_group ?? false,
+        igm.repeatNumber, igm.repeatMax, igm.showGroup,
+        igm.ordinal, igm.borders, igm.repeatingGroup ?? false,
       ]);
     }
 
@@ -5075,10 +5500,11 @@ export const forkForm = async (
       WHERE ifm.crf_version_id = $1
     `, [sourceVersionId]);
 
+    let scdCopied = 0;
     for (const scd of scdResult.rows) {
-      const newTargetIfmId = ifmMapping[scd.scd_item_form_metadata_id];
-      const newControlIfmId = scd.control_item_form_metadata_id
-        ? ifmMapping[scd.control_item_form_metadata_id]
+      const newTargetIfmId = ifmMapping[scd.scdItemFormMetadataId];
+      const newControlIfmId = scd.controlItemFormMetadataId
+        ? ifmMapping[scd.controlItemFormMetadataId]
         : null;
 
       if (newTargetIfmId) {
@@ -5089,9 +5515,138 @@ export const forkForm = async (
           ) VALUES ($1, $2, $3, $4, $5, $6)
         `, [
           newTargetIfmId, newControlIfmId || null,
-          scd.control_item_name, scd.option_value, scd.message, scd.version || 1
+          scd.controlItemName, scd.optionValue, scd.message, scd.version || 1
         ]);
+        scdCopied++;
       }
+    }
+
+    // 10. Copy validation_rules tied to the source CRF / version. Without
+    // this, the forked CRF silently loses every required-field, range, BP,
+    // and custom-expression rule — a regulator would see two "identical"
+    // CRFs with materially different data-quality behavior. Wrapped in a
+    // savepoint because the validation_rules table is created lazily by a
+    // startup migration and may be missing on very old installations.
+    let rulesCopied = 0;
+    try {
+      await client.query('SAVEPOINT copy_rules');
+      const rulesResult = await client.query(`
+        SELECT name, description, rule_type, field_path, severity,
+               error_message, warning_message, active,
+               min_value, max_value, pattern, format_type,
+               operator, compare_field_path, compare_value, custom_expression,
+               bp_systolic_min, bp_systolic_max, bp_diastolic_min, bp_diastolic_max,
+               item_id, table_cell_target
+          FROM validation_rules
+         WHERE crf_id = $1
+           AND (crf_version_id IS NULL OR crf_version_id = $2)
+      `, [sourceCrfId, sourceVersionId]);
+
+      for (const rule of rulesResult.rows) {
+        const newRuleItemId = rule.itemId ? itemIdMapping[rule.itemId] ?? null : null;
+
+        // Deep-remap table_cell_target: the JSONB stores `tableItemId` which is
+        // the old item.item_id. If we don't remap it, the forked rule points at
+        // the source CRF's item — cell-level validation silently breaks.
+        let tableCellTarget = rule.tableCellTarget;
+        if (tableCellTarget && typeof tableCellTarget === 'object' && tableCellTarget.tableItemId) {
+          const newTableItemId = itemIdMapping[tableCellTarget.tableItemId];
+          if (newTableItemId) {
+            tableCellTarget = { ...tableCellTarget, tableItemId: newTableItemId };
+          }
+        }
+
+        await client.query(`
+          INSERT INTO validation_rules (
+            crf_id, crf_version_id, item_id, name, description, rule_type,
+            field_path, severity, error_message, warning_message, active,
+            min_value, max_value, pattern, format_type,
+            operator, compare_field_path, compare_value, custom_expression,
+            bp_systolic_min, bp_systolic_max, bp_diastolic_min, bp_diastolic_max,
+            table_cell_target,
+            date_created, owner_id
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10, $11,
+            $12, $13, $14, $15,
+            $16, $17, $18, $19,
+            $20, $21, $22, $23,
+            $24,
+            CURRENT_TIMESTAMP, $25
+          )
+        `, [
+          newCrfId, newVersionId, newRuleItemId, rule.name, rule.description, rule.ruleType,
+          rule.fieldPath, rule.severity, rule.errorMessage, rule.warningMessage, rule.active,
+          rule.minValue, rule.maxValue, rule.pattern, rule.formatType,
+          rule.operator, rule.compareFieldPath, rule.compareValue, rule.customExpression,
+          rule.bpSystolicMin, rule.bpSystolicMax, rule.bpDiastolicMin, rule.bpDiastolicMax,
+          tableCellTarget ? JSON.stringify(tableCellTarget) : null,
+          userId,
+        ]);
+        rulesCopied++;
+      }
+      await client.query('RELEASE SAVEPOINT copy_rules');
+    } catch (ruleErr: any) {
+      await client.query('ROLLBACK TO SAVEPOINT copy_rules');
+      logger.warn('Failed to copy validation_rules during fork (table may not exist)', {
+        error: ruleErr.message, sourceCrfId,
+      });
+    }
+
+    // 11. Audit log — INSIDE the transaction, on the same client. Two rows:
+    //   (a) FORM_FORKED on the destination so the new CRF carries its lineage
+    //   (b) FORM_COPIED_OUT on the source so a regulator inspecting the
+    //       source CRF can see "this was copied to org X / study Y on date Z"
+    // Both are written with the same client so they roll back atomically with
+    // the structural copy if anything below fails — no orphan audit rows and
+    // no fork-without-audit gaps.
+    const isCrossOrg =
+      sourceOrgId !== null && targetOrgId !== null && sourceOrgId !== targetOrgId;
+    const detailParts = [
+      `Copied CRF "${sourceCrf.name}" (ID: ${sourceCrfId}) as "${data.newName}" (ID: ${newCrfId})`,
+    ];
+    if (sourceOrgName) detailParts.push(`source org: ${sourceOrgName}`);
+    if (targetOrgName) detailParts.push(`target org: ${targetOrgName}`);
+    if (targetStudyName) detailParts.push(`target study: ${targetStudyName} (ID: ${resolvedTargetStudyId})`);
+    if (isCrossOrg) detailParts.push('CROSS-ORGANIZATION COPY');
+    const auditDetails = detailParts.join('; ');
+
+    try {
+      const forkedTypeId = await resolveAuditEventTypeId(client, 'Form Copied');
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id, entity_name,
+          old_value, new_value, audit_log_event_type_id, reason_for_change
+        ) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        'crf', userId, newCrfId, data.newName,
+        `crf_id=${sourceCrfId}`, `crf_id=${newCrfId}`,
+        forkedTypeId, auditDetails,
+      ]);
+
+      const copiedOutTypeId = await resolveAuditEventTypeId(client, 'Form Copied To Another Organization');
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date, audit_table, user_id, entity_id, entity_name,
+          old_value, new_value, audit_log_event_type_id, reason_for_change
+        ) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        'crf', userId, sourceCrfId, sourceCrf.name,
+        `crf_id=${sourceCrfId}`, `crf_id=${newCrfId}`,
+        copiedOutTypeId, auditDetails,
+      ]);
+    } catch (auditError: any) {
+      // Audit failure is fatal for a Part 11 system — abort the fork so we
+      // never end up with structural data we can't trace.
+      await client.query('ROLLBACK');
+      logger.error('Failed to record fork audit — fork rolled back', {
+        error: auditError.message, sourceCrfId, newCrfId,
+      });
+      return {
+        success: false,
+        message: 'Failed to record audit trail for the copy operation; nothing was changed.',
+        code: 'ERROR',
+      };
     }
 
     await client.query('COMMIT');
@@ -5100,39 +5655,543 @@ export const forkForm = async (
       sourceCrfId,
       newCrfId,
       newVersionId,
+      sourceOrgId,
+      targetOrgId,
+      crossOrg: isCrossOrg,
       sectionsCopied: Object.keys(sectionMapping).length,
-      itemsCopied: itemsResult.rows.length
+      itemsCopied: itemsResult.rows.length,
+      rulesCopied,
+      scdCopied,
     });
 
-    // Audit log
-    try {
-      await trackUserAction({
-        userId,
-        username: '',
-        action: 'FORM_FORKED',
-        entityType: 'crf',
-        entityId: newCrfId,
-        details: `Forked from CRF "${sourceCrf.name}" (ID: ${sourceCrfId}) as "${data.newName}"`
-      });
-    } catch (auditError: any) {
-      logger.warn('Failed to record fork audit', { error: auditError.message });
+    const brokenLinks = linkedFormActions.filter(a => a.status === 'broken' || a.status === 'not_found');
+    const autoRelinked = linkedFormActions.filter(a => a.status === 'auto_relinked');
+
+    let resultMessage = `Form "${data.newName}" copied successfully.`;
+    if (autoRelinked.length > 0) {
+      resultMessage += ` ${autoRelinked.length} form link(s) were automatically re-linked to matching forms in the target study.`;
+    }
+    if (brokenLinks.length > 0) {
+      resultMessage += ` ${brokenLinks.length} form link(s) could not be resolved — please review the linkedFormActions for recommended next steps.`;
     }
 
     return {
       success: true,
       newCrfId,
-      message: `Form "${data.newName}" forked successfully`
+      message: resultMessage,
+      code: 'OK',
+      copied: {
+        sections: Object.keys(sectionMapping).length,
+        itemGroups: Object.keys(itemGroupMapping).length,
+        items: itemsResult.rows.length,
+        scd: scdCopied,
+        validationRules: rulesCopied,
+        responseSets: Object.keys(responseSetMapping).length,
+      },
+      linkedFormActions: linkedFormActions.length > 0 ? linkedFormActions : undefined,
     };
   } catch (error: any) {
     await client.query('ROLLBACK');
     logger.error('Fork form error', { error: error.message, sourceCrfId });
     return {
       success: false,
-      message: `Failed to fork form: ${error.message}`
+      message: `Failed to fork form: ${error.message}`,
+      code: 'ERROR',
     };
   } finally {
     client.release();
   }
+};
+
+/**
+ * Parse extended_props from an item's description, detect form-link references
+ * (linkedFormId, formLinks[].targetFormId), and resolve them:
+ *
+ *  1. Self-references (linkedFormId === sourceCrfId):
+ *     Remap to newCrfId. The form links to itself (e.g. repeating sub-form).
+ *
+ *  2. External references where a form with the same name exists in the
+ *     target study: auto-relink to the matching CRF ID in the target study.
+ *
+ *  3. External references with no match: mark as broken, clear the ID to
+ *     prevent the UI from trying to open a non-existent form, and add
+ *     actionable guidance to the `actions` array.
+ *
+ * Question-table and table column structures are NOT mutated here because
+ * they use stable text IDs (not database PKs), so copying them verbatim is
+ * correct.
+ */
+function remapDescriptionFormLinks(
+  description: string | null,
+  fieldName: string,
+  sourceCrfId: number,
+  newCrfId: number,
+  targetStudyForms: Map<string, { crfId: number; name: string }>,
+  actions: Array<{
+    fieldName: string;
+    fieldLabel?: string;
+    originalFormId: number;
+    originalFormName?: string;
+    status: 'auto_relinked' | 'self_relinked' | 'broken' | 'not_found';
+    resolvedFormId?: number;
+    resolvedFormName?: string;
+    recommendation: string;
+  }>
+): string | null {
+  if (!description) return description;
+  const DELIM = '---EXTENDED_PROPS---';
+  const delimIdx = description.indexOf(DELIM);
+  if (delimIdx < 0) return description;
+
+  const prefix = description.substring(0, delimIdx);
+  const jsonStr = description.substring(delimIdx + DELIM.length).trim();
+  if (!jsonStr) return description;
+
+  let props: any;
+  try {
+    props = JSON.parse(jsonStr);
+  } catch {
+    return description;
+  }
+
+  let changed = false;
+
+  function resolveFormRef(
+    oldId: number,
+    oldName: string | undefined
+  ): { newId: number | null; status: 'self_relinked' | 'auto_relinked' | 'broken' | 'not_found' } {
+    if (oldId === sourceCrfId) {
+      return { newId: newCrfId, status: 'self_relinked' };
+    }
+    // Try to find a form with the same name in the target study
+    if (oldName && targetStudyForms.has(oldName.toLowerCase().trim())) {
+      const match = targetStudyForms.get(oldName.toLowerCase().trim())!;
+      return { newId: match.crfId, status: 'auto_relinked' };
+    }
+    return { newId: null, status: oldName ? 'not_found' : 'broken' };
+  }
+
+  // Remap linkedFormId (single form link)
+  if (props.linkedFormId != null) {
+    const oldId = Number(props.linkedFormId);
+    if (oldId > 0) {
+      const resolved = resolveFormRef(oldId, props.linkedFormName);
+      if (resolved.newId) {
+        props.linkedFormId = resolved.newId;
+        if (resolved.status === 'auto_relinked') {
+          const match = targetStudyForms.get((props.linkedFormName || '').toLowerCase().trim());
+          props.linkedFormName = match?.name || props.linkedFormName;
+        }
+        changed = true;
+      } else {
+        props.linkedFormId = null;
+        props._brokenFormLink = {
+          originalFormId: oldId,
+          originalFormName: props.linkedFormName,
+          status: resolved.status,
+        };
+        changed = true;
+      }
+      actions.push({
+        fieldName,
+        fieldLabel: props.fieldName || fieldName,
+        originalFormId: oldId,
+        originalFormName: props.linkedFormName || undefined,
+        status: resolved.status,
+        resolvedFormId: resolved.newId ?? undefined,
+        resolvedFormName: resolved.newId
+          ? (resolved.status === 'auto_relinked'
+            ? targetStudyForms.get((props.linkedFormName || '').toLowerCase().trim())?.name
+            : undefined)
+          : undefined,
+        recommendation: resolved.status === 'self_relinked'
+          ? 'This form links to itself. The link was automatically updated to point at the new copy.'
+          : resolved.status === 'auto_relinked'
+          ? `A form named "${props.linkedFormName}" was found in the target study and has been automatically linked.`
+          : `The linked form "${props.linkedFormName || `#${oldId}`}" was not found in the target study. ` +
+            `Copy that form to the same study, then use the "Relink Forms" feature (PATCH /api/forms/{id}/relink) ` +
+            `to reconnect this field. The branching rule is preserved but the link is temporarily disabled.`,
+      });
+    }
+  }
+
+  // Remap formLinks[].targetFormId (array of structured form links)
+  if (Array.isArray(props.formLinks)) {
+    for (const link of props.formLinks) {
+      if (link.targetFormId != null) {
+        const oldId = Number(link.targetFormId);
+        if (oldId > 0) {
+          const resolved = resolveFormRef(oldId, link.targetFormName);
+          if (resolved.newId) {
+            link.targetFormId = resolved.newId;
+            if (resolved.status === 'auto_relinked') {
+              const match = targetStudyForms.get((link.targetFormName || '').toLowerCase().trim());
+              if (match) link.targetFormName = match.name;
+            }
+            changed = true;
+          } else {
+            link._broken = true;
+            link._originalTargetFormId = oldId;
+            link.targetFormId = null;
+            changed = true;
+          }
+          actions.push({
+            fieldName,
+            fieldLabel: props.fieldName || fieldName,
+            originalFormId: oldId,
+            originalFormName: link.targetFormName || link.name || undefined,
+            status: resolved.status,
+            resolvedFormId: resolved.newId ?? undefined,
+            recommendation: resolved.status === 'self_relinked'
+              ? `Form link "${link.name || link.id}" (self-reference) was automatically updated.`
+              : resolved.status === 'auto_relinked'
+              ? `Form link "${link.name || link.id}" was automatically relinked to the matching form in the target study.`
+              : `Form link "${link.name || link.id}" references "${link.targetFormName || `form #${oldId}`}" which is not in the target study. ` +
+                `Copy that form first, then relink this field using PATCH /api/forms/{id}/relink.`,
+          });
+        }
+      }
+    }
+  }
+
+  // Remap linkedFormIds[] (array of form ID strings)
+  if (Array.isArray(props.linkedFormIds)) {
+    props.linkedFormIds = props.linkedFormIds.map((idStr: string) => {
+      const oldId = Number(idStr);
+      if (oldId === sourceCrfId) { changed = true; return String(newCrfId); }
+      return idStr;
+    });
+  }
+
+  if (!changed) return description;
+  return prefix + DELIM + '\n' + JSON.stringify(props);
+}
+
+/**
+ * Resolve an audit_log_event_type ID by name on the given client (so the
+ * lookup participates in the active transaction). Falls back to 1 if the
+ * row is missing — the seed-on-startup path normally guarantees presence,
+ * but we don't want a missing row to abort an otherwise-good fork.
+ */
+async function resolveAuditEventTypeId(client: any, name: string): Promise<number> {
+  try {
+    const r = await client.query(
+      `SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = $1 LIMIT 1`,
+      [name]
+    );
+    if (r.rows.length > 0) return r.rows[0].auditLogEventTypeId;
+  } catch { /* fall through */ }
+  return 1;
+}
+
+/**
+ * Relink form-link references in a CRF's fields.
+ *
+ * After a fork, some fields may have broken `linkedFormId` or
+ * `formLinks[].targetFormId` references because the linked form wasn't in
+ * the target study at fork time. Once the user copies the linked form, they
+ * call this endpoint to reconnect the references.
+ *
+ * Each entry in `relinks` maps an old CRF ID → new CRF ID. The function
+ * scans every item in the CRF, parses extended_props, rewrites matching
+ * form-link IDs, and clears the `_brokenFormLink` / `_broken` markers.
+ *
+ * 21 CFR Part 11: an audit row is written for every field that changes.
+ */
+export const relinkFormLinks = async (
+  crfId: number,
+  relinks: Array<{ oldFormId: number; newFormId: number; newFormName?: string }>,
+  userId: number
+): Promise<{
+  success: boolean;
+  message?: string;
+  updatedFields: string[];
+}> => {
+  logger.info('Relinking form links', { crfId, relinks, userId });
+
+  if (!relinks || relinks.length === 0) {
+    return { success: false, message: 'No relink mappings provided', updatedFields: [] };
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Get latest version
+    const verResult = await client.query(
+      `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 ORDER BY crf_version_id DESC LIMIT 1`,
+      [crfId]
+    );
+    if (verResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'No version found for this CRF', updatedFields: [] };
+    }
+    const versionId = verResult.rows[0].crfVersionId;
+
+    // Build a fast lookup: oldFormId → { newFormId, newFormName }
+    const relinkMap = new Map<number, { newFormId: number; newFormName?: string }>();
+    for (const r of relinks) relinkMap.set(r.oldFormId, { newFormId: r.newFormId, newFormName: r.newFormName });
+
+    // Scan all items in this version
+    const itemsResult = await client.query(
+      `SELECT i.item_id, i.name, i.description
+         FROM item i
+         INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+        WHERE ifm.crf_version_id = $1`,
+      [versionId]
+    );
+
+    const DELIM = '---EXTENDED_PROPS---';
+    const updatedFields: string[] = [];
+
+    for (const item of itemsResult.rows) {
+      if (!item.description || !item.description.includes(DELIM)) continue;
+
+      const delimIdx = item.description.indexOf(DELIM);
+      const prefix = item.description.substring(0, delimIdx);
+      const jsonStr = item.description.substring(delimIdx + DELIM.length).trim();
+      if (!jsonStr) continue;
+
+      let props: any;
+      try { props = JSON.parse(jsonStr); } catch { continue; }
+
+      let changed = false;
+
+      // Relink linkedFormId
+      if (props.linkedFormId === null && props._brokenFormLink) {
+        const oldId = props._brokenFormLink.originalFormId;
+        const mapping = relinkMap.get(oldId);
+        if (mapping) {
+          props.linkedFormId = mapping.newFormId;
+          if (mapping.newFormName) props.linkedFormName = mapping.newFormName;
+          delete props._brokenFormLink;
+          changed = true;
+        }
+      } else if (props.linkedFormId != null) {
+        const mapping = relinkMap.get(Number(props.linkedFormId));
+        if (mapping) {
+          props.linkedFormId = mapping.newFormId;
+          if (mapping.newFormName) props.linkedFormName = mapping.newFormName;
+          changed = true;
+        }
+      }
+
+      // Relink formLinks[]
+      if (Array.isArray(props.formLinks)) {
+        for (const link of props.formLinks) {
+          if (link._broken && link._originalTargetFormId) {
+            const mapping = relinkMap.get(link._originalTargetFormId);
+            if (mapping) {
+              link.targetFormId = mapping.newFormId;
+              if (mapping.newFormName) link.targetFormName = mapping.newFormName;
+              delete link._broken;
+              delete link._originalTargetFormId;
+              changed = true;
+            }
+          } else if (link.targetFormId != null) {
+            const mapping = relinkMap.get(Number(link.targetFormId));
+            if (mapping) {
+              link.targetFormId = mapping.newFormId;
+              if (mapping.newFormName) link.targetFormName = mapping.newFormName;
+              changed = true;
+            }
+          }
+        }
+      }
+
+      if (changed) {
+        const newDescription = prefix + DELIM + '\n' + JSON.stringify(props);
+        await client.query(
+          `UPDATE item SET description = $1 WHERE item_id = $2`,
+          [newDescription, item.itemId]
+        );
+        updatedFields.push(item.name);
+      }
+    }
+
+    // Audit trail
+    if (updatedFields.length > 0) {
+      await trackUserAction({
+        userId,
+        username: '',
+        action: 'FORM_UPDATED',
+        entityType: 'crf',
+        entityId: crfId,
+        details: `Relinked form references in ${updatedFields.length} field(s): ${updatedFields.join(', ')}. Mappings: ${relinks.map(r => `#${r.oldFormId}→#${r.newFormId}`).join(', ')}`,
+      });
+    }
+
+    await client.query('COMMIT');
+
+    return {
+      success: true,
+      message: updatedFields.length > 0
+        ? `Successfully relinked ${updatedFields.length} field(s): ${updatedFields.join(', ')}`
+        : 'No fields matched the provided relink mappings',
+      updatedFields,
+    };
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    logger.error('relinkFormLinks error', { crfId, error: error.message });
+    return { success: false, message: error.message, updatedFields: [] };
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Batch-fork multiple forms into a target study in one operation, then
+ * automatically relink all cross-form references between the copied forms.
+ *
+ * This solves the "Form A links to Form B" problem: if you fork them
+ * one-at-a-time, Form A's copy still points at the ORIGINAL Form B. With
+ * batch fork, both are copied first, then every `linkedFormId` and
+ * `formLinks[].targetFormId` that references another form IN THE BATCH is
+ * automatically remapped to its new CRF ID.
+ *
+ * External references (to forms NOT in the batch) are still reported as
+ * `linkedFormActions` with status 'broken' or 'not_found'.
+ *
+ * The user gets back a summary per form plus a consolidated list of form-link
+ * actions across the entire batch.
+ */
+export const batchForkForms = async (
+  sourceCrfIds: number[],
+  targetStudyId: number,
+  nameMap: Record<number, string>,
+  userId: number,
+  callerOrgIds: number[] = []
+): Promise<{
+  success: boolean;
+  message: string;
+  results: Array<{
+    sourceCrfId: number;
+    sourceName: string;
+    newCrfId?: number;
+    newName: string;
+    success: boolean;
+    error?: string;
+    copied?: any;
+  }>;
+  crossFormRelinks: Array<{ fieldName: string; oldFormId: number; newFormId: number }>;
+  linkedFormActions: any[];
+}> => {
+  logger.info('Batch forking forms', { sourceCrfIds, targetStudyId, userId });
+
+  // Phase 1: Fork each form individually. Collect the old→new CRF ID mapping.
+  const crfIdMap = new Map<number, number>(); // oldCrfId → newCrfId
+  const results: Array<{
+    sourceCrfId: number; sourceName: string; newCrfId?: number;
+    newName: string; success: boolean; error?: string; copied?: any;
+  }> = [];
+  const allLinkedFormActions: any[] = [];
+
+  for (const sourceCrfId of sourceCrfIds) {
+    const newName = nameMap[sourceCrfId] || `Copy of ${sourceCrfId}`;
+    try {
+      const forkResult = await forkForm(
+        sourceCrfId,
+        { newName, targetStudyId },
+        userId,
+        callerOrgIds
+      );
+
+      // Resolve the source name from the result message or a lookup
+      let sourceName = '';
+      try {
+        const src = await pool.query(`SELECT name FROM crf WHERE crf_id = $1`, [sourceCrfId]);
+        sourceName = src.rows[0]?.name || `CRF #${sourceCrfId}`;
+      } catch { sourceName = `CRF #${sourceCrfId}`; }
+
+      if (forkResult.success && forkResult.newCrfId) {
+        crfIdMap.set(sourceCrfId, forkResult.newCrfId);
+      }
+
+      results.push({
+        sourceCrfId,
+        sourceName,
+        newCrfId: forkResult.newCrfId,
+        newName,
+        success: forkResult.success,
+        error: forkResult.success ? undefined : forkResult.message,
+        copied: forkResult.copied,
+      });
+
+      if (forkResult.linkedFormActions) {
+        allLinkedFormActions.push(
+          ...forkResult.linkedFormActions.map((a: any) => ({
+            ...a,
+            sourceCrfId,
+            newCrfId: forkResult.newCrfId,
+          }))
+        );
+      }
+    } catch (err: any) {
+      results.push({
+        sourceCrfId,
+        sourceName: `CRF #${sourceCrfId}`,
+        newName,
+        success: false,
+        error: err.message,
+      });
+    }
+  }
+
+  // Phase 2: Cross-relink. For every broken/not_found form-link action, check
+  // if the referenced form was ALSO in the batch (and thus has a new CRF ID).
+  const crossFormRelinks: Array<{ fieldName: string; oldFormId: number; newFormId: number }> = [];
+
+  for (const action of allLinkedFormActions) {
+    if ((action.status === 'broken' || action.status === 'not_found') && action.originalFormId) {
+      const newTargetId = crfIdMap.get(action.originalFormId);
+      if (newTargetId && action.newCrfId) {
+        // This linked form WAS in the batch — relink automatically
+        try {
+          const relinkResult = await relinkFormLinks(
+            action.newCrfId,
+            [{ oldFormId: action.originalFormId, newFormId: newTargetId }],
+            userId
+          );
+          if (relinkResult.success) {
+            crossFormRelinks.push({
+              fieldName: action.fieldName,
+              oldFormId: action.originalFormId,
+              newFormId: newTargetId,
+            });
+            // Upgrade the action status
+            action.status = 'auto_relinked';
+            action.resolvedFormId = newTargetId;
+            action.recommendation = `Automatically relinked to the batch-copied form (new CRF #${newTargetId}).`;
+          }
+        } catch (relinkErr: any) {
+          logger.warn('Cross-form relink failed during batch fork', {
+            crfId: action.newCrfId, oldFormId: action.originalFormId, error: relinkErr.message
+          });
+        }
+      }
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const stillBroken = allLinkedFormActions.filter(
+    (a: any) => a.status === 'broken' || a.status === 'not_found'
+  );
+
+  let message = `Batch copy complete: ${successCount}/${sourceCrfIds.length} form(s) copied successfully.`;
+  if (crossFormRelinks.length > 0) {
+    message += ` ${crossFormRelinks.length} cross-form link(s) were automatically reconnected.`;
+  }
+  if (stillBroken.length > 0) {
+    message += ` ${stillBroken.length} form link(s) still need manual attention (linked forms not in this batch).`;
+  }
+
+  return {
+    success: successCount > 0,
+    message,
+    results,
+    crossFormRelinks,
+    linkedFormActions: allLinkedFormActions,
+  };
 };
 
 /**
@@ -5186,7 +6245,7 @@ export const updateFieldData = async (
     const eventCrf = eventCrfResult.rows[0];
 
     // Check if locked
-    if (eventCrf.status_id === 6) {
+    if (eventCrf.statusId === 6) {
       return {
         success: false,
         message: 'Cannot edit data - this record is locked.',
@@ -5209,7 +6268,7 @@ export const updateFieldData = async (
           OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2)
         )
       LIMIT 1
-    `, [eventCrf.crf_version_id, fieldName]);
+    `, [eventCrf.crfVersionId, fieldName]);
 
     // Fallback: match by technical fieldName stored in extended_props
     if (itemResult.rows.length === 0) {
@@ -5218,19 +6277,12 @@ export const updateFieldData = async (
         FROM item i
         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
         WHERE igm.crf_version_id = $1
-      `, [eventCrf.crf_version_id]);
+      `, [eventCrf.crfVersionId]);
       for (const row of allItems.rows) {
-        if (row.description?.includes('---EXTENDED_PROPS---')) {
-          try {
-            const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
-            if (json) {
-              const ext = JSON.parse(json);
-              if (ext.fieldName && ext.fieldName.toLowerCase() === fieldName.toLowerCase()) {
-                itemResult = { rows: [row] } as any;
-                break;
-              }
-            }
-          } catch { /* ignore */ }
+        const ext = parseExtendedProps(row.description);
+        if (ext.fieldName && ext.fieldName.toLowerCase() === fieldName.toLowerCase()) {
+          itemResult = { rows: [row] } as any;
+          break;
         }
       }
     }
@@ -5239,7 +6291,7 @@ export const updateFieldData = async (
       return { success: false, message: `Field "${fieldName}" not found in form` };
     }
 
-    const itemId = itemResult.rows[0].item_id;
+    const itemId = itemResult.rows[0].itemId;
 
     // Get current item_data (if exists)
     const existingResult = await client.query(`
@@ -5248,7 +6300,7 @@ export const updateFieldData = async (
       LIMIT 1
     `, [eventCrfId, itemId]);
 
-    const itemDataId = existingResult.rows[0]?.item_data_id;
+    const itemDataId = existingResult.rows[0]?.itemDataId;
     const oldValue = existingResult.rows[0]?.value;
 
     // Get all form data for cross-field validation.
@@ -5264,30 +6316,23 @@ export const updateFieldData = async (
     const allFormData: Record<string, any> = {};
     for (const row of allDataResult.rows) {
       allFormData[row.name] = row.value;
-      allFormData[`item_${row.item_id}`] = row.value;
-      if (row.description?.includes('---EXTENDED_PROPS---')) {
-        try {
-          const json = row.description.split('---EXTENDED_PROPS---')[1]?.trim();
-          if (json) {
-            const ext = JSON.parse(json);
-            if (ext.fieldName) allFormData[ext.fieldName] = row.value;
-          }
-        } catch { /* ignore */ }
-      }
+      allFormData[`item_${row.itemId}`] = row.value;
+      const ext = parseExtendedProps(row.description);
+      if (ext.fieldName) allFormData[ext.fieldName] = row.value;
     }
     // Include the new value being validated
     allFormData[fieldName] = value;
 
     // Validate the field change
     const validationResult = await validationRulesService.validateFieldChange(
-      eventCrf.crf_id,
+      eventCrf.crfId,
       fieldName,
       value,
       allFormData,
       {
         createQueries: options?.createQueries ?? false,
-        studyId: eventCrf.study_id,
-        subjectId: eventCrf.study_subject_id,
+        studyId: eventCrf.studyId,
+        subjectId: eventCrf.studySubjectId,
         eventCrfId: eventCrfId,
         itemDataId: itemDataId,
         userId: userId
@@ -5381,7 +6426,7 @@ export const updateFieldData = async (
         RETURNING item_data_id
       `, [itemId, eventCrfId, stringValue, userId]);
 
-      savedItemDataId = insertResult.rows[0].item_data_id;
+      savedItemDataId = insertResult.rows[0].itemDataId;
 
       // Audit trail for creation
       await client.query(`
@@ -5415,14 +6460,14 @@ export const updateFieldData = async (
     if (validationResult.warnings.length > 0 && !validationResult.warnings[0]?.queryId) {
       try {
         const warningValidation = await validationRulesService.validateFieldChange(
-          eventCrf.crf_id,
+          eventCrf.crfId,
           fieldName,
           value,
           allFormData,
           {
             createQueries: true,
-            studyId: eventCrf.study_id,
-            subjectId: eventCrf.study_subject_id,
+            studyId: eventCrf.studyId,
+            subjectId: eventCrf.studySubjectId,
             eventCrfId: eventCrfId,
             itemDataId: savedItemDataId,
             itemId: itemId,
@@ -5477,7 +6522,9 @@ export const updateFieldData = async (
  */
 export const markFormComplete = async (
   eventCrfId: number,
-  userId: number
+  userId: number,
+  hiddenFieldIds?: number[],
+  hiddenFields?: string[]
 ): Promise<{ success: boolean; message: string }> => {
   const client = await pool.connect();
   try {
@@ -5487,7 +6534,7 @@ export const markFormComplete = async (
     const ecResult = await client.query(`
       SELECT ec.event_crf_id, ec.status_id, ec.completion_status_id,
              COALESCE(ec.frozen, false) AS frozen,
-             cv.crf_id
+             cv.crf_id, cv.crf_version_id
       FROM event_crf ec
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
       WHERE ec.event_crf_id = $1
@@ -5500,7 +6547,7 @@ export const markFormComplete = async (
 
     const ec = ecResult.rows[0];
 
-    if (ec.status_id === 6) {
+    if (ec.statusId === 6) {
       await client.query('ROLLBACK');
       throw new Error('Form is already locked and cannot be modified');
     }
@@ -5508,29 +6555,80 @@ export const markFormComplete = async (
       await client.query('ROLLBACK');
       throw new Error('Form is frozen — it is already in the lock pipeline');
     }
-    if (ec.completion_status_id >= 4 && ec.status_id === 2) {
+    if (ec.completionStatusId >= 4 && ec.statusId === 2) {
       await client.query('ROLLBACK');
       throw new Error('Form is already marked as complete');
     }
 
-    // 2. Check required fields have data
-    // item_form_metadata.required is the authoritative required flag in LibreClinica schema
-    const missingResult = await client.query(`
-      SELECT COUNT(*) AS missing_count
-      FROM item_form_metadata ifm
-      INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
-      WHERE cv.crf_id = $1
-        AND ifm.required = true
-        AND NOT EXISTS (
-          SELECT 1 FROM item_data id
-          WHERE id.item_id = ifm.item_id
-            AND id.event_crf_id = $2
-            AND id.value IS NOT NULL
-            AND TRIM(id.value) <> ''
-        )
-    `, [ec.crf_id, eventCrfId]);
+    // 2. Check required fields have data.
+    // Fields hidden by branching/skip logic are excluded so they don't block
+    // completion. Uses item IDs (primary) with string name fallback.
+    const hiddenItemIds: Set<number> = new Set();
+    if (hiddenFieldIds && Array.isArray(hiddenFieldIds)) {
+      for (const id of hiddenFieldIds) {
+        const parsed = typeof id === 'number' ? id : parseInt(String(id), 10);
+        if (!isNaN(parsed) && parsed > 0) hiddenItemIds.add(parsed);
+      }
+    }
+    if (hiddenFields && Array.isArray(hiddenFields)) {
+      // Resolve string names to item IDs via DB lookup
+      for (const hf of hiddenFields) {
+        if (!hf) continue;
+        const itemLookup = await client.query(
+          `SELECT i.item_id FROM item i
+           INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+           WHERE ifm.crf_version_id = $1 AND (LOWER(i.name) = LOWER($2))
+           LIMIT 1`,
+          [ec.crfVersionId, hf]
+        );
+        if (itemLookup.rows.length > 0) {
+          hiddenItemIds.add(itemLookup.rows[0].itemId);
+        }
+      }
+    }
 
-    const missingCount = parseInt(missingResult.rows[0]?.missing_count || '0');
+    let missingCount = 0;
+    if (hiddenItemIds.size > 0) {
+      const hiddenIdArray = Array.from(hiddenItemIds);
+      const missingResult = await client.query(`
+        SELECT COUNT(*) AS missing_count
+        FROM item_form_metadata ifm
+        INNER JOIN item i ON ifm.item_id = i.item_id
+        WHERE ifm.crf_version_id = $1
+          AND ifm.required = true
+          AND i.description NOT LIKE '%"type":"section_header"%'
+          AND i.description NOT LIKE '%"type":"static_text"%'
+          AND ifm.item_id != ALL($3::int[])
+          AND NOT EXISTS (
+            SELECT 1 FROM item_data id
+            WHERE id.item_id = ifm.item_id
+              AND id.event_crf_id = $2
+              AND id.value IS NOT NULL
+              AND TRIM(id.value) <> ''
+          )
+      `, [ec.crfVersionId, eventCrfId, hiddenIdArray]);
+      missingCount = parseInt(missingResult.rows[0]?.missingCount || '0');
+    } else {
+      const missingResult = await client.query(`
+        SELECT COUNT(*) AS missing_count
+        FROM item_form_metadata ifm
+        INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
+        INNER JOIN item i ON ifm.item_id = i.item_id
+        WHERE cv.crf_id = $1
+          AND ifm.required = true
+          AND i.description NOT LIKE '%"type":"section_header"%'
+          AND i.description NOT LIKE '%"type":"static_text"%'
+          AND NOT EXISTS (
+            SELECT 1 FROM item_data id
+            WHERE id.item_id = ifm.item_id
+              AND id.event_crf_id = $2
+              AND id.value IS NOT NULL
+              AND TRIM(id.value) <> ''
+          )
+      `, [ec.crfId, eventCrfId]);
+      missingCount = parseInt(missingResult.rows[0]?.missingCount || '0');
+    }
+
     if (missingCount > 0) {
       await client.query('ROLLBACK');
       throw new Error(
@@ -5570,7 +6668,7 @@ export const markFormComplete = async (
       );
       if (seResult.rows.length > 0) {
         const { checkAndUpdateVisitStatus } = await import('./event.service');
-        await checkAndUpdateVisitStatus(seResult.rows[0].study_event_id);
+        await checkAndUpdateVisitStatus(seResult.rows[0].studyEventId);
       }
     } catch (visitErr: any) {
       logger.warn('Failed to auto-update visit status after form completion', { eventCrfId, error: visitErr.message });
@@ -5606,6 +6704,8 @@ export default {
   getFormVersions,
   createFormVersion,
   forkForm,
+  batchForkForms,
+  relinkFormLinks,
   // Field-level operations
   updateFieldData,
   markFormComplete,

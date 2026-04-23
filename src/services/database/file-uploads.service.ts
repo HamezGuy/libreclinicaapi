@@ -73,18 +73,18 @@ export const getFilesForItem = async (itemId: number): Promise<UploadedFile[]> =
   `, [itemId]);
   
   return result.rows.map(row => ({
-    fileId: row.file_id,
-    originalName: row.original_name,
-    storedName: row.stored_name,
-    filePath: row.file_path,
-    mimeType: row.mime_type,
-    fileSize: row.file_size,
+    fileId: row.fileId,
+    originalName: row.originalName,
+    storedName: row.storedName,
+    filePath: row.filePath,
+    mimeType: row.mimeType,
+    fileSize: row.fileSize,
     checksum: row.checksum,
-    crfVersionId: row.crf_version_id,
-    itemId: row.item_id,
-    crfVersionMediaId: row.crf_version_media_id,
-    uploadedBy: row.uploaded_by,
-    uploadedAt: row.uploaded_at
+    crfVersionId: row.crfVersionId,
+    itemId: row.itemId,
+    crfVersionMediaId: row.crfVersionMediaId,
+    uploadedBy: row.uploadedBy,
+    uploadedAt: row.uploadedAt
   }));
 };
 
@@ -101,18 +101,18 @@ export const getFilesForCrfVersion = async (crfVersionId: number): Promise<Uploa
   `, [crfVersionId]);
   
   return result.rows.map(row => ({
-    fileId: row.file_id,
-    originalName: row.original_name,
-    storedName: row.stored_name,
-    filePath: row.file_path,
-    mimeType: row.mime_type,
-    fileSize: row.file_size,
+    fileId: row.fileId,
+    originalName: row.originalName,
+    storedName: row.storedName,
+    filePath: row.filePath,
+    mimeType: row.mimeType,
+    fileSize: row.fileSize,
     checksum: row.checksum,
-    crfVersionId: row.crf_version_id,
-    itemId: row.item_id,
-    crfVersionMediaId: row.crf_version_media_id,
-    uploadedBy: row.uploaded_by,
-    uploadedAt: row.uploaded_at
+    crfVersionId: row.crfVersionId,
+    itemId: row.itemId,
+    crfVersionMediaId: row.crfVersionMediaId,
+    uploadedBy: row.uploadedBy,
+    uploadedAt: row.uploadedAt
   }));
 };
 
@@ -133,18 +133,18 @@ export const getFileById = async (fileId: string): Promise<UploadedFile | null> 
   
   const row = result.rows[0];
   return {
-    fileId: row.file_id,
-    originalName: row.original_name,
-    storedName: row.stored_name,
-    filePath: row.file_path,
-    mimeType: row.mime_type,
-    fileSize: row.file_size,
+    fileId: row.fileId,
+    originalName: row.originalName,
+    storedName: row.storedName,
+    filePath: row.filePath,
+    mimeType: row.mimeType,
+    fileSize: row.fileSize,
     checksum: row.checksum,
-    crfVersionId: row.crf_version_id,
-    itemId: row.item_id,
-    crfVersionMediaId: row.crf_version_media_id,
-    uploadedBy: row.uploaded_by,
-    uploadedAt: row.uploaded_at
+    crfVersionId: row.crfVersionId,
+    itemId: row.itemId,
+    crfVersionMediaId: row.crfVersionMediaId,
+    uploadedBy: row.uploadedBy,
+    uploadedAt: row.uploadedAt
   };
 };
 

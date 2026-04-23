@@ -137,7 +137,7 @@ async function testEmailNotifications(): Promise<void> {
     ]);
 
     if (insertResult.rows.length > 0) {
-      const queueId = insertResult.rows[0].queue_id;
+      const queueId = insertResult.rows[0].queueId;
       
       // Verify we can read it back
       const verifyResult = await pool.query(
@@ -145,7 +145,7 @@ async function testEmailNotifications(): Promise<void> {
         [queueId]
       );
       
-      if (verifyResult.rows.length > 0 && verifyResult.rows[0].recipient_email === testEmail.recipientEmail) {
+      if (verifyResult.rows.length > 0 && verifyResult.rows[0].recipientEmail === testEmail.recipientEmail) {
         recordResult('Email', 'Queue Email', true, 
           `Email queued and verified (queue_id: ${queueId})`);
       } else {
@@ -166,7 +166,7 @@ async function testEmailNotifications(): Promise<void> {
       recordResult('Email', 'Notification Preferences', false, 'No users found in database');
       return;
     }
-    const userId = userResult.rows[0].user_id;
+    const userId = userResult.rows[0].userId;
 
     // Delete any existing preference for this test
     await pool.query(`
@@ -252,10 +252,10 @@ async function testSubjectTransfer(): Promise<void> {
       return;
     }
 
-    const studyId = studyResult.rows[0].study_id;
-    const subjectId = subjectResult.rows[0].study_subject_id;
-    const currentSiteId = subjectResult.rows[0].study_id;
-    const userId = userResult.rows[0].user_id;
+    const studyId = studyResult.rows[0].studyId;
+    const subjectId = subjectResult.rows[0].studySubjectId;
+    const currentSiteId = subjectResult.rows[0].studyId;
+    const userId = userResult.rows[0].userId;
 
     const insertResult = await pool.query(`
       INSERT INTO acc_transfer_log (
@@ -336,8 +336,8 @@ async function testDDE(): Promise<void> {
       return;
     }
 
-    const eventCrfId = crfResult.rows[0].event_crf_id;
-    const crfVersionId = crfResult.rows[0].crf_version_id;
+    const eventCrfId = crfResult.rows[0].eventCrfId;
+    const crfVersionId = crfResult.rows[0].crfVersionId;
     const userResult = await pool.query('SELECT user_id FROM user_account LIMIT 1');
     const userId = userResult.rows[0]?.user_id || 1;
 
@@ -364,7 +364,7 @@ async function testDDE(): Promise<void> {
         [statusId]
       );
       
-      if (verifyResult.rows.length > 0 && verifyResult.rows[0].total_items === 999) {
+      if (verifyResult.rows.length > 0 && verifyResult.rows[0].totalItems === 999) {
         recordResult('DDE', 'Create Status', true, 
           `DDE status created and verified (id: ${statusId})`);
       } else {
@@ -396,8 +396,8 @@ async function testEConsent(): Promise<void> {
       return;
     }
 
-    const studyId = studyResult.rows[0].study_id;
-    const userId = userResult.rows[0]?.user_id || 1;
+    const studyId = studyResult.rows[0].studyId;
+    const userId = userResult.rows[0]?.userId || 1;
 
     const insertResult = await pool.query(`
       INSERT INTO acc_consent_document (
@@ -465,7 +465,7 @@ async function testEConsent(): Promise<void> {
         [testVersionId]
       );
       
-      if (verifyResult.rows.length > 0 && verifyResult.rows[0].version_number === 'TEST_V1.0') {
+      if (verifyResult.rows.length > 0 && verifyResult.rows[0].versionNumber === 'TEST_V1.0') {
         recordResult('eConsent', 'Create Version', true, 
           `Consent version created and verified (id: ${testVersionId})`);
       } else {
@@ -520,7 +520,7 @@ async function testEPRO(): Promise<void> {
       return;
     }
 
-    const subjectId = subjectResult.rows[0].study_subject_id;
+    const subjectId = subjectResult.rows[0].studySubjectId;
     const testEmail = 'test-patient-' + Date.now() + '@test.example.com';
 
     const insertResult = await pool.query(`
@@ -572,9 +572,9 @@ async function testEPRO(): Promise<void> {
       return;
     }
 
-    const subjectId = subjectResult.rows[0].study_subject_id;
-    const instrumentId = instrumentResult.rows[0].instrument_id;
-    const userId = userResult.rows[0]?.user_id || 1;
+    const subjectId = subjectResult.rows[0].studySubjectId;
+    const instrumentId = instrumentResult.rows[0].instrumentId;
+    const userId = userResult.rows[0]?.userId || 1;
 
     const insertResult = await pool.query(`
       INSERT INTO acc_pro_assignment (
@@ -631,7 +631,7 @@ async function testRTSM(): Promise<void> {
       return;
     }
 
-    const studyId = studyResult.rows[0].study_id;
+    const studyId = studyResult.rows[0].studyId;
 
     const insertResult = await pool.query(`
       INSERT INTO acc_kit_type (
@@ -697,7 +697,7 @@ async function testRTSM(): Promise<void> {
         [testKitId]
       );
       
-      if (verifyResult.rows.length > 0 && verifyResult.rows[0].kit_number === 'TEST_KIT_001') {
+      if (verifyResult.rows.length > 0 && verifyResult.rows[0].kitNumber === 'TEST_KIT_001') {
         recordResult('RTSM', 'Create Kit', true, 
           `Kit created and verified (id: ${testKitId})`);
       } else {
@@ -718,8 +718,8 @@ async function testRTSM(): Promise<void> {
       return;
     }
 
-    const studyId = studyResult.rows[0].study_id;
-    const userId = userResult.rows[0]?.user_id || 1;
+    const studyId = studyResult.rows[0].studyId;
+    const userId = userResult.rows[0]?.userId || 1;
 
     const insertResult = await pool.query(`
       INSERT INTO acc_shipment (
@@ -746,7 +746,7 @@ async function testRTSM(): Promise<void> {
         [testShipmentId]
       );
       
-      if (verifyResult.rows.length > 0 && verifyResult.rows[0].shipment_number === 'TEST_SHIP_001') {
+      if (verifyResult.rows.length > 0 && verifyResult.rows[0].shipmentNumber === 'TEST_SHIP_001') {
         recordResult('RTSM', 'Create Shipment', true, 
           `Shipment created and verified (id: ${testShipmentId})`);
       } else {
@@ -760,7 +760,7 @@ async function testRTSM(): Promise<void> {
   // Test 6.4: Log temperature
   try {
     const userResult = await pool.query('SELECT user_id FROM user_account LIMIT 1');
-    const userId = userResult.rows[0]?.user_id || 1;
+    const userId = userResult.rows[0]?.userId || 1;
 
     const insertResult = await pool.query(`
       INSERT INTO acc_temperature_log (

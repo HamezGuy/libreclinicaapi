@@ -140,6 +140,8 @@ describe('Query System — Comprehensive Tests', () => {
 
   describe('Joi Schema — querySchemas.create', () => {
     const valid = {
+      entityType: 'itemData' as const,
+      entityId: 1,
       description: 'This is a valid query description with enough chars',
       queryType: 'Query',
       studyId: 1
@@ -184,13 +186,13 @@ describe('Query System — Comprehensive Tests', () => {
       expect(joiError(querySchemas.create, { ...valid, description: '1234567890' })).toBeNull();
     });
 
-    it('rejects when description exceeds 1000 chars', () => {
-      expect(joiError(querySchemas.create, { ...valid, description: 'x'.repeat(1001) }))
-        .toMatch(/1000 characters/i);
+    it('rejects when description exceeds 2000 chars', () => {
+      expect(joiError(querySchemas.create, { ...valid, description: 'x'.repeat(2001) }))
+        .toMatch(/2000 characters/i);
     });
 
-    it('accepts description of exactly 1000 chars', () => {
-      expect(joiError(querySchemas.create, { ...valid, description: 'x'.repeat(1000) })).toBeNull();
+    it('accepts description of exactly 2000 chars', () => {
+      expect(joiError(querySchemas.create, { ...valid, description: 'x'.repeat(2000) })).toBeNull();
     });
 
     it('rejects when queryType is missing', () => {
@@ -248,12 +250,12 @@ describe('Query System — Comprehensive Tests', () => {
       expect(joiError(querySchemas.create, { ...valid, assignedUserId: -5 })).toBeTruthy();
     });
 
-    it('rejects detailedNotes exceeding 2000 chars', () => {
-      expect(joiError(querySchemas.create, { ...valid, detailedNotes: 'x'.repeat(2001) })).toBeTruthy();
+    it('rejects detailedNotes exceeding 10000 chars', () => {
+      expect(joiError(querySchemas.create, { ...valid, detailedNotes: 'x'.repeat(10001) })).toBeTruthy();
     });
 
-    it('accepts detailedNotes of exactly 2000 chars', () => {
-      expect(joiError(querySchemas.create, { ...valid, detailedNotes: 'x'.repeat(2000) })).toBeNull();
+    it('accepts detailedNotes of exactly 10000 chars', () => {
+      expect(joiError(querySchemas.create, { ...valid, detailedNotes: 'x'.repeat(10000) })).toBeNull();
     });
 
     it('accepts empty string detailedNotes', () => {
@@ -286,9 +288,9 @@ describe('Query System — Comprehensive Tests', () => {
         .toMatch(/at least 10 characters/i);
     });
 
-    it('rejects response longer than 1000 chars', () => {
-      expect(joiError(querySchemas.respond, { response: 'x'.repeat(1001) }))
-        .toMatch(/1000 characters/i);
+    it('rejects response longer than 2000 chars', () => {
+      expect(joiError(querySchemas.respond, { response: 'x'.repeat(2001) }))
+        .toMatch(/2000 characters/i);
     });
 
     it('rejects newStatusId = 1 (New — not valid for a response)', () => {
@@ -356,8 +358,8 @@ describe('Query System — Comprehensive Tests', () => {
       expect(joiError(querySchemas.acceptResolution, { reason: '' })).toBeNull();
     });
 
-    it('rejects reason exceeding 500 chars', () => {
-      expect(joiError(querySchemas.acceptResolution, { reason: 'x'.repeat(501) })).toBeTruthy();
+    it('rejects reason exceeding 2000 chars', () => {
+      expect(joiError(querySchemas.acceptResolution, { reason: 'x'.repeat(2001) })).toBeTruthy();
     });
 
     it('accepts meaning field', () => {
@@ -388,8 +390,8 @@ describe('Query System — Comprehensive Tests', () => {
       })).toBeNull();
     });
 
-    it('rejects reason exceeding 500 chars', () => {
-      expect(joiError(querySchemas.rejectResolution, { reason: 'x'.repeat(501) })).toBeTruthy();
+    it('rejects reason exceeding 2000 chars', () => {
+      expect(joiError(querySchemas.rejectResolution, { reason: 'x'.repeat(2001) })).toBeTruthy();
     });
   });
 
@@ -1356,6 +1358,8 @@ describe('Query System — Comprehensive Tests', () => {
       // If stripUnknown is not set, unknown keys are allowed by default
       // This test verifies our schema allows this (we don't use .unknown(false))
       const err = joiError(querySchemas.create, {
+        entityType: 'itemData',
+        entityId: 1,
         description: 'A valid description here for unknown field test',
         queryType: 'Query',
         studyId: 1,

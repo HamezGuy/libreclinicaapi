@@ -59,14 +59,14 @@ describe('markFormComplete', () => {
       INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id)
       VALUES ($1, $2, NOW(), 1, $3, NOW(), 1)
       RETURNING study_event_id
-    `, [eventDefResult.rows[0].study_event_definition_id, testSubjectId, rootUserId]);
+    `, [eventDefResult.rows[0].studyEventDefinitionId, testSubjectId, rootUserId]);
 
     const crfResult = await testDb.pool.query(`
       INSERT INTO crf (source_study_id, name, status_id, owner_id, date_created, oc_oid)
       VALUES ($1, 'Complete Test CRF', 1, $2, NOW(), $3)
       RETURNING crf_id
     `, [testStudyId, rootUserId, `F_COMP_${Date.now()}`]);
-    crfId = crfResult.rows[0].crf_id;
+    crfId = crfResult.rows[0].crfId;
 
     const cvResult = await testDb.pool.query(`
       INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
@@ -78,9 +78,9 @@ describe('markFormComplete', () => {
       INSERT INTO event_crf (study_event_id, crf_version_id, status_id, completion_status_id, owner_id, date_created, study_subject_id)
       VALUES ($1, $2, 1, 2, $3, NOW(), $4)
       RETURNING event_crf_id
-    `, [eventResult.rows[0].study_event_id, cvResult.rows[0].crf_version_id, rootUserId, testSubjectId]);
+    `, [eventResult.rows[0].studyEventId, cvResult.rows[0].crfVersionId, rootUserId, testSubjectId]);
 
-    testEventCrfId = ecResult.rows[0].event_crf_id;
+    testEventCrfId = ecResult.rows[0].eventCrfId;
   });
 
   afterEach(async () => {
@@ -100,8 +100,8 @@ describe('markFormComplete', () => {
       'SELECT status_id, completion_status_id FROM event_crf WHERE event_crf_id = $1',
       [testEventCrfId]
     );
-    expect(db.rows[0].status_id).toBe(2);
-    expect(db.rows[0].completion_status_id).toBe(4);
+    expect(db.rows[0].statusId).toBe(2);
+    expect(db.rows[0].completionStatusId).toBe(4);
   });
 
   it('should reject if form is already locked', async () => {

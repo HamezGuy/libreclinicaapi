@@ -243,20 +243,20 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
       const subj = subjectRow.rows[0];
 
       if (subj) {
-        const ref = updates.visitDateReference ?? subj.visit_date_reference ?? 'scheduling_date';
+        const ref = updates.visitDateReference ?? subj.visitDateReference ?? 'scheduling_date';
         let anchorStr: string | null = null;
 
         if (ref === 'enrollment_date') {
-          anchorStr = updates.enrollmentDate ?? subj.enrollment_date;
+          anchorStr = updates.enrollmentDate ?? subj.enrollmentDate;
         } else if (ref === 'custom_date') {
-          anchorStr = updates.visitDateCustom ?? subj.visit_date_custom;
+          anchorStr = updates.visitDateCustom ?? subj.visitDateCustom;
         } else {
-          anchorStr = updates.screeningDate ?? subj.screening_date ?? updates.enrollmentDate ?? subj.enrollment_date;
+          anchorStr = updates.screeningDate ?? subj.screeningDate ?? updates.enrollmentDate ?? subj.enrollmentDate;
         }
 
         const anchor = anchorStr ? parseDateLocal(anchorStr) : null;
 
-        if (anchor && subj.parent_study_id) {
+        if (anchor && subj.parentStudyId) {
           const visitRows = await client.query(`
             SELECT se.study_event_id, sed.ordinal, sed.schedule_day
             FROM study_event se
@@ -266,17 +266,17 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
               AND sed.study_id = $2
               AND COALESCE(se.is_unscheduled, false) = false
             ORDER BY sed.ordinal
-          `, [parseInt(id), subj.parent_study_id]);
+          `, [parseInt(id), subj.parentStudyId]);
 
           for (const row of visitRows.rows) {
-            if (row.schedule_day == null) {
+            if (row.scheduleDay == null) {
               logger.warn('Skipping reschedule for visit without schedule_day', {
-                studyEventId: row.study_event_id,
+                studyEventId: row.studyEventId,
                 ordinal: row.ordinal
               });
               continue;
             }
-            const daysOffset = row.schedule_day;
+            const daysOffset = row.scheduleDay;
             const visitDate = new Date(anchor.getTime());
             visitDate.setDate(visitDate.getDate() + daysOffset);
             const isoDate = formatIsoDate(visitDate);
@@ -285,7 +285,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
               UPDATE study_event
               SET scheduled_date = $1::date
               WHERE study_event_id = $2
-            `, [isoDate, row.study_event_id]);
+            `, [isoDate, row.studyEventId]);
           }
 
           logger.info('Rescheduled visit due dates', {
@@ -304,7 +304,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
       const subjectResult = await client.query(subjectQuery, [parseInt(id)]);
       
       if (subjectResult.rows.length > 0) {
-        const subjectId = subjectResult.rows[0].subject_id;
+        const subjectId = subjectResult.rows[0].subjectId;
         const subjectUpdates: string[] = [];
         const subjectParams: any[] = [];
         let subjectParamIndex = 1;
@@ -391,7 +391,7 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
       return;
     }
 
-    const oldStatus = currentResult.rows[0].status_id;
+    const oldStatus = currentResult.rows[0].statusId;
 
     // Update status
     await client.query(`
@@ -531,10 +531,10 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
     const result = await pool.query(query, [parseInt(id)]);
 
     const events = result.rows.map(event => {
-      const totalForms = parseInt(event.total_forms) || 0;
-      const completedForms = parseInt(event.completed_forms) || 0;
-      const startedForms = parseInt(event.started_forms) || 0;
-      const lockedForms = parseInt(event.locked_forms) || 0;
+      const totalForms = parseInt(event.totalForms) || 0;
+      const completedForms = parseInt(event.completedForms) || 0;
+      const startedForms = parseInt(event.startedForms) || 0;
+      const lockedForms = parseInt(event.lockedForms) || 0;
 
       // Compute status from actual form data
       let status: string;
@@ -549,32 +549,32 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
       }
 
       return {
-        id: event.study_event_id.toString(),
-        study_event_id: event.study_event_id,
-        eventDefinitionId: event.study_event_definition_id.toString(),
-        study_event_definition_id: event.study_event_definition_id,
-        name: event.event_name,
-        description: event.event_description || '',
-        type: event.event_type || 'scheduled',
-        event_type: event.event_type || 'scheduled',
-        order: event.event_order,
-        ordinal: event.event_order,
-        occurrence: event.sample_ordinal,
-        startDate: event.date_start,
-        date_start: event.date_start,
-        endDate: event.date_end,
-        date_end: event.date_end,
-        scheduledDate: event.scheduled_date,
-        scheduled_date: event.scheduled_date,
-        isUnscheduled: event.is_unscheduled,
-        is_unscheduled: event.is_unscheduled,
+        id: event.studyEventId.toString(),
+        study_event_id: event.studyEventId,
+        eventDefinitionId: event.studyEventDefinitionId.toString(),
+        study_event_definition_id: event.studyEventDefinitionId,
+        name: event.eventName,
+        description: event.eventDescription || '',
+        type: event.eventType || 'scheduled',
+        event_type: event.eventType || 'scheduled',
+        order: event.eventOrder,
+        ordinal: event.eventOrder,
+        occurrence: event.sampleOrdinal,
+        startDate: event.dateStart,
+        date_start: event.dateStart,
+        endDate: event.dateEnd,
+        date_end: event.dateEnd,
+        scheduledDate: event.scheduledDate,
+        scheduled_date: event.scheduledDate,
+        isUnscheduled: event.isUnscheduled,
+        is_unscheduled: event.isUnscheduled,
         location: event.location || '',
-        schedule_day: event.schedule_day,
-        min_day: event.min_day,
-        max_day: event.max_day,
+        schedule_day: event.scheduleDay,
+        min_day: event.minDay,
+        max_day: event.maxDay,
         status,
         status_name: status,
-        dateCreated: event.date_created,
+        dateCreated: event.dateCreated,
         totalForms,
         total_forms: totalForms,
         completedForms,
@@ -643,7 +643,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
     
     // Track which (study_event_id, crf_id) pairs already have event_crf entries
     const existingPairs = new Set(
-      existingResult.rows.map((r: any) => `${r.study_event_id}_${r.crf_id}`)
+      existingResult.rows.map((r: any) => `${r.studyEventId}_${r.crfId}`)
     );
 
     // Get forms ASSIGNED to events but WITHOUT data yet (from event_definition_crf)
@@ -680,44 +680,44 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
 
     // Map existing forms (with data)
     const forms = existingResult.rows.map((form: any) => ({
-      id: form.event_crf_id.toString(),
-      eventId: form.study_event_id.toString(),
-      eventName: form.event_name,
-      formId: form.crf_id.toString(),
-      formName: form.form_name,
-      formDescription: form.form_description || '',
-      versionId: form.crf_version_id?.toString() || '',
-      versionName: form.version_name || '',
-      interviewDate: form.date_interviewed,
-      interviewer: form.interviewer_name || '',
-      completionStatus: form.completion_status,
+      id: form.eventCrfId.toString(),
+      eventId: form.studyEventId.toString(),
+      eventName: form.eventName,
+      formId: form.crfId.toString(),
+      formName: form.formName,
+      formDescription: form.formDescription || '',
+      versionId: form.crfVersionId?.toString() || '',
+      versionName: form.versionName || '',
+      interviewDate: form.dateInterviewed,
+      interviewer: form.interviewerName || '',
+      completionStatus: form.completionStatus,
       status: form.status,
-      required: form.required_crf === true,
-      dateCreated: form.date_created,
-      dateUpdated: form.date_updated,
-      dateCompleted: form.date_completed,
-      dateValidated: form.date_validate,
-      validatorId: form.validator_id
+      required: form.requiredCrf === true,
+      dateCreated: form.dateCreated,
+      dateUpdated: form.dateUpdated,
+      dateCompleted: form.dateCompleted,
+      dateValidated: form.dateValidate,
+      validatorId: form.validatorId
     }));
 
     // Add assigned but not-yet-started forms (no event_crf entry yet)
     for (const assigned of assignedResult.rows) {
-      const pairKey = `${assigned.study_event_id}_${assigned.crf_id}`;
+      const pairKey = `${assigned.studyEventId}_${assigned.crfId}`;
       if (!existingPairs.has(pairKey)) {
         forms.push({
-          id: `pending_${assigned.study_event_id}_${assigned.crf_id}`,
-          eventId: assigned.study_event_id.toString(),
-          eventName: assigned.event_name,
-          formId: assigned.crf_id.toString(),
-          formName: assigned.form_name,
-          formDescription: assigned.form_description || '',
-          versionId: assigned.crf_version_id?.toString() || '',
-          versionName: assigned.version_name || '',
+          id: `pending_${assigned.studyEventId}_${assigned.crfId}`,
+          eventId: assigned.studyEventId.toString(),
+          eventName: assigned.eventName,
+          formId: assigned.crfId.toString(),
+          formName: assigned.formName,
+          formDescription: assigned.formDescription || '',
+          versionId: assigned.crfVersionId?.toString() || '',
+          versionName: assigned.versionName || '',
           interviewDate: null,
           interviewer: '',
           completionStatus: 'not_started',
           status: 'available',
-          required: assigned.required_crf === true,
+          required: assigned.requiredCrf === true,
           dateCreated: null,
           dateUpdated: null,
           dateCompleted: null,

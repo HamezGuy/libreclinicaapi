@@ -10,26 +10,26 @@ import { logger } from '../../config/logger';
 import { ForbiddenError } from '../../middleware/errorHandler.middleware';
 
 export interface FormFolder {
-  folder_id: number;
+  folderId: number;
   name: string;
   description?: string;
-  study_id?: number;
-  owner_id: number;
-  sort_order: number;
-  parent_folder_id?: number | null;
-  date_created: string;
-  date_updated: string;
-  form_count?: number;
-  crf_ids?: number[];
-  child_count?: number;
+  studyId?: number;
+  ownerId: number;
+  sortOrder: number;
+  parentFolderId?: number | null;
+  dateCreated: string;
+  dateUpdated: string;
+  formCount?: number;
+  crfIds?: number[];
+  childCount?: number;
 }
 
 export interface FormFolderItem {
-  folder_item_id: number;
-  folder_id: number;
-  crf_id: number;
-  sort_order: number;
-  date_added: string;
+  folderItemId: number;
+  folderId: number;
+  crfId: number;
+  sortOrder: number;
+  dateAdded: string;
 }
 
 export const getFolders = async (studyId?: number, userId?: number, parentFolderId?: number | null, organizationIds?: number[]): Promise<FormFolder[]> => {
@@ -97,7 +97,7 @@ export const assertFolderOrgAccess = async (folderId: number, organizationIds?: 
     [folderId]
   );
   if (result.rows.length === 0) return; // Will 404 downstream
-  const folderOrgId = result.rows[0].organization_id;
+  const folderOrgId = result.rows[0].organizationId;
   if (folderOrgId !== null && !organizationIds.includes(folderOrgId)) {
     throw new ForbiddenError('Folder belongs to a different organization');
   }
@@ -130,9 +130,9 @@ export const createFolder = async (
     INSERT INTO acc_form_folder (name, description, study_id, owner_id, sort_order, parent_folder_id, organization_id)
     VALUES ($1, $2, $3, $4, $5, $6, $7)
     RETURNING folder_id, name, description, study_id, owner_id, sort_order, parent_folder_id, organization_id, date_created, date_updated
-  `, [name, description || null, studyId || null, userId, maxOrder.rows[0].next_order, parentFolderId || null, organizationId || null]);
+  `, [name, description || null, studyId || null, userId, maxOrder.rows[0].nextOrder, parentFolderId || null, organizationId || null]);
 
-  return { ...result.rows[0], form_count: 0, crf_ids: [], child_count: 0 };
+  return { ...result.rows[0], formCount: 0, crfIds: [], childCount: 0 };
 };
 
 export const updateFolder = async (
@@ -193,7 +193,7 @@ export const addFormToFolder = async (folderId: number, crfId: number): Promise<
     VALUES ($1, $2, $3)
     ON CONFLICT (folder_id, crf_id) DO NOTHING
     RETURNING folder_item_id, folder_id, crf_id, sort_order, date_added
-  `, [folderId, crfId, maxOrder.rows[0].next_order]);
+  `, [folderId, crfId, maxOrder.rows[0].nextOrder]);
 
   return result.rows[0];
 };
@@ -236,7 +236,7 @@ export const getFolderDepth = async (folderId: number): Promise<number> => {
     )
     SELECT MAX(depth) AS current_depth FROM ancestors
   `, [folderId]);
-  return parseInt(result.rows[0]?.current_depth) || 0;
+  return parseInt(result.rows[0]?.currentDepth) || 0;
 };
 
 /**
@@ -298,7 +298,7 @@ export const getSubtreeDepth = async (folderId: number): Promise<number> => {
     )
     SELECT MAX(depth) AS max_depth FROM subtree
   `, [folderId]);
-  return parseInt(result.rows[0]?.max_depth) || 1;
+  return parseInt(result.rows[0]?.maxDepth) || 1;
 };
 
 /**
@@ -307,7 +307,7 @@ export const getSubtreeDepth = async (folderId: number): Promise<number> => {
  */
 export const moveChildrenToParent = async (folderId: number): Promise<number> => {
   const folder = await getFolderById(folderId);
-  const targetParent = folder?.parent_folder_id || null;
+  const targetParent = folder?.parentFolderId || null;
 
   const result = await pool.query(
     `UPDATE acc_form_folder SET parent_folder_id = $1, date_updated = NOW() WHERE parent_folder_id = $2`,

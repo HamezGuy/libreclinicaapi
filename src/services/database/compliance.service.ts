@@ -26,6 +26,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import crypto from 'crypto';
+import { verifyAndUpgrade } from '../../utils/password.util';
 
 /**
  * LibreClinica Audit Event Types
@@ -137,7 +138,7 @@ export const logLibreClinicaAuditEvent = async (
       params.eventCrfVersionId || null
     ]);
 
-    const auditId = result.rows[0].audit_id;
+    const auditId = result.rows[0].auditId;
     logger.info('LibreClinica audit event logged', { auditId, eventTypeId });
 
     return { success: true, auditId };
@@ -276,9 +277,10 @@ export const verifyPasswordForCompliance = async (
 ): Promise<{ success: boolean; message?: string }> => {
   try {
     const query = `
-      SELECT passwd, status_id 
-      FROM user_account 
-      WHERE user_id = $1
+      SELECT u.user_id, u.passwd, u.status_id, uae.bcrypt_passwd 
+      FROM user_account u 
+      LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id 
+      WHERE u.user_id = $1
     `;
 
     const result = await pool.query(query, [userId]);
@@ -290,15 +292,19 @@ export const verifyPasswordForCompliance = async (
     const user = result.rows[0];
 
     // status_id: 1 = active, 5 = locked
-    if (user.status_id !== 1) {
+    if (user.statusId !== 1) {
       return { success: false, message: 'Account is not active' };
     }
 
-    // Hash password using MD5 (LibreClinica compatibility)
-    const passwordHash = crypto.createHash('md5').update(password).digest('hex');
-
-    if (passwordHash !== user.passwd) {
+    const verification = await verifyAndUpgrade(password, user.passwd, user.bcryptPasswd || null);
+    if (!verification.valid) {
       return { success: false, message: 'Invalid password' };
+    }
+    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+      pool.query(
+        'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
+        [userId, verification.upgradedBcryptHash]
+      ).catch(() => {});
     }
 
     return { success: true };
@@ -364,17 +370,17 @@ export const getAuditTrail = async (
     return {
       success: true,
       data: result.rows.map(row => ({
-        auditId: row.audit_id,
-        auditDate: row.audit_date,
-        auditTable: row.audit_table,
-        entityId: row.entity_id,
-        entityName: row.entity_name,
-        oldValue: row.old_value,
-        newValue: row.new_value,
-        reasonForChange: row.reason_for_change,
-        eventType: row.event_type,
-        userName: row.user_name,
-        fullName: row.full_name
+        auditId: row.auditId,
+        auditDate: row.auditDate,
+        auditTable: row.auditTable,
+        entityId: row.entityId,
+        entityName: row.entityName,
+        oldValue: row.oldValue,
+        newValue: row.newValue,
+        reasonForChange: row.reasonForChange,
+        eventType: row.eventType,
+        userName: row.userName,
+        fullName: row.fullName
       }))
     };
 

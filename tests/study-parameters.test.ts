@@ -476,7 +476,7 @@ describe('Study Parameters - Key Naming and Data Integrity', () => {
 
       const updated = await studyService.getStudyById(studyId, userId);
       expect(updated.name).toBe('Lifecycle Test Study (Updated)');
-      expect(updated.expected_total_enrollment).toBe(600);
+      expect(updated.expectedTotalEnrollment).toBe(600);
       expect(updated.studyParameters['collectDob']).toBe('2');
       expect(updated.studyParameters['personIdShownOnCRF']).toBe('true');
 
@@ -489,7 +489,7 @@ describe('Study Parameters - Key Naming and Data Integrity', () => {
         'SELECT status_id FROM study WHERE study_id = $1',
         [studyId]
       );
-      expect(archived.rows[0].status_id).toBe(5);
+      expect(archived.rows[0].statusId).toBe(5);
     });
   });
 
@@ -554,36 +554,36 @@ describe('Study Parameters - Key Naming and Data Integrity', () => {
       const study = await studyService.getStudyById(studyId, userId);
       
       expect(study.name).toBe(fullStudyData.name);
-      expect(study.official_title).toBe(fullStudyData.officialTitle);
-      expect(study.secondary_identifier).toBe(fullStudyData.secondaryIdentifier);
+      expect(study.officialTitle).toBe(fullStudyData.officialTitle);
+      expect(study.secondaryIdentifier).toBe(fullStudyData.secondaryIdentifier);
       expect(study.summary).toBe(fullStudyData.summary);
-      expect(study.principal_investigator).toBe(fullStudyData.principalInvestigator);
+      expect(study.principalInvestigator).toBe(fullStudyData.principalInvestigator);
       expect(study.sponsor).toBe(fullStudyData.sponsor);
       expect(study.collaborators).toBe(fullStudyData.collaborators);
       expect(study.phase).toBe(fullStudyData.phase);
-      expect(study.protocol_type).toBe(fullStudyData.protocolType);
-      expect(study.expected_total_enrollment).toBe(fullStudyData.expectedTotalEnrollment);
-      expect(study.facility_name).toBe(fullStudyData.facilityName);
-      expect(study.facility_city).toBe(fullStudyData.facilityCity);
-      expect(study.facility_state).toBe(fullStudyData.facilityState);
-      expect(study.facility_zip).toBe(fullStudyData.facilityZip);
-      expect(study.facility_country).toBe(fullStudyData.facilityCountry);
-      expect(study.facility_recruitment_status).toBe(fullStudyData.facilityRecruitmentStatus);
-      expect(study.facility_contact_name).toBe(fullStudyData.facilityContactName);
-      expect(study.facility_contact_degree).toBe(fullStudyData.facilityContactDegree);
-      expect(study.facility_contact_phone).toBe(fullStudyData.facilityContactPhone);
-      expect(study.facility_contact_email).toBe(fullStudyData.facilityContactEmail);
-      expect(study.protocol_description).toBe(fullStudyData.protocolDescription);
-      expect(study.medline_identifier).toBe(fullStudyData.medlineIdentifier);
+      expect(study.protocolType).toBe(fullStudyData.protocolType);
+      expect(study.expectedTotalEnrollment).toBe(fullStudyData.expectedTotalEnrollment);
+      expect(study.facilityName).toBe(fullStudyData.facilityName);
+      expect(study.facilityCity).toBe(fullStudyData.facilityCity);
+      expect(study.facilityState).toBe(fullStudyData.facilityState);
+      expect(study.facilityZip).toBe(fullStudyData.facilityZip);
+      expect(study.facilityCountry).toBe(fullStudyData.facilityCountry);
+      expect(study.facilityRecruitmentStatus).toBe(fullStudyData.facilityRecruitmentStatus);
+      expect(study.facilityContactName).toBe(fullStudyData.facilityContactName);
+      expect(study.facilityContactDegree).toBe(fullStudyData.facilityContactDegree);
+      expect(study.facilityContactPhone).toBe(fullStudyData.facilityContactPhone);
+      expect(study.facilityContactEmail).toBe(fullStudyData.facilityContactEmail);
+      expect(study.protocolDescription).toBe(fullStudyData.protocolDescription);
+      expect(study.medlineIdentifier).toBe(fullStudyData.medlineIdentifier);
       expect(study.url).toBe(fullStudyData.url);
-      expect(study.url_description).toBe(fullStudyData.urlDescription);
+      expect(study.urlDescription).toBe(fullStudyData.urlDescription);
       expect(study.conditions).toBe(fullStudyData.conditions);
       expect(study.keywords).toBe(fullStudyData.keywords);
       expect(study.interventions).toBe(fullStudyData.interventions);
       expect(study.eligibility).toBe(fullStudyData.eligibility);
       expect(study.gender).toBe(fullStudyData.gender);
-      expect(study.age_min).toBe(fullStudyData.ageMin);
-      expect(study.age_max).toBe(fullStudyData.ageMax);
+      expect(study.ageMin).toBe(fullStudyData.ageMin);
+      expect(study.ageMax).toBe(fullStudyData.ageMax);
       expect(study.purpose).toBe(fullStudyData.purpose);
       expect(study.allocation).toBe(fullStudyData.allocation);
       expect(study.masking).toBe(fullStudyData.masking);
@@ -632,12 +632,12 @@ describe('Study Parameters - Key Naming and Data Integrity', () => {
 
       const study = await studyService.getStudyById(studyId, userId);
       expect(study.name).toBe('Updated Name');
-      expect(study.official_title).toBe('Updated Official Title');
-      expect(study.principal_investigator).toBe('Dr. Updated');
+      expect(study.officialTitle).toBe('Updated Official Title');
+      expect(study.principalInvestigator).toBe('Dr. Updated');
       expect(study.sponsor).toBe('Updated Pharma');
       expect(study.phase).toBe('IV');
-      expect(study.expected_total_enrollment).toBe(999);
-      expect(study.facility_name).toBe('Updated Hospital');
+      expect(study.expectedTotalEnrollment).toBe(999);
+      expect(study.facilityName).toBe('Updated Hospital');
       expect(study.purpose).toBe('Prevention');
     });
   });

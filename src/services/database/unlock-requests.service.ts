@@ -68,7 +68,7 @@ export const createUnlockRequest = async (
       await client.query('ROLLBACK');
       return { success: false, message: 'Form instance not found' };
     }
-    if (ecResult.rows[0].status_id !== 6) {
+    if (ecResult.rows[0].statusId !== 6) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Form is not locked — no unlock request needed' };
     }
@@ -84,7 +84,7 @@ export const createUnlockRequest = async (
       return {
         success: false,
         message: 'You already have a pending unlock request for this form',
-        requestId: existingResult.rows[0].unlock_request_id
+        requestId: existingResult.rows[0].unlockRequestId
       };
     }
 
@@ -104,7 +104,7 @@ export const createUnlockRequest = async (
       data.priority || 'medium'
     ]);
 
-    const requestId = insertResult.rows[0].unlock_request_id;
+    const requestId = insertResult.rows[0].unlockRequestId;
 
     // Audit log
     await client.query(`
@@ -133,7 +133,7 @@ export const createUnlockRequest = async (
 
       for (const row of adminResult.rows) {
         await notificationService.createNotification({
-          userId: row.user_id,
+          userId: row.userId,
           type: 'form_unlocked',
           title: 'Unlock Request Submitted',
           message: `A new unlock request has been submitted for review (priority: ${data.priority || 'medium'})`,
@@ -238,23 +238,23 @@ export const getUnlockRequests = async (filters: {
     return {
       success: true,
       data: dataResult.rows.map((r: any) => ({
-        unlockRequestId: r.unlock_request_id,
-        eventCrfId: r.event_crf_id,
-        studySubjectId: r.study_subject_id,
-        studyId: r.study_id,
-        requestedById: r.requested_by_id,
-        requestedByName: r.requested_by_name,
-        requestedAt: r.requested_at,
+        unlockRequestId: r.unlockRequestId,
+        eventCrfId: r.eventCrfId,
+        studySubjectId: r.studySubjectId,
+        studyId: r.studyId,
+        requestedById: r.requestedById,
+        requestedByName: r.requestedByName,
+        requestedAt: r.requestedAt,
         reason: r.reason,
         priority: r.priority,
         status: r.status,
-        reviewedById: r.reviewed_by_id,
-        reviewedByName: r.reviewed_by_name,
-        reviewedAt: r.reviewed_at,
-        reviewNotes: r.review_notes,
-        subjectLabel: r.subject_label,
-        crfName: r.crf_name,
-        eventName: r.event_name
+        reviewedById: r.reviewedById,
+        reviewedByName: r.reviewedByName,
+        reviewedAt: r.reviewedAt,
+        reviewNotes: r.reviewNotes,
+        subjectLabel: r.subjectLabel,
+        crfName: r.crfName,
+        eventName: r.eventName
       })),
       pagination: { page, limit, total }
     };
@@ -318,7 +318,7 @@ export const reviewUnlockRequest = async (
         SET status_id = 2, frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
         WHERE event_crf_id = $1 AND status_id = 6
         RETURNING event_crf_id
-      `, [request.event_crf_id, reviewerUserId]);
+      `, [request.eventCrfId, reviewerUserId]);
 
       if (unlockResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -330,7 +330,7 @@ export const reviewUnlockRequest = async (
         INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
         VALUES (CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'Data Unlocked via Unlock Request',
           (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
-      `, [reviewerUserId, request.event_crf_id]);
+      `, [reviewerUserId, request.eventCrfId]);
     }
 
     // Update the request record
@@ -364,13 +364,13 @@ export const reviewUnlockRequest = async (
         : `Your unlock request has been rejected. Reason: ${reviewNotes || 'No reason provided'}`;
 
       await notificationService.createNotification({
-        userId: request.requested_by_id,
+        userId: request.requestedById,
         type: action === 'approve' ? 'form_unlocked' : 'general',
         title: `Unlock Request ${newStatus.charAt(0).toUpperCase() + newStatus.slice(1)}`,
         message: approvedMsg,
         entityType: 'acc_unlock_request',
         entityId: requestId,
-        studyId: request.study_id,
+        studyId: request.studyId,
         linkUrl: '/data-lock-management'
       } as any);
     } catch (notifErr: any) {
@@ -421,7 +421,7 @@ export const cancelUnlockRequest = async (
       return { success: false, message: 'Only pending requests can be cancelled' };
     }
 
-    const isOwner = request.requested_by_id === callerUserId;
+    const isOwner = request.requestedById === callerUserId;
     const isAdmin = callerRole && ['admin', 'data_manager'].includes(callerRole.toLowerCase());
 
     if (!isOwner && !isAdmin) {

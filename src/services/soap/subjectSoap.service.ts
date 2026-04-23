@@ -37,7 +37,11 @@ interface SoapSubjectResponse {
  */
 function buildSubjectSoapEnvelope(methodName: string, bodyContent: string): string {
   const username = config.libreclinica.soapUsername || 'root';
-  const password = config.libreclinica.soapPassword || '25d55ad283aa400af464c76d713c07ad';
+  const password = config.libreclinica.soapPassword;
+
+  if (!password) {
+    throw new Error('SOAP password (libreclinica.soapPassword) is not configured');
+  }
   
   return `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" 
@@ -109,9 +113,8 @@ export const createSubject = async (
   userId: number,
   username: string
 ): Promise<ApiResponse<SoapSubjectResponse>> => {
-  // Accept either `label` (canonical, matches shared-types + Joi) or the
-  // deprecated `studySubjectId` alias for backward compatibility.
-  const subjectLabel = request.label ?? request.studySubjectId ?? '';
+  // `label` is the canonical field (matches shared-types + Joi validator).
+  const subjectLabel = request.label ?? '';
   if (!subjectLabel) {
     return {
       success: false,
@@ -137,7 +140,7 @@ export const createSubject = async (
       <v1:createRequest>
          <v1:studySubject>
             <v1:label>${escapeXml(subjectLabel)}</v1:label>
-            <v1:secondaryLabel>${escapeXml(request.secondaryId || '')}</v1:secondaryLabel>
+            <v1:secondaryLabel>${escapeXml(request.secondaryLabel || '')}</v1:secondaryLabel>
             <v1:enrollmentDate>${request.enrollmentDate || todayIso()}</v1:enrollmentDate>
             <v1:subject>
                <v1:uniqueIdentifier>${escapeXml(subjectLabel)}</v1:uniqueIdentifier>
@@ -377,7 +380,6 @@ export function parseSubjectListOdm(odmXml: string): any[] {
         if (keyMatch) {
           subjects.push({
             label: keyMatch[1],
-            studySubjectId: keyMatch[1]
           });
         }
       }

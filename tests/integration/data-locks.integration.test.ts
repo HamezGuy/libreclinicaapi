@@ -49,7 +49,7 @@ describe('Data Lock Integration Tests', () => {
       VALUES ('DL Integration Test', $1, 'interventional', 1, 1, NOW(), $1)
       RETURNING study_id
     `, [`DL_INT_${Date.now()}`]);
-    studyId = studyResult.rows[0].study_id;
+    studyId = studyResult.rows[0].studyId;
 
     // Assign root user to study
     await testDb.pool.query(`
@@ -63,7 +63,7 @@ describe('Data Lock Integration Tests', () => {
       VALUES ($1, 'DL-INT-001', 1, 1, NOW(), $2)
       RETURNING study_subject_id
     `, [studyId, `SS_DL_INT_${Date.now()}`]);
-    subjectId = subResult.rows[0].study_subject_id;
+    subjectId = subResult.rows[0].studySubjectId;
 
     // Create event, CRF, CRF version, event_crf
     const edResult = await testDb.pool.query(`
@@ -76,7 +76,7 @@ describe('Data Lock Integration Tests', () => {
       INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id)
       VALUES ($1, $2, NOW(), 1, 1, NOW(), 1)
       RETURNING study_event_id
-    `, [edResult.rows[0].study_event_definition_id, subjectId]);
+    `, [edResult.rows[0].studyEventDefinitionId, subjectId]);
 
     const crfResult = await testDb.pool.query(`
       INSERT INTO crf (source_study_id, name, status_id, owner_id, date_created, oc_oid)
@@ -88,14 +88,14 @@ describe('Data Lock Integration Tests', () => {
       INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
       VALUES ($1, 'v1.0', 1, 1, NOW(), $2)
       RETURNING crf_version_id
-    `, [crfResult.rows[0].crf_id, `FV_DL_INT_${Date.now()}`]);
+    `, [crfResult.rows[0].crfId, `FV_DL_INT_${Date.now()}`]);
 
     const ecResult = await testDb.pool.query(`
       INSERT INTO event_crf (study_event_id, crf_version_id, status_id, completion_status_id, owner_id, date_created, study_subject_id)
       VALUES ($1, $2, 1, 2, 1, NOW(), $3)
       RETURNING event_crf_id
-    `, [seResult.rows[0].study_event_id, cvResult.rows[0].crf_version_id, subjectId]);
-    eventCrfId = ecResult.rows[0].event_crf_id;
+    `, [seResult.rows[0].studyEventId, cvResult.rows[0].crfVersionId, subjectId]);
+    eventCrfId = ecResult.rows[0].eventCrfId;
   });
 
   afterAll(async () => {
@@ -220,8 +220,8 @@ describe('Data Lock Integration Tests', () => {
           'SELECT status_id, completion_status_id FROM event_crf WHERE event_crf_id = $1',
           [eventCrfId]
         );
-        expect(db1.rows[0].status_id).toBe(2);
-        expect(db1.rows[0].completion_status_id).toBe(4);
+        expect(db1.rows[0].statusId).toBe(2);
+        expect(db1.rows[0].completionStatusId).toBe(4);
       } else {
         // Force complete for test
         await testDb.pool.query(
@@ -250,7 +250,7 @@ describe('Data Lock Integration Tests', () => {
         'SELECT status_id, frozen FROM event_crf WHERE event_crf_id = $1',
         [eventCrfId]
       );
-      expect(db3.rows[0].status_id).toBe(6);
+      expect(db3.rows[0].statusId).toBe(6);
       expect(db3.rows[0].frozen).toBe(false); // D3 fix: frozen cleared on lock
 
       // Step 4: Verify form save is blocked
@@ -291,7 +291,7 @@ describe('Data Lock Integration Tests', () => {
         'SELECT status_id FROM event_crf WHERE event_crf_id = $1',
         [eventCrfId]
       );
-      expect(db4.rows[0].status_id).toBe(2); // D2 fix: restores to data complete
+      expect(db4.rows[0].statusId).toBe(2); // D2 fix: restores to data complete
     });
   });
 

@@ -12,6 +12,7 @@
 
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireRole } from '../middleware/authorization.middleware';
 import tasksController from '../controllers/tasks.controller';
 
 const router = Router();
@@ -34,11 +35,11 @@ router.get('/completed', tasksController.getCompletedTasks);
 // Get tasks by type
 router.get('/type/:type', tasksController.getTasksByType);
 
-// Get tasks for specific user
-router.get('/user/:username', tasksController.getUserTasks);
+// Get tasks for specific user (admin/data_manager only)
+router.get('/user/:username', requireRole('admin', 'data_manager'), tasksController.getUserTasks);
 
-// Get task summary for specific user
-router.get('/user/:username/summary', tasksController.getUserTaskSummary);
+// Get task summary for specific user (admin/data_manager only)
+router.get('/user/:username/summary', requireRole('admin', 'data_manager'), tasksController.getUserTaskSummary);
 
 // Complete a task
 router.patch('/:taskId/complete', tasksController.completeTask);

@@ -88,7 +88,7 @@ describe('Feature 1: Form Duplication (Fork)', () => {
     expect(forkResult.rows[0].crf_id).not.toBe(crfId); // Different ID
     
     // Copy versions
-    const forkedCrfId = forkResult.rows[0].crf_id;
+    const forkedCrfId = forkResult.rows[0].crfId;
     await pool.query(`
       INSERT INTO crf_version (crf_id, name, description, date_created, owner_id, status_id, oc_oid)
       SELECT $1, name, description, NOW(), $2, 1, $3
@@ -140,7 +140,7 @@ describe('Feature 3: Site Address Field (facility_address)', () => {
     ]);
     
     expect(result.rows.length).toBe(1);
-    expect(result.rows[0].facility_address).toBe(address);
+    expect(result.rows[0].facilityAddress).toBe(address);
   });
 
   it('should retrieve facility_address when fetching site details', async () => {
@@ -155,13 +155,13 @@ describe('Feature 3: Site Address Field (facility_address)', () => {
       RETURNING study_id
     `, [studyId, `SITE-GET-${Date.now()}`, 'Retrieve Test Site', address, userId, `S_GET_${Date.now()}`]);
     
-    const siteId = insertResult.rows[0].study_id;
+    const siteId = insertResult.rows[0].studyId;
     
     // Fetch and verify
     const fetchResult = await pool.query(
       'SELECT facility_address FROM study WHERE study_id = $1', [siteId]
     );
-    expect(fetchResult.rows[0].facility_address).toBe(address);
+    expect(fetchResult.rows[0].facilityAddress).toBe(address);
   });
 
   it('should update facility_address on an existing site', async () => {
@@ -174,7 +174,7 @@ describe('Feature 3: Site Address Field (facility_address)', () => {
       RETURNING study_id
     `, [studyId, `SITE-UPD-${Date.now()}`, 'Update Test Site', userId, `S_UPD_${Date.now()}`]);
     
-    const siteId = insertResult.rows[0].study_id;
+    const siteId = insertResult.rows[0].studyId;
     
     // Update with address
     const newAddress = '789 Clinical Ave, Bldg A';
@@ -186,7 +186,7 @@ describe('Feature 3: Site Address Field (facility_address)', () => {
     const result = await pool.query(
       'SELECT facility_address FROM study WHERE study_id = $1', [siteId]
     );
-    expect(result.rows[0].facility_address).toBe(newAddress);
+    expect(result.rows[0].facilityAddress).toBe(newAddress);
   });
 
   it('should handle NULL facility_address gracefully', async () => {
@@ -200,9 +200,9 @@ describe('Feature 3: Site Address Field (facility_address)', () => {
     
     const result = await pool.query(
       'SELECT facility_address FROM study WHERE study_id = $1',
-      [insertResult.rows[0].study_id]
+      [insertResult.rows[0].studyId]
     );
-    expect(result.rows[0].facility_address).toBeNull();
+    expect(result.rows[0].facilityAddress).toBeNull();
   });
 
   it('should include facility_address in study getById site listing', async () => {
@@ -224,9 +224,9 @@ describe('Feature 3: Site Address Field (facility_address)', () => {
     `, [studyId]);
     
     expect(sitesResult.rows.length).toBeGreaterThanOrEqual(1);
-    const site = sitesResult.rows.find((s: any) => s.facility_address === address);
+    const site = sitesResult.rows.find((s: any) => s.facilityAddress === address);
     expect(site).toBeDefined();
-    expect(site.facility_address).toBe(address);
+    expect(site.facilityAddress).toBe(address);
   });
 });
 
@@ -260,8 +260,8 @@ describe('Feature 4: Unscheduled Visit Scheduling', () => {
     `, [subjectId, eventDefId, 'Emergency Room', scheduledDate, userId, scheduledDate]);
     
     expect(result.rows.length).toBe(1);
-    expect(result.rows[0].is_unscheduled).toBe(true);
-    expect(new Date(result.rows[0].scheduled_date).toISOString()).toBe(scheduledDate.toISOString());
+    expect(result.rows[0].isUnscheduled).toBe(true);
+    expect(new Date(result.rows[0].scheduledDate).toISOString()).toBe(scheduledDate.toISOString());
   });
 
   it('should set scheduled_date to "now" when requested', async () => {
@@ -278,7 +278,7 @@ describe('Feature 4: Unscheduled Visit Scheduling', () => {
     `, [subjectId, eventDefId, 'Clinic', userId]);
     
     const after = new Date();
-    const scheduledDate = new Date(result.rows[0].scheduled_date);
+    const scheduledDate = new Date(result.rows[0].scheduledDate);
     
     // The scheduled_date should be approximately "now"
     expect(scheduledDate.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
@@ -302,7 +302,7 @@ describe('Feature 4: Unscheduled Visit Scheduling', () => {
       RETURNING is_unscheduled
     `, [subjectId, scheduledEventDefId, userId]);
     
-    expect(result.rows[0].is_unscheduled).toBe(false);
+    expect(result.rows[0].isUnscheduled).toBe(false);
   });
 
   it('should create event_crf records when scheduling unscheduled visits', async () => {
@@ -311,7 +311,7 @@ describe('Feature 4: Unscheduled Visit Scheduling', () => {
     const versionResult = await pool.query(
       'SELECT crf_version_id FROM crf_version WHERE crf_id = $1 LIMIT 1', [crfId]
     );
-    const crfVersionId = versionResult.rows[0].crf_version_id;
+    const crfVersionId = versionResult.rows[0].crfVersionId;
     
     await pool.query(`
       INSERT INTO event_definition_crf (
@@ -332,7 +332,7 @@ describe('Feature 4: Unscheduled Visit Scheduling', () => {
       RETURNING study_event_id
     `, [subjectId, eventDefId, userId]);
     
-    const studyEventId = eventResult.rows[0].study_event_id;
+    const studyEventId = eventResult.rows[0].studyEventId;
     
     // Create event_crf (simulating what scheduleSubjectEvent does)
     await pool.query(`
@@ -362,8 +362,8 @@ describe('Feature 4: Unscheduled Visit Scheduling', () => {
     `, [subjectId, eventDefId, userId]);
     
     // DB allows it, but we document this as a known constraint that the service should enforce
-    expect(result.rows[0].is_unscheduled).toBe(true);
-    expect(result.rows[0].scheduled_date).toBeNull();
+    expect(result.rows[0].isUnscheduled).toBe(true);
+    expect(result.rows[0].scheduledDate).toBeNull();
   });
 });
 
@@ -440,9 +440,9 @@ describe('Feature 5: Chronological Visit Ordering', () => {
     expect(result.rows.length).toBe(3);
     
     // Should be: Screening (Mar 1) -> Unscheduled (Mar 10) -> Follow-up (Mar 20)
-    expect(result.rows[0].event_name).toBe('Screening');
-    expect(result.rows[1].event_name).toBe('Unscheduled Emergency');
-    expect(result.rows[2].event_name).toBe('Week 4 Follow-up');
+    expect(result.rows[0].eventName).toBe('Screening');
+    expect(result.rows[1].eventName).toBe('Unscheduled Emergency');
+    expect(result.rows[2].eventName).toBe('Week 4 Follow-up');
   });
 
   it('should interleave unscheduled visits correctly between scheduled ones', async () => {
@@ -490,14 +490,14 @@ describe('Feature 5: Chronological Visit Ordering', () => {
     `, [subjectId]);
     
     expect(result.rows.length).toBe(4);
-    expect(result.rows[0].event_name).toBe('Week 1');        // April 1
-    expect(result.rows[1].event_name).toBe('Urgent Checkup'); // April 5 (unscheduled, interleaved)
-    expect(result.rows[2].event_name).toBe('Week 2');         // April 8
-    expect(result.rows[3].event_name).toBe('Week 3');         // April 15
+    expect(result.rows[0].eventName).toBe('Week 1');        // April 1
+    expect(result.rows[1].eventName).toBe('Urgent Checkup'); // April 5 (unscheduled, interleaved)
+    expect(result.rows[2].eventName).toBe('Week 2');         // April 8
+    expect(result.rows[3].eventName).toBe('Week 3');         // April 15
     
     // Verify the unscheduled one is flagged
-    expect(result.rows[1].is_unscheduled).toBe(true);
-    expect(result.rows[0].is_unscheduled).toBe(false);
+    expect(result.rows[1].isUnscheduled).toBe(true);
+    expect(result.rows[0].isUnscheduled).toBe(false);
   });
 
   it('should return status_id alias alongside subject_event_status_id', async () => {
@@ -534,11 +534,11 @@ describe('Feature 5: Chronological Visit Ordering', () => {
     
     expect(result.rows.length).toBe(1);
     // Both field names should be present for frontend compatibility
-    expect(result.rows[0].subject_event_status_id).toBeDefined();
-    expect(result.rows[0].status_id).toBeDefined();
-    expect(result.rows[0].subject_event_status_id).toBe(result.rows[0].status_id);
-    expect(result.rows[0].study_subject_id).toBeDefined();
-    expect(result.rows[0].event_type).toBeDefined();
+    expect(result.rows[0].subjectEventStatusId).toBeDefined();
+    expect(result.rows[0].statusId).toBeDefined();
+    expect(result.rows[0].subjectEventStatusId).toBe(result.rows[0].statusId);
+    expect(result.rows[0].studySubjectId).toBeDefined();
+    expect(result.rows[0].eventType).toBeDefined();
   });
 });
 
@@ -581,7 +581,7 @@ describe('Feature 2: Visit Duplication', () => {
     
     expect(duplicateResult.rows.length).toBe(1);
     expect(duplicateResult.rows[0].name).toBe('Baseline Visit (Copy)');
-    expect(duplicateResult.rows[0].study_event_definition_id).not.toBe(originalId);
+    expect(duplicateResult.rows[0].studyEventDefinitionId).not.toBe(originalId);
     expect(duplicateResult.rows[0].ordinal).toBe(2);
   });
 
@@ -613,7 +613,7 @@ describe('Feature 2: Visit Duplication', () => {
       RETURNING study_event_definition_id
     `, [`SE_DUP_${Date.now()}`, originalEventId]);
     
-    const dupEventId = dupEventResult.rows[0].study_event_definition_id;
+    const dupEventId = dupEventResult.rows[0].studyEventDefinitionId;
     
     // Copy CRF assignments
     await pool.query(`
@@ -640,9 +640,9 @@ describe('Feature 2: Visit Duplication', () => {
     );
     
     expect(dupCrfs.rows.length).toBe(originalCrfs.rows.length);
-    expect(dupCrfs.rows[0].crf_id).toBe(originalCrfs.rows[0].crf_id);
-    expect(dupCrfs.rows[0].required_crf).toBe(originalCrfs.rows[0].required_crf);
-    expect(dupCrfs.rows[0].electronic_signature).toBe(originalCrfs.rows[0].electronic_signature);
+    expect(dupCrfs.rows[0].crfId).toBe(originalCrfs.rows[0].crfId);
+    expect(dupCrfs.rows[0].requiredCrf).toBe(originalCrfs.rows[0].requiredCrf);
+    expect(dupCrfs.rows[0].electronicSignature).toBe(originalCrfs.rows[0].electronicSignature);
   });
 });
 
@@ -694,20 +694,20 @@ describe('Field Name Consistency: Frontend ↔ Backend', () => {
     const row = result.rows[0];
     
     // Verify ALL fields the frontend SubjectEvent interface expects
-    expect(row.study_event_id).toBeDefined();
-    expect(row.study_event_definition_id).toBeDefined();
-    expect(row.study_subject_id).toBeDefined();
-    expect(row.event_name).toBeDefined();
+    expect(row.studyEventId).toBeDefined();
+    expect(row.studyEventDefinitionId).toBeDefined();
+    expect(row.studySubjectId).toBeDefined();
+    expect(row.eventName).toBeDefined();
     expect(row.ordinal).toBeDefined();
-    expect(row.event_type).toBeDefined();
-    expect(row.status_id).toBeDefined();
-    expect(row.status_name).toBeDefined();
-    expect(row.date_start).toBeDefined();
+    expect(row.eventType).toBeDefined();
+    expect(row.statusId).toBeDefined();
+    expect(row.statusName).toBeDefined();
+    expect(row.dateStart).toBeDefined();
     expect(row.location).toBeDefined();
-    expect(row.scheduled_date).toBeDefined();
-    expect(typeof row.is_unscheduled).toBe('boolean');
-    expect(row.crf_count).toBeDefined();
-    expect(row.completed_crf_count).toBeDefined();
+    expect(row.scheduledDate).toBeDefined();
+    expect(typeof row.isUnscheduled).toBe('boolean');
+    expect(row.crfCount).toBeDefined();
+    expect(row.completedCrfCount).toBeDefined();
   });
 
   it('site data should include facility_address in all CRUD operations', async () => {
@@ -718,13 +718,13 @@ describe('Field Name Consistency: Frontend ↔ Backend', () => {
       INSERT INTO study (parent_study_id, unique_identifier, name, facility_address, status_id, owner_id, date_created, oc_oid)
       VALUES ($1, $2, $3, $4, 1, $5, NOW(), $6) RETURNING study_id
     `, [studyId, `CRUD-${Date.now()}`, 'CRUD Site', address, userId, `S_CRUD_${Date.now()}`]);
-    const siteId = createResult.rows[0].study_id;
+    const siteId = createResult.rows[0].studyId;
     
     // READ
     const readResult = await pool.query(
       'SELECT facility_address FROM study WHERE study_id = $1', [siteId]
     );
-    expect(readResult.rows[0].facility_address).toBe(address);
+    expect(readResult.rows[0].facilityAddress).toBe(address);
     
     // UPDATE
     const newAddress = '600 Innovation Way';
@@ -732,14 +732,14 @@ describe('Field Name Consistency: Frontend ↔ Backend', () => {
     const updateResult = await pool.query(
       'SELECT facility_address FROM study WHERE study_id = $1', [siteId]
     );
-    expect(updateResult.rows[0].facility_address).toBe(newAddress);
+    expect(updateResult.rows[0].facilityAddress).toBe(newAddress);
     
     // DELETE (soft delete via status)
     await pool.query('UPDATE study SET status_id = 5 WHERE study_id = $1', [siteId]);
     const deleteResult = await pool.query(
       'SELECT status_id, facility_address FROM study WHERE study_id = $1', [siteId]
     );
-    expect(deleteResult.rows[0].status_id).toBe(5);
-    expect(deleteResult.rows[0].facility_address).toBe(newAddress); // Still retained
+    expect(deleteResult.rows[0].statusId).toBe(5);
+    expect(deleteResult.rows[0].facilityAddress).toBe(newAddress); // Still retained
   });
 });

@@ -10,6 +10,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { validate, siteSchemas } from '../middleware/validation.middleware';
 import { pool } from '../config/database';
 
 const router = express.Router();
@@ -56,30 +57,30 @@ router.get('/study/:studyId', asyncHandler(async (req: Request, res: Response) =
 
   const sites = result.rows.map(row => ({
     id: row.id,
-    siteNumber: row.site_number || '',
-    siteName: row.site_name,
+    siteNumber: row.siteNumber || '',
+    siteName: row.siteName,
     description: row.description,
-    parentStudyId: row.parent_study_id,
-    parentStudyName: row.parent_study_name,
-    statusId: row.status_id,
-    status: row.status_id === 1 ? 'active' : row.status_id === 6 ? 'locked' : row.status_id === 9 ? 'frozen' : 'inactive',
-    principalInvestigator: row.principal_investigator,
-    facilityName: row.facility_name,
-    facilityAddress: row.facility_address,
-    facilityCity: row.facility_city,
-    facilityState: row.facility_state,
-    facilityZip: row.facility_zip,
-    facilityCountry: row.facility_country,
-    facilityRecruitmentStatus: row.facility_recruitment_status,
-    contactName: row.contact_name,
-    contactDegree: row.contact_degree,
-    contactEmail: row.contact_email,
-    contactPhone: row.contact_phone,
-    expectedTotalEnrollment: row.expected_total_enrollment,
-    enrolledSubjects: parseInt(row.enrolled_subjects) || 0,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    oid: row.oc_oid
+    parentStudyId: row.parentStudyId,
+    parentStudyName: row.parentStudyName,
+    statusId: row.statusId,
+    status: row.statusId === 1 ? 'active' : row.statusId === 6 ? 'locked' : row.statusId === 9 ? 'frozen' : 'inactive',
+    principalInvestigator: row.principalInvestigator,
+    facilityName: row.facilityName,
+    facilityAddress: row.facilityAddress,
+    facilityCity: row.facilityCity,
+    facilityState: row.facilityState,
+    facilityZip: row.facilityZip,
+    facilityCountry: row.facilityCountry,
+    facilityRecruitmentStatus: row.facilityRecruitmentStatus,
+    contactName: row.contactName,
+    contactDegree: row.contactDegree,
+    contactEmail: row.contactEmail,
+    contactPhone: row.contactPhone,
+    expectedTotalEnrollment: row.expectedTotalEnrollment,
+    enrolledSubjects: parseInt(row.enrolledSubjects) || 0,
+    dateCreated: row.dateCreated,
+    dateUpdated: row.dateUpdated,
+    oid: row.ocOid
   }));
 
   res.json({ success: true, data: sites });
@@ -107,24 +108,24 @@ router.get('/:siteId', asyncHandler(async (req: Request, res: Response) => {
   res.json({
     success: true,
     data: {
-      id: row.study_id,
-      siteNumber: row.secondary_identifier || '',
+      id: row.studyId,
+      siteNumber: row.secondaryIdentifier || '',
       siteName: row.name,
       description: row.summary,
-      parentStudyId: row.parent_study_id,
-      parentStudyName: row.parent_study_name,
-      statusId: row.status_id,
-      principalInvestigator: row.principal_investigator,
-      facilityName: row.facility_name,
-      facilityAddress: row.facility_address,
-      facilityCity: row.facility_city,
-      facilityState: row.facility_state,
-      facilityZip: row.facility_zip,
-      facilityCountry: row.facility_country,
-      expectedTotalEnrollment: row.expected_total_enrollment,
-      enrolledSubjects: parseInt(row.enrolled_subjects) || 0,
-      dateCreated: row.date_created,
-      dateUpdated: row.date_updated
+      parentStudyId: row.parentStudyId,
+      parentStudyName: row.parentStudyName,
+      statusId: row.statusId,
+      principalInvestigator: row.principalInvestigator,
+      facilityName: row.facilityName,
+      facilityAddress: row.facilityAddress,
+      facilityCity: row.facilityCity,
+      facilityState: row.facilityState,
+      facilityZip: row.facilityZip,
+      facilityCountry: row.facilityCountry,
+      expectedTotalEnrollment: row.expectedTotalEnrollment,
+      enrolledSubjects: parseInt(row.enrolledSubjects) || 0,
+      dateCreated: row.dateCreated,
+      dateUpdated: row.dateUpdated
     }
   });
 }));
@@ -133,7 +134,7 @@ router.get('/:siteId', asyncHandler(async (req: Request, res: Response) => {
  * POST /api/sites
  * Create a new site (child study)
  */
-router.post('/', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/', requireRole('admin', 'data_manager'), validate({ body: siteSchemas.create }), asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { parentStudyId, siteName, siteNumber, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description } = req.body;
 
@@ -159,14 +160,14 @@ router.post('/', requireRole('admin', 'data_manager'), asyncHandler(async (req: 
     return;
   }
 
-  res.status(201).json({ success: true, data: { siteId: result.rows[0].study_id } });
+  res.status(201).json({ success: true, data: { siteId: result.rows[0].studyId } });
 }));
 
 /**
  * PUT /api/sites/:siteId
  * Update a site
  */
-router.put('/:siteId', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
+router.put('/:siteId', requireRole('admin', 'data_manager'), validate({ body: siteSchemas.update }), asyncHandler(async (req: Request, res: Response) => {
   const { siteId } = req.params;
   const user = (req as any).user;
   const { siteName, siteNumber, principalInvestigator, facilityName, facilityAddress, facilityCity, facilityState, facilityZip, facilityCountry, expectedTotalEnrollment, description } = req.body;
@@ -189,7 +190,7 @@ router.put('/:siteId', requireRole('admin', 'data_manager'), asyncHandler(async 
  * PATCH /api/sites/:siteId/status
  * Update site status
  */
-router.patch('/:siteId/status', requireRole('admin'), asyncHandler(async (req: Request, res: Response) => {
+router.patch('/:siteId/status', requireRole('admin'), validate({ body: siteSchemas.updateStatus }), asyncHandler(async (req: Request, res: Response) => {
   const { siteId } = req.params;
   const { statusId } = req.body;
   const user = (req as any).user;
@@ -229,11 +230,11 @@ router.get('/:siteId/patients', asyncHandler(async (req: Request, res: Response)
   res.json({
     success: true,
     data: result.rows.map(r => ({
-      studySubjectId: r.study_subject_id,
+      studySubjectId: r.studySubjectId,
       label: r.label,
-      secondaryLabel: r.secondary_label,
-      enrollmentDate: r.enrollment_date,
-      statusId: r.status_id,
+      secondaryLabel: r.secondaryLabel,
+      enrollmentDate: r.enrollmentDate,
+      statusId: r.statusId,
       gender: r.gender
     })),
     total: parseInt(countResult.rows[0].total)
@@ -244,7 +245,7 @@ router.get('/:siteId/patients', asyncHandler(async (req: Request, res: Response)
  * POST /api/sites/transfer
  * Transfer a patient between sites
  */
-router.post('/transfer', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/transfer', requireRole('admin', 'data_manager'), validate({ body: siteSchemas.transfer }), asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { studySubjectId, fromSiteId, toSiteId, reason } = req.body;
 
@@ -295,10 +296,10 @@ router.get('/:siteId/staff', asyncHandler(async (req: Request, res: Response) =>
   res.json({
     success: true,
     data: result.rows.map(r => ({
-      userId: r.user_id,
+      userId: r.userId,
       username: r.username,
-      firstName: r.first_name,
-      lastName: r.last_name,
+      firstName: r.firstName,
+      lastName: r.lastName,
       email: r.email,
       role: r.role,
       isPrimary: r.role === 'investigator'
@@ -310,7 +311,7 @@ router.get('/:siteId/staff', asyncHandler(async (req: Request, res: Response) =>
  * POST /api/sites/:siteId/staff
  * Assign staff to a site
  */
-router.post('/:siteId/staff', requireRole('admin', 'data_manager'), asyncHandler(async (req: Request, res: Response) => {
+router.post('/:siteId/staff', requireRole('admin', 'data_manager'), validate({ body: siteSchemas.assignStaff }), asyncHandler(async (req: Request, res: Response) => {
   const { siteId } = req.params;
   const user = (req as any).user;
   const { username, userId, role } = req.body;
@@ -319,7 +320,7 @@ router.post('/:siteId/staff', requireRole('admin', 'data_manager'), asyncHandler
   let staffUsername = username;
   if (!staffUsername && userId) {
     const userResult = await pool.query(`SELECT user_name FROM user_account WHERE user_id = $1`, [userId]);
-    if (userResult.rows.length > 0) staffUsername = userResult.rows[0].user_name;
+    if (userResult.rows.length > 0) staffUsername = userResult.rows[0].userName;
   }
 
   if (!staffUsername || !role) {
@@ -384,12 +385,12 @@ router.get('/study/:studyId/stats', asyncHandler(async (req: Request, res: Respo
   res.json({
     success: true,
     data: {
-      totalSites: parseInt(row.total_sites) || 0,
-      activeSites: parseInt(row.active_sites) || 0,
-      totalSubjects: parseInt(row.total_subjects) || 0,
-      targetEnrollment: parseInt(row.target_enrollment) || 0,
-      averageEnrollment: (parseInt(row.active_sites) || 0) > 0 
-        ? Math.round((parseInt(row.total_subjects) || 0) / (parseInt(row.active_sites) || 1)) 
+      totalSites: parseInt(row.totalSites) || 0,
+      activeSites: parseInt(row.activeSites) || 0,
+      totalSubjects: parseInt(row.totalSubjects) || 0,
+      targetEnrollment: parseInt(row.targetEnrollment) || 0,
+      averageEnrollment: (parseInt(row.activeSites) || 0) > 0 
+        ? Math.round((parseInt(row.totalSubjects) || 0) / (parseInt(row.activeSites) || 1)) 
         : 0
     }
   });

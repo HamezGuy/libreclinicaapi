@@ -13,6 +13,49 @@ import { logger } from './logger';
 // DATE type (OID 1082) — return as YYYY-MM-DD string
 types.setTypeParser(1082, (val: string) => val); // Keep as-is, already YYYY-MM-DD from Postgres
 
+// ════════════════════════════════════════════════════════════════════
+// Row Key Camelization
+// ════════════════════════════════════════════════════════════════════
+// PostgreSQL columns are snake_case; TypeScript interfaces are camelCase.
+// Rather than scattering toXxx() converters across every service, we
+// transform row keys ONCE here at the infrastructure layer so every
+// query result is camelCase by the time service code touches it.
+
+function snakeToCamel(s: string): string {
+  return s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+}
+
+function camelizeRow(row: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const key of Object.keys(row)) {
+    out[snakeToCamel(key)] = row[key];
+  }
+  return out;
+}
+
+function camelizeRows(rows: any[]): any[] {
+  return rows.map(camelizeRow);
+}
+
+/**
+ * Wrap a raw PoolClient so that its query() method auto-camelizes
+ * result row keys. BEGIN/COMMIT/ROLLBACK are sent via the raw client
+ * (they return no meaningful rows). Everything the callback does
+ * goes through the camelizing wrapper.
+ */
+function wrapClientWithCamelize(rawClient: PoolClient): PoolClient {
+  const origQuery = rawClient.query.bind(rawClient);
+  const wrapped = Object.create(rawClient);
+  wrapped.query = async (...args: any[]) => {
+    const result = await (origQuery as any)(...args);
+    if (result?.rows) {
+      result.rows = camelizeRows(result.rows);
+    }
+    return result;
+  };
+  return wrapped as PoolClient;
+}
+
 class DatabaseConnection {
   public pool: Pool;
   
@@ -78,10 +121,14 @@ class DatabaseConnection {
       const result = await this.pool.query(text, params);
       const duration = Date.now() - start;
       
+      if (result.rows) {
+        result.rows = camelizeRows(result.rows);
+      }
+
       logger.debug('Database query executed', { 
         duration, 
         rows: result.rowCount,
-        query: text.substring(0, 100) // Log first 100 chars
+        query: text.substring(0, 100)
       });
       
       return result;
@@ -97,7 +144,8 @@ class DatabaseConnection {
   }
   
   async connect(): Promise<PoolClient> {
-    return this.pool.connect();
+    const raw = await this.pool.connect();
+    return wrapClientWithCamelize(raw);
   }
 
   async end(): Promise<void> {
@@ -105,21 +153,24 @@ class DatabaseConnection {
   }
   
   async getClient(): Promise<PoolClient> {
-    return this.pool.connect();
+    const raw = await this.pool.connect();
+    return wrapClientWithCamelize(raw);
   }
   
   async transaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+    const rawClient = await this.pool.connect();
+    const origQuery = rawClient.query.bind(rawClient);
+    const camelClient = wrapClientWithCamelize(rawClient);
     try {
-      await client.query('BEGIN');
-      const result = await callback(client);
-      await client.query('COMMIT');
+      await (origQuery as any)('BEGIN');
+      const result = await callback(camelClient);
+      await (origQuery as any)('COMMIT');
       return result;
     } catch (error) {
-      await client.query('ROLLBACK');
+      await (origQuery as any)('ROLLBACK');
       throw error;
     } finally {
-      client.release();
+      rawClient.release();
     }
   }
   

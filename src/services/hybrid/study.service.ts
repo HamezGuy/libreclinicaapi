@@ -45,8 +45,7 @@ import {
   Study, 
   StudyEventDefinition,
   CRF,
-  PaginatedResponse,
-  toStudy
+  PaginatedResponse
 } from '../../types/libreclinica-models';
 import { CreateStudyRequest, UpdateStudyRequest } from '../../types/study.dto';
 
@@ -119,17 +118,17 @@ export const getStudies = async (
       WHERE u.user_id = $1
     `;
     const adminCheck = await pool.query(adminCheckQuery, [userId]);
-    const isAdmin = adminCheck.rows[0]?.user_type_id === 1 || 
-                   adminCheck.rows[0]?.user_type_id === 4 ||
-                   adminCheck.rows[0]?.user_type === 'admin' ||
-                   adminCheck.rows[0]?.user_type === 'sysadmin';
+    const isAdmin = adminCheck.rows[0]?.userTypeId === 1 || 
+                   adminCheck.rows[0]?.userTypeId === 4 ||
+                   adminCheck.rows[0]?.userType === 'admin' ||
+                   adminCheck.rows[0]?.userType === 'sysadmin';
 
     // Check organization membership to scope studies
     const orgCheck = await pool.query(
       `SELECT organization_id, role FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
       [userId]
     );
-    const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+    const userOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
     const belongsToOrg = userOrgIds.length > 0;
     const isOrgAdmin = orgCheck.rows.some((r: any) => r.role === 'admin');
 
@@ -280,13 +279,13 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
       `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
       [userId]
     );
-    const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+    const userOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
     if (userOrgIds.length > 0) {
       const studyOwnerCheck = await pool.query(
         `SELECT s.owner_id FROM study s WHERE s.study_id = $1`, [studyId]
       );
       if (studyOwnerCheck.rows.length > 0) {
-        const studyOwnerId = studyOwnerCheck.rows[0].owner_id;
+        const studyOwnerId = studyOwnerCheck.rows[0].ownerId;
         // Check if study owner is in the same org(s) OR if caller is directly assigned
         const ownerInOrg = await pool.query(
           `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
@@ -422,46 +421,49 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
     const eventDefinitions = [];
     for (const event of eventsResult.rows) {
       const crfQuery = `
-        SELECT DISTINCT ON (edc.crf_id)
-          edc.crf_id,
-          edc.required_crf as required,
-          edc.double_entry as double_data_entry,
-          COALESCE(awc.requires_signature, edc.electronic_signature, false) as electronic_signature,
-          COALESCE(awc.requires_sdv, false) as requires_sdv,
-          COALESCE(awc.requires_dde, false) as requires_dde,
-          edc.hide_crf,
-          edc.ordinal,
-          c.name as crf_name
-        FROM event_definition_crf edc
-        INNER JOIN crf c ON edc.crf_id = c.crf_id
-        LEFT JOIN acc_form_workflow_config awc ON (
-          c.crf_id = awc.crf_id AND (awc.study_id IS NULL OR awc.study_id = edc.study_id)
-        )
-        WHERE edc.study_event_definition_id = $1 AND edc.study_id = $2 AND edc.status_id = 1
-        ORDER BY edc.crf_id, edc.ordinal
+        SELECT * FROM (
+          SELECT DISTINCT ON (edc.crf_id)
+            edc.crf_id,
+            edc.required_crf as required,
+            edc.double_entry as double_data_entry,
+            COALESCE(awc.requires_signature, edc.electronic_signature, false) as electronic_signature,
+            COALESCE(awc.requires_sdv, false) as requires_sdv,
+            COALESCE(awc.requires_dde, false) as requires_dde,
+            edc.hide_crf,
+            edc.ordinal,
+            c.name as crf_name
+          FROM event_definition_crf edc
+          INNER JOIN crf c ON edc.crf_id = c.crf_id
+          LEFT JOIN acc_form_workflow_config awc ON (
+            c.crf_id = awc.crf_id AND (awc.study_id IS NULL OR awc.study_id = edc.study_id)
+          )
+          WHERE edc.study_event_definition_id = $1 AND edc.study_id = $2 AND edc.status_id = 1
+          ORDER BY edc.crf_id, edc.ordinal
+        ) deduped
+        ORDER BY deduped.ordinal
       `;
-      const crfResult = await pool.query(crfQuery, [event.study_event_definition_id, studyId]);
+      const crfResult = await pool.query(crfQuery, [event.studyEventDefinitionId, studyId]);
       
       eventDefinitions.push({
-        studyEventDefinitionId: event.study_event_definition_id,
+        studyEventDefinitionId: event.studyEventDefinitionId,
         name: event.name,
         description: event.description,
         category: event.category,
         type: event.type,
         ordinal: event.ordinal,
         repeating: event.repeating,
-        oid: event.oc_oid,
-        scheduleDay: event.schedule_day,
-        minDay: event.min_day,
-        maxDay: event.max_day,
-        referenceEventId: event.reference_event_id,
+        oid: event.ocOid,
+        scheduleDay: event.scheduleDay,
+        minDay: event.minDay,
+        maxDay: event.maxDay,
+        referenceEventId: event.referenceEventId,
         crfAssignments: crfResult.rows.map((crf: any) => ({
-          crfId: crf.crf_id,
-          crfName: crf.crf_name,
+          crfId: crf.crfId,
+          crfName: crf.crfName,
           required: crf.required,
-          doubleDataEntry: crf.double_data_entry,
-          electronicSignature: crf.electronic_signature,
-          hideCrf: crf.hide_crf,
+          doubleDataEntry: crf.doubleDataEntry,
+          electronicSignature: crf.electronicSignature,
+          hideCrf: crf.hideCrf,
           ordinal: crf.ordinal
         }))
       });
@@ -494,7 +496,7 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
           FROM study_group sg
           WHERE sg.study_group_class_id = $1 AND (sg.status_id = 1 OR sg.status_id IS NULL)
         `;
-        groupsResult = await pool.query(groupsQuery, [gc.study_group_class_id]);
+        groupsResult = await pool.query(groupsQuery, [gc.studyGroupClassId]);
       } catch {
         // Fallback for minimal schema without status_id
         const groupsQueryMinimal = `
@@ -505,17 +507,17 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
           FROM study_group sg
           WHERE sg.study_group_class_id = $1
         `;
-        groupsResult = await pool.query(groupsQueryMinimal, [gc.study_group_class_id]);
+        groupsResult = await pool.query(groupsQueryMinimal, [gc.studyGroupClassId]);
       }
       
       groupClasses.push({
-        studyGroupClassId: gc.study_group_class_id,
+        studyGroupClassId: gc.studyGroupClassId,
         name: gc.name,
-        groupClassTypeId: gc.group_class_type_id,
-        customTypeName: gc.custom_type_name || undefined,
-        subjectAssignment: gc.subject_assignment,
+        groupClassTypeId: gc.groupClassTypeId,
+        customTypeName: gc.customTypeName || undefined,
+        subjectAssignment: gc.subjectAssignment,
         groups: groupsResult.rows.map((g: any) => ({
-          studyGroupId: g.study_group_id,
+          studyGroupId: g.studyGroupId,
           name: g.name,
           description: g.description
         }))
@@ -550,24 +552,24 @@ export const getStudyById = async (studyId: number, userId: number): Promise<any
     const sitesResult = await pool.query(sitesQuery, [studyId]);
     
     const sites = sitesResult.rows.map((site: any) => ({
-      studyId: site.study_id,
-      uniqueIdentifier: site.unique_identifier,
+      studyId: site.studyId,
+      uniqueIdentifier: site.uniqueIdentifier,
       name: site.name,
-      principalInvestigator: site.principal_investigator,
-      expectedTotalEnrollment: site.expected_total_enrollment,
-      facilityName: site.facility_name,
-      facilityAddress: site.facility_address,
-      facilityCity: site.facility_city,
-      facilityState: site.facility_state,
-      facilityZip: site.facility_zip,
-      facilityCountry: site.facility_country,
-      facilityRecruitmentStatus: site.facility_recruitment_status,
-      facilityContactName: site.facility_contact_name,
-      facilityContactDegree: site.facility_contact_degree,
-      facilityContactPhone: site.facility_contact_phone,
-      facilityContactEmail: site.facility_contact_email,
-      enrolledSubjects: parseInt(site.enrolled_subjects) || 0,
-      isActive: site.status_id === 1
+      principalInvestigator: site.principalInvestigator,
+      expectedTotalEnrollment: site.expectedTotalEnrollment,
+      facilityName: site.facilityName,
+      facilityAddress: site.facilityAddress,
+      facilityCity: site.facilityCity,
+      facilityState: site.facilityState,
+      facilityZip: site.facilityZip,
+      facilityCountry: site.facilityCountry,
+      facilityRecruitmentStatus: site.facilityRecruitmentStatus,
+      facilityContactName: site.facilityContactName,
+      facilityContactDegree: site.facilityContactDegree,
+      facilityContactPhone: site.facilityContactPhone,
+      facilityContactEmail: site.facilityContactEmail,
+      enrolledSubjects: parseInt(site.enrolledSubjects) || 0,
+      isActive: site.statusId === 1
     }));
 
     // Get study parameters
@@ -616,7 +618,7 @@ export const getStudyMetadata = async (
       return null;
     }
 
-    const studyOid = oidResult.rows[0].oc_oid || `S_${studyId}`;
+    const studyOid = oidResult.rows[0].ocOid || `S_${studyId}`;
 
     // Get metadata from SOAP
     const soapResult = await studySoap.getStudyMetadata(studyOid, userId, username);
@@ -730,6 +732,7 @@ export const createStudy = async (
     const existsResult = await client.query(existsQuery, [data.uniqueIdentifier]);
 
     if (existsResult.rows.length > 0) {
+      await client.query('ROLLBACK');
       return {
         success: false,
         message: 'Study with this identifier already exists'
@@ -864,7 +867,7 @@ export const createStudy = async (
       data.sdvRequirement || null                                     // $63 sdv_requirement
     ]);
 
-    const studyId = insertResult.rows[0].study_id;
+    const studyId = insertResult.rows[0].studyId;
 
     // Assign creator to study with admin role (using SAVEPOINT for Part 11 compliance)
     // SAVEPOINT allows this optional operation to fail without aborting the main transaction
@@ -877,7 +880,7 @@ export const createStudy = async (
           INSERT INTO study_user_role (
             role_name, study_id, status_id, owner_id, date_created, user_name
           ) VALUES ('admin', $1, 1, $2, NOW(), $3)
-        `, [studyId, userId, username.rows[0].user_name]);
+        `, [studyId, userId, username.rows[0].userName]);
       }
       await client.query('RELEASE SAVEPOINT assign_role');
     } catch (roleError: any) {
@@ -1010,7 +1013,7 @@ export const createStudy = async (
           eventOid
         ]);
         
-        const eventDefId = eventResult.rows[0].study_event_definition_id;
+        const eventDefId = eventResult.rows[0].studyEventDefinitionId;
         logger.info('Created study event definition', { eventDefId, name: eventDef.name });
         
         // Assign CRFs to this event if provided
@@ -1031,7 +1034,7 @@ export const createStudy = async (
                 ORDER BY crf_version_id DESC LIMIT 1
               `, [numCrfId]);
               if (versionResult.rows.length > 0) {
-                defaultVersionId = versionResult.rows[0].crf_version_id;
+                defaultVersionId = versionResult.rows[0].crfVersionId;
               }
             }
             
@@ -1089,7 +1092,7 @@ export const createStudy = async (
             userId
           ]);
           
-          const groupClassId = groupClassResult.rows[0].study_group_class_id;
+          const groupClassId = groupClassResult.rows[0].studyGroupClassId;
           logger.info('Created study group class', { groupClassId, name: groupClass.name });
           
             // Insert groups within this class
@@ -1392,7 +1395,7 @@ export const updateStudy = async (
                     `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
                     [crfAssign.crfId]
                   );
-                  if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crf_version_id;
+                  if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crfVersionId;
                 }
                 
                 await client.query(`
@@ -1471,7 +1474,7 @@ export const updateStudy = async (
               eventOid
             ]);
             
-            const newEventDefId = eventResult.rows[0].study_event_definition_id;
+            const newEventDefId = eventResult.rows[0].studyEventDefinitionId;
             
             // Add CRF assignments for the new event definition
             // Deduplicate by crfId to prevent unique-constraint violation if the
@@ -1489,7 +1492,7 @@ export const updateStudy = async (
                     `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id = 1 ORDER BY crf_version_id DESC LIMIT 1`,
                     [crfAssign.crfId]
                   );
-                  if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crf_version_id;
+                  if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crfVersionId;
                 }
                 
                 await client.query(`
@@ -1615,7 +1618,7 @@ export const updateStudy = async (
               userId
             ]);
             
-            const newGroupClassId = gcResult.rows[0].study_group_class_id;
+            const newGroupClassId = gcResult.rows[0].studyGroupClassId;
             
             if (groupClass.groups && Array.isArray(groupClass.groups)) {
               for (const group of groupClass.groups) {
@@ -1847,7 +1850,7 @@ export const archiveStudy = async (
 
     const study = studyCheck.rows[0];
 
-    if (study.status_id === 5) {
+    if (study.statusId === 5) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Study is already archived' };
     }
@@ -1877,7 +1880,7 @@ export const archiveStudy = async (
         'status_id: ' || $4::text, 'status_id: 5 (archived)',
         (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Study Updated' LIMIT 1)
       )
-    `, [userId, studyId, study.name, study.status_id]);
+    `, [userId, studyId, study.name, study.statusId]);
 
     await client.query('COMMIT');
 
@@ -1927,7 +1930,7 @@ export const restoreStudy = async (
 
     const study = studyCheck.rows[0];
 
-    if (study.status_id !== 5) {
+    if (study.statusId !== 5) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Study is not archived' };
     }
@@ -1981,14 +1984,14 @@ export const restoreStudy = async (
  */
 export const getArchivedStudies = async (
   userId: number
-): Promise<{ success: boolean; data: any[] }> => {
+): Promise<{ success: boolean; data: any[]; message?: string }> => {
   try {
     // Check organization membership to scope archived studies
     const orgCheck = await pool.query(
       `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
       [userId]
     );
-    const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+    const userOrgIds = orgCheck.rows.map((r: any) => r.organizationId);
 
     let orgFilter = '';
     const params: any[] = [];
@@ -2019,19 +2022,19 @@ export const getArchivedStudies = async (
     return {
       success: true,
       data: result.rows.map(row => ({
-        studyId: row.study_id,
+        studyId: row.studyId,
         name: row.name,
-        identifier: row.unique_identifier,
+        identifier: row.uniqueIdentifier,
         summary: row.summary,
-        dateCreated: row.date_created,
-        dateArchived: row.date_updated,
-        subjectCount: parseInt(row.subject_count) || 0,
-        siteCount: parseInt(row.site_count) || 0
+        dateCreated: row.dateCreated,
+        dateArchived: row.dateUpdated,
+        subjectCount: parseInt(row.subjectCount) || 0,
+        siteCount: parseInt(row.siteCount) || 0
       }))
     };
   } catch (error: any) {
     logger.error('Get archived studies error', { error: error.message });
-    return { success: true, data: [] };
+    return { success: false, data: [], message: error.message };
   }
 };
 
@@ -2083,8 +2086,8 @@ async function enrichStudiesWithStats(soapStudies: any[], userId: number): Promi
     // Create a map for quick lookup
     const statsMap = new Map();
     for (const row of statsResult.rows) {
-      statsMap.set(row.oc_oid, row);
-      statsMap.set(row.unique_identifier, row);
+      statsMap.set(row.ocOid, row);
+      statsMap.set(row.uniqueIdentifier, row);
     }
 
     // Merge SOAP data with DB stats
@@ -2092,12 +2095,12 @@ async function enrichStudiesWithStats(soapStudies: any[], userId: number): Promi
       const stats = statsMap.get(soapStudy.oid) || statsMap.get(soapStudy.identifier) || {};
       return {
         ...soapStudy,
-        study_id: stats.study_id,
+        study_id: stats.studyId,
         status: soapStudy.status || stats.status,
-        enrolled_subjects: parseInt(stats.enrolled_subjects) || 0,
-        active_subjects: parseInt(stats.active_subjects) || 0,
-        total_events: parseInt(stats.total_events) || 0,
-        total_forms: parseInt(stats.total_forms) || 0,
+        enrolled_subjects: parseInt(stats.enrolledSubjects) || 0,
+        active_subjects: parseInt(stats.activeSubjects) || 0,
+        total_events: parseInt(stats.totalEvents) || 0,
+        total_forms: parseInt(stats.totalForms) || 0,
         source: 'SOAP' // Mark as SOAP-sourced for Part 11 compliance
       };
     });

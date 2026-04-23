@@ -96,13 +96,13 @@ import formFolderRoutes from './routes/form-folder.routes';
 // ============================================================================
 // The following features use custom acc_* tables that extend LibreClinica.
 // These tables have been migrated and are available in the database.
-// Set environment variables to 'false' to disable specific features if needed.
+// Set environment variables to 'true' to enable specific features.
 // ============================================================================
-const ENABLE_EMAIL_NOTIFICATIONS = process.env.ENABLE_EMAIL_NOTIFICATIONS !== 'false';
-const ENABLE_SUBJECT_TRANSFERS = process.env.ENABLE_SUBJECT_TRANSFERS !== 'false';
-const ENABLE_ECONSENT = process.env.ENABLE_ECONSENT !== 'false';
-const ENABLE_EPRO = process.env.ENABLE_EPRO !== 'false';
-const ENABLE_RTSM = process.env.ENABLE_RTSM !== 'false';
+const ENABLE_EMAIL_NOTIFICATIONS = process.env.ENABLE_EMAIL_NOTIFICATIONS === 'true';
+const ENABLE_SUBJECT_TRANSFERS = process.env.ENABLE_SUBJECT_TRANSFERS === 'true';
+const ENABLE_ECONSENT = process.env.ENABLE_ECONSENT === 'true';
+const ENABLE_EPRO = process.env.ENABLE_EPRO === 'true';
+const ENABLE_RTSM = process.env.ENABLE_RTSM === 'true';
 
 // Routes are conditionally required below when features are enabled
 

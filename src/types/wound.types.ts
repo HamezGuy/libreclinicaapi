@@ -26,7 +26,7 @@ export type CalibrationMethod =
   | 'lidar'
   | 'arkit';
 
-export type SignatureMeaning = 
+export type WoundSignatureMeaning = 
   | 'AUTHORSHIP'
   | 'APPROVAL'
   | 'REVIEW'
@@ -160,16 +160,17 @@ export interface SubmitMeasurementsResponse {
 }
 
 // ============================================================================
-// ELECTRONIC SIGNATURE
+// WOUND ELECTRONIC SIGNATURE (distinct from the shared-types
+// ElectronicSignature used for clinical data submissions)
 // ============================================================================
 
-export interface ElectronicSignature {
+export interface WoundElectronicSignature {
   id: string;
   sessionId: string;
   userId: string;
   userName: string;
   userRole: string;
-  meaning: SignatureMeaning;
+  meaning: WoundSignatureMeaning;
   manifestation: string;
   dataHash: string;
   signatureValue: string;
@@ -181,13 +182,16 @@ export interface ElectronicSignature {
   createdAt: Date;
 }
 
+/** @deprecated Use WoundElectronicSignature directly. */
+export type WoundElectronicSignatureCompat = WoundElectronicSignature;
+
 export interface SignSessionRequest {
   sessionId: string;
   signature: {
     userId: string;
     userName: string;
     userRole: string;
-    meaning: SignatureMeaning;
+    meaning: WoundSignatureMeaning;
     manifestation: string;
     dataHash: string;
     signatureValue: string;
@@ -293,7 +297,7 @@ export interface PendingSession {
   patientId: string;
   templateId: string;
   measurements: Omit<WoundMeasurement, 'id' | 'sessionId' | 'createdAt'>[];
-  signature?: Omit<ElectronicSignature, 'id' | 'sessionId' | 'createdAt'>;
+  signature?: Omit<WoundElectronicSignature, 'id' | 'sessionId' | 'createdAt'>;
   auditTrail: AuditEntry[];
   createdAt: Date;
 }

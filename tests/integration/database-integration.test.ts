@@ -189,7 +189,7 @@ describe('Database Integration Tests', () => {
         if (result.rows.length > 0) {
           expect(result.rows[0].name).toBe('query_created');
           expect(result.rows[0].subject).toBeDefined();
-          expect(result.rows[0].html_body).toBeDefined();
+          expect(result.rows[0].htmlBody).toBeDefined();
         }
       });
     });
@@ -206,7 +206,7 @@ describe('Database Integration Tests', () => {
           return;
         }
 
-        const templateId = templateResult.rows[0].template_id;
+        const templateId = templateResult.rows[0].templateId;
         const testEmail = `db-test-${Date.now()}@test.example.com`;
 
         // INSERT
@@ -220,7 +220,7 @@ describe('Database Integration Tests', () => {
           RETURNING queue_id
         `, [templateId, testEmail]);
 
-        const queueId = insertResult.rows[0].queue_id;
+        const queueId = insertResult.rows[0].queueId;
         trackRecord('acc_email_queue', queueId);
 
         // RETRIEVE
@@ -230,7 +230,7 @@ describe('Database Integration Tests', () => {
         );
 
         expect(selectResult.rows.length).toBe(1);
-        expect(selectResult.rows[0].recipient_email).toBe(testEmail);
+        expect(selectResult.rows[0].recipientEmail).toBe(testEmail);
         expect(selectResult.rows[0].status).toBe('pending');
 
         // UPDATE
@@ -245,7 +245,7 @@ describe('Database Integration Tests', () => {
         );
 
         expect(updatedResult.rows[0].status).toBe('sent');
-        expect(updatedResult.rows[0].date_sent).not.toBeNull();
+        expect(updatedResult.rows[0].dateSent).not.toBeNull();
       });
     });
 
@@ -261,7 +261,7 @@ describe('Database Integration Tests', () => {
           return;
         }
 
-        const userId = userResult.rows[0].user_id;
+        const userId = userResult.rows[0].userId;
 
         // INSERT with ON CONFLICT
         const insertResult = await client.query(`
@@ -274,7 +274,7 @@ describe('Database Integration Tests', () => {
           RETURNING preference_id
         `, [userId]);
 
-        const prefId = insertResult.rows[0].preference_id;
+        const prefId = insertResult.rows[0].preferenceId;
         trackRecord('acc_notification_preference', prefId);
 
         // RETRIEVE
@@ -283,8 +283,8 @@ describe('Database Integration Tests', () => {
           [prefId]
         );
 
-        expect(selectResult.rows[0].email_enabled).toBe(true);
-        expect(selectResult.rows[0].digest_enabled).toBe(false);
+        expect(selectResult.rows[0].emailEnabled).toBe(true);
+        expect(selectResult.rows[0].digestEnabled).toBe(false);
       });
     });
   });
@@ -309,7 +309,7 @@ describe('Database Integration Tests', () => {
           return;
         }
 
-        const { study_subject_id, study_id } = subjectResult.rows[0];
+        const { studySubjectId: study_subject_id, studyId: study_id } = subjectResult.rows[0];
 
         // INSERT
         const insertResult = await client.query(`
@@ -321,7 +321,7 @@ describe('Database Integration Tests', () => {
           RETURNING transfer_id
         `, [study_subject_id, study_id]);
 
-        const transferId = insertResult.rows[0].transfer_id;
+        const transferId = insertResult.rows[0].transferId;
         trackRecord('acc_transfer_log', transferId);
 
         // RETRIEVE
@@ -330,9 +330,9 @@ describe('Database Integration Tests', () => {
           [transferId]
         );
 
-        expect(selectResult.rows[0].study_subject_id).toBe(study_subject_id);
-        expect(selectResult.rows[0].transfer_status).toBe('pending');
-        expect(selectResult.rows[0].reason_for_transfer).toBe('DB Integration Test');
+        expect(selectResult.rows[0].studySubjectId).toBe(study_subject_id);
+        expect(selectResult.rows[0].transferStatus).toBe('pending');
+        expect(selectResult.rows[0].reasonForTransfer).toBe('DB Integration Test');
 
         // UPDATE - Approve
         await client.query(`
@@ -346,7 +346,7 @@ describe('Database Integration Tests', () => {
           [transferId]
         );
 
-        expect(approvedResult.rows[0].transfer_status).toBe('approved');
+        expect(approvedResult.rows[0].transferStatus).toBe('approved');
       });
     });
   });
@@ -369,7 +369,7 @@ describe('Database Integration Tests', () => {
           RETURNING status_id
         `);
 
-        testStatusId = insertResult.rows[0].status_id;
+        testStatusId = insertResult.rows[0].statusId;
         trackRecord('acc_dde_status', testStatusId);
 
         // RETRIEVE
@@ -378,8 +378,8 @@ describe('Database Integration Tests', () => {
           [testStatusId]
         );
 
-        expect(selectResult.rows[0].first_entry_status).toBe('pending');
-        expect(selectResult.rows[0].dde_complete).toBe(false);
+        expect(selectResult.rows[0].firstEntryStatus).toBe('pending');
+        expect(selectResult.rows[0].ddeComplete).toBe(false);
       });
     });
 
@@ -397,7 +397,7 @@ describe('Database Integration Tests', () => {
           RETURNING entry_id
         `, [testStatusId]);
 
-        const entryId = insertResult.rows[0].entry_id;
+        const entryId = insertResult.rows[0].entryId;
         trackRecord('acc_dde_entry', entryId);
 
         // Verify foreign key relationship
@@ -408,7 +408,7 @@ describe('Database Integration Tests', () => {
           WHERE e.entry_id = $1
         `, [entryId]);
 
-        expect(joinResult.rows[0].status_id).toBe(testStatusId);
+        expect(joinResult.rows[0].statusId).toBe(testStatusId);
         expect(joinResult.rows[0].value).toBe('75');
       });
     });
@@ -429,7 +429,7 @@ describe('Database Integration Tests', () => {
           RETURNING discrepancy_id
         `, [testStatusId]);
 
-        const discrepancyId = insertResult.rows[0].discrepancy_id;
+        const discrepancyId = insertResult.rows[0].discrepancyId;
         trackRecord('acc_dde_discrepancy', discrepancyId);
 
         // Resolve discrepancy
@@ -445,8 +445,8 @@ describe('Database Integration Tests', () => {
           [discrepancyId]
         );
 
-        expect(resolvedResult.rows[0].resolution_status).toBe('first_correct');
-        expect(resolvedResult.rows[0].resolved_value).toBe('75');
+        expect(resolvedResult.rows[0].resolutionStatus).toBe('first_correct');
+        expect(resolvedResult.rows[0].resolvedValue).toBe('75');
       });
     });
   });
@@ -471,7 +471,7 @@ describe('Database Integration Tests', () => {
           RETURNING document_id
         `);
 
-        testDocumentId = insertResult.rows[0].document_id;
+        testDocumentId = insertResult.rows[0].documentId;
         trackRecord('acc_consent_document', testDocumentId);
 
         const selectResult = await client.query(
@@ -499,7 +499,7 @@ describe('Database Integration Tests', () => {
           RETURNING version_id
         `, [testDocumentId, JSON.stringify({ pages: [], acknowledgments: [] })]);
 
-        testVersionId = insertResult.rows[0].version_id;
+        testVersionId = insertResult.rows[0].versionId;
         trackRecord('acc_consent_version', testVersionId);
 
         // Verify relationship
@@ -510,7 +510,7 @@ describe('Database Integration Tests', () => {
           WHERE v.version_id = $1
         `, [testVersionId]);
 
-        expect(joinResult.rows[0].document_name).toBe('DB Test Consent');
+        expect(joinResult.rows[0].documentName).toBe('DB Test Consent');
       });
     });
 
@@ -531,7 +531,7 @@ describe('Database Integration Tests', () => {
           return;
         }
 
-        const subjectId = subjectResult.rows[0].study_subject_id;
+        const subjectId = subjectResult.rows[0].studySubjectId;
 
         const insertResult = await client.query(`
           INSERT INTO acc_subject_consent (
@@ -544,7 +544,7 @@ describe('Database Integration Tests', () => {
           RETURNING consent_id
         `, [subjectId, testVersionId]);
 
-        const consentId = insertResult.rows[0].consent_id;
+        const consentId = insertResult.rows[0].consentId;
         trackRecord('acc_subject_consent', consentId);
 
         // Verify full relationship chain
@@ -556,8 +556,8 @@ describe('Database Integration Tests', () => {
           WHERE c.consent_id = $1
         `, [consentId]);
 
-        expect(fullResult.rows[0].consent_status).toBe('consented');
-        expect(fullResult.rows[0].document_name).toBe('DB Test Consent');
+        expect(fullResult.rows[0].consentStatus).toBe('consented');
+        expect(fullResult.rows[0].documentName).toBe('DB Test Consent');
       });
     });
   });
@@ -581,7 +581,7 @@ describe('Database Integration Tests', () => {
           RETURNING instrument_id
         `, [JSON.stringify({ questions: [{ id: 1, text: 'Test question?' }] })]);
 
-        testInstrumentId = insertResult.rows[0].instrument_id;
+        testInstrumentId = insertResult.rows[0].instrumentId;
         trackRecord('acc_pro_instrument', testInstrumentId);
 
         const selectResult = await client.query(
@@ -589,7 +589,7 @@ describe('Database Integration Tests', () => {
           [testInstrumentId]
         );
 
-        expect(selectResult.rows[0].short_name).toBe('DB-TEST');
+        expect(selectResult.rows[0].shortName).toBe('DB-TEST');
         expect(selectResult.rows[0].status).toBe('active');
       });
     });
@@ -611,7 +611,7 @@ describe('Database Integration Tests', () => {
           return;
         }
 
-        const subjectId = subjectResult.rows[0].study_subject_id;
+        const subjectId = subjectResult.rows[0].studySubjectId;
 
         // Create assignment
         const assignmentResult = await client.query(`
@@ -624,7 +624,7 @@ describe('Database Integration Tests', () => {
           RETURNING assignment_id
         `, [subjectId, testInstrumentId]);
 
-        testAssignmentId = assignmentResult.rows[0].assignment_id;
+        testAssignmentId = assignmentResult.rows[0].assignmentId;
         trackRecord('acc_pro_assignment', testAssignmentId);
 
         // Submit response
@@ -637,7 +637,7 @@ describe('Database Integration Tests', () => {
           RETURNING response_id
         `, [testAssignmentId, JSON.stringify({ q1: 7 })]);
 
-        trackRecord('acc_pro_response', responseResult.rows[0].response_id);
+        trackRecord('acc_pro_response', responseResult.rows[0].responseId);
 
         // Update assignment status
         await client.query(`
@@ -655,8 +655,8 @@ describe('Database Integration Tests', () => {
         `, [testAssignmentId]);
 
         expect(verifyResult.rows[0].status).toBe('completed');
-        expect(verifyResult.rows[0].raw_score).toBe(7);
-        expect(verifyResult.rows[0].short_name).toBe('DB-TEST');
+        expect(verifyResult.rows[0].rawScore).toBe(7);
+        expect(verifyResult.rows[0].shortName).toBe('DB-TEST');
       });
     });
   });
@@ -682,7 +682,7 @@ describe('Database Integration Tests', () => {
           RETURNING kit_type_id
         `);
 
-        testKitTypeId = insertResult.rows[0].kit_type_id;
+        testKitTypeId = insertResult.rows[0].kitTypeId;
         trackRecord('acc_kit_type', testKitTypeId);
 
         const selectResult = await client.query(
@@ -691,7 +691,7 @@ describe('Database Integration Tests', () => {
         );
 
         expect(selectResult.rows[0].name).toBe('DB Test Treatment');
-        expect(selectResult.rows[0].is_blinded).toBe(true);
+        expect(selectResult.rows[0].isBlinded).toBe(true);
       });
     });
 
@@ -712,7 +712,7 @@ describe('Database Integration Tests', () => {
           RETURNING kit_id
         `, [testKitTypeId]);
 
-        testKitId = insertResult.rows[0].kit_id;
+        testKitId = insertResult.rows[0].kitId;
         trackRecord('acc_kit', testKitId);
 
         // Reserve kit
@@ -736,14 +736,14 @@ describe('Database Integration Tests', () => {
             UPDATE acc_kit 
             SET status = 'dispensed', dispensed_to_subject_id = $1, dispensed_by = 1, dispensed_at = CURRENT_TIMESTAMP
             WHERE kit_id = $2
-          `, [subjectResult.rows[0].study_subject_id, testKitId]);
+          `, [subjectResult.rows[0].studySubjectId, testKitId]);
 
           kitResult = await client.query(
             `SELECT * FROM acc_kit WHERE kit_id = $1`,
             [testKitId]
           );
           expect(kitResult.rows[0].status).toBe('dispensed');
-          expect(kitResult.rows[0].dispensed_to_subject_id).toBe(subjectResult.rows[0].study_subject_id);
+          expect(kitResult.rows[0].dispensedToSubjectId).toBe(subjectResult.rows[0].studySubjectId);
         }
       });
     });
@@ -762,7 +762,7 @@ describe('Database Integration Tests', () => {
           RETURNING kit_id
         `, [testKitTypeId]);
 
-        const shipKitId = kitResult.rows[0].kit_id;
+        const shipKitId = kitResult.rows[0].kitId;
         trackRecord('acc_kit', shipKitId);
 
         // Create shipment
@@ -774,7 +774,7 @@ describe('Database Integration Tests', () => {
           RETURNING shipment_id
         `);
 
-        testShipmentId = shipmentResult.rows[0].shipment_id;
+        testShipmentId = shipmentResult.rows[0].shipmentId;
         trackRecord('acc_kit_shipment', testShipmentId);
 
         // Add kit to shipment
@@ -800,7 +800,7 @@ describe('Database Integration Tests', () => {
         `, [testShipmentId]);
 
         expect(verifyResult.rows[0].status).toBe('in_transit');
-        expect(parseInt(verifyResult.rows[0].kit_count)).toBe(1);
+        expect(parseInt(verifyResult.rows[0].kitCount)).toBe(1);
       });
     });
 
@@ -815,7 +815,7 @@ describe('Database Integration Tests', () => {
           RETURNING log_id
         `);
 
-        trackRecord('acc_temperature_log', normalResult.rows[0].log_id);
+        trackRecord('acc_temperature_log', normalResult.rows[0].logId);
 
         // Excursion reading
         const excursionResult = await client.query(`
@@ -826,14 +826,14 @@ describe('Database Integration Tests', () => {
           RETURNING log_id
         `);
 
-        trackRecord('acc_temperature_log', excursionResult.rows[0].log_id);
+        trackRecord('acc_temperature_log', excursionResult.rows[0].logId);
 
         // Verify excursion count
         const excursionCount = await client.query(`
           SELECT COUNT(*) as count FROM acc_temperature_log
           WHERE study_id = 1 AND is_excursion = true
           AND log_id = ANY($1)
-        `, [[normalResult.rows[0].log_id, excursionResult.rows[0].log_id]]);
+        `, [[normalResult.rows[0].logId, excursionResult.rows[0].logId]]);
 
         expect(parseInt(excursionCount.rows[0].count)).toBe(1);
       });
@@ -858,7 +858,7 @@ describe('Database Integration Tests', () => {
           RETURNING queue_id
         `);
         
-        insertedId = result.rows[0].queue_id;
+        insertedId = result.rows[0].queueId;
         
         // Force an error
         await client.query('SELECT * FROM nonexistent_table');

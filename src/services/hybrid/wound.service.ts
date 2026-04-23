@@ -27,7 +27,7 @@ import {
   WoundMeasurement,
   SubmitMeasurementsRequest,
   SubmitMeasurementsResponse,
-  ElectronicSignature,
+  WoundElectronicSignature,
   SignSessionRequest,
   SignSessionResponse,
   SubmitToLibreClinicaRequest,
@@ -95,7 +95,7 @@ export const createSession = async (
     return {
       success: true,
       sessionId: result.rows[0].id,
-      createdAt: result.rows[0].created_at,
+      createdAt: result.rows[0].createdAt,
       status: result.rows[0].status
     };
   } catch (error: any) {
@@ -250,8 +250,8 @@ export const uploadImage = async (
       success: true,
       imageId: result.rows[0].id,
       hash: result.rows[0].hash,
-      hashVerified: result.rows[0].hash_verified,
-      size: result.rows[0].size_bytes
+      hashVerified: result.rows[0].hashVerified,
+      size: result.rows[0].sizeBytes
     };
   } catch (error: any) {
     logger.error('Upload image error', { error: error.message });
@@ -487,17 +487,17 @@ export const submitToLibreClinica = async (
       'SELECT storage_path FROM wound_images WHERE session_id = $1 ORDER BY created_at DESC LIMIT 1',
       [request.sessionId]
     );
-    const imageUrl = imageResult.rows.length > 0 ? imageResult.rows[0].storage_path : '';
+    const imageUrl = imageResult.rows.length > 0 ? imageResult.rows[0].storagePath : '';
 
     // Build form data for LibreClinica
     const formData: Record<string, any> = {
       IG_WOUND: {
-        WOUND_AREA: measurement.area_cm2.toFixed(2),
-        WOUND_PERIMETER: measurement.perimeter_cm.toFixed(2),
-        WOUND_MAX_LENGTH: measurement.max_length_cm.toFixed(2),
-        WOUND_MAX_WIDTH: measurement.max_width_cm.toFixed(2),
-        WOUND_DEPTH: measurement.max_depth_cm ? measurement.max_depth_cm.toFixed(2) : '',
-        WOUND_VOLUME: measurement.volume_cm3 ? measurement.volume_cm3.toFixed(2) : '',
+        WOUND_AREA: measurement.areaCm2.toFixed(2),
+        WOUND_PERIMETER: measurement.perimeterCm.toFixed(2),
+        WOUND_MAX_LENGTH: measurement.maxLengthCm.toFixed(2),
+        WOUND_MAX_WIDTH: measurement.maxWidthCm.toFixed(2),
+        WOUND_DEPTH: measurement.maxDepthCm ? measurement.maxDepthCm.toFixed(2) : '',
+        WOUND_VOLUME: measurement.volumeCm3 ? measurement.volumeCm3.toFixed(2) : '',
         WOUND_IMAGE_URL: imageUrl,
         WOUND_SESSION_ID: request.sessionId,
         WOUND_NOTES: measurement.notes || ''
@@ -505,16 +505,16 @@ export const submitToLibreClinica = async (
     };
 
     // Parse study/event IDs
-    const studyId = parseInt(session.study_id) || 1;
-    const studyEventDefId = parseInt(session.study_event_id) || 1;
-    const patientId = parseInt(session.patient_id);
+    const studyId = parseInt(session.studyId) || 1;
+    const studyEventDefId = parseInt(session.studyEventId) || 1;
+    const patientId = parseInt(session.patientId);
 
     // Get CRF ID from template
     const crfResult = await pool.query(
       `SELECT crf_id FROM crf WHERE oc_oid = $1 OR name LIKE $2 LIMIT 1`,
-      [session.template_id, `%${session.template_id}%`]
+      [session.templateId, `%${session.templateId}%`]
     );
-    const crfId = crfResult.rows.length > 0 ? crfResult.rows[0].crf_id : 1;
+    const crfId = crfResult.rows.length > 0 ? crfResult.rows[0].crfId : 1;
 
     // Submit via SOAP
     const soapRequest = {
@@ -540,7 +540,7 @@ export const submitToLibreClinica = async (
         userId: userId.toString(),
         userName,
         sessionId: request.sessionId,
-        patientId: session.patient_id,
+        patientId: session.patientId,
         details: {
           error: soapResponse.message || 'SOAP submission failed'
         }
@@ -567,7 +567,7 @@ export const submitToLibreClinica = async (
       userId: userId.toString(),
       userName,
       sessionId: request.sessionId,
-      patientId: session.patient_id,
+      patientId: session.patientId,
       details: {
         libreclinica_id: libreClinicaId,
         measurement_count: '1'
@@ -696,52 +696,52 @@ export const submitAuditEntries = async (entries: AuditEntry[]): Promise<{ recei
 function mapSessionRow(row: any): WoundSession {
   return {
     id: row.id,
-    patientId: row.patient_id,
-    templateId: row.template_id,
-    studyId: row.study_id,
-    studyEventId: row.study_event_id,
-    siteId: row.site_id,
-    deviceId: row.device_id,
+    patientId: row.patientId,
+    templateId: row.templateId,
+    studyId: row.studyId,
+    studyEventId: row.studyEventId,
+    siteId: row.siteId,
+    deviceId: row.deviceId,
     source: row.source,
     status: row.status,
-    createdByUserId: row.created_by_user_id,
-    createdByUserName: row.created_by_user_name,
-    submittedByUserId: row.submitted_by_user_id,
-    submittedByUserName: row.submitted_by_user_name,
-    libreClinicaId: row.libreclinica_id,
-    studyEventDataId: row.study_event_data_id,
-    itemDataId: row.item_data_id,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    capturedAt: row.captured_at,
-    signedAt: row.signed_at,
-    submittedAt: row.submitted_at,
-    confirmedAt: row.confirmed_at,
-    dataHash: row.data_hash
+    createdByUserId: row.createdByUserId,
+    createdByUserName: row.createdByUserName,
+    submittedByUserId: row.submittedByUserId,
+    submittedByUserName: row.submittedByUserName,
+    libreClinicaId: row.libreclinicaId,
+    studyEventDataId: row.studyEventDataId,
+    itemDataId: row.itemDataId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    capturedAt: row.capturedAt,
+    signedAt: row.signedAt,
+    submittedAt: row.submittedAt,
+    confirmedAt: row.confirmedAt,
+    dataHash: row.dataHash
   };
 }
 
 function mapMeasurementRow(row: any): WoundMeasurement {
   return {
     id: row.id,
-    sessionId: row.session_id,
-    imageId: row.image_id,
-    areaCm2: parseFloat(row.area_cm2),
-    perimeterCm: parseFloat(row.perimeter_cm),
-    maxLengthCm: parseFloat(row.max_length_cm),
-    maxWidthCm: parseFloat(row.max_width_cm),
-    maxDepthCm: row.max_depth_cm ? parseFloat(row.max_depth_cm) : undefined,
-    volumeCm3: row.volume_cm3 ? parseFloat(row.volume_cm3) : undefined,
-    boundaryPoints: typeof row.boundary_points === 'string' 
-      ? JSON.parse(row.boundary_points) 
-      : row.boundary_points,
-    pointCount: row.point_count,
-    calibrationMethod: row.calibration_method,
-    pixelsPerCm: parseFloat(row.pixels_per_cm),
-    dataHash: row.data_hash,
+    sessionId: row.sessionId,
+    imageId: row.imageId,
+    areaCm2: parseFloat(row.areaCm2),
+    perimeterCm: parseFloat(row.perimeterCm),
+    maxLengthCm: parseFloat(row.maxLengthCm),
+    maxWidthCm: parseFloat(row.maxWidthCm),
+    maxDepthCm: row.maxDepthCm ? parseFloat(row.maxDepthCm) : undefined,
+    volumeCm3: row.volumeCm3 ? parseFloat(row.volumeCm3) : undefined,
+    boundaryPoints: typeof row.boundaryPoints === 'string' 
+      ? JSON.parse(row.boundaryPoints) 
+      : row.boundaryPoints,
+    pointCount: row.pointCount,
+    calibrationMethod: row.calibrationMethod,
+    pixelsPerCm: parseFloat(row.pixelsPerCm),
+    dataHash: row.dataHash,
     notes: row.notes,
-    measuredAt: row.measured_at,
-    createdAt: row.created_at
+    measuredAt: row.measuredAt,
+    createdAt: row.createdAt
   };
 }
 

@@ -14,6 +14,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import Joi from 'joi';
 import * as controller from '../controllers/subject.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
@@ -34,7 +35,7 @@ router.use(authMiddleware);
  * Get study parameters and group classes needed for enrollment form
  * This tells the frontend how to configure the enrollment form dynamically
  */
-router.get('/enrollment-config/:studyId', async (req: Request, res: Response) => {
+router.get('/enrollment-config/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), async (req: Request, res: Response) => {
   try {
     const studyId = parseInt(req.params.studyId);
     
@@ -91,7 +92,7 @@ router.get('/enrollment-config/:studyId', async (req: Request, res: Response) =>
  * Check if a subject label already exists in a study (for real-time validation)
  * Returns { exists: boolean } so the frontend can warn before submission
  */
-router.get('/check-label/:studyId/:label', async (req: Request, res: Response) => {
+router.get('/check-label/:studyId/:label', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required(), label: Joi.string().trim().min(1).max(30).required() }) }), async (req: Request, res: Response) => {
   try {
     const studyId = parseInt(req.params.studyId);
     const label = decodeURIComponent(req.params.label).trim();

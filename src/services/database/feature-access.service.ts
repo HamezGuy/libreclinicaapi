@@ -61,7 +61,7 @@ export async function getUserFeatureAccess(userId: number): Promise<UserFeatureA
       INNER JOIN user_account ua ON sur.user_name = ua.user_name
       WHERE ua.user_id = $1 AND sur.status_id = 1
     `, [userId]);
-    const rawRoleNames = roleResult.rows.map(r => r.role_name);
+    const rawRoleNames = roleResult.rows.map(r => r.roleName);
 
     // Normalize legacy role names to canonical names via the alias map.
     // e.g., 'coordinator' (legacy DB) → 'data_manager' (new canonical),
@@ -93,7 +93,7 @@ export async function getUserFeatureAccess(userId: number): Promise<UserFeatureA
       FROM acc_user_feature_access
       WHERE user_id = $1
     `, [userId]);
-    const overrides = new Map(overridesResult.rows.map(r => [r.feature_key, r]));
+    const overrides = new Map(overridesResult.rows.map(r => [r.featureKey, r]));
 
     // Get role defaults for ALL of the user's roles (union of canonical + raw names)
     let roleFeatures = new Set<string>();
@@ -103,36 +103,36 @@ export async function getUserFeatureAccess(userId: number): Promise<UserFeatureA
         FROM acc_role_default_features
         WHERE role_name = ANY($1) AND is_enabled = true
       `, [userRoles]);
-      roleFeatures = new Set(roleDefaultsResult.rows.map(r => r.feature_key));
+      roleFeatures = new Set(roleDefaultsResult.rows.map(r => r.featureKey));
     }
 
     // Resolve effective access for each feature
     const featureAccess: UserFeatureAccess[] = [];
     for (const feature of featuresResult.rows) {
-      const override = overrides.get(feature.feature_key);
+      const override = overrides.get(feature.featureKey);
       
       let isEnabled = false;
       let source: UserFeatureAccess['source'] = 'denied';
 
       if (override) {
         // Per-user override takes priority
-        isEnabled = override.is_enabled;
+        isEnabled = override.isEnabled;
         source = 'user_override';
-      } else if (roleFeatures.has(feature.feature_key)) {
+      } else if (roleFeatures.has(feature.featureKey)) {
         // Role default
         isEnabled = true;
         source = 'role_default';
       }
 
       featureAccess.push({
-        feature_key: feature.feature_key,
-        display_name: feature.display_name,
+        feature_key: feature.featureKey,
+        display_name: feature.displayName,
         description: feature.description,
         category: feature.category,
         is_enabled: isEnabled,
         source,
-        granted_by: override?.granted_by,
-        granted_at: override?.granted_at,
+        granted_by: override?.grantedBy,
+        granted_at: override?.grantedAt,
       });
     }
 
@@ -256,7 +256,7 @@ export async function hasFeatureAccess(userId: number, featureKey: string): Prom
     `, [userId, featureKey]);
 
     if (overrideResult.rows.length > 0) {
-      return overrideResult.rows[0].is_enabled;
+      return overrideResult.rows[0].isEnabled;
     }
 
     // Check role defaults - get user's roles, normalize, then check
@@ -270,8 +270,8 @@ export async function hasFeatureAccess(userId: number, featureKey: string): Prom
     // Normalize role names through alias map
     const allRoleNames: string[] = [];
     for (const row of rolesResult.rows) {
-      allRoleNames.push(row.role_name.toLowerCase());
-      const resolved = getRoleByName(row.role_name);
+      allRoleNames.push(row.roleName.toLowerCase());
+      const resolved = getRoleByName(row.roleName);
       if (resolved.id !== 0) allRoleNames.push(resolved.name);
     }
     const uniqueRoles = [...new Set(allRoleNames)];
@@ -300,7 +300,7 @@ export async function getRoleDefaultFeatures(roleName: string): Promise<string[]
       SELECT feature_key FROM acc_role_default_features
       WHERE role_name = $1 AND is_enabled = true
     `, [roleName]);
-    return result.rows.map(r => r.feature_key);
+    return result.rows.map(r => r.featureKey);
   } catch (error: any) {
     logger.error('Error getting role default features', { roleName, error: error.message });
     return [];

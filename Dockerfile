@@ -9,9 +9,11 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# shared-types must be in ../shared-types relative to /app so the
+# "file:../shared-types" dependency in package.json resolves during npm ci.
+COPY shared-types /shared-types
+
 # Production dependencies only — npm ci uses the lockfile for deterministic builds.
-# The wildcard on package-lock.json ensures the build fails loudly if it's missing
-# rather than silently falling back to npm install.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 

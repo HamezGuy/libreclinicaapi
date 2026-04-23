@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
+import Joi from 'joi';
 import { WorkflowController } from '../controllers/workflow.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { validate, commonSchemas } from '../middleware/validation.middleware';
 import * as workflowService from '../services/database/workflow.service';
 import { pool } from '../config/database';
 
@@ -75,7 +77,7 @@ router.post(
 // ── CRF Lifecycle Status ──────────────────────────────────────────────
 
 // Get lifecycle status for a single CRF instance
-router.get('/crf-lifecycle/:eventCrfId', async (req: Request, res: Response) => {
+router.get('/crf-lifecycle/:eventCrfId', validate({ params: Joi.object({ eventCrfId: Joi.number().integer().positive().required() }) }), async (req: Request, res: Response) => {
   try {
     const eventCrfId = parseInt(req.params.eventCrfId);
     const status = await workflowService.getCrfLifecycleStatus(eventCrfId);
@@ -91,7 +93,7 @@ router.get('/crf-lifecycle/:eventCrfId', async (req: Request, res: Response) => 
 
 // Get lifecycle status for all patient CRF instances in a study (dashboard data).
 // This is the core endpoint for tracking each form per patient — NOT the base template.
-router.get('/crf-lifecycle-summary/:studyId', async (req: Request, res: Response) => {
+router.get('/crf-lifecycle-summary/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), async (req: Request, res: Response) => {
   try {
     const studyId = parseInt(req.params.studyId);
     
@@ -132,7 +134,7 @@ router.get('/crf-lifecycle-summary/:studyId', async (req: Request, res: Response
         WHERE study_id = $1 OR study_id IS NULL
       `, [studyId]);
       for (const row of cfgResult.rows) {
-        configMap[row.crf_id] = row;
+        configMap[row.crfId] = row;
       }
     } catch { /* table may not exist */ }
 
@@ -152,44 +154,44 @@ router.get('/crf-lifecycle-summary/:studyId', async (req: Request, res: Response
         GROUP BY dem.event_crf_id
       `, [studyId]);
       for (const row of qResult.rows) {
-        queryCountMap[row.event_crf_id] = parseInt(row.cnt);
+        queryCountMap[row.eventCrfId] = parseInt(row.cnt);
       }
     } catch { /* ignore */ }
 
     // Compute lifecycle status for each instance
     const items = ecResult.rows.map((row: any) => {
-      const cfg = configMap[row.crf_id] || {};
-      const requiresSDV = cfg.requires_sdv || false;
-      const requiresSignature = cfg.requires_signature || false;
-      const requiresDDE = cfg.requires_dde || false;
+      const cfg = configMap[row.crfId] || {};
+      const requiresSDV = cfg.requiresSdv || false;
+      const requiresSignature = cfg.requiresSignature || false;
+      const requiresDDE = cfg.requiresDde || false;
 
       // Determine current phase
       let currentPhase = 'not_started';
-      if (row.status_id === 6) {
+      if (row.statusId === 6) {
         currentPhase = 'locked';
-      } else if (row.completion_status_id >= 5 || row.is_signed) {
+      } else if (row.completionStatusId >= 5 || row.isSigned) {
         currentPhase = 'signed';
-      } else if (row.sdv_verified) {
+      } else if (row.sdvVerified) {
         currentPhase = 'sdv_complete';
-      } else if (row.completion_status_id >= 4 || row.status_id === 2) {
+      } else if (row.completionStatusId >= 4 || row.statusId === 2) {
         currentPhase = 'data_entry_complete';
-      } else if (row.completion_status_id >= 2) {
+      } else if (row.completionStatusId >= 2) {
         currentPhase = 'data_entry';
       }
 
       return {
-        eventCrfId: row.event_crf_id,
-        crfId: row.crf_id,
-        formName: row.form_name,
-        versionName: row.version_name,
-        subjectId: row.subject_id,
-        subjectLabel: row.subject_label,
-        visitName: row.visit_name,
-        studyEventId: row.study_event_id,
+        eventCrfId: row.eventCrfId,
+        crfId: row.crfId,
+        formName: row.formName,
+        versionName: row.versionName,
+        subjectId: row.subjectId,
+        subjectLabel: row.subjectLabel,
+        visitName: row.visitName,
+        studyEventId: row.studyEventId,
         currentPhase,
-        formStarted: row.form_started,
-        formUpdated: row.form_updated,
-        openQueryCount: queryCountMap[row.event_crf_id] || 0,
+        formStarted: row.formStarted,
+        formUpdated: row.formUpdated,
+        openQueryCount: queryCountMap[row.eventCrfId] || 0,
         workflowConfig: { requiresSDV, requiresSignature, requiresDDE }
       };
     });

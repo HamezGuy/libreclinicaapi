@@ -200,6 +200,17 @@ export function deserializeCorrectionForDisplay(
 const DATA_TABLE_PATH_RE = /^(.+)\[(\d+|\*)\]\.(.+)$/;
 const QUESTION_TABLE_PATH_RE = /^([^.[]+)\.([^.]+)\.([^.]+)$/;
 
+export interface CellTarget {
+  tableFieldPath: string;
+  tableItemId?: number;
+  columnId: string;
+  columnType?: string;
+  rowIndex?: number;
+  rowId?: string;
+  allRows: boolean;
+  tableType: 'table' | 'question_table';
+}
+
 export interface CellTypeInfo {
   cellType: string;
   cellOptions?: { label: string; value: string }[];
@@ -209,7 +220,9 @@ export interface CellTypeInfo {
 
 /**
  * Parse a cellPath and extract the column key.
- * Returns null if the string is not a valid cell path.
+ * @deprecated Prefer using CellTarget.columnId directly when a structured
+ * cell_target is available. This regex-based parser is kept only for legacy
+ * data that predates the cell_target JSONB migration.
  */
 export function parseCellPathColumnKey(cellPath: string | null | undefined): string | null {
   if (!cellPath) return null;
@@ -222,14 +235,22 @@ export function parseCellPathColumnKey(cellPath: string | null | undefined): str
 
 /**
  * Resolve the specific column type for a cell-level query from
- * the parent field's FieldTypeInfo. Returns null if the cellPath
- * is not a valid cell path or the column cannot be found.
+ * the parent field's FieldTypeInfo.
+ *
+ * Accepts either a structured CellTarget (preferred — no regex) or a
+ * legacy cellPath string (regex fallback for pre-migration data).
  */
 export function resolveCellTypeInfo(
-  cellPath: string | null | undefined,
+  cellPathOrTarget: string | CellTarget | null | undefined,
   parentFieldTypeInfo: FieldTypeInfo
 ): CellTypeInfo | null {
-  const colKey = parseCellPathColumnKey(cellPath);
+  // Extract the column key from either the structured target or legacy string
+  let colKey: string | null = null;
+  if (cellPathOrTarget && typeof cellPathOrTarget === 'object') {
+    colKey = cellPathOrTarget.columnId || null;
+  } else {
+    colKey = parseCellPathColumnKey(cellPathOrTarget as string | null | undefined);
+  }
   if (!colKey) return null;
 
   // Check data table columns
@@ -247,19 +268,24 @@ export function resolveCellTypeInfo(
     }
   }
 
-  // Check question table answer columns
+  // Check question table answer columns across ALL rows (rows can have
+  // varying answer column definitions in some templates — inspecting only
+  // the first row would return the wrong type for every other row).
   if (parentFieldTypeInfo.questionRows?.length) {
-    const firstRow = parentFieldTypeInfo.questionRows[0];
-    const ansCol = (firstRow as any).answerColumns?.find(
-      (c: any) => c.id === colKey
-    );
-    if (ansCol) {
-      return {
-        cellType: ansCol.type || 'text',
-        cellOptions: ansCol.options,
-        cellMin: ansCol.min,
-        cellMax: ansCol.max,
-      };
+    for (const row of parentFieldTypeInfo.questionRows) {
+      const cols = (row as any).answerColumns;
+      if (!Array.isArray(cols)) continue;
+      const ansCol = cols.find(
+        (c: any) => c.id === colKey || c.name === colKey || (c as any).key === colKey
+      );
+      if (ansCol) {
+        return {
+          cellType: ansCol.type || 'text',
+          cellOptions: ansCol.options,
+          cellMin: ansCol.min,
+          cellMax: ansCol.max,
+        };
+      }
     }
   }
 

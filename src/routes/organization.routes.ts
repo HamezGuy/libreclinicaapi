@@ -11,29 +11,30 @@ import express from 'express';
 import * as controller from '../controllers/organization.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { publicRegistrationRateLimiter } from '../middleware/rateLimiter.middleware';
 
 const router = express.Router();
 
 // ============================================================================
-// PUBLIC ROUTES (no auth required)
+// PUBLIC ROUTES (no auth required) — rate limited to prevent abuse
 // ============================================================================
 
 // Organization registration (creates org + admin user)
-router.post('/register', controller.register);
+router.post('/register', publicRegistrationRateLimiter, controller.register);
 
 // Code validation and registration
-router.post('/codes/validate', controller.validateCode);
-router.post('/codes/register', controller.registerWithCode);
+router.post('/codes/validate', publicRegistrationRateLimiter, controller.validateCode);
+router.post('/codes/register', publicRegistrationRateLimiter, controller.registerWithCode);
 
 // Access requests (public submission)
-router.post('/access-requests', controller.createAccessRequest);
+router.post('/access-requests', publicRegistrationRateLimiter, controller.createAccessRequest);
 
 // Public organization directory (for access request form - returns only name/type of active orgs)
 router.get('/public', controller.listPublic);
 
 // Invitation validation and acceptance (public)
 router.get('/invitations/:token/validate', controller.validateInvitation);
-router.post('/invitations/:token/accept', controller.acceptInvitation);
+router.post('/invitations/:token/accept', publicRegistrationRateLimiter, controller.acceptInvitation);
 
 // ============================================================================
 // AUTHENTICATED ROUTES

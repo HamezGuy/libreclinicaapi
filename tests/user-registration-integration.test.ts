@@ -36,7 +36,7 @@ describe('User Registration Integration Tests', () => {
         'Test study for user registration tests', 1, 'Registration test protocol', 'Dr. Test'
       ) RETURNING study_id
     `);
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
   });
 
   afterAll(async () => {
@@ -92,27 +92,27 @@ describe('User Registration Integration Tests', () => {
       const user = dbUser.rows[0];
       
       // Core fields
-      expect(user.user_name).toBe(userData.username);
-      expect(user.first_name).toBe(userData.firstName);
-      expect(user.last_name).toBe(userData.lastName);
+      expect(user.userName).toBe(userData.username);
+      expect(user.firstName).toBe(userData.firstName);
+      expect(user.lastName).toBe(userData.lastName);
       expect(user.email).toBe(userData.email);
       expect(user.phone).toBe(userData.phone);
-      expect(user.institutional_affiliation).toBe(userData.institutionalAffiliation);
+      expect(user.institutionalAffiliation).toBe(userData.institutionalAffiliation);
       
       // Password should be MD5 hashed
       expect(user.passwd).toBe(hashPasswordMD5(userData.password));
-      expect(user.passwd_timestamp).toBeDefined();
+      expect(user.passwdTimestamp).toBeDefined();
       
       // Status fields
       expect(user.enabled).toBe(true);
-      expect(user.account_non_locked).toBe(true);
-      expect(user.status_id).toBe(1);
-      expect(user.owner_id).toBe(creatorId);
-      expect(user.date_created).toBeDefined();
+      expect(user.accountNonLocked).toBe(true);
+      expect(user.statusId).toBe(1);
+      expect(user.ownerId).toBe(creatorId);
+      expect(user.dateCreated).toBeDefined();
       
       // User type (coordinator maps to user type 2)
-      expect(user.user_type_id).toBe(2);
-      expect(user.user_type).toBe('user');
+      expect(user.userTypeId).toBe(2);
+      expect(user.userType).toBe('user');
     });
 
     it('should create admin user with user_type_id = 1', async () => {
@@ -136,7 +136,7 @@ describe('User Registration Integration Tests', () => {
         [result.userId]
       );
       
-      expect(dbUser.rows[0].user_type_id).toBe(1);
+      expect(dbUser.rows[0].userTypeId).toBe(1);
     });
 
     it('should automatically assign user to study with role', async () => {
@@ -162,9 +162,9 @@ describe('User Registration Integration Tests', () => {
       `, [userData.username, testStudyId]);
 
       expect(roleResult.rows.length).toBe(1);
-      expect(roleResult.rows[0].role_name).toBe('Investigator');
-      expect(roleResult.rows[0].status_id).toBe(1);
-      expect(roleResult.rows[0].owner_id).toBe(creatorId);
+      expect(roleResult.rows[0].roleName).toBe('Investigator');
+      expect(roleResult.rows[0].statusId).toBe(1);
+      expect(roleResult.rows[0].ownerId).toBe(creatorId);
     });
   });
 
@@ -205,7 +205,7 @@ describe('User Registration Integration Tests', () => {
       `, [roleTestUsername, testStudyId]);
 
       expect(roleResult.rows.length).toBe(1);
-      expect(roleResult.rows[0].role_name).toBe('coordinator');
+      expect(roleResult.rows[0].roleName).toBe('coordinator');
     });
 
     it('should assign user to study with investigator role', async () => {
@@ -223,7 +223,7 @@ describe('User Registration Integration Tests', () => {
         WHERE user_name = $1 AND study_id = $2
       `, [roleTestUsername, testStudyId]);
 
-      expect(roleResult.rows[0].role_name).toBe('Investigator');
+      expect(roleResult.rows[0].roleName).toBe('Investigator');
     });
 
     it('should assign user to study with data entry (ra) role', async () => {
@@ -241,7 +241,7 @@ describe('User Registration Integration Tests', () => {
         WHERE user_name = $1 AND study_id = $2
       `, [roleTestUsername, testStudyId]);
 
-      expect(roleResult.rows[0].role_name).toBe('ra');
+      expect(roleResult.rows[0].roleName).toBe('ra');
     });
 
     it('should assign user to study with monitor role', async () => {
@@ -259,7 +259,7 @@ describe('User Registration Integration Tests', () => {
         WHERE user_name = $1 AND study_id = $2
       `, [roleTestUsername, testStudyId]);
 
-      expect(roleResult.rows[0].role_name).toBe('monitor');
+      expect(roleResult.rows[0].roleName).toBe('monitor');
     });
 
     it('should update existing role when reassigning', async () => {
@@ -283,7 +283,7 @@ describe('User Registration Integration Tests', () => {
       `, [roleTestUsername, testStudyId]);
 
       expect(roleResult.rows.length).toBe(1);
-      expect(roleResult.rows[0].role_name).toBe('coordinator');
+      expect(roleResult.rows[0].roleName).toBe('coordinator');
     });
 
     it('should reject invalid role names', async () => {
@@ -325,11 +325,11 @@ describe('User Registration Integration Tests', () => {
       const user = await userService.getUserById(retrievalTestUserId);
 
       expect(user).toBeDefined();
-      expect(user?.user_name).toBeDefined();
-      expect(user?.first_name).toBeDefined();
-      expect(user?.last_name).toBeDefined();
+      expect(user?.userName).toBeDefined();
+      expect(user?.firstName).toBeDefined();
+      expect(user?.lastName).toBeDefined();
       expect(user?.email).toBeDefined();
-      expect(user?.study_ids).toBeDefined();
+      expect(user?.studyIds).toBeDefined();
       expect(user?.roles).toBeDefined();
     });
 
@@ -525,7 +525,7 @@ describe('User Registration Integration Tests', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toBeDefined();
-      expect(result.data?.user_name).toBe(authTestUsername);
+      expect(result.data?.userName).toBe(authTestUsername);
     });
 
     it('should reject wrong password', async () => {
@@ -563,7 +563,7 @@ describe('User Registration Integration Tests', () => {
         '127.0.0.1'
       );
 
-      const roles = await authService.getUserRoles(authResult.data!.user_id, testStudyId);
+      const roles = await authService.getUserRoles(authResult.data!.userId, testStudyId);
 
       expect(roles).toContain('coordinator');
     });
@@ -597,7 +597,7 @@ describe('User Registration Integration Tests', () => {
       expect(result.success).toBe(true);
 
       const user = await userService.getUserById(updateTestUserId);
-      expect(user?.first_name).toBe('UpdatedFirst');
+      expect(user?.firstName).toBe('UpdatedFirst');
     });
 
     it('should update user lastName', async () => {
@@ -610,7 +610,7 @@ describe('User Registration Integration Tests', () => {
       expect(result.success).toBe(true);
 
       const user = await userService.getUserById(updateTestUserId);
-      expect(user?.last_name).toBe('UpdatedLast');
+      expect(user?.lastName).toBe('UpdatedLast');
     });
 
     it('should update user email', async () => {
@@ -654,10 +654,10 @@ describe('User Registration Integration Tests', () => {
       expect(result.success).toBe(true);
 
       const user = await userService.getUserById(updateTestUserId);
-      expect(user?.first_name).toBe(updates.firstName);
-      expect(user?.last_name).toBe(updates.lastName);
+      expect(user?.firstName).toBe(updates.firstName);
+      expect(user?.lastName).toBe(updates.lastName);
       expect(user?.phone).toBe(updates.phone);
-      expect(user?.institutional_affiliation).toBe(updates.institutionalAffiliation);
+      expect(user?.institutionalAffiliation).toBe(updates.institutionalAffiliation);
     });
   });
 
@@ -738,8 +738,8 @@ describe('User Registration Integration Tests', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].user_id).toBe(creatorId);
-      expect(auditResult.rows[0].new_value).toBe(userData.username);
+      expect(auditResult.rows[0].userId).toBe(creatorId);
+      expect(auditResult.rows[0].newValue).toBe(userData.username);
     });
 
     it('should create audit log entry on user update', async () => {

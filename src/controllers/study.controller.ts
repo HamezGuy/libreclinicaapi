@@ -183,42 +183,41 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
     const result = await pool.query(query, [parseInt(id)]);
 
     const sites = result.rows.map(site => ({
-      id: site.study_id.toString(),
-      siteNumber: site.unique_identifier,
+      id: site.studyId.toString(),
+      siteNumber: site.uniqueIdentifier,
       siteName: site.name,
-      uniqueIdentifier: site.unique_identifier,
+      uniqueIdentifier: site.uniqueIdentifier,
       description: site.summary || '',
-      principalInvestigator: site.principal_investigator || '',
-      status: mapSiteStatus(site.status_id),
+      principalInvestigator: site.principalInvestigator || '',
+      status: mapSiteStatus(site.statusId),
       address: {
-        facility: site.facility_name || '',
-        street: site.facility_address || '',
-        city: site.facility_city || '',
-        state: site.facility_state || '',
-        zip: site.facility_zip || '',
-        country: site.facility_country || ''
+        facility: site.facilityName || '',
+        street: site.facilityAddress || '',
+        city: site.facilityCity || '',
+        state: site.facilityState || '',
+        zip: site.facilityZip || '',
+        country: site.facilityCountry || ''
       },
-      // Also provide flat field names for frontend compatibility
-      facilityName: site.facility_name || '',
-      facilityAddress: site.facility_address || '',
-      facilityCity: site.facility_city || '',
-      facilityState: site.facility_state || '',
-      facilityZip: site.facility_zip || '',
-      facilityCountry: site.facility_country || '',
-      facilityRecruitmentStatus: site.facility_recruitment_status || '',
-      facilityContactName: site.facility_contact_name || '',
-      facilityContactDegree: site.facility_contact_degree || '',
-      facilityContactEmail: site.facility_contact_email || '',
-      facilityContactPhone: site.facility_contact_phone || '',
+      facilityName: site.facilityName || '',
+      facilityAddress: site.facilityAddress || '',
+      facilityCity: site.facilityCity || '',
+      facilityState: site.facilityState || '',
+      facilityZip: site.facilityZip || '',
+      facilityCountry: site.facilityCountry || '',
+      facilityRecruitmentStatus: site.facilityRecruitmentStatus || '',
+      facilityContactName: site.facilityContactName || '',
+      facilityContactDegree: site.facilityContactDegree || '',
+      facilityContactEmail: site.facilityContactEmail || '',
+      facilityContactPhone: site.facilityContactPhone || '',
       contact: {
-        name: site.facility_contact_name || '',
-        degree: site.facility_contact_degree || '',
-        email: site.facility_contact_email || '',
-        phone: site.facility_contact_phone || ''
+        name: site.facilityContactName || '',
+        degree: site.facilityContactDegree || '',
+        email: site.facilityContactEmail || '',
+        phone: site.facilityContactPhone || ''
       },
-      targetEnrollment: site.expected_total_enrollment || 0,
-      actualEnrollment: parseInt(site.enrolled_subjects) || 0,
-      dateCreated: site.date_created
+      targetEnrollment: site.expectedTotalEnrollment || 0,
+      actualEnrollment: parseInt(site.enrolledSubjects) || 0,
+      dateCreated: site.dateCreated
     }));
 
     res.json({ success: true, data: sites });
@@ -268,20 +267,20 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
     const result = await pool.query(query, [parseInt(id)]);
 
     const events = result.rows.map(event => ({
-      id: event.study_event_definition_id.toString(),
-      oid: event.oc_oid,
+      id: event.studyEventDefinitionId.toString(),
+      oid: event.ocOid,
       name: event.name,
       description: event.description || '',
       type: event.type || 'scheduled',
       repeating: event.repeating || false,
       category: event.category || '',
       order: event.ordinal,
-      status: event.status_name,
-      formCount: parseInt(event.form_count) || 0,
-      scheduleDay: event.schedule_day,
-      minDay: event.min_day,
-      maxDay: event.max_day,
-      referenceEventId: event.reference_event_id
+      status: event.statusName,
+      formCount: parseInt(event.formCount) || 0,
+      scheduleDay: event.scheduleDay,
+      minDay: event.minDay,
+      maxDay: event.maxDay,
+      referenceEventId: event.referenceEventId
     }));
 
     res.json({ success: true, data: events });
@@ -338,22 +337,22 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
       success: true,
       data: {
         enrollment: {
-          target: parseInt(stats.target_enrollment) || 0,
-          actual: parseInt(stats.total_subjects) || 0,
-          active: parseInt(stats.active_subjects) || 0,
-          completed: parseInt(stats.completed_subjects) || 0,
-          percentage: stats.target_enrollment > 0 
-            ? Math.round((stats.total_subjects / stats.target_enrollment) * 100) 
+          target: parseInt(stats.targetEnrollment) || 0,
+          actual: parseInt(stats.totalSubjects) || 0,
+          active: parseInt(stats.activeSubjects) || 0,
+          completed: parseInt(stats.completedSubjects) || 0,
+          percentage: stats.targetEnrollment > 0 
+            ? Math.round((stats.totalSubjects / stats.targetEnrollment) * 100) 
             : 0
         },
         queries: {
-          total: parseInt(stats.total_queries) || 0,
-          open: parseInt(stats.open_queries) || 0,
-          closed: (parseInt(stats.total_queries) || 0) - (parseInt(stats.open_queries) || 0)
+          total: parseInt(stats.totalQueries) || 0,
+          open: parseInt(stats.openQueries) || 0,
+          closed: (parseInt(stats.totalQueries) || 0) - (parseInt(stats.openQueries) || 0)
         },
-        sites: parseInt(stats.site_count) || 0,
-        events: parseInt(stats.event_count) || 0,
-        forms: parseInt(stats.form_count) || 0
+        sites: parseInt(stats.siteCount) || 0,
+        events: parseInt(stats.eventCount) || 0,
+        forms: parseInt(stats.formCount) || 0
       }
     });
   } catch (error: any) {
@@ -391,15 +390,15 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
     const result = await pool.query(query, [parseInt(id)]);
 
     const users = result.rows.map(user => ({
-      userId: user.user_id,
-      username: user.user_name,
-      firstName: user.first_name,
-      lastName: user.last_name,
+      userId: user.userId,
+      username: user.userName,
+      firstName: user.firstName,
+      lastName: user.lastName,
       email: user.email,
       phone: user.phone || '',
-      role: user.role_name,
-      assignedDate: user.date_created,
-      status: user.status_name
+      role: user.roleName,
+      assignedDate: user.dateCreated,
+      status: user.statusName
     }));
 
     res.json({ success: true, data: users });

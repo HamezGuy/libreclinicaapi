@@ -58,8 +58,8 @@ describe('Study Service', () => {
 
       expect(dbResult.rows.length).toBe(1);
       expect(dbResult.rows[0].name).toBe(studyData.name);
-      expect(dbResult.rows[0].unique_identifier).toBe(studyData.uniqueIdentifier);
-      expect(dbResult.rows[0].principal_investigator).toBe(studyData.principalInvestigator);
+      expect(dbResult.rows[0].uniqueIdentifier).toBe(studyData.uniqueIdentifier);
+      expect(dbResult.rows[0].principalInvestigator).toBe(studyData.principalInvestigator);
       expect(dbResult.rows[0].sponsor).toBe(studyData.sponsor);
     });
 
@@ -113,8 +113,8 @@ describe('Study Service', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].user_id).toBe(userId);
-      expect(auditResult.rows[0].new_value).toBe(studyData.name);
+      expect(auditResult.rows[0].userId).toBe(userId);
+      expect(auditResult.rows[0].newValue).toBe(studyData.name);
 
       // Cleanup
       if (result.studyId) {
@@ -139,7 +139,7 @@ describe('Study Service', () => {
       );
 
       expect(roleResult.rows.length).toBeGreaterThan(0);
-      expect(roleResult.rows[0].role_name).toBe('admin');
+      expect(roleResult.rows[0].roleName).toBe('admin');
 
       // Cleanup
       if (result.studyId) {
@@ -192,9 +192,9 @@ describe('Study Service', () => {
 
       expect(dbResult.rows[0].name).toBe(updates.name);
       expect(dbResult.rows[0].summary).toBe(updates.description);
-      expect(dbResult.rows[0].principal_investigator).toBe(updates.principalInvestigator);
+      expect(dbResult.rows[0].principalInvestigator).toBe(updates.principalInvestigator);
       expect(dbResult.rows[0].sponsor).toBe(updates.sponsor);
-      expect(dbResult.rows[0].expected_total_enrollment).toBe(updates.expectedTotalEnrollment);
+      expect(dbResult.rows[0].expectedTotalEnrollment).toBe(updates.expectedTotalEnrollment);
     });
 
     it('should create audit log entry when updating study', async () => {
@@ -237,7 +237,7 @@ describe('Study Service', () => {
         [deleteTestStudyId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(5);
+      expect(dbResult.rows[0].statusId).toBe(5);
 
       // Cleanup
       await testDb.pool.query('DELETE FROM study WHERE study_id = $1', [deleteTestStudyId]);
@@ -274,7 +274,7 @@ describe('Study Service', () => {
           `SELECT * FROM study_user_role sur
            INNER JOIN user_account ua ON sur.user_name = ua.user_name
            WHERE sur.study_id = $1 AND ua.user_id = $2`,
-          [study.study_id, userId]
+          [study.studyId, userId]
         );
         expect(roleCheck.rows.length).toBeGreaterThan(0);
       }
@@ -287,10 +287,10 @@ describe('Study Service', () => {
       const study = await studyService.getStudyById(1, userId);
 
       if (study) {
-        expect(study.study_id).toBe(1);
+        expect(study.studyId).toBe(1);
         expect(study.name).toBeDefined();
-        expect(study.total_subjects).toBeDefined();
-        expect(study.active_subjects).toBeDefined();
+        expect(study.totalSubjects).toBeDefined();
+        expect(study.activeSubjects).toBeDefined();
       }
     });
 
@@ -328,7 +328,7 @@ describe('Study Service', () => {
         userId,
         `S_SITE_${Date.now()}`
       ]).then(res => {
-        siteStudyId = res.rows[0].study_id;
+        siteStudyId = res.rows[0].studyId;
       });
     });
 
@@ -352,14 +352,14 @@ describe('Study Service', () => {
     it('should include parent study in sites list', async () => {
       const sites = await studyService.getStudySites(parentStudyId);
 
-      const parentSite = sites.find(s => s.study_id === parentStudyId);
+      const parentSite = sites.find(s => s.studyId === parentStudyId);
       expect(parentSite).toBeDefined();
     });
 
     it('should include child sites in list', async () => {
       const sites = await studyService.getStudySites(parentStudyId);
 
-      const childSite = sites.find(s => s.study_id === siteStudyId);
+      const childSite = sites.find(s => s.studyId === siteStudyId);
       expect(childSite).toBeDefined();
       expect(childSite?.name).toBe('Test Site');
     });
@@ -368,8 +368,8 @@ describe('Study Service', () => {
       const sites = await studyService.getStudySites(parentStudyId);
 
       if (sites.length > 0) {
-        expect(sites[0].status_id).toBeDefined();
-        expect(sites[0].status_name).toBeDefined();
+        expect(sites[0].statusId).toBeDefined();
+        expect(sites[0].statusName).toBeDefined();
       }
     });
   });

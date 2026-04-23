@@ -39,7 +39,7 @@ export const createTestUser = async (
     overrides?.userTypeId || 2 // Regular user
   ]);
 
-  return result.rows[0].user_id;
+  return result.rows[0].userId;
 };
 
 /**
@@ -81,7 +81,7 @@ export const createTestStudy = async (
     ocOid
   ]);
 
-  const studyId = result.rows[0].study_id;
+  const studyId = result.rows[0].studyId;
 
   // Assign user to study with admin role (use ON CONFLICT to avoid duplicates)
   const userResult = await pool.query('SELECT user_name FROM user_account WHERE user_id = $1', [userId]);
@@ -90,7 +90,7 @@ export const createTestStudy = async (
       INSERT INTO study_user_role (role_name, study_id, status_id, owner_id, user_name, date_created)
       VALUES ('admin', $1, 1, $2, $3, NOW())
       ON CONFLICT DO NOTHING
-    `, [studyId, userId, userResult.rows[0].user_name]);
+    `, [studyId, userId, userResult.rows[0].userName]);
   }
 
   return studyId;
@@ -118,7 +118,7 @@ export const createTestSubject = async (
     RETURNING subject_id
   `, [overrides?.statusId || 1, label]);
 
-  const subjectId = subjectResult.rows[0].subject_id;
+  const subjectId = subjectResult.rows[0].subjectId;
 
   // Then create the study_subject record with required oc_oid
   const result = await pool.query(`
@@ -135,7 +135,7 @@ export const createTestSubject = async (
     ocOid
   ]);
 
-  return result.rows[0].study_subject_id;
+  return result.rows[0].studySubjectId;
 };
 
 /**
@@ -167,7 +167,7 @@ export const createTestEventDefinition = async (
     `SE_${Date.now()}`
   ]);
 
-  return result.rows[0].study_event_definition_id;
+  return result.rows[0].studyEventDefinitionId;
 };
 
 /**
@@ -193,7 +193,7 @@ export const createTestCRF = async (
     `F_${Date.now()}`
   ]);
 
-  const crfId = result.rows[0].crf_id;
+  const crfId = result.rows[0].crfId;
 
   // Create a default version
   await pool.query(`
@@ -228,7 +228,7 @@ export const createTestItem = async (
     `I_${Date.now()}`
   ]);
 
-  return result.rows[0].item_id;
+  return result.rows[0].itemId;
 };
 
 /**
@@ -258,7 +258,7 @@ export const createTestQuery = async (
     studyId
   ]);
 
-  return result.rows[0].discrepancy_note_id;
+  return result.rows[0].discrepancyNoteId;
 };
 
 /**

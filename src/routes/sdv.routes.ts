@@ -23,6 +23,7 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { validate, sdvSchemas } from '../middleware/validation.middleware';
 import * as sdvController from '../controllers/sdv.controller';
 
 const router = express.Router();
@@ -52,6 +53,7 @@ router.put('/:id/unverify',
 );
 router.post('/bulk-verify', 
   requireRole('monitor', 'admin'), 
+  validate({ body: sdvSchemas.bulkVerify }),
   requireSignatureFor(SignatureMeanings.VERIFY),
   sdvController.bulkVerify
 );

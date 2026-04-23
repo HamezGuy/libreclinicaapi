@@ -99,19 +99,19 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
       const studyResult = await testPool.query(
         `SELECT study_id FROM study WHERE status_id = 1 LIMIT 1`
       );
-      testStudyId = studyResult.rows[0]?.study_id || 1;
+      testStudyId = studyResult.rows[0]?.studyId || 1;
 
       const siteResult = await testPool.query(
         `SELECT study_id FROM study WHERE parent_study_id = $1 LIMIT 1`,
         [testStudyId]
       );
-      testSiteId = siteResult.rows[0]?.study_id || 2;
+      testSiteId = siteResult.rows[0]?.studyId || 2;
 
       const subjectResult = await testPool.query(
         `SELECT study_subject_id FROM study_subject WHERE study_id = $1 LIMIT 1`,
         [testSiteId || testStudyId]
       );
-      testSubjectId = subjectResult.rows[0]?.study_subject_id || 1;
+      testSubjectId = subjectResult.rows[0]?.studySubjectId || 1;
     } catch (e) {
       testStudyId = 1;
       testSiteId = 2;
@@ -293,7 +293,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           return;
         }
 
-        const templateId = templateResult.rows[0].template_id;
+        const templateId = templateResult.rows[0].templateId;
 
         // Step 2: Insert email directly to queue (simulating queueEmail service call)
         const insertResult = await testPool.query(`
@@ -316,7 +316,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           3
         ]);
 
-        const queueId = insertResult.rows[0].queue_id;
+        const queueId = insertResult.rows[0].queueId;
         createdRecords.emailQueue.push(queueId);
 
         // Step 3: Verify via API queue status
@@ -334,7 +334,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
 
         expect(verifyResult.rows.length).toBe(1);
         expect(verifyResult.rows[0].status).toBe('pending');
-        expect(verifyResult.rows[0].rendered_subject).toBe('E2E Test Email Subject');
+        expect(verifyResult.rows[0].renderedSubject).toBe('E2E Test Email Subject');
       });
     });
 
@@ -368,7 +368,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           );
 
           if (dbResult.rows.length > 0) {
-            expect(dbResult.rows[0].email_enabled).toBe(true);
+            expect(dbResult.rows[0].emailEnabled).toBe(true);
           }
         }
       });
@@ -396,7 +396,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           return;
         }
 
-        const { study_subject_id, study_id, parent_study_id } = subjectResult.rows[0];
+        const { studySubjectId: study_subject_id, studyId: study_id, parentStudyId: parent_study_id } = subjectResult.rows[0];
 
         // Get another site for transfer
         const otherSiteResult = await testPool.query(`
@@ -410,7 +410,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           return;
         }
 
-        const destinationSiteId = otherSiteResult.rows[0].study_id;
+        const destinationSiteId = otherSiteResult.rows[0].studyId;
 
         // Step 2: Initiate transfer via API
         const transferResponse = await request(app)
@@ -434,9 +434,9 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
             );
 
             expect(dbResult.rows.length).toBe(1);
-            expect(dbResult.rows[0].study_subject_id).toBe(study_subject_id);
-            expect(dbResult.rows[0].destination_site_id).toBe(destinationSiteId);
-            expect(dbResult.rows[0].transfer_status).toBe('pending');
+            expect(dbResult.rows[0].studySubjectId).toBe(study_subject_id);
+            expect(dbResult.rows[0].destinationSiteId).toBe(destinationSiteId);
+            expect(dbResult.rows[0].transferStatus).toBe('pending');
 
             // Step 4: Retrieve via API and verify consistency
             const getResponse = await request(app)
@@ -463,7 +463,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           return;
         }
 
-        const subjectId = transferResult.rows[0].study_subject_id;
+        const subjectId = transferResult.rows[0].studySubjectId;
 
         // Step 2: Get history via API
         const apiResponse = await request(app)
@@ -511,7 +511,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           `, [1]); // Using a placeholder event_crf_id
 
           if (statusResult.rows.length > 0) {
-            createdRecords.ddeStatuses.push(statusResult.rows[0].status_id);
+            createdRecords.ddeStatuses.push(statusResult.rows[0].statusId);
           }
         }
 
@@ -538,7 +538,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING status_id
         `);
 
-        const statusId = statusResult.rows[0].status_id;
+        const statusId = statusResult.rows[0].statusId;
         createdRecords.ddeStatuses.push(statusId);
 
         // Step 2: Create discrepancy
@@ -558,9 +558,9 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           WHERE ds.status_id = $1
         `, [statusId]);
 
-        expect(verifyResult.rows[0].first_entry_status).toBe('complete');
-        expect(verifyResult.rows[0].second_entry_status).toBe('complete');
-        expect(parseInt(verifyResult.rows[0].discrepancy_count)).toBeGreaterThan(0);
+        expect(verifyResult.rows[0].firstEntryStatus).toBe('complete');
+        expect(verifyResult.rows[0].secondEntryStatus).toBe('complete');
+        expect(parseInt(verifyResult.rows[0].discrepancyCount)).toBeGreaterThan(0);
       });
     });
   });
@@ -600,7 +600,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
 
             expect(dbResult.rows.length).toBe(1);
             expect(dbResult.rows[0].name).toBe('E2E Test Consent Document');
-            expect(dbResult.rows[0].document_type).toBe('main');
+            expect(dbResult.rows[0].documentType).toBe('main');
 
             // Step 3: Retrieve via API
             const getResponse = await request(app)
@@ -626,7 +626,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING document_id
         `, [testStudyId, testUserId]);
 
-        const documentId = docResult.rows[0].document_id;
+        const documentId = docResult.rows[0].documentId;
         createdRecords.consentDocuments.push(documentId);
 
         // Step 2: Create version
@@ -638,7 +638,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING version_id
         `, [documentId, JSON.stringify({ pages: [], acknowledgments: [], signatureRequirements: [] }), testUserId]);
 
-        const versionId = versionResult.rows[0].version_id;
+        const versionId = versionResult.rows[0].versionId;
         createdRecords.consentVersions.push(versionId);
 
         // Step 3: Activate version
@@ -663,7 +663,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING consent_id
         `, [testSubjectId, versionId, testUserId]);
 
-        const consentId = consentResult.rows[0].consent_id;
+        const consentId = consentResult.rows[0].consentId;
         createdRecords.subjectConsents.push(consentId);
 
         // Step 5: Verify consent via database
@@ -677,8 +677,8 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
         );
 
         expect(verifyResult.rows.length).toBe(1);
-        expect(verifyResult.rows[0].consent_status).toBe('consented');
-        expect(verifyResult.rows[0].subject_name).toBe('E2E Test Subject');
+        expect(verifyResult.rows[0].consentStatus).toBe('consented');
+        expect(verifyResult.rows[0].subjectName).toBe('E2E Test Subject');
       });
     });
   });
@@ -701,7 +701,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING instrument_id
         `, [testStudyId, JSON.stringify({ questions: [{ id: 1, text: 'Test question?' }] }), testUserId]);
 
-        const instrumentId = instrumentResult.rows[0].instrument_id;
+        const instrumentId = instrumentResult.rows[0].instrumentId;
         createdRecords.proInstruments.push(instrumentId);
 
         // Step 2: Verify via API
@@ -718,7 +718,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
         );
 
         expect(dbResult.rows.length).toBe(1);
-        expect(dbResult.rows[0].short_name).toBe('E2E-TEST');
+        expect(dbResult.rows[0].shortName).toBe('E2E-TEST');
         expect(dbResult.rows[0].status).toBe('active');
       });
     });
@@ -734,7 +734,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING instrument_id
         `, [testStudyId, JSON.stringify({ questions: [] }), testUserId]);
 
-        const instrumentId = instrumentResult.rows[0].instrument_id;
+        const instrumentId = instrumentResult.rows[0].instrumentId;
         createdRecords.proInstruments.push(instrumentId);
 
         // Step 2: Create assignment
@@ -748,7 +748,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING assignment_id
         `, [testSubjectId, instrumentId, testStudyId, testUserId]);
 
-        const assignmentId = assignmentResult.rows[0].assignment_id;
+        const assignmentId = assignmentResult.rows[0].assignmentId;
         createdRecords.proAssignments.push(assignmentId);
 
         // Step 3: Submit response
@@ -779,7 +779,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
 
         expect(verifyResult.rows.length).toBe(1);
         expect(verifyResult.rows[0].status).toBe('completed');
-        expect(verifyResult.rows[0].raw_score).toBe(15);
+        expect(verifyResult.rows[0].rawScore).toBe(15);
       });
     });
 
@@ -797,7 +797,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING patient_account_id
         `, [testSubjectId, 'e2e-patient-' + Date.now() + '@test.com', testUserId]);
 
-        const accountId = accountResult.rows[0].patient_account_id;
+        const accountId = accountResult.rows[0].patientAccountId;
         createdRecords.patientAccounts.push(accountId);
 
         // Step 2: Verify via API
@@ -837,7 +837,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING kit_type_id
         `, [testStudyId, testUserId]);
 
-        const kitTypeId = kitTypeResult.rows[0].kit_type_id;
+        const kitTypeId = kitTypeResult.rows[0].kitTypeId;
         createdRecords.kitTypes.push(kitTypeId);
 
         // Step 2: Register kits
@@ -854,7 +854,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
             RETURNING kit_id
           `, [kitTypeId, testStudyId, kitNumber, testUserId]);
 
-          createdRecords.kits.push(kitResult.rows[0].kit_id);
+          createdRecords.kits.push(kitResult.rows[0].kitId);
         }
 
         // Step 3: Verify via API
@@ -874,7 +874,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
         `, [kitTypeId]);
 
         expect(inventoryResult.rows.length).toBe(1);
-        expect(parseInt(inventoryResult.rows[0].available_count)).toBe(3);
+        expect(parseInt(inventoryResult.rows[0].availableCount)).toBe(3);
       });
     });
 
@@ -888,7 +888,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING kit_type_id
         `, [testStudyId, testUserId]);
 
-        const kitTypeId = kitTypeResult.rows[0].kit_type_id;
+        const kitTypeId = kitTypeResult.rows[0].kitTypeId;
         createdRecords.kitTypes.push(kitTypeId);
 
         const kitIds: number[] = [];
@@ -902,8 +902,8 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
             RETURNING kit_id
           `, [kitTypeId, testStudyId, `E2E-SHIP-${i}`, testUserId]);
 
-          kitIds.push(kitResult.rows[0].kit_id);
-          createdRecords.kits.push(kitResult.rows[0].kit_id);
+          kitIds.push(kitResult.rows[0].kitId);
+          createdRecords.kits.push(kitResult.rows[0].kitId);
         }
 
         // Step 2: Create shipment
@@ -915,7 +915,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING shipment_id
         `, [testStudyId, testSiteId, 'SHIP-E2E-' + Date.now(), testUserId]);
 
-        const shipmentId = shipmentResult.rows[0].shipment_id;
+        const shipmentId = shipmentResult.rows[0].shipmentId;
         createdRecords.shipments.push(shipmentId);
 
         // Step 3: Add kits to shipment
@@ -948,7 +948,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
 
         expect(verifyResult.rows.length).toBe(1);
         expect(verifyResult.rows[0].status).toBe('in_transit');
-        expect(parseInt(verifyResult.rows[0].kit_count)).toBe(2);
+        expect(parseInt(verifyResult.rows[0].kitCount)).toBe(2);
       });
     });
 
@@ -964,7 +964,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING log_id
         `, [testSiteId, testStudyId, testUserId]);
 
-        createdRecords.temperatureLogs.push(normalTempResult.rows[0].log_id);
+        createdRecords.temperatureLogs.push(normalTempResult.rows[0].logId);
 
         // Step 2: Log excursion temperature
         const excursionTempResult = await testPool.query(`
@@ -976,7 +976,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING log_id
         `, [testSiteId, testStudyId, testUserId]);
 
-        createdRecords.temperatureLogs.push(excursionTempResult.rows[0].log_id);
+        createdRecords.temperatureLogs.push(excursionTempResult.rows[0].logId);
 
         // Step 3: Verify via API
         const apiResponse = await request(app)
@@ -992,7 +992,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           WHERE study_id = $1 AND is_excursion = true
         `, [testStudyId]);
 
-        expect(parseInt(excursionResult.rows[0].excursion_count)).toBeGreaterThanOrEqual(1);
+        expect(parseInt(excursionResult.rows[0].excursionCount)).toBeGreaterThanOrEqual(1);
       });
     });
 
@@ -1006,7 +1006,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING kit_type_id
         `, [testStudyId, testUserId]);
 
-        const kitTypeId = kitTypeResult.rows[0].kit_type_id;
+        const kitTypeId = kitTypeResult.rows[0].kitTypeId;
         createdRecords.kitTypes.push(kitTypeId);
 
         const kitResult = await testPool.query(`
@@ -1018,7 +1018,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           RETURNING kit_id
         `, [kitTypeId, testStudyId, testSiteId, testUserId]);
 
-        const kitId = kitResult.rows[0].kit_id;
+        const kitId = kitResult.rows[0].kitId;
         createdRecords.kits.push(kitId);
 
         // Step 2: Dispense kit
@@ -1038,7 +1038,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
 
         expect(verifyResult.rows.length).toBe(1);
         expect(verifyResult.rows[0].status).toBe('dispensed');
-        expect(verifyResult.rows[0].dispensed_to_subject_id).toBe(testSubjectId);
+        expect(verifyResult.rows[0].dispensedToSubjectId).toBe(testSubjectId);
       });
     });
   });
@@ -1062,7 +1062,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           return;
         }
 
-        const eventCrfId = eventCrfResult.rows[0].event_crf_id;
+        const eventCrfId = eventCrfResult.rows[0].eventCrfId;
 
         // Step 2: Request print data via API
         const apiResponse = await request(app)
@@ -1089,7 +1089,7 @@ describe('End-to-End Integration Tests: Frontend → API → Database → Retrie
           return;
         }
 
-        const entityId = auditResult.rows[0].entity_id;
+        const entityId = auditResult.rows[0].entityId;
 
         // Step 2: Request audit trail via API
         const apiResponse = await request(app)

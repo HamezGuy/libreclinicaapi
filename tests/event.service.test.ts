@@ -36,7 +36,7 @@ describe('Event Service', () => {
       RETURNING study_id
     `, [`EVENT-TEST-${Date.now()}`, 'Event Test Study', userId, `S_EVT_${Date.now()}`]);
 
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
   });
 
   afterAll(async () => {
@@ -79,7 +79,7 @@ describe('Event Service', () => {
       expect(dbResult.rows[0].name).toBe(eventData.name);
       expect(dbResult.rows[0].type).toBe('scheduled');
       expect(dbResult.rows[0].ordinal).toBe(eventData.ordinal);
-      expect(dbResult.rows[0].oc_oid).toBeDefined();
+      expect(dbResult.rows[0].ocOid).toBeDefined();
     });
 
     it('should create an unscheduled event definition', async () => {
@@ -135,7 +135,7 @@ describe('Event Service', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].user_id).toBe(userId);
+      expect(auditResult.rows[0].userId).toBe(userId);
     });
   });
 
@@ -179,7 +179,7 @@ describe('Event Service', () => {
 
       expect(Array.isArray(events)).toBe(true);
       expect(events.length).toBeGreaterThan(0);
-      expect(events[0].study_event_definition_id).toBe(testEventId);
+      expect(events[0].studyEventDefinitionId).toBe(testEventId);
     });
 
     it('should include type field in results', async () => {
@@ -198,8 +198,8 @@ describe('Event Service', () => {
       const event = await eventService.getStudyEventById(testEventId);
 
       expect(event).toBeDefined();
-      expect(event.study_event_definition_id).toBe(testEventId);
-      expect(event.study_id).toBe(testStudyId);
+      expect(event.studyEventDefinitionId).toBe(testEventId);
+      expect(event.studyId).toBe(testStudyId);
     });
 
     it('should return null for non-existent event', async () => {
@@ -222,7 +222,7 @@ describe('Event Service', () => {
         [testEventId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(5);
+      expect(dbResult.rows[0].statusId).toBe(5);
     });
   });
 
@@ -240,7 +240,7 @@ describe('Event Service', () => {
         RETURNING subject_id
       `);
 
-      const subjectId = subjectResult.rows[0].subject_id;
+      const subjectId = subjectResult.rows[0].subjectId;
 
       const studySubjectResult = await testDb.pool.query(`
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
@@ -248,7 +248,7 @@ describe('Event Service', () => {
         RETURNING study_subject_id
       `, [`SUBEVT-${Date.now()}`, subjectId, testStudyId, `SS_SE_${Date.now()}`]);
 
-      testSubjectId = studySubjectResult.rows[0].study_subject_id;
+      testSubjectId = studySubjectResult.rows[0].studySubjectId;
 
       const eventDefResult = await testDb.pool.query(`
         INSERT INTO study_event_definition (study_id, name, description, repeating, type, ordinal, status_id, date_created, oc_oid)
@@ -256,7 +256,7 @@ describe('Event Service', () => {
         RETURNING study_event_definition_id
       `, [testStudyId, `SE_SUBEVT_${Date.now()}`]);
 
-      subjectEventDefId = eventDefResult.rows[0].study_event_definition_id;
+      subjectEventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
       await testDb.pool.query(`
         INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, status_id, owner_id, date_created, subject_event_status_id, sample_ordinal, scheduled_date, is_unscheduled)
@@ -285,11 +285,11 @@ describe('Event Service', () => {
       const events = await eventService.getSubjectEvents(testSubjectId);
 
       if (events.length > 0) {
-        expect(events[0].study_event_id).toBeDefined();
-        expect(events[0].event_name).toBeDefined();
-        expect(events[0].status_name).toBeDefined();
-        expect(events[0].is_unscheduled).toBeDefined();
-        expect(events[0].scheduled_date).toBeDefined();
+        expect(events[0].studyEventId).toBeDefined();
+        expect(events[0].eventName).toBeDefined();
+        expect(events[0].statusName).toBeDefined();
+        expect(events[0].isUnscheduled).toBeDefined();
+        expect(events[0].scheduledDate).toBeDefined();
       }
     });
 
@@ -297,8 +297,8 @@ describe('Event Service', () => {
       const events = await eventService.getSubjectEvents(testSubjectId);
 
       if (events.length > 0) {
-        expect(events[0].crf_count).toBeDefined();
-        expect(events[0].completed_crf_count).toBeDefined();
+        expect(events[0].crfCount).toBeDefined();
+        expect(events[0].completedCrfCount).toBeDefined();
       }
     });
 
@@ -307,8 +307,8 @@ describe('Event Service', () => {
 
       if (events.length > 1) {
         for (let i = 0; i < events.length - 1; i++) {
-          const dateA = events[i].scheduled_date || events[i].date_start;
-          const dateB = events[i + 1].scheduled_date || events[i + 1].date_start;
+          const dateA = events[i].scheduledDate || events[i].dateStart;
+          const dateB = events[i + 1].scheduledDate || events[i + 1].dateStart;
           if (dateA && dateB) {
             expect(new Date(dateA).getTime()).toBeLessThanOrEqual(new Date(dateB).getTime());
           }
@@ -325,9 +325,9 @@ describe('Event Service', () => {
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
         VALUES ($1, $2, $3, 1, NOW(), $4)
         RETURNING study_subject_id
-      `, [`NOEVT-${Date.now()}`, subjectResult.rows[0].subject_id, testStudyId, `SS_NE_${Date.now()}`]);
+      `, [`NOEVT-${Date.now()}`, subjectResult.rows[0].subjectId, testStudyId, `SS_NE_${Date.now()}`]);
 
-      const noEventsSubjectId = ssResult.rows[0].study_subject_id;
+      const noEventsSubjectId = ssResult.rows[0].studySubjectId;
 
       const events = await eventService.getSubjectEvents(noEventsSubjectId);
 
@@ -352,7 +352,7 @@ describe('Event Service', () => {
         RETURNING study_event_definition_id
       `, [testStudyId, `SE_CRF_${Date.now()}`]);
 
-      crfEventDefId = eventDefResult.rows[0].study_event_definition_id;
+      crfEventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
       const crfResult = await testDb.pool.query(`
         INSERT INTO crf (study_id, name, status_id, owner_id, date_created, oc_oid)
@@ -360,7 +360,7 @@ describe('Event Service', () => {
         RETURNING crf_id
       `, [testStudyId, userId, `F_EVTCRF_${Date.now()}`]);
 
-      testCrfId = crfResult.rows[0].crf_id;
+      testCrfId = crfResult.rows[0].crfId;
 
       const crfVersionResult = await testDb.pool.query(`
         INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created, oc_oid)
@@ -368,7 +368,7 @@ describe('Event Service', () => {
         RETURNING crf_version_id
       `, [testCrfId, userId, `FV_EVTCRF_${Date.now()}`]);
 
-      const crfVersionId = crfVersionResult.rows[0].crf_version_id;
+      const crfVersionId = crfVersionResult.rows[0].crfVersionId;
 
       await testDb.pool.query(`
         INSERT INTO event_definition_crf (study_event_definition_id, study_id, crf_id, required_crf, ordinal, status_id, default_version_id, date_created, owner_id)
@@ -398,9 +398,9 @@ describe('Event Service', () => {
       const crfs = await eventService.getEventCRFs(crfEventDefId);
 
       if (crfs.length > 0) {
-        expect(crfs[0].crf_id).toBeDefined();
-        expect(crfs[0].crf_name).toBeDefined();
-        expect(crfs[0].required_crf).toBeDefined();
+        expect(crfs[0].crfId).toBeDefined();
+        expect(crfs[0].crfName).toBeDefined();
+        expect(crfs[0].requiredCrf).toBeDefined();
       }
     });
 
@@ -408,8 +408,8 @@ describe('Event Service', () => {
       const crfs = await eventService.getEventCRFs(crfEventDefId);
 
       if (crfs.length > 0) {
-        expect(crfs[0].default_version_id).toBeDefined();
-        expect(crfs[0].default_version_name).toBeDefined();
+        expect(crfs[0].defaultVersionId).toBeDefined();
+        expect(crfs[0].defaultVersionName).toBeDefined();
       }
     });
 
@@ -420,7 +420,7 @@ describe('Event Service', () => {
         RETURNING study_event_definition_id
       `, [testStudyId, `SE_EMPTY_${Date.now()}`]);
 
-      const emptyEventDefId = emptyEventDefResult.rows[0].study_event_definition_id;
+      const emptyEventDefId = emptyEventDefResult.rows[0].studyEventDefinitionId;
 
       const crfs = await eventService.getEventCRFs(emptyEventDefId);
 
@@ -445,9 +445,9 @@ describe('Event Service', () => {
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
         VALUES ($1, $2, $3, 1, NOW(), $4)
         RETURNING study_subject_id
-      `, [`UNSCHED-${Date.now()}`, subjectResult.rows[0].subject_id, testStudyId, `SS_UN_${Date.now()}`]);
+      `, [`UNSCHED-${Date.now()}`, subjectResult.rows[0].subjectId, testStudyId, `SS_UN_${Date.now()}`]);
 
-      unschedSubjectId = ssResult.rows[0].study_subject_id;
+      unschedSubjectId = ssResult.rows[0].studySubjectId;
     });
 
     afterAll(async () => {
@@ -469,7 +469,7 @@ describe('Event Service', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toBeDefined();
-      expect(result.data.study_event_id || result.data.studyEventId).toBeDefined();
+      expect(result.data.studyEventId || result.data.studyEventId).toBeDefined();
     });
 
     it('should set is_unscheduled=true on the created study_event', async () => {
@@ -482,14 +482,14 @@ describe('Event Service', () => {
 
       expect(result.success).toBe(true);
 
-      const studyEventId = result.data?.study_event_id || result.data?.studyEventId;
+      const studyEventId = result.data?.studyEventId;
       if (studyEventId) {
         const dbResult = await testDb.pool.query(
           'SELECT is_unscheduled, scheduled_date FROM study_event WHERE study_event_id = $1',
           [studyEventId]
         );
-        expect(dbResult.rows[0].is_unscheduled).toBe(true);
-        expect(dbResult.rows[0].scheduled_date).toBeDefined();
+        expect(dbResult.rows[0].isUnscheduled).toBe(true);
+        expect(dbResult.rows[0].scheduledDate).toBeDefined();
       }
     });
 
@@ -515,13 +515,13 @@ describe('Event Service', () => {
       expect(result.success).toBe(true);
 
       // Verify it used the existing definition, not a new one
-      const studyEventId = result.data?.study_event_id || result.data?.studyEventId;
+      const studyEventId = result.data?.studyEventId;
       if (studyEventId) {
         const dbResult = await testDb.pool.query(
           'SELECT study_event_definition_id FROM study_event WHERE study_event_id = $1',
           [studyEventId]
         );
-        expect(dbResult.rows[0].study_event_definition_id).toBe(premadeDefId);
+        expect(dbResult.rows[0].studyEventDefinitionId).toBe(premadeDefId);
       }
 
       // Cleanup the premade definition
@@ -564,9 +564,9 @@ describe('Event Service', () => {
         INSERT INTO study_subject (label, subject_id, study_id, status_id, date_created, oc_oid)
         VALUES ($1, $2, $3, 1, NOW(), $4)
         RETURNING study_subject_id
-      `, [`SCHED-${Date.now()}`, subjectResult.rows[0].subject_id, testStudyId, `SS_SCH_${Date.now()}`]);
+      `, [`SCHED-${Date.now()}`, subjectResult.rows[0].subjectId, testStudyId, `SS_SCH_${Date.now()}`]);
 
-      schedSubjectId = ssResult.rows[0].study_subject_id;
+      schedSubjectId = ssResult.rows[0].studySubjectId;
 
       const eventDefResult = await testDb.pool.query(`
         INSERT INTO study_event_definition (study_id, name, description, repeating, type, ordinal, status_id, date_created, oc_oid)
@@ -574,7 +574,7 @@ describe('Event Service', () => {
         RETURNING study_event_definition_id
       `, [testStudyId, `SE_SCHED_${Date.now()}`]);
 
-      schedEventDefId = eventDefResult.rows[0].study_event_definition_id;
+      schedEventDefId = eventDefResult.rows[0].studyEventDefinitionId;
     });
 
     afterAll(async () => {
@@ -599,7 +599,7 @@ describe('Event Service', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toBeDefined();
-      expect(result.data.is_unscheduled).toBe(false);
+      expect(result.data.isUnscheduled).toBe(false);
     });
 
     it('should schedule an unscheduled event with is_unscheduled=true and scheduled_date', async () => {
@@ -616,8 +616,8 @@ describe('Event Service', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toBeDefined();
-      expect(result.data.is_unscheduled).toBe(true);
-      expect(result.data.scheduled_date).toBeDefined();
+      expect(result.data.isUnscheduled).toBe(true);
+      expect(result.data.scheduledDate).toBeDefined();
     });
 
     it('should fail for non-existent subject', async () => {
@@ -675,164 +675,3 @@ describe('Event Service', () => {
   });
 });
 
-// =========================================================
-// MODEL CONVERSION TESTS (toStudyEvent, toPatientEventForm)
-// =========================================================
-import { toStudyEvent, toPatientEventForm } from '../src/types/libreclinica-models';
-
-describe('Model Conversions', () => {
-  describe('toStudyEvent', () => {
-    it('should map all snake_case DB columns to camelCase', () => {
-      const dbRow = {
-        study_event_id: 1,
-        study_event_definition_id: 2,
-        study_subject_id: 3,
-        location: 'Clinic A',
-        sample_ordinal: 1,
-        date_start: '2026-03-01T00:00:00Z',
-        date_end: '2026-03-01T12:00:00Z',
-        start_time_flag: false,
-        end_time_flag: false,
-        scheduled_date: '2026-03-01T00:00:00Z',
-        is_unscheduled: false,
-        subject_event_status_id: 1,
-        status_id: 1,
-        owner_id: 1,
-        date_created: '2026-02-28T00:00:00Z',
-        date_updated: null,
-        update_id: null,
-        study_subject_label: 'SUBJ-001'
-      };
-
-      const result = toStudyEvent(dbRow);
-
-      expect(result.studyEventId).toBe(1);
-      expect(result.studyEventDefinitionId).toBe(2);
-      expect(result.studySubjectId).toBe(3);
-      expect(result.location).toBe('Clinic A');
-      expect(result.sampleOrdinal).toBe(1);
-      expect(result.dateStarted).toBe('2026-03-01T00:00:00Z');
-      expect(result.dateEnded).toBe('2026-03-01T12:00:00Z');
-      expect(result.scheduledDate).toBe('2026-03-01T00:00:00Z');
-      expect(result.isUnscheduled).toBe(false);
-      expect(result.subjectEventStatus).toBe('scheduled');
-      expect(result.studySubjectLabel).toBe('SUBJ-001');
-    });
-
-    it('should map isUnscheduled=true for unscheduled visits', () => {
-      const dbRow = {
-        study_event_id: 10,
-        study_event_definition_id: 5,
-        study_subject_id: 3,
-        sample_ordinal: 1,
-        is_unscheduled: true,
-        scheduled_date: '2026-04-15T08:00:00Z',
-        subject_event_status_id: 2,
-        status_id: 1,
-        owner_id: 1,
-        date_created: '2026-04-15T08:00:00Z'
-      };
-
-      const result = toStudyEvent(dbRow);
-
-      expect(result.isUnscheduled).toBe(true);
-      expect(result.scheduledDate).toBe('2026-04-15T08:00:00Z');
-      expect(result.subjectEventStatus).toBe('not_scheduled');
-    });
-
-    it('should default isUnscheduled to false when null', () => {
-      const dbRow = {
-        study_event_id: 11,
-        study_event_definition_id: 5,
-        study_subject_id: 3,
-        sample_ordinal: 1,
-        is_unscheduled: null,
-        subject_event_status_id: 1,
-        status_id: 1,
-        owner_id: 1,
-        date_created: '2026-01-01'
-      };
-
-      const result = toStudyEvent(dbRow);
-      expect(result.isUnscheduled).toBe(false);
-    });
-
-    it('should default sampleOrdinal to 1 when missing', () => {
-      const dbRow = {
-        study_event_id: 12,
-        study_event_definition_id: 5,
-        study_subject_id: 3,
-        subject_event_status_id: 1,
-        status_id: 1,
-        owner_id: 1,
-        date_created: '2026-01-01'
-      };
-
-      const result = toStudyEvent(dbRow);
-      expect(result.sampleOrdinal).toBe(1);
-    });
-  });
-
-  describe('toPatientEventForm', () => {
-    it('should map all snake_case DB columns to camelCase', () => {
-      const dbRow = {
-        patient_event_form_id: 100,
-        study_event_id: 1,
-        event_crf_id: 50,
-        crf_id: 10,
-        crf_version_id: 20,
-        study_subject_id: 3,
-        form_name: 'Vital Signs',
-        form_structure: { fields: [], fieldCount: 5 },
-        form_data: { field1: 'value1' },
-        completion_status: 'in_progress',
-        is_locked: false,
-        is_frozen: false,
-        sdv_status: true,
-        ordinal: 2,
-        date_created: '2026-03-01',
-        date_updated: '2026-03-02',
-        created_by: 1,
-        updated_by: 1
-      };
-
-      const result = toPatientEventForm(dbRow);
-
-      expect(result.patientEventFormId).toBe(100);
-      expect(result.studyEventId).toBe(1);
-      expect(result.eventCrfId).toBe(50);
-      expect(result.crfId).toBe(10);
-      expect(result.crfVersionId).toBe(20);
-      expect(result.studySubjectId).toBe(3);
-      expect(result.formName).toBe('Vital Signs');
-      expect(result.formStructure).toEqual({ fields: [], fieldCount: 5 });
-      expect(result.formData).toEqual({ field1: 'value1' });
-      expect(result.completionStatus).toBe('in_progress');
-      expect(result.isLocked).toBe(false);
-      expect(result.isFrozen).toBe(false);
-      expect(result.sdvStatus).toBe(true);
-      expect(result.ordinal).toBe(2);
-    });
-
-    it('should provide defaults for nullable fields', () => {
-      const dbRow = {
-        patient_event_form_id: 101,
-        study_event_id: 1,
-        crf_id: 10,
-        crf_version_id: 20,
-        study_subject_id: 3,
-        form_name: 'Demographics'
-      };
-
-      const result = toPatientEventForm(dbRow);
-
-      expect(result.formStructure).toEqual({});
-      expect(result.formData).toEqual({});
-      expect(result.completionStatus).toBe('not_started');
-      expect(result.isLocked).toBe(false);
-      expect(result.isFrozen).toBe(false);
-      expect(result.sdvStatus).toBe(false);
-      expect(result.ordinal).toBe(1);
-    });
-  });
-});

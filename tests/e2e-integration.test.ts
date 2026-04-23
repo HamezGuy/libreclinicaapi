@@ -75,9 +75,9 @@ describe('E2E Integration: Angular UI → API → Database', () => {
 
       expect(dbResult.rows.length).toBe(1);
       const dbUser = dbResult.rows[0];
-      expect(dbUser.user_name).toBe(userData.username);
-      expect(dbUser.first_name).toBe(userData.firstName);
-      expect(dbUser.last_name).toBe(userData.lastName);
+      expect(dbUser.userName).toBe(userData.username);
+      expect(dbUser.firstName).toBe(userData.firstName);
+      expect(dbUser.lastName).toBe(userData.lastName);
       expect(dbUser.email).toBe(userData.email);
       expect(dbUser.passwd).toBeDefined(); // Password should be hashed
       expect(dbUser.passwd).not.toBe(userData.password); // Should not be plain text
@@ -89,7 +89,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].action_message).toContain('created');
+      expect(auditResult.rows[0].actionMessage).toContain('created');
     });
 
     it('should update user from UI and verify changes in database', async () => {
@@ -129,8 +129,8 @@ describe('E2E Integration: Angular UI → API → Database', () => {
         [testUserId]
       );
 
-      expect(dbResult.rows[0].first_name).toBe(updateData.firstName);
-      expect(dbResult.rows[0].last_name).toBe(updateData.lastName);
+      expect(dbResult.rows[0].firstName).toBe(updateData.firstName);
+      expect(dbResult.rows[0].lastName).toBe(updateData.lastName);
       expect(dbResult.rows[0].email).toBe(updateData.email);
 
       // Verify audit trail captures the change
@@ -142,7 +142,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].action_message).toContain('updated');
+      expect(auditResult.rows[0].actionMessage).toContain('updated');
     });
   });
 
@@ -178,7 +178,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
       );
 
       expect(dbResult.rows.length).toBe(1);
-      expect(dbResult.rows[0].unique_identifier).toBe(studyData.uniqueIdentifier);
+      expect(dbResult.rows[0].uniqueIdentifier).toBe(studyData.uniqueIdentifier);
       expect(dbResult.rows[0].name).toBe(studyData.name);
       expect(dbResult.rows[0].description).toBe(studyData.description);
 
@@ -219,7 +219,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
         [testStudyId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(1); // 1 = available
+      expect(dbResult.rows[0].statusId).toBe(1); // 1 = available
     });
   });
 
@@ -270,7 +270,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
 
       expect(dbResult.rows.length).toBe(1);
       expect(dbResult.rows[0].label).toBe(subjectData.label);
-      expect(dbResult.rows[0].study_id).toBe(testStudyId);
+      expect(dbResult.rows[0].studyId).toBe(testStudyId);
 
       // Verify audit trail
       const auditResult = await testDb.query(
@@ -279,7 +279,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
       );
 
       expect(auditResult.rows.length).toBeGreaterThan(0);
-      expect(auditResult.rows[0].action_message).toContain('enrolled');
+      expect(auditResult.rows[0].actionMessage).toContain('enrolled');
     });
 
     it('should update subject data from UI and verify in database', async () => {
@@ -315,7 +315,7 @@ describe('E2E Integration: Angular UI → API → Database', () => {
         [testSubjectId]
       );
 
-      expect(dbResult.rows[0].status_id).toBeDefined();
+      expect(dbResult.rows[0].statusId).toBeDefined();
 
       // Verify audit trail
       const auditResult = await testDb.query(

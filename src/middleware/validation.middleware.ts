@@ -25,6 +25,12 @@ const validationOptions: Joi.ValidationOptions = {
                         // the specific keys they need, so extra fields are harmless.
 };
 
+const bodyValidationOptions: Joi.ValidationOptions = {
+  abortEarly: false,
+  allowUnknown: false,
+  stripUnknown: false
+};
+
 /**
  * Generic validation middleware factory
  * Creates middleware that validates specific parts of the request
@@ -38,7 +44,7 @@ export const validate = (schema: {
     try {
       // Validate request body
       if (schema.body) {
-        const { error, value } = schema.body.validate(req.body, validationOptions);
+        const { error, value } = schema.body.validate(req.body, bodyValidationOptions);
         if (error) {
           logger.warn('Request body validation failed', {
             path: req.path,
@@ -184,7 +190,7 @@ export const subjectSchemas = {
       }),
 
     // === OPTIONAL STUDY_SUBJECT FIELDS ===
-    secondaryId: Joi.string().optional().allow('').max(30),
+    secondaryLabel: Joi.string().optional().allow('').max(30),
     enrollmentDate: Joi.alternatives().try(
       Joi.date().iso(),
       Joi.string().isoDate()
@@ -350,16 +356,17 @@ export const formSchemas = {
     // 21 CFR Part 11 §11.10(e) - Reason for change
     reasonForChange: Joi.string().optional().allow('', null),
 
-    // Branching/skip logic: field keys hidden by conditional display rules.
-    // Excluded from required-fields completion check on the backend.
+    // Branching/skip logic: item IDs (item.item_id) of fields hidden by
+    // conditional display rules. Used by the backend to exclude hidden fields
+    // from the required-fields completion check and to clear stale item_data.
+    // Numeric IDs are authoritative — no casing or naming-convention issues.
+    hiddenFieldIds: Joi.array().items(Joi.number().integer().positive()).optional(),
+
+    // @deprecated — legacy string-based hidden field names. Superseded by
+    // hiddenFieldIds. Accepted for backward compatibility during rollout.
     hiddenFields: Joi.array().items(Joi.string()).optional(),
 
     // Electronic signature
-    electronicSignature: Joi.object({
-      username: Joi.string().required(),
-      password: Joi.string().required(),
-      meaning: Joi.string().required().valid('Data Entry', 'Review', 'Approval')
-    }).optional(),
     signatureUsername: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
     signatureMeaning: Joi.string().optional()
@@ -420,6 +427,19 @@ export const formSchemas = {
     value: Joi.any().required(),
     itemId: Joi.number().integer().positive().optional(),
     allFormData: Joi.object().optional(),
+  }),
+
+  // POST /api/forms/:id/fork — copy a CRF (optionally into a different study)
+  fork: Joi.object({
+    newName: Joi.string().required().min(1).max(2000)
+      .messages({ 'any.required': 'newName is required' }),
+    description: Joi.string().optional().max(50000).allow(''),
+    targetStudyId: Joi.number().integer().positive().optional(),
+    // Electronic signature fields are accepted on every signed route.
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500),
   }),
 };
 
@@ -906,6 +926,7 @@ export const studySchemas = {
     // === ELECTRONIC SIGNATURE (21 CFR Part 11, §11.50) ===
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500)
   }),
 
@@ -1001,6 +1022,7 @@ export const studySchemas = {
     // === ELECTRONIC SIGNATURE (21 CFR Part 11, §11.50) ===
     password: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500)
   })
 };
@@ -1019,9 +1041,9 @@ export const querySchemas = {
     // Entity linking fields (service determines which mapping table to use)
     entityType: Joi.string()
       .valid('itemData', 'eventCrf', 'studySubject', 'studyEvent')
-      .optional()
+      .required()
       .messages({ 'any.only': 'entityType must be one of: itemData, eventCrf, studySubject, studyEvent' }),
-    entityId: Joi.number().integer().positive().optional(),
+    entityId: Joi.number().integer().positive().required(),
     // Legacy / convenience fields for entity linking
     crfId: Joi.number().integer().positive().optional(),
     crfVersionId: Joi.number().integer().positive().optional(),
@@ -1032,6 +1054,26 @@ export const querySchemas = {
     fieldPath: Joi.string().optional().allow('').max(255),
     columnName: Joi.string().optional().allow('').max(255),
     cellPath: Joi.string().optional().allow('').max(500),
+    // Structured cell targeting (preferred over cellPath string for new queries).
+    // When provided, the backend stores this directly as JSONB — no string parsing needed.
+    cellTarget: Joi.object({
+      tableFieldPath: Joi.string().required().max(255),
+      tableItemId: Joi.number().integer().positive().optional(),
+      columnId: Joi.string().required().max(255),
+      columnType: Joi.string().optional().max(50).default('text'),
+      rowIndex: Joi.number().integer().min(0).optional(),
+      rowId: Joi.string().optional().max(255),
+      allRows: Joi.boolean().required(),
+      tableType: Joi.string().valid('table', 'question_table').required()
+    }).optional(),
+    // Cell-level type metadata for type-aware correction editors
+    cellType: Joi.string().optional().max(50),
+    cellOptions: Joi.array().items(Joi.object({
+      label: Joi.string().required(),
+      value: Joi.string().required()
+    })).optional(),
+    cellMin: Joi.number().optional(),
+    cellMax: Joi.number().optional(),
     // Required fields
     description: Joi.string().required().min(10).max(2000)
       .messages({
@@ -1529,6 +1571,248 @@ export const dataLockSchemas = {
 
   requestIdParam: Joi.object({
     requestId: Joi.number().integer().positive().required()
+  })
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// E-SIGNATURE SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const esignatureSchemas = {
+  verifyPassword: Joi.object({
+    password: Joi.string().required().min(1)
+      .messages({ 'string.empty': 'Password is required for verification' })
+  }),
+
+  sign: Joi.object({
+    entityType: Joi.string().required().max(100),
+    entityId: Joi.number().integer().positive().required(),
+    username: Joi.string().optional().max(255),
+    password: Joi.string().required().min(1),
+    meaning: Joi.string().optional().max(500).allow(''),
+    reason: Joi.string().optional().max(500).allow(''),
+    reasonForSigning: Joi.string().optional().max(500).allow(''),
+    deviceFingerprint: Joi.string().optional().max(255),
+    ipAddress: Joi.string().optional().max(100),
+    userAgent: Joi.string().optional().max(500)
+  }),
+
+  certify: Joi.object({
+    password: Joi.string().required().min(1)
+      .messages({ 'string.empty': 'Password is required for certification' }),
+    meaning: Joi.string().optional().max(500).allow('')
+  }),
+
+  invalidate: Joi.object({
+    entityType: Joi.string().required().max(100),
+    entityId: Joi.number().integer().positive().required(),
+    reason: Joi.string().optional().max(500).allow('')
+  }),
+
+  logFailedAttempt: Joi.object({
+    entityType: Joi.string().optional().max(100).allow(''),
+    entityId: Joi.number().integer().positive().optional(),
+    reason: Joi.string().optional().max(500).allow('')
+  })
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// SITE SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const siteSchemas = {
+  create: Joi.object({
+    parentStudyId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'parentStudyId is required' }),
+    siteName: Joi.string().required().max(255)
+      .messages({ 'any.required': 'siteName is required' }),
+    siteNumber: Joi.string().optional().max(255).allow(''),
+    principalInvestigator: Joi.string().optional().max(500).allow(''),
+    facilityName: Joi.string().optional().max(500).allow(''),
+    facilityAddress: Joi.string().optional().max(2000).allow(''),
+    facilityCity: Joi.string().optional().max(500).allow(''),
+    facilityState: Joi.string().optional().max(100).allow(''),
+    facilityZip: Joi.string().optional().max(100).allow(''),
+    facilityCountry: Joi.string().optional().max(100).allow(''),
+    expectedTotalEnrollment: Joi.number().integer().min(0).optional().allow(null),
+    description: Joi.string().optional().max(10000).allow('')
+  }),
+
+  update: Joi.object({
+    siteName: Joi.string().optional().max(255),
+    siteNumber: Joi.string().optional().max(255).allow(''),
+    principalInvestigator: Joi.string().optional().max(500).allow(''),
+    facilityName: Joi.string().optional().max(500).allow(''),
+    facilityAddress: Joi.string().optional().max(2000).allow(''),
+    facilityCity: Joi.string().optional().max(500).allow(''),
+    facilityState: Joi.string().optional().max(100).allow(''),
+    facilityZip: Joi.string().optional().max(100).allow(''),
+    facilityCountry: Joi.string().optional().max(100).allow(''),
+    expectedTotalEnrollment: Joi.number().integer().min(0).optional().allow(null),
+    description: Joi.string().optional().max(10000).allow('')
+  }),
+
+  updateStatus: Joi.object({
+    statusId: Joi.number().integer().min(1).max(10).required()
+      .messages({ 'any.required': 'statusId is required' })
+  }),
+
+  transfer: Joi.object({
+    studySubjectId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'studySubjectId is required' }),
+    fromSiteId: Joi.number().integer().positive().optional(),
+    toSiteId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'toSiteId is required' }),
+    reason: Joi.string().required().min(1).max(2000)
+      .messages({ 'any.required': 'reason is required' })
+  }),
+
+  assignStaff: Joi.object({
+    username: Joi.string().optional().max(64),
+    userId: Joi.number().integer().positive().optional(),
+    role: Joi.string().required().max(64)
+      .messages({ 'any.required': 'role is required' })
+  }).or('username', 'userId')
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// FLAGGING SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const flaggingSchemas = {
+  flagCrf: Joi.object({
+    flagType: Joi.string().optional().max(50).default('review'),
+    comment: Joi.string().optional().max(2000).allow('')
+  }),
+
+  flagItem: Joi.object({
+    flagType: Joi.string().optional().max(50).default('review'),
+    comment: Joi.string().optional().max(2000).allow('')
+  })
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// STUDY GROUPS SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const studyGroupSchemas = {
+  createClass: Joi.object({
+    studyId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'studyId is required' }),
+    name: Joi.string().required().max(255)
+      .messages({ 'any.required': 'name is required' }),
+    groupClassTypeId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'groupClassTypeId is required' }),
+    subjectAssignment: Joi.string().optional().valid('Required', 'Optional').default('Optional')
+  }),
+
+  createGroup: Joi.object({
+    studyGroupClassId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'studyGroupClassId is required' }),
+    name: Joi.string().required().max(255)
+      .messages({ 'any.required': 'name is required' }),
+    description: Joi.string().optional().max(1000).allow('')
+  }),
+
+  assignSubject: Joi.object({
+    assignments: Joi.array().items(Joi.object({
+      studyGroupClassId: Joi.number().integer().positive().required(),
+      studyGroupId: Joi.number().integer().positive().required(),
+      notes: Joi.string().optional().max(255).allow('')
+    })).min(1).required()
+      .messages({ 'any.required': 'assignments array is required' })
+  })
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// STUDY PARAMETERS SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const studyParameterSchemas = {
+  update: Joi.object({
+    collectDob: Joi.string().optional().valid('1', '2', '3', 'full', 'year_only', 'not_used', 'required'),
+    genderRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    subjectPersonIdRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    subjectIdGeneration: Joi.string().optional().valid('manual', 'auto_editable', 'auto_non_editable', 'auto'),
+    subjectIdPrefix: Joi.string().optional().allow(''),
+    subjectIdSuffix: Joi.string().optional().allow(''),
+    studySubjectIdLabel: Joi.string().optional().allow(''),
+    secondaryIdLabel: Joi.string().optional().allow(''),
+    personIdShownOnCrf: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    secondaryLabelViewable: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    eventLocationRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    dateOfEnrollmentForStudyRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    discrepancyManagement: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    allowAdministrativeEditing: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    adminForcedReasonForChange: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+    mailNotification: Joi.string().optional().allow(''),
+    contactEmail: Joi.string().optional().email({ tlds: { allow: false } }).allow(''),
+    queryDueDays: Joi.number().integer().min(1).max(90).optional(),
+    randomization: Joi.string().optional().allow('')
+  }).min(1)
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// RANDOMIZATION SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const randomizationSchemas = {
+  createConfig: Joi.object({
+    studyId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'studyId is required' }),
+    name: Joi.string().required().max(255),
+    method: Joi.string().required().valid('simple', 'block', 'stratified', 'minimization'),
+    blockSize: Joi.number().integer().min(2).optional(),
+    ratio: Joi.string().optional().max(50).allow(''),
+    stratificationFactors: Joi.array().items(Joi.object().unknown(true)).optional(),
+    treatmentGroups: Joi.array().items(Joi.object({
+      name: Joi.string().required().max(255),
+      code: Joi.string().optional().max(50).allow(''),
+      weight: Joi.number().min(0).optional()
+    })).min(2).required(),
+    listSize: Joi.number().integer().min(10).max(100000).optional(),
+    seed: Joi.number().integer().optional(),
+    ...signatureFields
+  }),
+
+  updateConfig: Joi.object({
+    name: Joi.string().optional().max(255),
+    method: Joi.string().optional().valid('simple', 'block', 'stratified', 'minimization'),
+    blockSize: Joi.number().integer().min(2).optional(),
+    ratio: Joi.string().optional().max(50).allow(''),
+    stratificationFactors: Joi.array().items(Joi.object().unknown(true)).optional(),
+    treatmentGroups: Joi.array().items(Joi.object({
+      name: Joi.string().required().max(255),
+      code: Joi.string().optional().max(50).allow(''),
+      weight: Joi.number().min(0).optional()
+    })).optional(),
+    listSize: Joi.number().integer().min(10).max(100000).optional(),
+    ...signatureFields
+  }),
+
+  randomize: Joi.object({
+    studyId: Joi.number().integer().positive().required(),
+    studySubjectId: Joi.number().integer().positive().required(),
+    stratificationValues: Joi.object().optional(),
+    ...signatureFields
+  }),
+
+  unblind: Joi.object({
+    reason: Joi.string().required().min(10).max(2000)
+      .messages({ 'string.min': 'Unblinding reason must be at least 10 characters' }),
+    ...signatureFields
+  })
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// SDV SCHEMAS
+// ═══════════════════════════════════════════════════════════════════
+
+export const sdvSchemas = {
+  bulkVerify: Joi.object({
+    ids: Joi.array().items(Joi.number().integer().positive()).min(1).required()
+      .messages({ 'any.required': 'ids array is required', 'array.min': 'at least one id is required' }),
+    ...signatureFields
   })
 };
 

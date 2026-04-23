@@ -39,7 +39,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
 
   // Fetch per-user custom permission overrides (à la carte)
-  const customPermissions = await authService.fetchCustomPermissions(result.data.user_id);
+  const customPermissions = await authService.fetchCustomPermissions(result.data.userId);
 
   res.json({
     success: true,
@@ -47,10 +47,10 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     refreshToken: tokens.refreshToken,
     expiresIn: tokens.expiresIn,
     user: {
-      userId: result.data.user_id,
-      username: result.data.user_name,
-      firstName: result.data.first_name,
-      lastName: result.data.last_name,
+      userId: result.data.userId,
+      username: result.data.userName,
+      firstName: result.data.firstName,
+      lastName: result.data.lastName,
       email: result.data.email,
       role: jwtPayload.role,
       studyIds: jwtPayload.studyIds,
@@ -86,7 +86,7 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
 
   // Fetch per-user custom permission overrides (à la carte)
-  const customPermissions = await authService.fetchCustomPermissions(result.data.user_id);
+  const customPermissions = await authService.fetchCustomPermissions(result.data.userId);
 
   res.json({
     success: true,
@@ -94,10 +94,10 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
     refreshToken: tokens.refreshToken,
     expiresIn: tokens.expiresIn,
     user: {
-      userId: result.data.user_id,
-      username: result.data.user_name,
-      firstName: result.data.first_name,
-      lastName: result.data.last_name,
+      userId: result.data.userId,
+      username: result.data.userName,
+      firstName: result.data.firstName,
+      lastName: result.data.lastName,
       email: result.data.email,
       role: jwtPayload.role,
       studyIds: jwtPayload.studyIds,

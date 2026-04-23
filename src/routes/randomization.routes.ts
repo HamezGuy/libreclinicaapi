@@ -41,6 +41,7 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireSignatureFor } from '../middleware/part11.middleware';
+import { validate, randomizationSchemas } from '../middleware/validation.middleware';
 import * as randomizationController from '../controllers/randomization.controller';
 
 const router = express.Router();
@@ -57,12 +58,14 @@ router.get('/config/:studyId', randomizationController.getConfig);
 // Create a new config
 router.post('/config',
   requireRole('investigator', 'admin'),
+  validate({ body: randomizationSchemas.createConfig }),
   randomizationController.createConfig
 );
 
 // Update config (only if not locked)
 router.put('/config/:configId',
   requireRole('investigator', 'admin'),
+  validate({ body: randomizationSchemas.updateConfig }),
   randomizationController.updateConfig
 );
 
@@ -113,6 +116,7 @@ router.get('/groups/:studyId', randomizationController.getGroups);
 // CORE: Randomize a subject (server-side assignment from sealed list)
 router.post('/randomize',
   requireRole('investigator', 'coordinator', 'admin'),
+  validate({ body: randomizationSchemas.randomize }),
   requireSignatureFor('I confirm this subject meets all eligibility criteria for randomization'),
   randomizationController.randomize
 );
@@ -139,6 +143,7 @@ router.delete('/subject/:subjectId',
 
 router.post('/subject/:subjectId/unblind',
   requireRole('investigator', 'admin'),
+  validate({ body: randomizationSchemas.unblind }),
   requireSignatureFor('I authorize unblinding of treatment assignment for this subject'),
   randomizationController.unblind
 );

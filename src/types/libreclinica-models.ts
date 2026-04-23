@@ -16,6 +16,9 @@
  * Source:          LibreClinica/core/src/main/java/org/akaza/openclinica/bean/
  */
 
+import { Status, STATUS_MAP, StudyType } from '@accura-trial/shared-types';
+export { Status, STATUS_MAP, StudyType };
+
 // =============================================================================
 // BASE ENTITY TYPES (from AuditableEntityBean.java)
 // =============================================================================
@@ -37,46 +40,9 @@ export interface AuditableEntity {
 }
 
 // =============================================================================
-// STATUS TYPES (from Status.java)
+// STATUS TYPES — imported from @accura-trial/shared-types
+// Helper functions remain here as they are backend-only.
 // =============================================================================
-
-/**
- * LibreClinica Status values
- * Matches bean/core/Status.java EXACTLY
- * 
- * From Status.java:
- *   INVALID = 0, AVAILABLE = 1, UNAVAILABLE = 2, PRIVATE = 3, PENDING = 4,
- *   DELETED = 5, LOCKED = 6, AUTO_DELETED = 7, SIGNED = 8, FROZEN = 9,
- *   SOURCE_DATA_VERIFICATION = 10, RESET = 11
- */
-export type Status = 
-  | 'invalid'                   // 0 - Invalid
-  | 'available'                 // 1 - Active/Available
-  | 'unavailable'               // 2 - Unavailable
-  | 'private'                   // 3 - Private
-  | 'pending'                   // 4 - Pending
-  | 'removed'                   // 5 - Removed/Deleted
-  | 'locked'                    // 6 - Locked
-  | 'auto-removed'              // 7 - Auto-removed
-  | 'signed'                    // 8 - Signed
-  | 'frozen'                    // 9 - Frozen
-  | 'source_data_verification'  // 10 - SDV
-  | 'reset';                    // 11 - Reset
-
-export const STATUS_MAP: Record<number, Status> = {
-  0: 'invalid',
-  1: 'available',
-  2: 'unavailable',
-  3: 'private',
-  4: 'pending',
-  5: 'removed',
-  6: 'locked',
-  7: 'auto-removed',
-  8: 'signed',
-  9: 'frozen',
-  10: 'source_data_verification',
-  11: 'reset'
-};
 
 export function getStatusFromId(statusId: number): Status {
   return STATUS_MAP[statusId] || 'available';
@@ -316,14 +282,9 @@ export interface Study {
 }
 
 /**
- * Study Type - matches StudyType.java
+ * Study Type — imported from @accura-trial/shared-types.
+ * STUDY_TYPE_MAP and getStudyType() remain here as backend-only helpers.
  */
-/**
- * Study Type - maps to study_type table
- * Database values: 1='genetic', 2='observational', 3='interventional', 4='other'
- * 'nongenetic' is a legacy alias for non-genetic studies
- */
-export type StudyType = 'genetic' | 'nongenetic' | 'observational' | 'interventional' | 'other';
 
 /**
  * Maps study_type_id to StudyType
@@ -497,31 +458,6 @@ export interface StudyPhase {
   usageCount?: number;              // Number of patients scheduled for this phase
   statusName?: string;              // Human-readable status
   assignedCrfs?: EventDefinitionCRF[]; // CRFs assigned to this phase
-}
-
-/**
- * Convert database row (snake_case) to StudyPhase (camelCase)
- */
-export function toStudyPhase(row: any): StudyPhase {
-  return {
-    studyEventDefinitionId: row.study_event_definition_id,
-    studyId: row.study_id,
-    name: row.name || '',
-    description: row.description,
-    category: row.category,
-    type: row.type || 'scheduled',
-    ordinal: row.ordinal || 1,
-    repeating: row.repeating || false,
-    statusId: row.status_id || 1,
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id,
-    oid: row.oc_oid,
-    crfCount: parseInt(row.crf_count) || 0,
-    usageCount: parseInt(row.usage_count) || 0,
-    statusName: row.status_name
-  };
 }
 
 // =============================================================================
@@ -773,6 +709,9 @@ export interface EventCRF {
   sdvStatus: boolean;
   sdvUpdateId?: number;
   
+  // Data Freeze
+  frozen?: boolean;
+  
   // Status & Audit
   statusId: number;
   status?: Status;
@@ -819,35 +758,6 @@ export interface PatientEventForm {
   dateUpdated?: Date | string;
   createdBy?: number;
   updatedBy?: number;
-}
-
-/**
- * Convert database row to PatientEventForm
- */
-export function toPatientEventForm(row: any): PatientEventForm {
-  return {
-    patientEventFormId: row.patient_event_form_id,
-    studyEventId: row.study_event_id,
-    eventCrfId: row.event_crf_id,
-    crfId: row.crf_id,
-    crfVersionId: row.crf_version_id,
-    studySubjectId: row.study_subject_id,
-    formName: row.form_name,
-    formStructure: row.form_structure || {},
-    formData: row.form_data || {},
-    completionStatus: row.completion_status || 'not_started',
-    isLocked: row.is_locked || false,
-    isFrozen: row.is_frozen || false,
-    sdvStatus: row.sdv_status || false,
-    ordinal: row.ordinal || 1,
-    openQueryCount: parseInt(row.open_query_count) || 0,
-    overdueQueryCount: parseInt(row.overdue_query_count) || 0,
-    closedQueryCount: parseInt(row.closed_query_count) || 0,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    createdBy: row.created_by,
-    updatedBy: row.updated_by
-  };
 }
 
 /**
@@ -1249,65 +1159,6 @@ export interface ApiResponse<T = any> {
   warnings?: any[];
 }
 
-// =============================================================================
-// CONVERSION UTILITIES: DATABASE ROW → TYPESCRIPT MODEL (snake_case → camelCase)
-// =============================================================================
-
-/**
- * Convert database row (snake_case) to Subject (camelCase)
- */
-export function toSubject(row: any): Subject {
-  return {
-    subjectId: row.subject_id,
-    uniqueIdentifier: row.unique_identifier || '',
-    dateOfBirth: row.date_of_birth,
-    gender: row.gender || '',
-    dobCollected: row.dob_collected ?? false,
-    fatherId: row.father_id,
-    motherId: row.mother_id,
-    statusId: row.status_id || 1,
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id,
-    label: row.label,
-    studyIdentifier: row.study_unique_identifier
-  };
-}
-
-/**
- * Convert database row (snake_case) to StudySubject (camelCase)
- */
-export function toStudySubject(row: any): StudySubject {
-  const statusId = row.status_id || 1;
-  return {
-    studySubjectId: row.study_subject_id,
-    label: row.label || '',
-    secondaryLabel: row.secondary_label || '',
-    subjectId: row.subject_id,
-    studyId: row.study_id,
-    enrollmentDate: row.enrollment_date,
-    screeningDate: row.screening_date ?? row.screeningDate,
-    enrollmentStatus: row.enrollment_status ?? row.enrollmentStatus ?? (row.enrollment_date ? 'enrolled' : (statusId === 5 ? 'screen_failure' : 'screening')),
-    oid: row.oc_oid,
-    statusId: statusId,
-    status: getStatusFromId(statusId),
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id,
-    uniqueIdentifier: row.unique_identifier,
-    gender: row.gender,
-    dateOfBirth: row.date_of_birth,
-    dobCollected: row.dob_collected,
-    studyName: row.study_name,
-    siteName: row.site_name,
-    timeZone: row.time_zone,
-    visitDateReference: row.visit_date_reference,
-    visitDateCustom: row.visit_date_custom
-  };
-}
-
 /**
  * Get the enrollment date for display. Returns the formatted date or 'N/A' if null/undefined.
  */
@@ -1341,160 +1192,6 @@ export function setEnrollmentDate(subject: StudySubject, date: Date | string | n
   subject.enrollmentDate = date ?? undefined;
 }
 
-/**
- * Convert database row (snake_case) to Study (camelCase)
- */
-export function toStudy(row: any): Study {
-  return {
-    studyId: row.study_id,
-    parentStudyId: row.parent_study_id,
-    name: row.name || '',
-    officialTitle: row.official_title,
-    identifier: row.unique_identifier || '',
-    secondaryIdentifier: row.secondary_identifier,
-    oid: row.oc_oid,
-    summary: row.summary,
-    protocolDescription: row.protocol_description,
-    datePlannedStart: row.date_planned_start,
-    datePlannedEnd: row.date_planned_end,
-    type: getStudyType(row.type_id),
-    protocolType: row.protocol_type,
-    phase: row.phase,
-    expectedTotalEnrollment: row.expected_total_enrollment,
-    sponsor: row.sponsor,
-    collaborators: row.collaborators,
-    principalInvestigator: row.principal_investigator,
-    facilityName: row.facility_name,
-    facilityCity: row.facility_city,
-    facilityState: row.facility_state,
-    facilityZip: row.facility_zip,
-    facilityCountry: row.facility_country,
-    facilityRecruitmentStatus: row.facility_recruitment_status,
-    facilityContactName: row.facility_contact_name,
-    facilityContactDegree: row.facility_contact_degree,
-    facilityContactPhone: row.facility_contact_phone,
-    facilityContactEmail: row.facility_contact_email,
-    statusId: row.status_id || 1,
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id
-  };
-}
-
-/**
- * Convert database row (snake_case) to StudyEvent (camelCase)
- */
-export function toStudyEvent(row: any): StudyEvent {
-  return {
-    studyEventId: row.study_event_id,
-    studyEventDefinitionId: row.study_event_definition_id,
-    studySubjectId: row.study_subject_id,
-    location: row.location,
-    sampleOrdinal: row.sample_ordinal || 1,
-    dateStarted: row.date_start,
-    dateEnded: row.date_end,
-    startTimeFlag: row.start_time_flag,
-    endTimeFlag: row.end_time_flag,
-    scheduledDate: row.scheduled_date,
-    isUnscheduled: row.is_unscheduled || false,
-    subjectEventStatus: SUBJECT_EVENT_STATUS_MAP[row.subject_event_status_id] || 'scheduled',
-    statusId: row.status_id,
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id,
-    studySubjectLabel: row.study_subject_label
-  };
-}
-
-/**
- * Convert database row (snake_case) to EventCRF (camelCase)
- */
-export function toEventCRF(row: any): EventCRF {
-  return {
-    eventCrfId: row.event_crf_id,
-    studyEventId: row.study_event_id,
-    crfVersionId: row.crf_version_id,
-    studySubjectId: row.study_subject_id,
-    dateInterviewed: row.date_interviewed,
-    interviewerName: row.interviewer_name,
-    completionStatusId: row.completion_status_id,
-    validatorId: row.validator_id,
-    dateValidate: row.date_validate,
-    dateValidateCompleted: row.date_validate_completed,
-    validatorAnnotations: row.validator_annotations,
-    validateString: row.validate_string,
-    annotations: row.annotations,
-    dateCompleted: row.date_completed,
-    electronicSignatureStatus: row.electronic_signature_status || false,
-    sdvStatus: row.sdv_status || false,
-    sdvUpdateId: row.sdv_update_id,
-    statusId: row.status_id,
-    status: getStatusFromId(row.status_id),
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id,
-    studySubjectName: row.study_subject_name,
-    eventName: row.event_name,
-    studyName: row.study_name,
-    eventOrdinal: row.event_ordinal
-  };
-}
-
-/**
- * Convert database row (snake_case) to CRF (camelCase)
- */
-export function toCRF(row: any): CRF {
-  return {
-    crfId: row.crf_id,
-    studyId: row.study_id,
-    name: row.name || '',
-    description: row.description,
-    oid: row.oc_oid,
-    statusId: row.status_id,
-    ownerId: row.owner_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id
-  };
-}
-
-/**
- * Convert database row (snake_case) to UserAccount (camelCase)
- */
-export function toUserAccount(row: any): UserAccount {
-  return {
-    userId: row.user_id,
-    userName: row.user_name || '',
-    firstName: row.first_name || '',
-    lastName: row.last_name || '',
-    email: row.email || '',
-    institutionalAffiliation: row.institutional_affiliation,
-    phone: row.phone,
-    enabled: row.enabled ?? true,
-    accountNonLocked: row.account_non_locked ?? true,
-    lockCounter: row.lock_counter,
-    lastVisitDate: row.date_lastvisit,
-    sysAdmin: row.user_type_id === 1 || row.user_type_id === 0,
-    techAdmin: row.user_type_id === 0,
-    activeStudyId: row.active_study,
-    runWebservices: row.run_webservices,
-    enableApiKey: row.enable_api_key,
-    apiKey: row.api_key,
-    accessCode: row.access_code,
-    authtype: row.authtype,
-    authsecret: row.authsecret,
-    timeZone: row.time_zone,
-    statusId: row.status_id || 1,
-    ownerId: row.owner_id || row.user_id,
-    dateCreated: row.date_created,
-    dateUpdated: row.date_updated,
-    updateId: row.update_id
-  };
-}
-
 // =============================================================================
 // UI-SPECIFIC TYPES (extending LibreClinica models for frontend)
 // =============================================================================
@@ -1514,18 +1211,22 @@ export interface LockHistory {
 }
 
 /**
- * Unlock request for locked data
+ * Unlock request — matches acc_unlock_request table (created by migration).
+ * Tracks requests to unlock frozen/locked event CRFs.
  */
 export interface UnlockRequest {
-  id: string;
-  lockId: string;
-  requestedBy: string;
-  requestedByName: string;
-  requestedAt: Date;
+  unlockRequestId: number;
+  eventCrfId: number;
+  studySubjectId?: number;
+  studyId?: number;
+  requestedById: number;
+  requestedAt: Date | string;
   reason: string;
-  status: 'pending' | 'approved' | 'rejected';
-  reviewedBy?: string;
-  reviewedAt?: Date;
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  reviewedById?: number;
+  reviewedAt?: Date | string;
+  reviewNotes?: string;
 }
 
 /**
@@ -1586,21 +1287,28 @@ export type WorkflowPriority = 'low' | 'medium' | 'high' | 'critical';
 export type WorkflowStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'overdue';
 
 /**
- * Workflow task for task management (acc_workflow_tasks)
+ * Workflow task — matches acc_workflow_tasks table (created by migration).
+ * Database columns use snake_case; the pool config auto-camelizes.
  */
 export interface WorkflowTask {
-  id: string;
-  workflowId: string;
+  taskId: number;
+  taskType: string;
   title: string;
-  description: string;
-  type: WorkflowType;
+  description?: string;
   status: WorkflowStatus;
   priority: WorkflowPriority;
-  assignedTo: string[];
-  createdAt: Date;
-  dueDate?: Date;
-  completedAt?: Date;
-  requiresSignature: boolean;
+  entityType?: string;
+  entityId?: number;
+  eventCrfId?: number;
+  studyId?: number;
+  assignedToUserIds: number[];
+  createdBy: number;
+  completedBy?: number;
+  dateCreated: Date | string;
+  dateUpdated: Date | string;
+  dateCompleted?: Date | string;
+  dueDate?: Date | string;
+  metadata?: Record<string, any>;
 }
 
 /**
@@ -1642,6 +1350,259 @@ export interface PhaseTransitionRule {
   condition?: string;
 }
 
+// =============================================================================
+// DATABASE ENTITY TYPES — matches acc_* and custom tables (created by migrations.ts)
+// =============================================================================
+
+/**
+ * Notification — matches acc_notifications table.
+ * Per-user in-app notifications for query assignments, workflow transitions, etc.
+ */
+export interface Notification {
+  notificationId: number;
+  userId: number;
+  notificationType: string;
+  title: string;
+  message: string;
+  isRead: boolean;
+  entityType?: string;
+  entityId?: number;
+  studyId?: number;
+  linkUrl?: string;
+  dateCreated: Date | string;
+  dateRead?: Date | string;
+}
+
+/**
+ * FormWorkflowConfig — matches acc_form_workflow_config table.
+ * Per-CRF lifecycle settings: SDV, PI signature, DDE, query routing.
+ */
+export interface FormWorkflowConfig {
+  configId: number;
+  crfId: number;
+  studyId?: number;
+  requiresSdv: boolean;
+  requiresSignature: boolean;
+  requiresDde: boolean;
+  queryRouteToUsers?: string;
+  updatedBy?: number;
+  dateUpdated?: Date | string;
+}
+
+/**
+ * UserAccountExtended — matches user_account_extended table.
+ * Stores bcrypt password hashes and platform role, keyed by user_id.
+ */
+export interface UserAccountExtended {
+  userId: number;
+  bcryptPasswd?: string;
+  passwdUpgradedAt?: Date | string;
+  passwordVersion?: number;
+  platformRole?: string;
+  secondaryRole?: string;
+}
+
+/**
+ * FileUpload — matches file_uploads table.
+ * Tracks uploaded files (CRF media, consent scans, wound images, etc.).
+ */
+export interface FileUpload {
+  fileId: string;
+  originalName: string;
+  storedName: string;
+  filePath: string;
+  mimeType: string;
+  fileSize: number;
+  checksum: string;
+  crfVersionId?: number;
+  itemId?: number;
+  crfVersionMediaId?: number;
+  eventCrfId?: number;
+  studySubjectId?: number;
+  consentId?: number;
+  uploadedBy: number;
+  uploadedAt: Date | string;
+  deletedAt?: Date | string;
+  deletedBy?: number;
+}
+
+/**
+ * Organization — matches acc_organization table.
+ * Represents a sponsor, CRO, or site organization.
+ */
+export interface Organization {
+  organizationId: number;
+  name: string;
+  type: string;
+  status: string;
+  email: string;
+  phone?: string;
+  website?: string;
+  street?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  ownerId?: number;
+  approvedBy?: number;
+  approvedAt?: Date | string;
+  dateCreated: Date | string;
+  dateUpdated?: Date | string;
+}
+
+/**
+ * OrganizationMember — matches acc_organization_member table.
+ * Links a user to an organization with a role.
+ */
+export interface OrganizationMember {
+  memberId: number;
+  organizationId: number;
+  userId: number;
+  role: string;
+  status: string;
+  dateJoined: Date | string;
+  dateUpdated?: Date | string;
+}
+
+/**
+ * OrganizationCode — matches acc_organization_code table.
+ * Invite codes that allow users to self-register into an organization.
+ */
+export interface OrganizationCode {
+  codeId: number;
+  code: string;
+  organizationId: number;
+  maxUses?: number;
+  currentUses: number;
+  expiresAt?: Date | string;
+  defaultRole?: string;
+  isActive: boolean;
+  createdBy?: number;
+  dateCreated: Date | string;
+}
+
+/**
+ * AccessRequest — matches acc_access_request table.
+ * External users requesting access to an organization / the platform.
+ */
+export interface AccessRequest {
+  requestId: number;
+  email: string;
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  organizationName?: string;
+  professionalTitle?: string;
+  credentials?: string;
+  reason?: string;
+  organizationId?: number;
+  requestedRole?: string;
+  status: string;
+  reviewedBy?: number;
+  reviewedAt?: Date | string;
+  reviewNotes?: string;
+  userId?: number;
+  dateCreated: Date | string;
+}
+
+/**
+ * UserInvitation — matches acc_user_invitation table.
+ * Token-based invitations sent by an admin to onboard new users.
+ */
+export interface UserInvitation {
+  invitationId: number;
+  email: string;
+  token: string;
+  organizationId?: number;
+  studyId?: number;
+  role?: string;
+  expiresAt: Date | string;
+  invitedBy?: number;
+  message?: string;
+  status: string;
+  acceptedBy?: number;
+  acceptedAt?: Date | string;
+  dateCreated: Date | string;
+}
+
+/**
+ * RolePermission — matches acc_role_permission table.
+ * Per-organization overrides for role-level permissions.
+ */
+export interface RolePermission {
+  rolePermissionId: number;
+  organizationId: number;
+  roleName: string;
+  permissionKey: string;
+  allowed: boolean;
+  dateCreated: Date | string;
+  dateUpdated?: Date | string;
+}
+
+/**
+ * ValidationRule — matches validation_rules table.
+ * Field-level validation rules attached to CRF items.
+ */
+export interface ValidationRule {
+  validationRuleId: number;
+  crfId?: number;
+  crfVersionId?: number;
+  itemId?: number;
+  name: string;
+  description?: string;
+  ruleType: string;
+  fieldPath?: string;
+  severity?: string;
+  errorMessage: string;
+  warningMessage?: string;
+  active: boolean;
+  minValue?: number;
+  maxValue?: number;
+  pattern?: string;
+  formatType?: string;
+  operator?: string;
+  compareFieldPath?: string;
+  customExpression?: string;
+  compareValue?: string;
+  bpSystolicMin?: number;
+  bpSystolicMax?: number;
+  bpDiastolicMin?: number;
+  bpDiastolicMax?: number;
+  dateCreated?: Date | string;
+  dateUpdated?: Date | string;
+  ownerId?: number;
+  updateId?: number;
+}
+
+/**
+ * FormFolder — matches acc_form_folder table.
+ * Visual-only folder grouping for CRFs on the dashboard.
+ */
+export interface FormFolder {
+  folderId: number;
+  name: string;
+  description?: string;
+  studyId?: number;
+  ownerId: number;
+  sortOrder: number;
+  parentFolderId?: number;
+  organizationId?: number;
+  dateCreated: Date | string;
+  dateUpdated?: Date | string;
+}
+
+/**
+ * FormFolderItem — matches acc_form_folder_item table.
+ * Links a CRF into a FormFolder with a display order.
+ */
+export interface FormFolderItem {
+  folderItemId: number;
+  folderId: number;
+  crfId: number;
+  sortOrder: number;
+  dateAdded: Date | string;
+}
+
 export default {
   STATUS_MAP,
   SUBJECT_EVENT_STATUS_MAP,
@@ -1650,13 +1611,6 @@ export default {
   getStatusFromId,
   getStatusId,
   getCompletionStatusFromId,
-  getCompletionStatusId,
-  toStudySubject,
-  toStudy,
-  toStudyEvent,
-  toStudyPhase,
-  toEventCRF,
-  toCRF,
-  toUserAccount
+  getCompletionStatusId
 };
 

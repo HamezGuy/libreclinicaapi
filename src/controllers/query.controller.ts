@@ -215,19 +215,19 @@ export const reopenQuery = asyncHandler(async (req: Request, res: Response) => {
 export const bulkUpdateStatus = asyncHandler(async (req: Request, res: Response) => {
   const { queryIds, statusId, reason } = req.body;
   const result = await queryService.bulkUpdateStatus(queryIds, statusId, userId(req), reason);
-  res.json({ success: result.success, updated: result.updated, failed: result.failed, errors: result.errors });
+  res.json({ success: result.success, message: `${result.updated} updated, ${result.failed} failed`, data: { updated: result.updated, failed: result.failed, errors: result.errors } });
 });
 
 export const bulkClose = asyncHandler(async (req: Request, res: Response) => {
   const { queryIds, reason } = req.body;
   const result = await queryService.bulkCloseQueries(queryIds, userId(req), reason || 'Bulk closed');
-  res.json({ success: result.success, closed: result.closed, failed: result.failed, errors: result.errors });
+  res.json({ success: result.success, message: `${result.closed} closed, ${result.failed} failed`, data: { closed: result.closed, failed: result.failed, errors: result.errors } });
 });
 
 export const bulkReassign = asyncHandler(async (req: Request, res: Response) => {
   const { queryIds, assignToUserId, reason } = req.body;
   const result = await queryService.bulkReassignQueries(queryIds, assignToUserId, userId(req), reason);
-  res.json({ success: result.success, reassigned: result.reassigned, failed: result.failed, errors: result.errors });
+  res.json({ success: result.success, message: `${result.reassigned} reassigned, ${result.failed} failed`, data: { reassigned: result.reassigned, failed: result.failed, errors: result.errors } });
 });
 
 export const subjectCounts = asyncHandler(async (req: Request, res: Response) => {

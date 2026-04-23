@@ -30,28 +30,28 @@ describe('Subject List Enhanced Fields', () => {
       VALUES ('Enhanced List Test Study', $1, 1, $2, NOW())
       RETURNING study_id
     `, [`ENH-LIST-${Date.now()}`, rootUserId]);
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
 
     const eventDefResult = await testDb.pool.query(`
       INSERT INTO study_event_definition (study_id, name, type, ordinal, status_id, owner_id, date_created)
       VALUES ($1, 'Screening Visit', 'scheduled', 1, 1, $2, NOW())
       RETURNING study_event_definition_id
     `, [testStudyId, rootUserId]);
-    testEventDefId = eventDefResult.rows[0].study_event_definition_id;
+    testEventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
     const crfResult = await testDb.pool.query(`
       INSERT INTO crf (name, status_id, owner_id, date_created)
       VALUES ('Test CRF', 1, $1, NOW())
       RETURNING crf_id
     `, [rootUserId]);
-    testCrfId = crfResult.rows[0].crf_id;
+    testCrfId = crfResult.rows[0].crfId;
 
     const crfVersionResult = await testDb.pool.query(`
       INSERT INTO crf_version (crf_id, name, status_id, owner_id, date_created)
       VALUES ($1, 'v1.0', 1, $2, NOW())
       RETURNING crf_version_id
     `, [testCrfId, rootUserId]);
-    testCrfVersionId = crfVersionResult.rows[0].crf_version_id;
+    testCrfVersionId = crfVersionResult.rows[0].crfVersionId;
 
     await testDb.pool.query(`
       INSERT INTO event_definition_crf (study_event_definition_id, crf_id, required_crf, status_id, owner_id, date_created, ordinal)
@@ -63,14 +63,14 @@ describe('Subject List Enhanced Fields', () => {
       VALUES ('m', '1990-01-01', 1, $1, NOW(), $2)
       RETURNING subject_id
     `, [rootUserId, `subj-unique-${Date.now()}`]);
-    const subjectId = subjectResult.rows[0].subject_id;
+    const subjectId = subjectResult.rows[0].subjectId;
 
     const studySubjectResult = await testDb.pool.query(`
       INSERT INTO study_subject (study_id, subject_id, label, enrollment_date, status_id, owner_id, date_created)
       VALUES ($1, $2, $3, NOW(), 1, $4, NOW())
       RETURNING study_subject_id
     `, [testStudyId, subjectId, `SUBJ-ENH-${Date.now()}`, rootUserId]);
-    testSubjectId = studySubjectResult.rows[0].study_subject_id;
+    testSubjectId = studySubjectResult.rows[0].studySubjectId;
 
     const eventResult = await testDb.pool.query(`
       INSERT INTO study_event (study_event_definition_id, study_subject_id, location, 
@@ -79,7 +79,7 @@ describe('Subject List Enhanced Fields', () => {
       VALUES ($1, $2, 'Site A', NOW(), $3, NOW(), 1, 1, $4)
       RETURNING study_event_id
     `, [testEventDefId, testSubjectId, rootUserId, new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
-    testStudyEventId = eventResult.rows[0].study_event_id;
+    testStudyEventId = eventResult.rows[0].studyEventId;
   });
 
   afterAll(async () => {
@@ -105,30 +105,30 @@ describe('Subject List Enhanced Fields', () => {
       expect(result.success).toBe(true);
       expect(result.data.length).toBeGreaterThanOrEqual(1);
 
-      const subject = result.data.find((s: any) => s.study_subject_id === testSubjectId);
+      const subject = result.data.find((s: any) => s.studySubjectId === testSubjectId);
       expect(subject).toBeDefined();
-      expect(parseInt(subject!.total_forms)).toBeGreaterThanOrEqual(1);
+      expect(parseInt(subject!.totalForms)).toBeGreaterThanOrEqual(1);
     });
 
     it('should return completed_forms as 0 when no forms are completed', async () => {
       const result = await subjectService.getSubjectList(testStudyId, { page: 1, limit: 10 });
-      const subject = result.data.find((s: any) => s.study_subject_id === testSubjectId);
+      const subject = result.data.find((s: any) => s.studySubjectId === testSubjectId);
 
-      expect(parseInt(subject!.completed_forms)).toBe(0);
+      expect(parseInt(subject!.completedForms)).toBe(0);
     });
 
     it('should return current_visit_name for the first incomplete visit', async () => {
       const result = await subjectService.getSubjectList(testStudyId, { page: 1, limit: 10 });
-      const subject = result.data.find((s: any) => s.study_subject_id === testSubjectId);
+      const subject = result.data.find((s: any) => s.studySubjectId === testSubjectId);
 
-      expect(subject!.current_visit_name).toBe('Screening Visit');
+      expect(subject!.currentVisitName).toBe('Screening Visit');
     });
 
     it('should return overdue_forms when scheduled_date is in the past', async () => {
       const result = await subjectService.getSubjectList(testStudyId, { page: 1, limit: 10 });
-      const subject = result.data.find((s: any) => s.study_subject_id === testSubjectId);
+      const subject = result.data.find((s: any) => s.studySubjectId === testSubjectId);
 
-      expect(parseInt(subject!.overdue_forms)).toBeGreaterThanOrEqual(1);
+      expect(parseInt(subject!.overdueForms)).toBeGreaterThanOrEqual(1);
     });
 
     it('should count completed_forms correctly after form completion', async () => {
@@ -139,14 +139,14 @@ describe('Subject List Enhanced Fields', () => {
       `, [testStudyEventId, testCrfVersionId, rootUserId]);
 
       const result = await subjectService.getSubjectList(testStudyId, { page: 1, limit: 10 });
-      const subject = result.data.find((s: any) => s.study_subject_id === testSubjectId);
+      const subject = result.data.find((s: any) => s.studySubjectId === testSubjectId);
 
-      expect(parseInt(subject!.completed_forms)).toBeGreaterThanOrEqual(1);
+      expect(parseInt(subject!.completedForms)).toBeGreaterThanOrEqual(1);
     });
 
     it('should return null current_visit_name when all visits are complete', async () => {
       const result = await subjectService.getSubjectList(testStudyId, { page: 1, limit: 10 });
-      const subject = result.data.find((s: any) => s.study_subject_id === testSubjectId);
+      const subject = result.data.find((s: any) => s.studySubjectId === testSubjectId);
 
       // After completing the form in the previous test, the visit may be complete
       // current_visit_name should be null or the next visit
@@ -181,7 +181,7 @@ describe('Subject List Enhanced Fields', () => {
       `, [testEventDefId, testCrfId]);
 
       expect(result.rows.length).toBe(1);
-      expect(result.rows[0].required_crf).toBe(true);
+      expect(result.rows[0].requiredCrf).toBe(true);
     });
   });
 });

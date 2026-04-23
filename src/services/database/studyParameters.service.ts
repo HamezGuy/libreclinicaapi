@@ -39,7 +39,7 @@ export interface StudyParameterConfig {
 interface RawParameter {
   parameter: string;
   value: string;
-  default_value: string;
+  defaultValue: string;
 }
 
 /**
@@ -62,11 +62,11 @@ export const getAvailableParameters = async (): Promise<any[]> => {
   try {
     const result = await pool.query(query);
     return result.rows.map(row => ({
-      id: row.study_parameter_id,
+      id: row.studyParameterId,
       handle: row.handle,
       name: row.name || row.handle,
       description: row.description || '',
-      defaultValue: row.default_value,
+      defaultValue: row.defaultValue,
       inheritable: row.inheritable,
       overridable: row.overridable
     }));
@@ -87,7 +87,7 @@ export const getStudyParameters = async (studyId: number): Promise<StudyParamete
     // First, get the parent study ID (if this is a site)
     const parentQuery = `SELECT parent_study_id FROM study WHERE study_id = $1`;
     const parentResult = await pool.query(parentQuery, [studyId]);
-    const parentStudyId = parentResult.rows[0]?.parent_study_id;
+    const parentStudyId = parentResult.rows[0]?.parentStudyId;
 
     // Get parameters - check study first, then parent, then defaults
     const query = `
@@ -213,7 +213,7 @@ export const initializeStudyParameters = async (studyId: number, userId: number)
 function parseParameterValues(rows: RawParameter[]): StudyParameterConfig {
   const valueMap: Record<string, string> = {};
   for (const row of rows) {
-    valueMap[row.parameter] = row.value || row.default_value;
+    valueMap[row.parameter] = row.value || row.defaultValue;
   }
 
   return {
@@ -294,35 +294,48 @@ export const generateNextSubjectId = async (studyId: number): Promise<string> =>
     return ''; // Don't auto-generate for manual
   }
 
-  // Get the greatest existing label and increment
-  const query = `
-    SELECT MAX(CAST(
-      CASE 
-        WHEN label ~ '^[0-9]+$' THEN label 
-        ELSE '0' 
-      END AS INTEGER
-    )) as max_label
-    FROM study_subject
-    WHERE study_id = $1 OR study_id IN (
-      SELECT study_id FROM study WHERE parent_study_id = $1
-    )
-  `;
+  const client = await pool.connect();
 
   try {
-    const result = await pool.query(query, [studyId]);
-    const nextNum = (result.rows[0]?.max_label || 0) + 1;
+    await client.query('BEGIN');
+
+    // Advisory lock scoped to this study prevents concurrent enrollments
+    // from reading the same MAX(label) before either INSERT completes.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['subject_id_' + studyId]);
+
+    const query = `
+      SELECT MAX(CAST(
+        CASE 
+          WHEN label ~ '^[0-9]+$' THEN label 
+          ELSE '0' 
+        END AS INTEGER
+      )) as max_label
+      FROM study_subject
+      WHERE study_id = $1 OR study_id IN (
+        SELECT study_id FROM study WHERE parent_study_id = $1
+      )
+    `;
+
+    const result = await client.query(query, [studyId]);
+    const nextNum = (result.rows[0]?.maxLabel || 0) + 1;
     
     // Apply prefix/suffix if configured
     const prefix = params.subjectIdPrefixSuffix || '';
+    let subjectId: string;
     if (prefix) {
-      // Format: [PREFIX][AUTO#][SUFFIX] - parse and apply
-      return prefix.replace('[AUTO#]', nextNum.toString().padStart(4, '0'));
+      subjectId = prefix.replace('[AUTO#]', nextNum.toString().padStart(4, '0'));
+    } else {
+      subjectId = nextNum.toString();
     }
-    
-    return nextNum.toString();
+
+    await client.query('COMMIT');
+    return subjectId;
   } catch (error: any) {
+    await client.query('ROLLBACK');
     logger.error('Failed to generate subject ID', { studyId, error: error.message });
     return '';
+  } finally {
+    client.release();
   }
 };
 

@@ -38,6 +38,8 @@ function ok(schema: Joi.Schema, value: unknown): unknown {
 
 describe('querySchemas.create', () => {
   const base = {
+    entityType: 'itemData' as const,
+    entityId: 1,
     description: 'Verify date of birth against source documents',
     queryType: 'Query',
     studyId: 1
@@ -76,13 +78,13 @@ describe('querySchemas.create', () => {
     expect(err(querySchemas.create, { ...base, description: '1234567890' })).toBeNull();
   });
 
-  it('passes when description is exactly 1000 chars (boundary)', () => {
-    expect(err(querySchemas.create, { ...base, description: 'a'.repeat(1000) })).toBeNull();
+  it('passes when description is exactly 2000 chars (boundary)', () => {
+    expect(err(querySchemas.create, { ...base, description: 'a'.repeat(2000) })).toBeNull();
   });
 
-  it('fails when description is 1001 chars (> max 1000)', () => {
-    expect(err(querySchemas.create, { ...base, description: 'a'.repeat(1001) }))
-      .toMatch(/1000 characters/i);
+  it('fails when description is 2001 chars (> max 2000)', () => {
+    expect(err(querySchemas.create, { ...base, description: 'a'.repeat(2001) }))
+      .toMatch(/2000 characters/i);
   });
 
   // ── queryType enum ────────────────────────────────────────────────────────
@@ -144,12 +146,12 @@ describe('querySchemas.create', () => {
     expect(err(querySchemas.create, { ...base, detailedNotes: '' })).toBeNull();
   });
 
-  it('passes with detailedNotes of 2000 chars (boundary)', () => {
-    expect(err(querySchemas.create, { ...base, detailedNotes: 'x'.repeat(2000) })).toBeNull();
+  it('passes with detailedNotes of 10000 chars (boundary)', () => {
+    expect(err(querySchemas.create, { ...base, detailedNotes: 'x'.repeat(10000) })).toBeNull();
   });
 
-  it('fails with detailedNotes of 2001 chars', () => {
-    expect(err(querySchemas.create, { ...base, detailedNotes: 'x'.repeat(2001) })).toBeTruthy();
+  it('fails with detailedNotes of 10001 chars', () => {
+    expect(err(querySchemas.create, { ...base, detailedNotes: 'x'.repeat(10001) })).toBeTruthy();
   });
 
   // ── optional integer fields ───────────────────────────────────────────────
@@ -207,13 +209,13 @@ describe('querySchemas.respond', () => {
     expect(err(querySchemas.respond, { response: '1234567890' })).toBeNull();
   });
 
-  it('fails when response is > 1000 chars', () => {
-    expect(err(querySchemas.respond, { response: 'x'.repeat(1001) }))
-      .toMatch(/1000 characters/i);
+  it('fails when response is > 2000 chars', () => {
+    expect(err(querySchemas.respond, { response: 'x'.repeat(2001) }))
+      .toMatch(/2000 characters/i);
   });
 
-  it('passes when response is exactly 1000 chars', () => {
-    expect(err(querySchemas.respond, { response: 'x'.repeat(1000) })).toBeNull();
+  it('passes when response is exactly 2000 chars', () => {
+    expect(err(querySchemas.respond, { response: 'x'.repeat(2000) })).toBeNull();
   });
 
   it.each([2, 3, 4])('passes newStatusId %i (valid response status)', (id) => {
@@ -251,10 +253,10 @@ describe('querySchemas.respond', () => {
     })).toBeNull();
   });
 
-  it('fails detailedNotes > 2000 chars', () => {
+  it('fails detailedNotes > 10000 chars', () => {
     expect(err(querySchemas.respond, {
       response: 'Valid response text here enough chars',
-      detailedNotes: 'x'.repeat(2001)
+      detailedNotes: 'x'.repeat(10001)
     })).toBeTruthy();
   });
 });
@@ -325,12 +327,12 @@ describe('querySchemas.acceptResolution', () => {
     })).toBeNull();
   });
 
-  it('fails reason exceeding 500 chars', () => {
-    expect(err(querySchemas.acceptResolution, { reason: 'x'.repeat(501) })).toBeTruthy();
+  it('fails reason exceeding 2000 chars', () => {
+    expect(err(querySchemas.acceptResolution, { reason: 'x'.repeat(2001) })).toBeTruthy();
   });
 
-  it('passes reason of exactly 500 chars', () => {
-    expect(err(querySchemas.acceptResolution, { reason: 'x'.repeat(500) })).toBeNull();
+  it('passes reason of exactly 2000 chars', () => {
+    expect(err(querySchemas.acceptResolution, { reason: 'x'.repeat(2000) })).toBeNull();
   });
 });
 
@@ -364,12 +366,12 @@ describe('querySchemas.rejectResolution', () => {
     })).toBeNull();
   });
 
-  it('fails reason > 500 chars', () => {
-    expect(err(querySchemas.rejectResolution, { reason: 'x'.repeat(501) })).toBeTruthy();
+  it('fails reason > 2000 chars', () => {
+    expect(err(querySchemas.rejectResolution, { reason: 'x'.repeat(2001) })).toBeTruthy();
   });
 
-  it('passes reason of exactly 500 chars', () => {
-    expect(err(querySchemas.rejectResolution, { reason: 'x'.repeat(500) })).toBeNull();
+  it('passes reason of exactly 2000 chars', () => {
+    expect(err(querySchemas.rejectResolution, { reason: 'x'.repeat(2000) })).toBeNull();
   });
 
   it('reason cannot be whitespace-only (empty after trim by Joi)', () => {

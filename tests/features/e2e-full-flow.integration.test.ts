@@ -212,7 +212,7 @@ describe('E2E Full Flow Integration Tests', () => {
           'SELECT crf_version_id FROM crf_version WHERE crf_id = $1',
           [testCrfId]
         );
-        testVersionId = versionResult.rows[0]?.crf_version_id;
+        testVersionId = versionResult.rows[0]?.crfVersionId;
       }
     });
   });
@@ -483,7 +483,7 @@ describe('E2E Full Flow Integration Tests', () => {
         // Form should be deleted or status changed
         expect(
           deletedCrf.rows.length === 0 || 
-          deletedCrf.rows[0].status_id === 5 // Deleted status
+          deletedCrf.rows[0].statusId === 5 // Deleted status
         ).toBe(true);
 
         // Clear test ID so cleanup doesn't try again
@@ -556,13 +556,13 @@ describe('Database Schema Verification', () => {
     console.log('Response types in database:', result.rows);
     
     // At minimum, types 1-7 should exist
-    expect(result.rows.some(r => r.response_type_id === 1)).toBe(true); // text
-    expect(result.rows.some(r => r.response_type_id === 2)).toBe(true); // textarea
-    expect(result.rows.some(r => r.response_type_id === 3)).toBe(true); // checkbox
-    expect(result.rows.some(r => r.response_type_id === 4)).toBe(true); // file
-    expect(result.rows.some(r => r.response_type_id === 5)).toBe(true); // radio
-    expect(result.rows.some(r => r.response_type_id === 6)).toBe(true); // select
-    expect(result.rows.some(r => r.response_type_id === 3)).toBe(true); // checkbox (multi-value)
+    expect(result.rows.some(r => r.responseTypeId === 1)).toBe(true); // text
+    expect(result.rows.some(r => r.responseTypeId === 2)).toBe(true); // textarea
+    expect(result.rows.some(r => r.responseTypeId === 3)).toBe(true); // checkbox
+    expect(result.rows.some(r => r.responseTypeId === 4)).toBe(true); // file
+    expect(result.rows.some(r => r.responseTypeId === 5)).toBe(true); // radio
+    expect(result.rows.some(r => r.responseTypeId === 6)).toBe(true); // select
+    expect(result.rows.some(r => r.responseTypeId === 3)).toBe(true); // checkbox (multi-value)
   });
 });
 

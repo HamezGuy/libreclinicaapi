@@ -62,20 +62,20 @@ export const authenticateUser = async (
     
     // Return a demo admin user
     const demoUser = {
-      user_id: 1,
-      user_name: username || 'demo',
-      first_name: 'Demo',
-      last_name: 'User',
+      userId: 1,
+      userName: username || 'demo',
+      firstName: 'Demo',
+      lastName: 'User',
       email: `${username || 'demo'}@demo.local`,
       passwd: '',
-      passwd_timestamp: new Date(),
-      date_lastvisit: new Date(),
-      user_type_id: 1, // Admin type
-      user_type: 'admin',
-      owner_id: 1,
-      date_created: new Date(),
-      status_id: 1,
-      update_id: 1
+      passwdTimestamp: new Date(),
+      dateLastvisit: new Date(),
+      userTypeId: 1,
+      userType: 'admin',
+      ownerId: 1,
+      dateCreated: new Date(),
+      statusId: 1,
+      updateId: 1
     } as User;
     
     return {
@@ -99,7 +99,7 @@ export const authenticateUser = async (
         AND table_name = 'user_account_extended'
       ) as table_exists
     `);
-    const hasExtendedTable = tableCheck.rows[0]?.table_exists === true;
+    const hasExtendedTable = tableCheck.rows[0]?.tableExists === true;
     
     // Use appropriate query based on table existence
     const query = hasExtendedTable 
@@ -160,8 +160,8 @@ export const authenticateUser = async (
     const user = result.rows[0];
 
     // Check if user is active via status_id (1 = active, other = inactive)
-    if (user.status_id !== 1) {
-      logger.warn('Authentication failed - user not active', { username, statusId: user.status_id });
+    if (user.statusId !== 1) {
+      logger.warn('Authentication failed - user not active', { username, statusId: user.statusId });
       return {
         success: false,
         message: 'User account is not active'
@@ -173,7 +173,7 @@ export const authenticateUser = async (
     const verification = await verifyAndUpgrade(
       password,
       user.passwd,           // MD5 hash from LibreClinica
-      user.bcrypt_passwd     // bcrypt hash if available (from our extended table)
+      user.bcryptPasswd     // bcrypt hash if available (from our extended table)
     );
 
     if (!verification.valid) {
@@ -191,12 +191,12 @@ export const authenticateUser = async (
     // If password was verified via MD5 and needs upgrade to bcrypt
     if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
       try {
-        await upgradeToBcrypt(user.user_id, verification.upgradedBcryptHash);
-        logger.info('Password upgraded from MD5 to bcrypt', { userId: user.user_id });
+        await upgradeToBcrypt(user.userId, verification.upgradedBcryptHash);
+        logger.info('Password upgraded from MD5 to bcrypt', { userId: user.userId });
       } catch (upgradeError: any) {
         // Don't fail login if upgrade fails - just log it
         logger.warn('Failed to upgrade password hash', { 
-          userId: user.user_id, 
+          userId: user.userId, 
           error: upgradeError.message 
         });
       }
@@ -212,8 +212,8 @@ export const authenticateUser = async (
     // }
 
     // Password expiration warning (within 7 days)
-    const daysUntilExpiration = user.passwd_timestamp 
-      ? getDaysUntilPasswordExpires(user.passwd_timestamp)
+    const daysUntilExpiration = user.passwdTimestamp 
+      ? getDaysUntilPasswordExpires(user.passwdTimestamp)
       : null;
 
     if (daysUntilExpiration !== null && daysUntilExpiration <= 7 && daysUntilExpiration > 0) {
@@ -224,19 +224,19 @@ export const authenticateUser = async (
     }
 
     // Reset lock counter on successful login
-    if (user.lock_counter > 0) {
-      await resetLockCounter(user.user_id);
+    if (user.lockCounter > 0) {
+      await resetLockCounter(user.userId);
     }
 
     // Update last visit date
-    await updateLastVisit(user.user_id);
+    await updateLastVisit(user.userId);
 
     // Log successful login
-    await logSuccessfulLogin(user.user_id, username, ipAddress);
+    await logSuccessfulLogin(user.userId, username, ipAddress);
 
     logger.info('Authentication successful', { 
       username,
-      userId: user.user_id
+      userId: user.userId
     });
 
     return {
@@ -299,8 +299,8 @@ export const authenticateWithGoogle = async (
     }
 
     // Check if user is active (status_id = 1 means active)
-    if (user.status_id !== 1) {
-      logger.warn('Google OAuth failed - user not active', { email, statusId: user.status_id });
+    if (user.statusId !== 1) {
+      logger.warn('Google OAuth failed - user not active', { email, statusId: user.statusId });
       return {
         success: false,
         message: 'User account is not active'
@@ -308,14 +308,14 @@ export const authenticateWithGoogle = async (
     }
 
     // Update last visit
-    await updateLastVisit(user.user_id);
+    await updateLastVisit(user.userId);
 
     // Log successful login
-    await logSuccessfulLogin(user.user_id, user.user_name, ipAddress);
+    await logSuccessfulLogin(user.userId, user.userName, ipAddress);
 
     logger.info('Google OAuth successful', {
       email,
-      userId: user.user_id
+      userId: user.userId
     });
 
     return {
@@ -370,7 +370,7 @@ export const getUserRoles = async (
     }
 
     const result = await pool.query(query, params);
-    return result.rows.map(row => row.role_name);
+    return result.rows.map(row => row.roleName);
   } catch (error: any) {
     logger.error('Failed to get user roles', {
       error: error.message,
@@ -395,7 +395,7 @@ export const getUserStudies = async (userId: number): Promise<number[]> => {
     `;
 
     const result = await pool.query(query, [userId]);
-    return result.rows.map(row => row.study_id);
+    return result.rows.map(row => row.studyId);
   } catch (error: any) {
     logger.error('Failed to get user studies', {
       error: error.message,
@@ -417,8 +417,8 @@ export const getUserStudies = async (userId: number): Promise<number[]> => {
  * (requireStudyAccess), not feature-level permissions (requireRole).
  */
 export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
-  const studyIds = await getUserStudies(user.user_id);
-  const userTypeId = (user as any).user_type_id;
+  const studyIds = await getUserStudies(user.userId);
+  const userTypeId = (user as any).userTypeId;
 
   let primaryRole = 'coordinator';
 
@@ -428,13 +428,13 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
     try {
       const result = await pool.query(
         `SELECT platform_role FROM user_account_extended WHERE user_id = $1`,
-        [user.user_id]
+        [user.userId]
       );
-      if (result.rows.length > 0 && result.rows[0].platform_role) {
-        primaryRole = result.rows[0].platform_role;
+      if (result.rows.length > 0 && result.rows[0].platformRole) {
+        primaryRole = result.rows[0].platformRole;
       }
     } catch (e: any) {
-      logger.warn('Could not read platform_role', { error: e.message, userId: user.user_id });
+      logger.warn('Could not read platform_role', { error: e.message, userId: user.userId });
     }
   }
 
@@ -448,24 +448,24 @@ export const buildJwtPayload = async (user: User): Promise<JwtPayload> => {
        FROM acc_organization_member m
        INNER JOIN acc_organization o ON m.organization_id = o.organization_id
        WHERE m.user_id = $1 AND m.status = 'active'`,
-      [user.user_id]
+      [user.userId]
     );
-    organizationIds = orgResult.rows.map((r: any) => r.organization_id);
+    organizationIds = orgResult.rows.map((r: any) => r.organizationId);
     organizationDetails = orgResult.rows.map((r: any) => ({
-      organizationId: r.organization_id,
-      organizationName: r.organization_name,
+      organizationId: r.organizationId,
+      organizationName: r.organizationName,
       role: r.role
     }));
   } catch (e: any) {
     logger.warn('Could not fetch org membership for JWT', { error: e.message });
   }
 
-  logger.info('JWT payload built', { userId: user.user_id, role: primaryRole, studyIds, organizationIds });
+  logger.info('JWT payload built', { userId: user.userId, role: primaryRole, studyIds, organizationIds });
 
   return {
-    userId: user.user_id,
-    userName: user.user_name,
-    username: user.user_name,
+    userId: user.userId,
+    userName: user.userName,
+    username: user.userName,
     email: user.email,
     role: primaryRole,
     userType: userType,

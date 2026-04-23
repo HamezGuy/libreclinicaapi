@@ -43,7 +43,7 @@ describe('Priority-1 Features', () => {
       VALUES ('P1 Test Study', 'P1-TEST-' || NOW()::text, 'P1-PROTO', 1, NOW(), $1)
       RETURNING study_id
     `, [testUserId]);
-    testStudyId = studyRes.rows[0].study_id;
+    testStudyId = studyRes.rows[0].studyId;
 
     // Create test subject
     const subRes = await pool.query(`
@@ -51,7 +51,7 @@ describe('Priority-1 Features', () => {
       VALUES ('P1-SUBJ-001', $1, 1, NOW(), $2)
       RETURNING study_subject_id
     `, [testStudyId, testUserId]);
-    testSubjectId = subRes.rows[0].study_subject_id;
+    testSubjectId = subRes.rows[0].studySubjectId;
 
     // Create CRF
     const crfRes = await pool.query(`
@@ -59,14 +59,14 @@ describe('Priority-1 Features', () => {
       VALUES ('P1 Test CRF', $1, 1, NOW())
       RETURNING crf_id
     `, [testUserId]);
-    testCrfId = crfRes.rows[0].crf_id;
+    testCrfId = crfRes.rows[0].crfId;
 
     const verRes = await pool.query(`
       INSERT INTO crf_version (crf_id, name, owner_id, status_id, date_created, revision_notes)
       VALUES ($1, 'v1.0', $2, 1, NOW(), 'test')
       RETURNING crf_version_id
     `, [testCrfId, testUserId]);
-    testCrfVersionId = verRes.rows[0].crf_version_id;
+    testCrfVersionId = verRes.rows[0].crfVersionId;
 
     // Create event definition + event
     const sedRes = await pool.query(`
@@ -74,27 +74,27 @@ describe('Priority-1 Features', () => {
       VALUES ($1, 'Test Visit', 'scheduled', 1, NOW(), $2, 1)
       RETURNING study_event_definition_id
     `, [testStudyId, testUserId]);
-    const sedId = sedRes.rows[0].study_event_definition_id;
+    const sedId = sedRes.rows[0].studyEventDefinitionId;
 
     const seRes = await pool.query(`
       INSERT INTO study_event (study_event_definition_id, study_subject_id, date_start, subject_event_status_id, owner_id, date_created, start_time_flag, end_time_flag)
       VALUES ($1, $2, NOW(), 1, $3, NOW(), false, false)
       RETURNING study_event_id
     `, [sedId, testSubjectId, testUserId]);
-    const seId = seRes.rows[0].study_event_id;
+    const seId = seRes.rows[0].studyEventId;
 
     // Create two event_crf records for batch testing
     const ec1 = await pool.query(`
       INSERT INTO event_crf (study_event_id, crf_version_id, study_subject_id, status_id, completion_status_id, owner_id, date_created)
       VALUES ($1, $2, $3, 2, 4, $4, NOW()) RETURNING event_crf_id
     `, [seId, testCrfVersionId, testSubjectId, testUserId]);
-    testEventCrfId = ec1.rows[0].event_crf_id;
+    testEventCrfId = ec1.rows[0].eventCrfId;
 
     const ec2 = await pool.query(`
       INSERT INTO event_crf (study_event_id, crf_version_id, study_subject_id, status_id, completion_status_id, owner_id, date_created)
       VALUES ($1, $2, $3, 2, 4, $4, NOW()) RETURNING event_crf_id
     `, [seId, testCrfVersionId, testSubjectId, testUserId]);
-    testEventCrfId2 = ec2.rows[0].event_crf_id;
+    testEventCrfId2 = ec2.rows[0].eventCrfId;
 
     // Create test queries
     const q1 = await queryService.createQuery({

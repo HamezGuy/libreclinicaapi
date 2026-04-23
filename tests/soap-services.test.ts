@@ -255,7 +255,7 @@ describe('Subject SOAP Service', () => {
     it('should create subject via SOAP', async () => {
       const request = {
         studyId: 1,
-        studySubjectId: 'SUBJ-TEST-001',
+        label: 'SUBJ-TEST-001',
         enrollmentDate: '2024-01-15',
         gender: 'M'
       };
@@ -270,7 +270,7 @@ describe('Subject SOAP Service', () => {
     it('should handle subject creation with minimal data', async () => {
       const request = {
         studyId: 1,
-        studySubjectId: 'SUBJ-MINIMAL'
+        label: 'SUBJ-MINIMAL'
       };
 
       const result = await subjectSoapService.createSubject(request, 1, 'root');
@@ -283,7 +283,7 @@ describe('Subject SOAP Service', () => {
 
       const request = {
         studyId: 1,
-        studySubjectId: 'SUBJ-FAIL'
+        label: 'SUBJ-FAIL'
       };
 
       const result = await subjectSoapService.createSubject(request, 1, 'root');
@@ -697,7 +697,7 @@ describe('SOAP Error Handling', () => {
     mockClient.setFailMode(true, 'Authentication failed: Invalid credentials');
 
     const result = await subjectSoapService.createSubject(
-      { studyId: 1, studySubjectId: 'TEST' },
+      { studyId: 1, label: 'TEST' },
       1,
       'invalid_user'
     );
@@ -740,7 +740,7 @@ describe('SOAP Integration Scenarios', () => {
 
     // Step 3: Create subject
     const createResult = await subjectSoapService.createSubject(
-      { studyId: 1, studySubjectId: 'NEW-SUBJ-001', gender: 'F' },
+      { studyId: 1, label: 'NEW-SUBJ-001', gender: 'F' },
       1,
       'root'
     );

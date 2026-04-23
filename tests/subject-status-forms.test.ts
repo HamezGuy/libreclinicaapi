@@ -21,7 +21,7 @@ describe('Subject Status Change', () => {
       VALUES ('Status Change Test Study', $1, 1, $2, NOW())
       RETURNING study_id
     `, [`STATUS-TEST-${Date.now()}`, rootUserId]);
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
 
     const subjectResult = await testDb.pool.query(`
       INSERT INTO subject (gender, status_id, owner_id, date_created, unique_identifier)
@@ -33,8 +33,8 @@ describe('Subject Status Change', () => {
       INSERT INTO study_subject (study_id, subject_id, label, enrollment_date, status_id, owner_id, date_created)
       VALUES ($1, $2, $3, NOW(), 1, $4, NOW())
       RETURNING study_subject_id
-    `, [testStudyId, subjectResult.rows[0].subject_id, `SUBJ-STATUS-${Date.now()}`, rootUserId]);
-    testSubjectId = studySubjectResult.rows[0].study_subject_id;
+    `, [testStudyId, subjectResult.rows[0].subjectId, `SUBJ-STATUS-${Date.now()}`, rootUserId]);
+    testSubjectId = studySubjectResult.rows[0].studySubjectId;
   });
 
   afterAll(async () => {
@@ -50,7 +50,7 @@ describe('Subject Status Change', () => {
       'SELECT status_id FROM study_subject WHERE study_subject_id = $1',
       [testSubjectId]
     );
-    expect(result.rows[0].status_id).toBe(1);
+    expect(result.rows[0].statusId).toBe(1);
   });
 
   it('should update status_id to 5 (removed)', async () => {
@@ -63,7 +63,7 @@ describe('Subject Status Change', () => {
       'SELECT status_id FROM study_subject WHERE study_subject_id = $1',
       [testSubjectId]
     );
-    expect(result.rows[0].status_id).toBe(5);
+    expect(result.rows[0].statusId).toBe(5);
   });
 
   it('should update date_updated when status changes', async () => {
@@ -84,8 +84,8 @@ describe('Subject Status Change', () => {
       [testSubjectId]
     );
 
-    expect(new Date(after.rows[0].date_updated).getTime())
-      .toBeGreaterThan(new Date(before.rows[0].date_updated).getTime());
+    expect(new Date(after.rows[0].dateUpdated).getTime())
+      .toBeGreaterThan(new Date(before.rows[0].dateUpdated).getTime());
   });
 
   it('should allow re-activation (status back to 1)', async () => {
@@ -102,7 +102,7 @@ describe('Subject Status Change', () => {
       'SELECT status_id FROM study_subject WHERE study_subject_id = $1',
       [testSubjectId]
     );
-    expect(result.rows[0].status_id).toBe(1);
+    expect(result.rows[0].statusId).toBe(1);
   });
 });
 
@@ -121,24 +121,24 @@ describe('Forms Required Field in event_definition_crf', () => {
       VALUES ('Required Field Test', $1, 1, $2, NOW())
       RETURNING study_id
     `, [`REQ-TEST-${Date.now()}`, rootUserId]);
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
 
     const eventDefResult = await testDb.pool.query(`
       INSERT INTO study_event_definition (study_id, name, type, ordinal, status_id, owner_id, date_created)
       VALUES ($1, 'Test Event', 'scheduled', 1, 1, $2, NOW())
       RETURNING study_event_definition_id
     `, [testStudyId, rootUserId]);
-    testEventDefId = eventDefResult.rows[0].study_event_definition_id;
+    testEventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
     const crfResult = await testDb.pool.query(`
       INSERT INTO crf (name, status_id, owner_id, date_created) VALUES ('Required CRF', 1, $1, NOW()) RETURNING crf_id
     `, [rootUserId]);
-    testCrfId = crfResult.rows[0].crf_id;
+    testCrfId = crfResult.rows[0].crfId;
 
     const crfResult2 = await testDb.pool.query(`
       INSERT INTO crf (name, status_id, owner_id, date_created) VALUES ('Optional CRF', 1, $1, NOW()) RETURNING crf_id
     `, [rootUserId]);
-    testCrfId2 = crfResult2.rows[0].crf_id;
+    testCrfId2 = crfResult2.rows[0].crfId;
 
     await testDb.pool.query(`
       INSERT INTO event_definition_crf (study_event_definition_id, crf_id, required_crf, status_id, owner_id, date_created, ordinal)
@@ -166,7 +166,7 @@ describe('Forms Required Field in event_definition_crf', () => {
       'SELECT required_crf FROM event_definition_crf WHERE study_event_definition_id = $1 AND crf_id = $2',
       [testEventDefId, testCrfId]
     );
-    expect(result.rows[0].required_crf).toBe(true);
+    expect(result.rows[0].requiredCrf).toBe(true);
   });
 
   it('should store required_crf as false for optional forms', async () => {
@@ -174,7 +174,7 @@ describe('Forms Required Field in event_definition_crf', () => {
       'SELECT required_crf FROM event_definition_crf WHERE study_event_definition_id = $1 AND crf_id = $2',
       [testEventDefId, testCrfId2]
     );
-    expect(result.rows[0].required_crf).toBe(false);
+    expect(result.rows[0].requiredCrf).toBe(false);
   });
 
   it('should distinguish required and optional forms in a single query', async () => {
@@ -188,8 +188,8 @@ describe('Forms Required Field in event_definition_crf', () => {
 
     expect(result.rows.length).toBe(2);
     expect(result.rows[0].name).toBe('Required CRF');
-    expect(result.rows[0].required_crf).toBe(true);
+    expect(result.rows[0].requiredCrf).toBe(true);
     expect(result.rows[1].name).toBe('Optional CRF');
-    expect(result.rows[1].required_crf).toBe(false);
+    expect(result.rows[1].requiredCrf).toBe(false);
   });
 });

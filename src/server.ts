@@ -49,7 +49,12 @@ function validateProductionConfig(): void {
   }
 
   if (process.env.DB_SSL !== 'true') {
-    errors.push('DB_SSL must be true in production (21 CFR Part 11 §11.10(a) — data in transit)');
+    const dbHost = process.env.LIBRECLINICA_DB_HOST || 'localhost';
+    const isInternalDocker = ['postgres', 'localhost', '127.0.0.1'].includes(dbHost)
+      || dbHost.startsWith('10.') || dbHost.startsWith('172.') || dbHost.startsWith('192.168.');
+    if (!isInternalDocker) {
+      errors.push('DB_SSL must be true in production when the database is on a remote host (21 CFR Part 11 §11.10(a) — data in transit)');
+    }
   }
 
   if (errors.length > 0) {

@@ -97,15 +97,15 @@ describe('Study Full Integration Tests', () => {
       const study = dbResult.rows[0];
 
       expect(study.name).toBe(studyData.name);
-      expect(study.unique_identifier).toBe(studyData.uniqueIdentifier);
-      expect(study.official_title).toBe(studyData.officialTitle);
-      expect(study.secondary_identifier).toBe(studyData.secondaryIdentifier);
-      expect(study.principal_investigator).toBe(studyData.principalInvestigator);
+      expect(study.uniqueIdentifier).toBe(studyData.uniqueIdentifier);
+      expect(study.officialTitle).toBe(studyData.officialTitle);
+      expect(study.secondaryIdentifier).toBe(studyData.secondaryIdentifier);
+      expect(study.principalInvestigator).toBe(studyData.principalInvestigator);
       expect(study.sponsor).toBe(studyData.sponsor);
       expect(study.collaborators).toBe(studyData.collaborators);
       expect(study.phase).toBe(studyData.phase);
-      expect(study.protocol_type).toBe(studyData.protocolType);
-      expect(study.expected_total_enrollment).toBe(studyData.expectedTotalEnrollment);
+      expect(study.protocolType).toBe(studyData.protocolType);
+      expect(study.expectedTotalEnrollment).toBe(studyData.expectedTotalEnrollment);
     });
 
     it('should create study with facility information', async () => {
@@ -137,13 +137,13 @@ describe('Study Full Integration Tests', () => {
       );
 
       const study = dbResult.rows[0];
-      expect(study.facility_name).toBe(studyData.facilityName);
-      expect(study.facility_city).toBe(studyData.facilityCity);
-      expect(study.facility_state).toBe(studyData.facilityState);
-      expect(study.facility_zip).toBe(studyData.facilityZip);
-      expect(study.facility_country).toBe(studyData.facilityCountry);
-      expect(study.facility_contact_name).toBe(studyData.facilityContactName);
-      expect(study.facility_contact_email).toBe(studyData.facilityContactEmail);
+      expect(study.facilityName).toBe(studyData.facilityName);
+      expect(study.facilityCity).toBe(studyData.facilityCity);
+      expect(study.facilityState).toBe(studyData.facilityState);
+      expect(study.facilityZip).toBe(studyData.facilityZip);
+      expect(study.facilityCountry).toBe(studyData.facilityCountry);
+      expect(study.facilityContactName).toBe(studyData.facilityContactName);
+      expect(study.facilityContactEmail).toBe(studyData.facilityContactEmail);
     });
 
     it('should create study with protocol and eligibility fields', async () => {
@@ -176,14 +176,14 @@ describe('Study Full Integration Tests', () => {
       );
 
       const study = dbResult.rows[0];
-      expect(study.protocol_description).toBe(studyData.protocolDescription);
-      expect(study.medline_identifier).toBe(studyData.medlineIdentifier);
+      expect(study.protocolDescription).toBe(studyData.protocolDescription);
+      expect(study.medlineIdentifier).toBe(studyData.medlineIdentifier);
       expect(study.url).toBe(studyData.url);
       expect(study.conditions).toBe(studyData.conditions);
       expect(study.keywords).toBe(studyData.keywords);
       expect(study.gender).toBe(studyData.gender);
-      expect(study.age_min).toBe(studyData.ageMin);
-      expect(study.age_max).toBe(studyData.ageMax);
+      expect(study.ageMin).toBe(studyData.ageMin);
+      expect(study.ageMax).toBe(studyData.ageMax);
     });
 
     it('should create study with design fields', async () => {
@@ -270,8 +270,8 @@ describe('Study Full Integration Tests', () => {
         [result.studyId]
       );
 
-      expect(dbResult.rows[0].oc_oid).toBeDefined();
-      expect(dbResult.rows[0].oc_oid).toContain('S_');
+      expect(dbResult.rows[0].ocOid).toBeDefined();
+      expect(dbResult.rows[0].ocOid).toContain('S_');
     });
   });
 
@@ -339,7 +339,7 @@ describe('Study Full Integration Tests', () => {
       expect(eventsResult.rows[2].ordinal).toBe(3);
 
       // Track for cleanup
-      eventsResult.rows.forEach((e: any) => createdEventDefIds.push(e.study_event_definition_id));
+      eventsResult.rows.forEach((e: any) => createdEventDefIds.push(e.studyEventDefinitionId));
     });
 
     it('should create repeating event correctly', async () => {
@@ -371,7 +371,7 @@ describe('Study Full Integration Tests', () => {
       );
 
       expect(eventsResult.rows[0].repeating).toBe(true);
-      createdEventDefIds.push(eventsResult.rows[0].study_event_definition_id);
+      createdEventDefIds.push(eventsResult.rows[0].studyEventDefinitionId);
     });
 
     it('should generate event OID correctly', async () => {
@@ -398,9 +398,9 @@ describe('Study Full Integration Tests', () => {
         [result.studyId]
       );
 
-      expect(eventsResult.rows[0].oc_oid).toBeDefined();
-      expect(eventsResult.rows[0].oc_oid).toContain('SE_');
-      createdEventDefIds.push(eventsResult.rows[0].study_event_definition_id);
+      expect(eventsResult.rows[0].ocOid).toBeDefined();
+      expect(eventsResult.rows[0].ocOid).toContain('SE_');
+      createdEventDefIds.push(eventsResult.rows[0].studyEventDefinitionId);
     });
 
     it('should handle unscheduled event type', async () => {
@@ -431,7 +431,7 @@ describe('Study Full Integration Tests', () => {
       );
 
       expect(eventsResult.rows[0].type).toBe('unscheduled');
-      createdEventDefIds.push(eventsResult.rows[0].study_event_definition_id);
+      createdEventDefIds.push(eventsResult.rows[0].studyEventDefinitionId);
     });
   });
 
@@ -451,7 +451,7 @@ describe('Study Full Integration Tests', () => {
         RETURNING crf_id
       `, [userId, `CRF_TEST_${Date.now()}`]);
 
-      testCrfId = crfResult.rows[0].crf_id;
+      testCrfId = crfResult.rows[0].crfId;
       createdCrfIds.push(testCrfId);
 
       // Create a CRF version
@@ -461,7 +461,7 @@ describe('Study Full Integration Tests', () => {
         RETURNING crf_version_id
       `, [testCrfId, userId, `CRF_V_${Date.now()}`]);
 
-      testCrfVersionId = versionResult.rows[0].crf_version_id;
+      testCrfVersionId = versionResult.rows[0].crfVersionId;
     });
 
     afterEach(async () => {
@@ -507,7 +507,7 @@ describe('Study Full Integration Tests', () => {
       );
 
       expect(eventResult.rows.length).toBe(1);
-      const eventDefId = eventResult.rows[0].study_event_definition_id;
+      const eventDefId = eventResult.rows[0].studyEventDefinitionId;
       createdEventDefIds.push(eventDefId);
 
       // Verify CRF assignment
@@ -517,10 +517,10 @@ describe('Study Full Integration Tests', () => {
       );
 
       expect(assignmentResult.rows.length).toBe(1);
-      expect(assignmentResult.rows[0].crf_id).toBe(testCrfId);
-      expect(assignmentResult.rows[0].required_crf).toBe(true);
-      expect(assignmentResult.rows[0].double_entry).toBe(false);
-      expect(assignmentResult.rows[0].electronic_signature).toBe(true);
+      expect(assignmentResult.rows[0].crfId).toBe(testCrfId);
+      expect(assignmentResult.rows[0].requiredCrf).toBe(true);
+      expect(assignmentResult.rows[0].doubleEntry).toBe(false);
+      expect(assignmentResult.rows[0].electronicSignature).toBe(true);
     });
 
     it('should assign default CRF version when not specified', async () => {
@@ -553,14 +553,14 @@ describe('Study Full Integration Tests', () => {
         'SELECT study_event_definition_id FROM study_event_definition WHERE study_id = $1',
         [result.studyId]
       );
-      createdEventDefIds.push(eventResult.rows[0].study_event_definition_id);
+      createdEventDefIds.push(eventResult.rows[0].studyEventDefinitionId);
 
       const assignmentResult = await testDb.pool.query(
         'SELECT default_version_id FROM event_definition_crf WHERE study_event_definition_id = $1',
-        [eventResult.rows[0].study_event_definition_id]
+        [eventResult.rows[0].studyEventDefinitionId]
       );
 
-      expect(assignmentResult.rows[0].default_version_id).toBe(testCrfVersionId);
+      expect(assignmentResult.rows[0].defaultVersionId).toBe(testCrfVersionId);
     });
 
     it('should handle multiple CRF assignments to one event', async () => {
@@ -571,7 +571,7 @@ describe('Study Full Integration Tests', () => {
         RETURNING crf_id
       `, [userId, `CRF_TEST2_${Date.now()}`]);
       
-      const testCrf2Id = crf2Result.rows[0].crf_id;
+      const testCrf2Id = crf2Result.rows[0].crfId;
       createdCrfIds.push(testCrf2Id);
 
       // Create version for second CRF
@@ -606,18 +606,18 @@ describe('Study Full Integration Tests', () => {
         'SELECT study_event_definition_id FROM study_event_definition WHERE study_id = $1',
         [result.studyId]
       );
-      createdEventDefIds.push(eventResult.rows[0].study_event_definition_id);
+      createdEventDefIds.push(eventResult.rows[0].studyEventDefinitionId);
 
       const assignmentsResult = await testDb.pool.query(
         'SELECT * FROM event_definition_crf WHERE study_event_definition_id = $1 ORDER BY ordinal',
-        [eventResult.rows[0].study_event_definition_id]
+        [eventResult.rows[0].studyEventDefinitionId]
       );
 
       expect(assignmentsResult.rows.length).toBe(2);
-      expect(assignmentsResult.rows[0].crf_id).toBe(testCrfId);
-      expect(assignmentsResult.rows[0].required_crf).toBe(true);
-      expect(assignmentsResult.rows[1].crf_id).toBe(testCrf2Id);
-      expect(assignmentsResult.rows[1].required_crf).toBe(false);
+      expect(assignmentsResult.rows[0].crfId).toBe(testCrfId);
+      expect(assignmentsResult.rows[0].requiredCrf).toBe(true);
+      expect(assignmentsResult.rows[1].crfId).toBe(testCrf2Id);
+      expect(assignmentsResult.rows[1].requiredCrf).toBe(false);
     });
   });
 
@@ -646,10 +646,10 @@ describe('Study Full Integration Tests', () => {
       const study = await studyService.getStudyById(testStudyId, userId);
 
       expect(study).toBeDefined();
-      expect(study.study_id).toBe(testStudyId);
-      expect(study.principal_investigator).toBe('Dr. Retrieval');
+      expect(study.studyId).toBe(testStudyId);
+      expect(study.principalInvestigator).toBe('Dr. Retrieval');
       expect(study.sponsor).toBe('Retrieval Corp');
-      expect(study.expected_total_enrollment).toBe(100);
+      expect(study.expectedTotalEnrollment).toBe(100);
     });
 
     it('should return null for non-existent study', async () => {
@@ -663,10 +663,10 @@ describe('Study Full Integration Tests', () => {
 
       expect(study).toBeDefined();
       // These fields are computed in the query
-      expect(study.total_subjects).toBeDefined();
-      expect(study.active_subjects).toBeDefined();
-      expect(study.total_events).toBeDefined();
-      expect(study.total_forms).toBeDefined();
+      expect(study.totalSubjects).toBeDefined();
+      expect(study.activeSubjects).toBeDefined();
+      expect(study.totalEvents).toBeDefined();
+      expect(study.totalForms).toBeDefined();
     });
 
     it('should retrieve study list with pagination', async () => {
@@ -723,9 +723,9 @@ describe('Study Full Integration Tests', () => {
 
       expect(dbResult.rows[0].name).toBe(updates.name);
       expect(dbResult.rows[0].summary).toBe(updates.description);
-      expect(dbResult.rows[0].principal_investigator).toBe(updates.principalInvestigator);
+      expect(dbResult.rows[0].principalInvestigator).toBe(updates.principalInvestigator);
       expect(dbResult.rows[0].sponsor).toBe(updates.sponsor);
-      expect(dbResult.rows[0].expected_total_enrollment).toBe(updates.expectedTotalEnrollment);
+      expect(dbResult.rows[0].expectedTotalEnrollment).toBe(updates.expectedTotalEnrollment);
     });
 
     it('should update date_updated field', async () => {
@@ -741,7 +741,7 @@ describe('Study Full Integration Tests', () => {
         [updateStudyId]
       );
 
-      expect(afterUpdate.rows[0].date_updated).not.toBe(beforeUpdate.rows[0].date_updated);
+      expect(afterUpdate.rows[0].dateUpdated).not.toBe(beforeUpdate.rows[0].dateUpdated);
     });
 
     it('should set update_id field', async () => {
@@ -752,7 +752,7 @@ describe('Study Full Integration Tests', () => {
         [updateStudyId]
       );
 
-      expect(dbResult.rows[0].update_id).toBe(userId);
+      expect(dbResult.rows[0].updateId).toBe(userId);
     });
 
     it('should create audit log entry on update', async () => {
@@ -801,7 +801,7 @@ describe('Study Full Integration Tests', () => {
         [deleteStudyId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(5);
+      expect(dbResult.rows[0].statusId).toBe(5);
     });
   });
 
@@ -871,7 +871,7 @@ describe('Study Full Integration Tests', () => {
       expect(events.length).toBeGreaterThanOrEqual(2);
 
       // Track for cleanup
-      events.forEach((e: any) => createdEventDefIds.push(e.study_event_definition_id));
+      events.forEach((e: any) => createdEventDefIds.push(e.studyEventDefinitionId));
     });
 
     it('should get event by ID', async () => {
@@ -935,7 +935,7 @@ describe('Study Full Integration Tests', () => {
         [eventId]
       );
 
-      expect(dbResult.rows[0].status_id).toBe(5);
+      expect(dbResult.rows[0].statusId).toBe(5);
     });
   });
 
@@ -955,7 +955,7 @@ describe('Study Full Integration Tests', () => {
         RETURNING crf_id
       `, [userId, `CRF_E2E_${timestamp}`]);
       
-      const crfId = crfResult.rows[0].crf_id;
+      const crfId = crfResult.rows[0].crfId;
       createdCrfIds.push(crfId);
 
       await testDb.pool.query(`
@@ -1003,7 +1003,7 @@ describe('Study Full Integration Tests', () => {
       
       expect(study).toBeDefined();
       expect(study.name).toBe(studyData.name);
-      expect(study.principal_investigator).toBe(studyData.principalInvestigator);
+      expect(study.principalInvestigator).toBe(studyData.principalInvestigator);
 
       console.log(`✅ Retrieved study: ${study.name}`);
 
@@ -1014,18 +1014,18 @@ describe('Study Full Integration Tests', () => {
       expect(events[0].name).toBe('Screening');
       expect(events[1].name).toBe('Treatment');
       
-      events.forEach((e: any) => createdEventDefIds.push(e.study_event_definition_id));
+      events.forEach((e: any) => createdEventDefIds.push(e.studyEventDefinitionId));
 
       console.log(`✅ Verified ${events.length} event definitions`);
 
       // Verify CRF assignment
       const crfAssignments = await testDb.pool.query(
         'SELECT * FROM event_definition_crf WHERE study_event_definition_id = $1',
-        [events[0].study_event_definition_id]
+        [events[0].studyEventDefinitionId]
       );
       
       expect(crfAssignments.rows.length).toBe(1);
-      expect(crfAssignments.rows[0].crf_id).toBe(crfId);
+      expect(crfAssignments.rows[0].crfId).toBe(crfId);
 
       console.log(`✅ Verified CRF assignment`);
 
@@ -1039,7 +1039,7 @@ describe('Study Full Integration Tests', () => {
 
       // Verify update
       const updatedStudy = await studyService.getStudyById(studyId, userId);
-      expect(updatedStudy.expected_total_enrollment).toBe(600);
+      expect(updatedStudy.expectedTotalEnrollment).toBe(600);
 
       console.log(`✅ Updated study enrollment to 600`);
 
@@ -1066,7 +1066,7 @@ describe('Study Full Integration Tests', () => {
         [studyId]
       );
 
-      expect(deletedStudy.rows[0].status_id).toBe(5);
+      expect(deletedStudy.rows[0].statusId).toBe(5);
 
       console.log(`✅ Soft deleted study (status_id = 5)`);
 

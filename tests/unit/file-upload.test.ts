@@ -59,7 +59,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ($1, 'File Upload Test Study', 1, $2, NOW(), $3)
       RETURNING study_id
     `, [`FILE-TEST-${Date.now()}`, userId, `S_FILE_${Date.now()}`]);
-    testStudyId = studyResult.rows[0].study_id;
+    testStudyId = studyResult.rows[0].studyId;
 
     // Create CRF with file field
     const crfResult = await testDb.pool.query(`
@@ -67,7 +67,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES (1, 'File Upload CRF', 'CRF with file fields', $1, NOW(), $2, $3)
       RETURNING crf_id
     `, [userId, `F_FILE_${Date.now()}`, testStudyId]);
-    testCrfId = crfResult.rows[0].crf_id;
+    testCrfId = crfResult.rows[0].crfId;
 
     // Create CRF version
     const versionResult = await testDb.pool.query(`
@@ -75,7 +75,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ($1, 'v1.0', 'Initial version', 1, $2, NOW(), $3)
       RETURNING crf_version_id
     `, [testCrfId, userId, `F_FILE_v10_${Date.now()}`]);
-    testCrfVersionId = versionResult.rows[0].crf_version_id;
+    testCrfVersionId = versionResult.rows[0].crfVersionId;
 
     // Create item for file upload field (response_type = 4)
     const itemResult = await testDb.pool.query(`
@@ -83,7 +83,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ('lab_report_upload', 'Lab report file upload field', 9, 1, $1, NOW(), $2)
       RETURNING item_id
     `, [userId, `I_LAB_UPLOAD_${Date.now()}`]);
-    testFileItemId = itemResult.rows[0].item_id;
+    testFileItemId = itemResult.rows[0].itemId;
 
     // Create subject
     const subjectResult = await testDb.pool.query(`
@@ -91,7 +91,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ('1990-01-01', 'm', $1, 1, NOW(), $2)
       RETURNING subject_id
     `, [`FILE-SUBJ-${Date.now()}`, userId]);
-    testSubjectId = subjectResult.rows[0].subject_id;
+    testSubjectId = subjectResult.rows[0].subjectId;
 
     // Create study_subject
     const ssResult = await testDb.pool.query(`
@@ -99,7 +99,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ($1, $2, $3, 1, $4, NOW(), $5)
       RETURNING study_subject_id
     `, [`FILE-SS-001`, testStudyId, testSubjectId, userId, `SS_FILE_${Date.now()}`]);
-    testStudySubjectId = ssResult.rows[0].study_subject_id;
+    testStudySubjectId = ssResult.rows[0].studySubjectId;
 
     // Create event definition
     const eventDefResult = await testDb.pool.query(`
@@ -107,7 +107,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ($1, 'File Upload Visit', 'Visit with file uploads', false, 'scheduled', 1, 1, NOW(), $2)
       RETURNING study_event_definition_id
     `, [testStudyId, `SE_FILE_${Date.now()}`]);
-    testEventDefId = eventDefResult.rows[0].study_event_definition_id;
+    testEventDefId = eventDefResult.rows[0].studyEventDefinitionId;
 
     // Create study_event
     const seResult = await testDb.pool.query(`
@@ -115,7 +115,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ($1, $2, 'Site 1', 1, NOW(), $3, 1, NOW(), 1, false, false)
       RETURNING study_event_id
     `, [testEventDefId, testStudySubjectId, userId]);
-    testStudyEventId = seResult.rows[0].study_event_id;
+    testStudyEventId = seResult.rows[0].studyEventId;
 
     // Create event_crf
     const ecResult = await testDb.pool.query(`
@@ -123,7 +123,7 @@ describe('File Upload in eCRF Forms', () => {
       VALUES ($1, $2, 1, $3, NOW(), NOW(), 'Test Interviewer')
       RETURNING event_crf_id
     `, [testStudyEventId, testCrfVersionId, userId]);
-    testEventCrfId = ecResult.rows[0].event_crf_id;
+    testEventCrfId = ecResult.rows[0].eventCrfId;
   });
 
   afterAll(async () => {
@@ -192,7 +192,7 @@ describe('File Upload in eCRF Forms', () => {
         testEventCrfId, testStudySubjectId,
         userId
       ]);
-      expect(result.rows[0].file_id).toBe('test_file_001');
+      expect(result.rows[0].fileId).toBe('test_file_001');
     });
 
     it('should insert a second file upload for the same field', async () => {
@@ -211,7 +211,7 @@ describe('File Upload in eCRF Forms', () => {
         testEventCrfId, testStudySubjectId,
         userId
       ]);
-      expect(result.rows[0].file_id).toBe('test_file_002');
+      expect(result.rows[0].fileId).toBe('test_file_002');
     });
 
     it('should query files by event_crf_id', async () => {
@@ -222,8 +222,8 @@ describe('File Upload in eCRF Forms', () => {
         ORDER BY uploaded_at
       `, [testEventCrfId]);
       expect(result.rows.length).toBe(2);
-      expect(result.rows[0].file_id).toBe('test_file_001');
-      expect(result.rows[1].file_id).toBe('test_file_002');
+      expect(result.rows[0].fileId).toBe('test_file_001');
+      expect(result.rows[1].fileId).toBe('test_file_002');
     });
 
     it('should query files by item_id', async () => {
@@ -262,7 +262,7 @@ describe('File Upload in eCRF Forms', () => {
 
       expect(result.rows.length).toBe(1);
       expect(result.rows[0].value).toBe('test_file_001,test_file_002');
-      expect(result.rows[0].item_name).toBe('lab_report_upload');
+      expect(result.rows[0].itemName).toBe('lab_report_upload');
 
       // Verify the file IDs can be split and resolved
       const fileIds = result.rows[0].value.split(',');
@@ -284,7 +284,7 @@ describe('File Upload in eCRF Forms', () => {
       `, [fileIds]);
 
       expect(filesResult.rows.length).toBe(2);
-      const names = filesResult.rows.map((r: any) => r.original_name).sort();
+      const names = filesResult.rows.map((r: any) => r.originalName).sort();
       expect(names).toEqual(['lab_report.pdf', 'lab_report_page2.pdf']);
     });
 
@@ -342,7 +342,7 @@ describe('File Upload in eCRF Forms', () => {
         'application/pdf', 204800, 'md5consent1',
         consentId, testStudySubjectId, userId
       ]);
-      expect(result.rows[0].consent_id).toBe(consentId);
+      expect(result.rows[0].consentId).toBe(consentId);
     });
 
     it('should query files by consent_id', async () => {
@@ -351,7 +351,7 @@ describe('File Upload in eCRF Forms', () => {
         WHERE consent_id = $1
       `, [999]);
       expect(result.rows.length).toBe(1);
-      expect(result.rows[0].original_name).toBe('consent_signed.pdf');
+      expect(result.rows[0].originalName).toBe('consent_signed.pdf');
     });
 
     it('should update file_uploads to link to consent after creation', async () => {
@@ -374,8 +374,8 @@ describe('File Upload in eCRF Forms', () => {
         SELECT consent_id, study_subject_id FROM file_uploads
         WHERE file_id = $1
       `, ['test_unlinked_scan']);
-      expect(result.rows[0].consent_id).toBe(888);
-      expect(result.rows[0].study_subject_id).toBe(testStudySubjectId);
+      expect(result.rows[0].consentId).toBe(888);
+      expect(result.rows[0].studySubjectId).toBe(testStudySubjectId);
     });
   });
 

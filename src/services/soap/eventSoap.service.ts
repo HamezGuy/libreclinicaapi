@@ -176,18 +176,18 @@ function buildScheduleEventOdm(request: EventScheduleRequest): string {
      FileType="Transactional"
      FileOID="ODM-${Date.now()}"
      CreationDateTime="${timestamp}">
-  <ClinicalData StudyOID="${studyOid}" MetaDataVersionOID="v1.0.0">
-    <SubjectData SubjectKey="${subjectOid}">
-      <StudyEventData StudyEventOID="${eventOid}" StudyEventRepeatKey="1">`;
+  <ClinicalData StudyOID="${escapeXml(studyOid)}" MetaDataVersionOID="v1.0.0">
+    <SubjectData SubjectKey="${escapeXml(subjectOid)}">
+      <StudyEventData StudyEventOID="${escapeXml(eventOid)}" StudyEventRepeatKey="1">`;
 
   if (startDate) {
     odmXml += `
-        <OpenClinica:StartDate>${startDate}</OpenClinica:StartDate>`;
+        <OpenClinica:StartDate>${escapeXml(startDate)}</OpenClinica:StartDate>`;
   }
 
   if (endDate) {
     odmXml += `
-        <OpenClinica:EndDate>${endDate}</OpenClinica:EndDate>`;
+        <OpenClinica:EndDate>${escapeXml(endDate)}</OpenClinica:EndDate>`;
   }
 
   if (location) {
@@ -220,9 +220,9 @@ function buildCreateEventOdm(
      FileType="Transactional"
      FileOID="ODM-${Date.now()}"
      CreationDateTime="${timestamp}">
-  <ClinicalData StudyOID="${studyOid}" MetaDataVersionOID="v1.0.0">
-    <SubjectData SubjectKey="${subjectOid}">
-      <StudyEventData StudyEventOID="${eventOid}" StudyEventRepeatKey="1">
+  <ClinicalData StudyOID="${escapeXml(studyOid)}" MetaDataVersionOID="v1.0.0">
+    <SubjectData SubjectKey="${escapeXml(subjectOid)}">
+      <StudyEventData StudyEventOID="${escapeXml(eventOid)}" StudyEventRepeatKey="1">
       </StudyEventData>
     </SubjectData>
   </ClinicalData>

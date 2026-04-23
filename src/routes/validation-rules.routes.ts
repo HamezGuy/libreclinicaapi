@@ -138,7 +138,7 @@ router.post('/test',
 
 // AI-suggested rule compilation (NEW v7).
 //   - Read-only with respect to validation_rules (no DB writes here).
-//   - Costs real money per call -> dedicated rate limiter (20/user/hr).
+//   - Costs real money per call -> dedicated rate limiter (2500/user/hr).
 //   - Authorisation: same as create/update — admin or data_manager only.
 //   - The orchestrator returns 200 with `data.flags.refused=true` when
 //     the kill-switch is off, the description has PHI, or every

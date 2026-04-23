@@ -46,7 +46,7 @@ router.get('/measurement-units', controller.getMeasurementUnits);
 // Helper: parse query_route_to_users JSON from DB row
 function parseRouteUsers(row: any): string[] {
   try {
-    const raw = row.query_route_to_users;
+    const raw = row.queryRouteToUsers;
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed;
@@ -89,11 +89,11 @@ router.get('/workflow-config', async (req: Request, res: Response) => {
 
     const configMap: Record<string, any> = {};
     for (const row of result.rows) {
-      if (configMap[String(row.crf_id)]) continue;
-      configMap[String(row.crf_id)] = {
-        requiresSDV: row.requires_sdv,
-        requiresSignature: row.requires_signature,
-        requiresDDE: row.requires_dde,
+      if (configMap[String(row.crfId)]) continue;
+      configMap[String(row.crfId)] = {
+        requiresSDV: row.requiresSdv,
+        requiresSignature: row.requiresSignature,
+        requiresDDE: row.requiresDde,
         queryRouteToUsers: parseRouteUsers(row)
       };
     }
@@ -131,9 +131,9 @@ router.get('/workflow-config/:crfId', async (req: Request, res: Response) => {
       res.json({
         success: true,
         data: {
-          requiresSDV: row.requires_sdv,
-          requiresSignature: row.requires_signature,
-          requiresDDE: row.requires_dde,
+          requiresSDV: row.requiresSdv,
+          requiresSignature: row.requiresSignature,
+          requiresDDE: row.requiresDde,
           queryRouteToUsers: parseRouteUsers(row)
         }
       });
@@ -244,12 +244,57 @@ router.post('/:id/versions',
   controller.createVersion
 );
 
-// Fork (copy) entire CRF to new independent form
+// Fork (copy) entire CRF to new independent form. Uses CRF_FORK signature
+// meaning so the §11.50 manifest accurately states what the user signed for
+// (a copy, not a brand-new form). Org-isolation on source and target is
+// enforced inside controller.fork → forkForm.
 router.post('/:id/fork', 
   requireRole('admin', 'data_manager'), 
-  validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.CRF_CREATE),
+  validate({ params: commonSchemas.idParam, body: formSchemas.fork }),
+  requireSignatureFor(SignatureMeanings.CRF_FORK),
   controller.fork
+);
+
+// Relink broken form-link references after a fork. When a form that branches
+// to another form is copied, and the linked form wasn't present in the target
+// study at copy time, the links are temporarily disabled. Once the linked form
+// is also copied, the user calls this endpoint to reconnect them.
+router.patch('/:id/relink',
+  requireRole('admin', 'data_manager'),
+  validate({
+    params: commonSchemas.idParam,
+    body: Joi.object({
+      relinks: Joi.array().items(Joi.object({
+        oldFormId: Joi.number().integer().positive().required(),
+        newFormId: Joi.number().integer().positive().required(),
+        newFormName: Joi.string().optional().max(2000),
+      })).min(1).required(),
+      signaturePassword: Joi.string().optional(),
+      signatureUsername: Joi.string().optional(),
+      signatureMeaning: Joi.string().optional().max(500),
+    }),
+  }),
+  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  controller.relinkFormLinks
+);
+
+// Batch-fork multiple forms with automatic cross-form relinking.
+// When Form A links to Form B and both are in the batch, the link in the
+// copied Form A automatically points at the copied Form B.
+router.post('/batch-fork',
+  requireRole('admin', 'data_manager'),
+  validate({
+    body: Joi.object({
+      sourceCrfIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+      targetStudyId: Joi.number().integer().positive().required(),
+      nameMap: Joi.object().pattern(Joi.string(), Joi.string().max(2000)).optional(),
+      signaturePassword: Joi.string().optional(),
+      signatureUsername: Joi.string().optional(),
+      signatureMeaning: Joi.string().optional().max(500),
+    }),
+  }),
+  requireSignatureFor(SignatureMeanings.CRF_FORK),
+  controller.batchFork
 );
 
 // Form data operations (signature required for data entry per §11.50)
@@ -271,6 +316,7 @@ router.get('/status/:eventCrfId', controller.getStatus);
 router.patch('/field/:eventCrfId', 
   requireRole('data_manager', 'coordinator', 'investigator'),
   validate({ body: formSchemas.fieldPatch }),
+  requireSignatureFor(SignatureMeanings.FORM_DATA_SAVE),
   controller.updateField
 );
 
@@ -291,7 +337,9 @@ router.post('/:eventCrfId/complete',
       password: Joi.string().optional(),
       signatureUsername: Joi.string().optional(),
       signaturePassword: Joi.string().optional(),
-      signatureMeaning: Joi.string().optional()
+      signatureMeaning: Joi.string().optional(),
+      hiddenFieldIds: Joi.array().items(Joi.number().integer().positive()).optional(),
+      hiddenFields: Joi.array().items(Joi.string()).optional()
     })
   }),
   requireSignatureFor('I confirm this form\'s data entry is complete and accurate'),

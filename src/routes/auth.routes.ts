@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import Joi from 'joi';
 import * as controller from '../controllers/auth.controller';
 import { validate, authSchemas } from '../middleware/validation.middleware';
 import { authRateLimiter, refreshRateLimiter } from '../middleware/rateLimiter.middleware';
@@ -40,8 +41,15 @@ router.post('/logout', authMiddleware, controller.logout);
 
 // Profile management (self-service)
 router.get('/profile', authMiddleware, controller.getProfile);
-router.put('/profile', authMiddleware, controller.updateProfile);
-router.post('/change-password', authMiddleware, controller.changePassword);
+router.put('/profile', authMiddleware, validate({ body: Joi.object({
+  firstName: Joi.string().optional().max(50),
+  lastName: Joi.string().optional().max(50),
+  email: Joi.string().email().optional().max(120),
+  phone: Joi.string().optional().max(64).allow('', null),
+  institutionalAffiliation: Joi.string().optional().max(255).allow('', null),
+  timeZone: Joi.string().optional().max(255).allow('', null)
+}) }), controller.updateProfile);
+router.post('/change-password', authMiddleware, validate({ body: authSchemas.changePassword }), controller.changePassword);
 
 // Capture token generation (requires auth)
 router.post('/capture-token', authMiddleware, controller.generateCaptureToken);
