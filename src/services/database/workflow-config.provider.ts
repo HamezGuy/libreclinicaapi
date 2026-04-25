@@ -24,23 +24,15 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import { FormWorkflowConfig } from '@accura-trial/shared-types';
 
 // ─── Public Interface ────────────────────────────────────────────────────────
 
-export interface FormWorkflowConfig {
-  crfId: number;
-  studyId?: number;
-  requiresSDV: boolean;
-  requiresSignature: boolean;
-  requiresDDE: boolean;
-  queryRouteToUsers: string[];
-  queryRouteToUserIds: number[];
-}
-
 const DEFAULT_CONFIG: Omit<FormWorkflowConfig, 'crfId'> = {
-  requiresSDV: false,
+  requiresSdv: false,
   requiresSignature: false,
-  requiresDDE: false,
+  requiresDde: false,
+  autoQueryRouting: false,
   queryRouteToUsers: [],
   queryRouteToUserIds: [],
 };
@@ -119,9 +111,10 @@ export async function getFormWorkflowConfig(
     return {
       crfId,
       studyId,
-      requiresSDV: !!row.requiresSdv,
+      requiresSdv: !!row.requiresSdv,
       requiresSignature: !!row.requiresSignature,
-      requiresDDE: !!row.requiresDde,
+      requiresDde: !!row.requiresDde,
+      autoQueryRouting: !!row.autoQueryRouting,
       queryRouteToUsers,
       queryRouteToUserIds,
     };
@@ -316,8 +309,118 @@ export async function needsWorkflowStep(
 ): Promise<boolean> {
   const config = await getFormWorkflowConfig(crfId, studyId);
   switch (step) {
-    case 'sdv': return config.requiresSDV;
+    case 'sdv': return config.requiresSdv;
     case 'signature': return config.requiresSignature;
-    case 'dde': return config.requiresDDE;
+    case 'dde': return config.requiresDde;
   }
+}
+
+// ─── Route-facing helpers ────────────────────────────────────────────────────
+
+function parseRouteUsers(row: any): string[] {
+  try {
+    const raw = row.queryRouteToUsers;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch { /* ignore parse errors */ }
+  return [];
+}
+
+const DEFAULT_ROUTE_CONFIG = { requiresSDV: false, requiresSignature: false, requiresDDE: false, queryRouteToUsers: [] as string[] };
+
+/**
+ * Get workflow configuration for ALL forms (bulk).
+ * Study-specific rows override global ones.
+ */
+export async function getAllWorkflowConfigs(
+  studyId?: number | null
+): Promise<Record<string, { requiresSDV: boolean; requiresSignature: boolean; requiresDDE: boolean; queryRouteToUsers: string[] }>> {
+  if (!(await ensureTable())) return {};
+
+  let result;
+  if (studyId) {
+    result = await pool.query(`
+      SELECT crf_id, requires_sdv, requires_signature, requires_dde, query_route_to_users
+      FROM acc_form_workflow_config
+      WHERE study_id = $1 OR study_id IS NULL
+      ORDER BY crf_id, study_id DESC NULLS LAST
+    `, [studyId]);
+  } else {
+    result = await pool.query(`
+      SELECT crf_id, requires_sdv, requires_signature, requires_dde, query_route_to_users
+      FROM acc_form_workflow_config
+      WHERE study_id IS NULL
+      ORDER BY crf_id
+    `);
+  }
+
+  const configMap: Record<string, any> = {};
+  for (const row of result.rows) {
+    if (configMap[String(row.crfId)]) continue;
+    configMap[String(row.crfId)] = {
+      requiresSDV: row.requiresSdv,
+      requiresSignature: row.requiresSignature,
+      requiresDDE: row.requiresDde,
+      queryRouteToUsers: parseRouteUsers(row)
+    };
+  }
+  return configMap;
+}
+
+/**
+ * Get workflow configuration for a single form (by CRF ID).
+ * Returns the default config if the table doesn't exist or no row is found.
+ */
+export async function getSingleWorkflowConfig(
+  crfId: number,
+  studyId?: number | null
+): Promise<{ requiresSDV: boolean; requiresSignature: boolean; requiresDDE: boolean; queryRouteToUsers: string[] }> {
+  if (!(await ensureTable())) return { ...DEFAULT_ROUTE_CONFIG };
+
+  const result = await pool.query(`
+    SELECT requires_sdv, requires_signature, requires_dde, query_route_to_users
+    FROM acc_form_workflow_config
+    WHERE crf_id = $1 AND (study_id = $2 OR study_id IS NULL)
+    ORDER BY study_id DESC NULLS LAST
+    LIMIT 1
+  `, [crfId, studyId || null]);
+
+  if (result.rows.length > 0) {
+    const row = result.rows[0];
+    return {
+      requiresSDV: row.requiresSdv,
+      requiresSignature: row.requiresSignature,
+      requiresDDE: row.requiresDde,
+      queryRouteToUsers: parseRouteUsers(row)
+    };
+  }
+  return { ...DEFAULT_ROUTE_CONFIG };
+}
+
+/**
+ * Save (upsert) workflow configuration for a form.
+ */
+export async function saveWorkflowConfig(
+  crfId: number,
+  config: { requiresSDV?: boolean; requiresSignature?: boolean; requiresDDE?: boolean; queryRouteToUsers?: string[]; studyId?: number | null },
+  userId: number
+): Promise<void> {
+  const usersJson = JSON.stringify(config.queryRouteToUsers || []);
+  const resolvedStudyId = config.studyId || null;
+
+  await pool.query(`
+    INSERT INTO acc_form_workflow_config
+      (crf_id, study_id, requires_sdv, requires_signature, requires_dde, query_route_to_users, updated_by, date_updated)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    ON CONFLICT (crf_id, COALESCE(study_id, 0))
+    DO UPDATE SET
+      requires_sdv = EXCLUDED.requires_sdv,
+      requires_signature = EXCLUDED.requires_signature,
+      requires_dde = EXCLUDED.requires_dde,
+      query_route_to_users = EXCLUDED.query_route_to_users,
+      updated_by = EXCLUDED.updated_by,
+      date_updated = NOW()
+  `, [crfId, resolvedStudyId, config.requiresSDV || false, config.requiresSignature || false, config.requiresDDE || false, usersJson, userId]);
 }

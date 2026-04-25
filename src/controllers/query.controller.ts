@@ -10,6 +10,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../middleware/errorHandler.middleware';
 import * as queryService from '../services/database/query.service';
+import type { CreateQueryRequest, RespondToQueryRequest, CloseQueryRequest, QueryListRequest, ApiResponse, QueryWithDetails } from '@accura-trial/shared-types';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -42,68 +43,80 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const result = await queryService.getQueryById(intParam(req, 'id'), userId(req));
   if (!result) throw new NotFoundError('Query not found');
-  res.json({ success: true, data: result });
+  const response: ApiResponse<QueryWithDetails> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getAuditTrail = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getQueryAuditTrail(intParam(req, 'id'), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const stats = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   if (!studyId) throw new BadRequestError('studyId is required');
   const data = await queryService.getQueryStats(parseInt(studyId as string), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse<{ status: string; count: number }[]> = { success: true, data };
+  res.json(response);
 });
 
 export const getQueryTypes = asyncHandler(async (_req: Request, res: Response) => {
-  res.json({ success: true, data: await queryService.getQueryTypes() });
+  const response: ApiResponse = { success: true, data: await queryService.getQueryTypes() };
+  res.json(response);
 });
 
 export const getResolutionStatuses = asyncHandler(async (_req: Request, res: Response) => {
-  res.json({ success: true, data: await queryService.getResolutionStatuses() });
+  const response: ApiResponse = { success: true, data: await queryService.getResolutionStatuses() };
+  res.json(response);
 });
 
 export const getFormQueries = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getFormQueries(intParam(req, 'eventCrfId'), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse<QueryWithDetails[]> = { success: true, data };
+  res.json(response);
 });
 
 export const getFieldQueries = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getFieldQueries(intParam(req, 'itemDataId'), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse<QueryWithDetails[]> = { success: true, data };
+  res.json(response);
 });
 
 export const getQueriesByField = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getQueriesByField(
     intParam(req, 'eventCrfId'), req.params.fieldName, userId(req)
   );
-  res.json({ success: true, data });
+  const response: ApiResponse<QueryWithDetails[]> = { success: true, data };
+  res.json(response);
 });
 
 export const getFormFieldQueryCounts = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getFormFieldQueryCounts(intParam(req, 'eventCrfId'), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const countByStatus = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   if (!studyId) throw new BadRequestError('studyId is required');
   const data = await queryService.getQueryCountByStatus(parseInt(studyId as string), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const countByType = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   if (!studyId) throw new BadRequestError('studyId is required');
   const data = await queryService.getQueryCountByType(parseInt(studyId as string), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const getThread = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getQueryThread(intParam(req, 'id'), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const getOverdue = asyncHandler(async (req: Request, res: Response) => {
@@ -114,7 +127,8 @@ export const getOverdue = asyncHandler(async (req: Request, res: Response) => {
     parseInt(days as string) || 7,
     userId(req)
   );
-  res.json({ success: true, data });
+  const response: ApiResponse<QueryWithDetails[]> = { success: true, data };
+  res.json(response);
 });
 
 export const getMyAssigned = asyncHandler(async (req: Request, res: Response) => {
@@ -123,14 +137,16 @@ export const getMyAssigned = asyncHandler(async (req: Request, res: Response) =>
     userId(req),
     studyId ? parseInt(studyId as string) : undefined
   );
-  res.json({ success: true, data });
+  const response: ApiResponse<QueryWithDetails[]> = { success: true, data };
+  res.json(response);
 });
 
 // ─── Write endpoints ──────────────────────────────────────────────────────────
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const { queryId, message } = await queryService.createQuery(req.body, userId(req));
-  res.status(201).json({ success: true, queryId, message });
+  const response: ApiResponse<{ queryId: number }> = { success: true, data: { queryId }, message };
+  res.status(201).json(response);
 });
 
 export const respond = asyncHandler(async (req: Request, res: Response) => {
@@ -234,17 +250,20 @@ export const subjectCounts = asyncHandler(async (req: Request, res: Response) =>
   const { studyId } = req.query;
   if (!studyId) throw new BadRequestError('studyId is required');
   const data = await queryService.getQueryCountsBySubject(parseInt(studyId as string), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const formQueryCountsBySubject = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getFormQueryCountsBySubject(intParam(req, 'studySubjectId'));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const formQueryStatusByEvent = asyncHandler(async (req: Request, res: Response) => {
   const data = await queryService.getFormQueryStatusByEvent(intParam(req, 'studyEventId'), userId(req));
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 /**
@@ -257,7 +276,8 @@ export const resolveRecipients = asyncHandler(async (req: Request, res: Response
     eventCrfId ? parseInt(eventCrfId as string) : undefined,
     studyId ? parseInt(studyId as string) : undefined
   );
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 /**

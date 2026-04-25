@@ -28,6 +28,7 @@ import {
   ApiResponse, 
   PaginatedResponse
 } from '../../types/libreclinica-models';
+import type { CreateSubjectRequest } from '@accura-trial/shared-types';
 import * as workflowService from '../database/workflow.service';
 import { formatDate as formatIsoDate, today as todayIso, toISOTimestamp, parseDateLocal } from '../../utils/date.util';
 import { getFormMetadata } from './form.service';
@@ -93,23 +94,10 @@ async function insertWithRetry(
  *   - oc_oid (varchar 40), time_zone (varchar 255)
  * ═══════════════════════════════════════════════════════════════════
  */
-export interface SubjectCreateRequest {
-  // === STUDY_SUBJECT TABLE FIELDS ===
-  studyId: number;
-  label: string;                      // study_subject.label — the ONE user-visible Subject ID (varchar 30)
-  secondaryId?: string;               // secondary_label column (varchar 30)
-  enrollmentDate?: string;            // enrollment_date column
-  screeningDate?: string;             // screening enrollment date (app-level, not in LC schema)
-  timeZone?: string;                  // time_zone column (varchar 255)
-  
-  // === SUBJECT TABLE FIELDS (demographics) ===
-  gender?: string;                    // gender column (char 1: 'm', 'f', '')
-  dateOfBirth?: string;               // date_of_birth column
-  personId?: string;                  // unique_identifier column (varchar 255)
-  
+export interface SubjectCreateRequest extends CreateSubjectRequest {
   // === FAMILY/GENETIC STUDY FIELDS (subject table) ===
-  fatherId?: number;                  // father_id column (FK to subject)
-  motherId?: number;                  // mother_id column (FK to subject)
+  fatherId?: number;
+  motherId?: number;
   
   // === GROUP ASSIGNMENTS (subject_group_map table) ===
   groupAssignments?: { studyGroupClassId: number; studyGroupId: number; notes?: string }[];
@@ -156,6 +144,7 @@ const createPatientFormSnapshotForEnrollment = async (
       study_subject_id, form_name, form_structure, form_data,
       completion_status, ordinal, created_by
     ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, '{}'::jsonb, 'not_started', $8, $9)
+    ON CONFLICT (event_crf_id) WHERE event_crf_id IS NOT NULL DO NOTHING
   `, [studyEventId, eventCrfId, crfId, crfVersionId, studySubjectId, formName, JSON.stringify(structure), ordinal, userId]);
 };
 
@@ -198,11 +187,19 @@ const createSubjectDirect = async (
   try {
     await client.query('BEGIN');
 
-    // 0. Pre-check: Verify subject label doesn't already exist in this study
+    // Acquire an advisory lock scoped to this study so that concurrent
+    // enrollments in the same study are serialized.  The lock is tied to
+    // the transaction and released automatically on COMMIT/ROLLBACK.
+    await client.query('SELECT pg_advisory_xact_lock($1)', [request.studyId]);
+
+    // 0. Pre-check: Verify subject label doesn't already exist in this study.
+    // FOR UPDATE locks matching rows so a concurrent txn that somehow slips
+    // past the advisory lock still blocks until we commit.
     // Exclude archived statuses: 5=Removed, 6=Auto-Deleted, 7=Withdrawn
     const duplicateCheckQuery = `
       SELECT study_subject_id, label FROM study_subject 
       WHERE study_id = $1 AND label = $2 AND status_id NOT IN (5, 6, 7)
+      FOR UPDATE
     `;
     const duplicateCheck = await client.query(duplicateCheckQuery, [
       request.studyId, 
@@ -330,7 +327,7 @@ const createSubjectDirect = async (
 
     const studySubjectResult = await client.query(studySubjectQuery, [
       subjectLabel,
-      request.secondaryId || '',
+      request.secondaryLabel || '',
       subjectId,
       request.studyId,
       effectiveEnrollmentDate,
@@ -435,13 +432,15 @@ const createSubjectDirect = async (
           // Use schedule_day from the event definition to compute the due date.
           // date_start = the anchor (enrollment/screening date) for all visits,
           // scheduled_date (due date) = anchor + schedule_day offset.
+          // Default to 0 (Day 0 = enrollment day) when schedule_day is not set,
+          // so that forms are still created for the patient even without visit
+          // window configuration.
+          const daysOffset = eventDef.scheduleDay ?? 0;
           if (eventDef.scheduleDay == null) {
-            throw new Error(
-              `Visit "${eventDef.name}" (definition ${eventDef.studyEventDefinitionId}) has no schedule_day configured. ` +
-              `Set the number of days for this visit in the study event definitions before enrolling patients.`
-            );
+            logger.warn(`Visit "${eventDef.name}" has no schedule_day — defaulting to Day 0`, {
+              studyEventDefinitionId: eventDef.studyEventDefinitionId
+            });
           }
-          const daysOffset = eventDef.scheduleDay;
           const anchorDate = parseDateLocal(enrollmentDate) || new Date();
           const eventDueDate = new Date(anchorDate.getTime());
           eventDueDate.setDate(eventDueDate.getDate() + daysOffset);
@@ -679,7 +678,7 @@ const createSubjectDirect = async (
         
         // Study Subject fields
         label: subjectLabel,
-        secondaryLabel: request.secondaryId || '',
+        secondaryLabel: request.secondaryLabel || '',
         studyId: request.studyId,
         enrollmentDate: effectiveEnrollmentDate,
         screeningDate: effectiveScreeningDate,
@@ -752,6 +751,8 @@ export const getSubjectList = async (
   studyId: number,
   filters: {
     status?: string;
+    search?: string;
+    siteId?: number;
     page?: number;
     limit?: number;
     includeArchived?: boolean;
@@ -762,7 +763,7 @@ export const getSubjectList = async (
   logger.info('Getting subject list (SOAP primary)', { studyId, filters, soapEnabled: config.libreclinica.soapEnabled });
 
   try {
-    const { status, page = 1, limit = 20, includeArchived = false } = filters;
+    const { status, search, siteId, page = 1, limit = 20, includeArchived = false } = filters;
     const offset = (page - 1) * limit;
 
     // Try SOAP first for Part 11 compliance
@@ -835,6 +836,21 @@ export const getSubjectList = async (
     if (status) {
       conditions.push(`st.name = $${paramIndex++}`);
       params.push(status);
+    }
+
+    if (search && search.trim()) {
+      conditions.push(`(
+        ss.label ILIKE $${paramIndex}
+        OR ss.secondary_label ILIKE $${paramIndex}
+        OR s.unique_identifier ILIKE $${paramIndex}
+      )`);
+      params.push(`%${search.trim()}%`);
+      paramIndex++;
+    }
+
+    if (siteId) {
+      conditions.push(`ss.study_id = $${paramIndex++}`);
+      params.push(siteId);
     }
 
     const whereClause = conditions.join(' AND ');
@@ -1452,10 +1468,473 @@ export const getFormsWithQueriesForSubjects = async (studySubjectIds: number[]):
   return formsMap;
 };
 
+/**
+ * Get events for a subject with form completion stats.
+ * Returns raw rows — the controller handles DTO mapping.
+ */
+export const getSubjectEvents = async (studySubjectId: number) => {
+  const query = `
+    SELECT 
+      se.study_event_id,
+      se.study_subject_id,
+      sed.study_event_definition_id,
+      sed.name as event_name,
+      sed.description as event_description,
+      sed.type as event_type,
+      sed.ordinal as event_order,
+      sed.schedule_day,
+      sed.min_day,
+      sed.max_day,
+      se.sample_ordinal,
+      se.date_start,
+      se.date_end,
+      se.location,
+      se.scheduled_date,
+      COALESCE(se.is_unscheduled, false) as is_unscheduled,
+      se.date_created,
+      GREATEST(
+        (SELECT COUNT(*) FROM event_definition_crf edc2
+         INNER JOIN crf c2 ON edc2.crf_id = c2.crf_id
+         WHERE edc2.study_event_definition_id = sed.study_event_definition_id
+           AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
+        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
+      ) as total_forms,
+      (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 4 AND ec.status_id NOT IN (5, 7)) as completed_forms,
+      (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_forms,
+      (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id = 6) as locked_forms
+    FROM study_event se
+    INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    WHERE se.study_subject_id = $1
+    ORDER BY 
+      COALESCE(se.scheduled_date, se.date_start, se.date_created) ASC,
+      sed.ordinal ASC,
+      se.sample_ordinal ASC
+  `;
+
+  const result = await pool.query(query, [studySubjectId]);
+  return result.rows;
+};
+
+/**
+ * Get forms/CRFs for a subject: both existing (with data) and assigned-but-not-started.
+ * Returns { existingRows, assignedRows } — the controller merges and maps to DTOs.
+ */
+export const getSubjectForms = async (studySubjectId: number) => {
+  const existingFormsQuery = `
+    SELECT 
+      ec.event_crf_id,
+      ec.study_event_id,
+      se.study_subject_id,
+      sed.name as event_name,
+      sed.study_event_definition_id,
+      c.crf_id,
+      c.name as form_name,
+      c.description as form_description,
+      cv.crf_version_id,
+      cv.name as version_name,
+      ec.date_interviewed,
+      ec.interviewer_name,
+      COALESCE(cs.name, 'initial_data_entry') as completion_status,
+      st.name as status,
+      ec.date_created,
+      ec.date_updated,
+      ec.validator_id,
+      ec.date_validate,
+      ec.date_completed,
+      COALESCE(edc.required_crf, false) as required_crf
+    FROM event_crf ec
+    INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+    INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+    INNER JOIN crf c ON cv.crf_id = c.crf_id
+    LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
+    INNER JOIN status st ON ec.status_id = st.status_id
+    LEFT JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id AND edc.crf_id = c.crf_id
+    WHERE se.study_subject_id = $1
+      AND ec.status_id NOT IN (5, 7)
+    ORDER BY sed.ordinal, c.name
+  `;
+
+  const assignedFormsQuery = `
+    SELECT 
+      se.study_event_id,
+      se.study_subject_id,
+      sed.name as event_name,
+      sed.study_event_definition_id,
+      edc.crf_id,
+      c.name as form_name,
+      c.description as form_description,
+      (SELECT cv2.crf_version_id FROM crf_version cv2 
+       WHERE cv2.crf_id = edc.crf_id AND cv2.status_id NOT IN (5, 7) 
+       ORDER BY cv2.crf_version_id DESC LIMIT 1) as crf_version_id,
+      (SELECT cv2.name FROM crf_version cv2 
+       WHERE cv2.crf_id = edc.crf_id AND cv2.status_id NOT IN (5, 7) 
+       ORDER BY cv2.crf_version_id DESC LIMIT 1) as version_name,
+      edc.required_crf,
+      edc.ordinal as crf_ordinal
+    FROM study_event se
+    INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    INNER JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id
+    INNER JOIN crf c ON edc.crf_id = c.crf_id
+    WHERE se.study_subject_id = $1
+      AND se.status_id NOT IN (5, 7)
+      AND edc.status_id NOT IN (5, 7)
+      AND c.status_id NOT IN (5, 7)
+    ORDER BY sed.ordinal, edc.ordinal, c.name
+  `;
+
+  const [existingResult, assignedResult] = await Promise.all([
+    pool.query(existingFormsQuery, [studySubjectId]),
+    pool.query(assignedFormsQuery, [studySubjectId]),
+  ]);
+
+  return { existingRows: existingResult.rows, assignedRows: assignedResult.rows };
+};
+
+/**
+ * Update a subject inside a single transaction.
+ * Handles study_subject fields, visit rescheduling, demographics, and audit logging.
+ * Returns the committed result; throws on failure (caller should catch).
+ */
+export const updateSubject = async (
+  studySubjectId: number,
+  updates: {
+    secondaryLabel?: string;
+    enrollmentDate?: string;
+    screeningDate?: string;
+    enrollmentStatus?: string;
+    visitDateReference?: string;
+    visitDateCustom?: string;
+    dateOfBirth?: string;
+    gender?: string;
+    personId?: string;
+  },
+  userId: number
+): Promise<void> => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const updateFields: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (updates.secondaryLabel !== undefined) {
+      updateFields.push(`secondary_label = $${paramIndex++}`);
+      params.push(updates.secondaryLabel);
+    }
+
+    if (updates.enrollmentDate !== undefined) {
+      updateFields.push(`enrollment_date = $${paramIndex++}`);
+      params.push(updates.enrollmentDate || null);
+    }
+
+    if (updates.screeningDate !== undefined) {
+      updateFields.push(`screening_date = $${paramIndex++}`);
+      params.push(updates.screeningDate || null);
+    }
+
+    if (updates.enrollmentStatus !== undefined) {
+      const statusMap: Record<string, number> = {
+        'enrolled': 1,
+        'screening': 4,
+        'screen_failure': 5,
+      };
+      const statusId = statusMap[updates.enrollmentStatus];
+      if (statusId !== undefined) {
+        updateFields.push(`status_id = $${paramIndex++}`);
+        params.push(statusId);
+      }
+    }
+
+    if (updates.visitDateReference !== undefined) {
+      updateFields.push(`visit_date_reference = $${paramIndex++}`);
+      params.push(updates.visitDateReference);
+    }
+
+    if (updates.visitDateCustom !== undefined) {
+      updateFields.push(`visit_date_custom = $${paramIndex++}`);
+      params.push(updates.visitDateCustom || null);
+    }
+
+    if (updateFields.length > 0) {
+      updateFields.push(`date_updated = NOW()`);
+      updateFields.push(`update_id = $${paramIndex++}`);
+      params.push(userId);
+      params.push(studySubjectId);
+
+      const updateQuery = `
+        UPDATE study_subject
+        SET ${updateFields.join(', ')}
+        WHERE study_subject_id = $${paramIndex}
+      `;
+
+      await client.query(updateQuery, params);
+    }
+
+    // Reschedule visit due dates when any anchor-relevant field changes.
+    const anchorFieldChanged =
+      updates.enrollmentDate !== undefined ||
+      updates.screeningDate !== undefined ||
+      updates.visitDateReference !== undefined ||
+      updates.visitDateCustom !== undefined ||
+      updates.enrollmentStatus !== undefined;
+
+    if (anchorFieldChanged) {
+      const subjectRow = await client.query(
+        `SELECT ss.enrollment_date, ss.screening_date,
+                ss.visit_date_reference, ss.visit_date_custom,
+                COALESCE(s.parent_study_id, ss.study_id) AS parent_study_id
+         FROM study_subject ss
+         JOIN study s ON ss.study_id = s.study_id
+         WHERE ss.study_subject_id = $1`,
+        [studySubjectId]
+      );
+      const subj = subjectRow.rows[0];
+
+      if (subj) {
+        const ref = updates.visitDateReference ?? subj.visitDateReference ?? 'scheduling_date';
+        let anchorStr: string | null = null;
+
+        if (ref === 'enrollment_date') {
+          anchorStr = updates.enrollmentDate ?? subj.enrollmentDate;
+        } else if (ref === 'custom_date') {
+          anchorStr = updates.visitDateCustom ?? subj.visitDateCustom;
+        } else {
+          anchorStr = updates.screeningDate ?? subj.screeningDate ?? updates.enrollmentDate ?? subj.enrollmentDate;
+        }
+
+        const anchor = anchorStr ? parseDateLocal(anchorStr) : null;
+
+        if (anchor && subj.parentStudyId) {
+          const visitRows = await client.query(`
+            SELECT se.study_event_id, sed.ordinal, sed.schedule_day
+            FROM study_event se
+            JOIN study_event_definition sed
+              ON se.study_event_definition_id = sed.study_event_definition_id
+            WHERE se.study_subject_id = $1
+              AND sed.study_id = $2
+              AND COALESCE(se.is_unscheduled, false) = false
+            ORDER BY sed.ordinal
+          `, [studySubjectId, subj.parentStudyId]);
+
+          for (const row of visitRows.rows) {
+            if (row.scheduleDay == null) {
+              logger.warn('Skipping reschedule for visit without schedule_day', {
+                studyEventId: row.studyEventId,
+                ordinal: row.ordinal
+              });
+              continue;
+            }
+            const daysOffset = row.scheduleDay;
+            const visitDate = new Date(anchor.getTime());
+            visitDate.setDate(visitDate.getDate() + daysOffset);
+            const isoDate = formatIsoDate(visitDate);
+
+            await client.query(`
+              UPDATE study_event
+              SET scheduled_date = $1::date
+              WHERE study_event_id = $2
+            `, [isoDate, row.studyEventId]);
+          }
+
+          logger.info('Rescheduled visit due dates', {
+            studySubjectId,
+            reference: ref,
+            anchorDate: anchorStr,
+            visitsUpdated: visitRows.rows.length
+          });
+        }
+      }
+    }
+
+    // Update subject table if demographic info or personId provided
+    if (updates.dateOfBirth || updates.gender || updates.personId !== undefined) {
+      const subjectQuery = `SELECT ss.subject_id FROM study_subject ss WHERE ss.study_subject_id = $1`;
+      const subjectResult = await client.query(subjectQuery, [studySubjectId]);
+      
+      if (subjectResult.rows.length > 0) {
+        const subjectId = subjectResult.rows[0].subjectId;
+        const subjectUpdates: string[] = [];
+        const subjectParams: any[] = [];
+        let subjectParamIndex = 1;
+
+        if (updates.dateOfBirth) {
+          subjectUpdates.push(`date_of_birth = $${subjectParamIndex++}`);
+          subjectParams.push(updates.dateOfBirth);
+        }
+
+        if (updates.gender) {
+          subjectUpdates.push(`gender = $${subjectParamIndex++}`);
+          subjectParams.push(updates.gender === 'male' ? 'm' : updates.gender === 'female' ? 'f' : updates.gender);
+        }
+
+        if (updates.personId !== undefined) {
+          logger.info('personId update requested (display-only, does not change internal UUID)', {
+            studySubjectId, personId: updates.personId
+          });
+        }
+
+        if (subjectUpdates.length > 0) {
+          subjectParams.push(subjectId);
+          const subjectUpdateQuery = `
+            UPDATE subject
+            SET ${subjectUpdates.join(', ')}
+            WHERE subject_id = $${subjectParamIndex}
+          `;
+          await client.query(subjectUpdateQuery, subjectParams);
+        }
+      }
+    }
+
+    // Audit log
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'study_subject', $1, $2, 'Subject',
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Update%' LIMIT 1)
+      )
+    `, [userId, studySubjectId]);
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Update a subject's status inside a transaction.
+ * Returns the old status id; throws on failure.
+ */
+export const updateSubjectStatus = async (
+  studySubjectId: number,
+  statusId: number,
+  userId: number,
+  reason?: string
+): Promise<{ oldStatusId: number }> => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const currentResult = await client.query(
+      `SELECT status_id FROM study_subject WHERE study_subject_id = $1`,
+      [studySubjectId]
+    );
+
+    if (currentResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      throw Object.assign(new Error('Subject not found'), { statusCode: 404 });
+    }
+
+    const oldStatusId = currentResult.rows[0].statusId;
+
+    await client.query(`
+      UPDATE study_subject
+      SET status_id = $1, date_updated = NOW(), update_id = $2
+      WHERE study_subject_id = $3
+    `, [statusId, userId, studySubjectId]);
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, reason_for_change,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'study_subject', $1, $2, 'Subject', $3, $4, $5,
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Status%' LIMIT 1)
+      )
+    `, [userId, studySubjectId, oldStatusId.toString(), statusId.toString(), reason || 'Status change']);
+
+    await client.query('COMMIT');
+    return { oldStatusId };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Soft-delete a subject (set status to removed) inside a transaction.
+ * Throws with statusCode 404 if subject not found.
+ */
+export const removeSubject = async (
+  studySubjectId: number,
+  userId: number
+): Promise<void> => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const checkResult = await client.query(
+      `SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1`,
+      [studySubjectId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      throw Object.assign(new Error('Subject not found'), { statusCode: 404 });
+    }
+
+    await client.query(`
+      UPDATE study_subject
+      SET status_id = 5, date_updated = NOW(), update_id = $1
+      WHERE study_subject_id = $2
+    `, [userId, studySubjectId]);
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_date, audit_table, user_id, entity_id, entity_name,
+        audit_log_event_type_id
+      ) VALUES (
+        NOW(), 'study_subject', $1, $2, 'Subject',
+        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Remove%' OR name LIKE '%Delete%' LIMIT 1)
+      )
+    `, [userId, studySubjectId]);
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Check whether a subject label already exists in a study (including child studies).
+ * Excludes removed/auto-removed/invalid statuses (5, 6, 7).
+ */
+export const checkLabelExists = async (studyId: number, label: string): Promise<boolean> => {
+  const result = await pool.query(`
+    SELECT study_subject_id FROM study_subject 
+    WHERE (study_id = $1 OR study_id IN (
+      SELECT study_id FROM study WHERE parent_study_id = $1
+    ))
+    AND label = $2 AND status_id NOT IN (5, 6, 7)
+    LIMIT 1
+  `, [studyId, label]);
+  return result.rows.length > 0;
+};
+
 export default {
   createSubject,
   getSubjectList,
   getSubjectById,
-  getSubjectProgress
+  getSubjectProgress,
+  getSubjectEvents,
+  getSubjectForms,
+  updateSubject,
+  updateSubjectStatus,
+  removeSubject,
+  checkLabelExists
 };
 

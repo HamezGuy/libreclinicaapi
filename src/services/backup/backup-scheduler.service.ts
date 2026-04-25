@@ -369,7 +369,7 @@ export const triggerImmediateBackup = async (
  * Initialize scheduler on application startup if enabled
  */
 export const initializeScheduler = async (): Promise<void> => {
-  const enabled = process.env.BACKUP_SCHEDULER_ENABLED !== 'false';
+  const enabled = process.env.BACKUP_SCHEDULER_ENABLED === 'true';
   
   if (enabled) {
     logger.info('Backup scheduler auto-start enabled');

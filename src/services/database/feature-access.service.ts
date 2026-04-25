@@ -16,26 +16,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { getRoleByName } from '../../constants/roles';
-
-export interface FeatureDefinition {
-  feature_key: string;
-  display_name: string;
-  description: string;
-  category: string;
-  is_active: boolean;
-  requires_role_level: number;
-}
-
-export interface UserFeatureAccess {
-  feature_key: string;
-  display_name: string;
-  description: string;
-  category: string;
-  is_enabled: boolean;
-  source: 'user_override' | 'role_default' | 'denied';
-  granted_by?: number;
-  granted_at?: string;
-}
+import { FeatureDefinition, UserFeatureAccess } from '@accura-trial/shared-types';
 
 /**
  * Get all features available in the system
@@ -125,14 +106,14 @@ export async function getUserFeatureAccess(userId: number): Promise<UserFeatureA
       }
 
       featureAccess.push({
-        feature_key: feature.featureKey,
-        display_name: feature.displayName,
+        featureKey: feature.featureKey,
+        displayName: feature.displayName,
         description: feature.description,
         category: feature.category,
-        is_enabled: isEnabled,
+        isEnabled,
         source,
-        granted_by: override?.grantedBy,
-        granted_at: override?.grantedAt,
+        grantedBy: override?.grantedBy,
+        grantedAt: override?.grantedAt,
       });
     }
 

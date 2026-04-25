@@ -12,9 +12,9 @@
 import { getSoapClient } from './soapClient';
 import { logger } from '../../config/logger';
 import { ApiResponse } from '../../types';
-import xml2js from 'xml2js';
+import { safeXmlParse } from '../../utils/xml-safe-parse';
 
-// Local interface for SOAP metadata response (uses snake_case to match raw data)
+// Local interface for SOAP metadata response
 interface SoapStudyMetadata {
   study: Record<string, unknown>;
   events: Record<string, unknown>[];
@@ -141,23 +141,21 @@ export const listStudies = async (
  */
 export const parseOdmMetadata = async (odmXml: string): Promise<SoapStudyMetadata> => {
   try {
-    const parser = new xml2js.Parser({
+    const result = await safeXmlParse(odmXml, {
       explicitArray: false,
       mergeAttrs: true
-    });
-
-    const result = await parser.parseStringPromise(odmXml);
+    }) as Record<string, any>;
 
     const metadata: SoapStudyMetadata = {
       study: {
-        study_id: 0,
-        unique_identifier: '',
+        studyId: 0,
+        identifier: '',
         name: '',
-        date_created: new Date(),
-        owner_id: 0,
-        update_id: 0,
-        type_id: 0,
-        status_id: 0
+        dateCreated: new Date(),
+        ownerId: 0,
+        updateId: 0,
+        typeId: 0,
+        statusId: 0
       },
       events: [],
       crfs: []
@@ -168,16 +166,16 @@ export const parseOdmMetadata = async (odmXml: string): Promise<SoapStudyMetadat
       const study = Array.isArray(result.ODM.Study) ? result.ODM.Study[0] : result.ODM.Study;
       
       metadata.study = {
-        study_id: parseInt(study.OID?.replace('S_', '') || '0'),
-        unique_identifier: study.OID || '',
+        studyId: parseInt(study.OID?.replace('S_', '') || '0'),
+        identifier: study.OID || '',
         name: study.GlobalVariables?.StudyName || '',
         summary: study.GlobalVariables?.StudyDescription || '',
-        protocol_type: study.GlobalVariables?.ProtocolName || '',
-        date_created: new Date(),
-        owner_id: 0,
-        update_id: 0,
-        type_id: 0,
-        status_id: 0
+        protocolType: study.GlobalVariables?.ProtocolName || '',
+        dateCreated: new Date(),
+        ownerId: 0,
+        updateId: 0,
+        typeId: 0,
+        statusId: 0
       };
 
       // Parse metadata version
@@ -193,16 +191,16 @@ export const parseOdmMetadata = async (odmXml: string): Promise<SoapStudyMetadat
             : [metaDataVersion.StudyEventDef];
 
           metadata.events = eventDefs.map((event: any, index: number) => ({
-            study_event_definition_id: parseInt(event.OID?.replace('SE_', '') || '0'),
-            study_id: metadata.study.study_id,
+            studyEventDefinitionId: parseInt(event.OID?.replace('SE_', '') || '0'),
+            studyId: metadata.study.studyId,
             name: event.Name || '',
             description: event.Description || '',
             repeating: event.Repeating === 'Yes',
             type: event.Type || 'Common',
             ordinal: index + 1,
-            owner_id: 0,
-            date_created: new Date(),
-            update_id: 0
+            ownerId: 0,
+            dateCreated: new Date(),
+            updateId: 0
           }));
         }
 
@@ -213,15 +211,15 @@ export const parseOdmMetadata = async (odmXml: string): Promise<SoapStudyMetadat
             : [metaDataVersion.FormDef];
 
           metadata.crfs = formDefs.map((form: any) => ({
-            crf_id: parseInt(form.OID?.replace('F_', '') || '0'),
-            study_id: metadata.study.study_id,
+            crfId: parseInt(form.OID?.replace('F_', '') || '0'),
+            studyId: metadata.study.studyId,
             name: form.Name || '',
             description: form.Description || '',
-            oc_oid: form.OID || '',
-            owner_id: 0,
-            date_created: new Date(),
-            update_id: 0,
-            status_id: 0
+            oid: form.OID || '',
+            ownerId: 0,
+            dateCreated: new Date(),
+            updateId: 0,
+            statusId: 0
           }));
         }
       }
@@ -289,7 +287,7 @@ function parseStudyList(responseData: any): any[] {
     logger.error('Failed to parse study list', {
       error: error.message
     });
-    return [];
+    throw new Error(`Failed to parse study list: ${error.message}`);
   }
 }
 

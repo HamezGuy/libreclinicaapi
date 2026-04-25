@@ -3,9 +3,9 @@ import Joi from 'joi';
 import { WorkflowController } from '../controllers/workflow.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { requireEntityStudyAccess } from '../middleware/study-scope.middleware';
 import { validate, commonSchemas } from '../middleware/validation.middleware';
 import * as workflowService from '../services/database/workflow.service';
-import { pool } from '../config/database';
 
 const router = Router();
 const controller = new WorkflowController();
@@ -16,7 +16,7 @@ router.use(authMiddleware);
 // Get all workflows (admin only)
 router.get(
   '/',
-  requireRole('admin', 'data_manager', 'coordinator'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
   controller.getAllWorkflows.bind(controller)
 );
 
@@ -35,42 +35,46 @@ router.get(
 // Create new workflow task
 router.post(
   '/',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   controller.createWorkflow.bind(controller)
 );
 
 // Update workflow status
 router.put(
   '/:id/status',
-  requireRole('admin', 'data_manager', 'coordinator'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
+  requireEntityStudyAccess('workflowTask', 'id'),
   controller.updateWorkflowStatus.bind(controller)
 );
 
 // Complete workflow task
 router.post(
   '/:id/complete',
-  requireRole('admin', 'data_manager', 'coordinator'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
+  requireEntityStudyAccess('workflowTask', 'id'),
   controller.completeWorkflow.bind(controller)
 );
 
 // Approve workflow task
 router.post(
   '/:id/approve',
-  requireRole('admin', 'investigator'),
+  requireRole('admin', 'investigator', 'data_manager'),
+  requireEntityStudyAccess('workflowTask', 'id'),
   controller.approveWorkflow.bind(controller)
 );
 
 // Reject workflow task
 router.post(
   '/:id/reject',
-  requireRole('admin', 'investigator'),
+  requireRole('admin', 'investigator', 'data_manager'),
+  requireEntityStudyAccess('workflowTask', 'id'),
   controller.rejectWorkflow.bind(controller)
 );
 
 // Handoff workflow task to another user/role
 router.post(
   '/:id/handoff',
-  requireRole('admin', 'data_manager', 'coordinator'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
   controller.handoffWorkflow.bind(controller)
 );
 
@@ -93,119 +97,6 @@ router.get('/crf-lifecycle/:eventCrfId', validate({ params: Joi.object({ eventCr
 
 // Get lifecycle status for all patient CRF instances in a study (dashboard data).
 // This is the core endpoint for tracking each form per patient — NOT the base template.
-router.get('/crf-lifecycle-summary/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), async (req: Request, res: Response) => {
-  try {
-    const studyId = parseInt(req.params.studyId);
-    
-    // Single batched query: get all event_crf records with patient + form info
-    const ecResult = await pool.query(`
-      SELECT 
-        ec.event_crf_id,
-        ec.status_id,
-        ec.completion_status_id,
-        COALESCE(ec.sdv_status, false) as sdv_verified,
-        COALESCE(ec.electronic_signature_status, false) as is_signed,
-        ec.date_created as form_started,
-        ec.date_updated as form_updated,
-        cv.crf_id,
-        c.name as form_name,
-        cv.name as version_name,
-        ss.study_subject_id as subject_id,
-        ss.label as subject_label,
-        sed.name as visit_name,
-        se.study_event_id
-      FROM event_crf ec
-      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-      INNER JOIN crf c ON cv.crf_id = c.crf_id
-      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
-      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-      WHERE ss.study_id = $1
-        AND ec.status_id NOT IN (5, 7)
-      ORDER BY ss.label, sed.ordinal, c.name
-    `, [studyId]);
-
-    // Load workflow configs in bulk
-    let configMap: Record<number, any> = {};
-    try {
-      const cfgResult = await pool.query(`
-        SELECT crf_id, requires_sdv, requires_signature, requires_dde
-        FROM acc_form_workflow_config
-        WHERE study_id = $1 OR study_id IS NULL
-      `, [studyId]);
-      for (const row of cfgResult.rows) {
-        configMap[row.crfId] = row;
-      }
-    } catch { /* table may not exist */ }
-
-    // Count open queries per event_crf in bulk
-    let queryCountMap: Record<number, number> = {};
-    try {
-      const qResult = await pool.query(`
-        SELECT dem.event_crf_id, COUNT(*) as cnt
-        FROM discrepancy_note dn
-        INNER JOIN dn_event_crf_map dem ON dn.discrepancy_note_id = dem.discrepancy_note_id
-        INNER JOIN event_crf ec ON dem.event_crf_id = ec.event_crf_id
-        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-        INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
-        WHERE ss.study_id = $1
-          AND dn.resolution_status_id IN (1, 2, 3)
-          AND dn.parent_dn_id IS NULL
-        GROUP BY dem.event_crf_id
-      `, [studyId]);
-      for (const row of qResult.rows) {
-        queryCountMap[row.eventCrfId] = parseInt(row.cnt);
-      }
-    } catch { /* ignore */ }
-
-    // Compute lifecycle status for each instance
-    const items = ecResult.rows.map((row: any) => {
-      const cfg = configMap[row.crfId] || {};
-      const requiresSDV = cfg.requiresSdv || false;
-      const requiresSignature = cfg.requiresSignature || false;
-      const requiresDDE = cfg.requiresDde || false;
-
-      // Determine current phase
-      let currentPhase = 'not_started';
-      if (row.statusId === 6) {
-        currentPhase = 'locked';
-      } else if (row.completionStatusId >= 5 || row.isSigned) {
-        currentPhase = 'signed';
-      } else if (row.sdvVerified) {
-        currentPhase = 'sdv_complete';
-      } else if (row.completionStatusId >= 4 || row.statusId === 2) {
-        currentPhase = 'data_entry_complete';
-      } else if (row.completionStatusId >= 2) {
-        currentPhase = 'data_entry';
-      }
-
-      return {
-        eventCrfId: row.eventCrfId,
-        crfId: row.crfId,
-        formName: row.formName,
-        versionName: row.versionName,
-        subjectId: row.subjectId,
-        subjectLabel: row.subjectLabel,
-        visitName: row.visitName,
-        studyEventId: row.studyEventId,
-        currentPhase,
-        formStarted: row.formStarted,
-        formUpdated: row.formUpdated,
-        openQueryCount: queryCountMap[row.eventCrfId] || 0,
-        workflowConfig: { requiresSDV, requiresSignature, requiresDDE }
-      };
-    });
-
-    // Aggregate counts by phase
-    const summary: Record<string, number> = {};
-    for (const item of items) {
-      summary[item.currentPhase] = (summary[item.currentPhase] || 0) + 1;
-    }
-
-    res.json({ success: true, data: { items, summary, totalInstances: items.length } });
-  } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
+router.get('/crf-lifecycle-summary/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), controller.getCrfLifecycleSummary.bind(controller));
 
 export default router;

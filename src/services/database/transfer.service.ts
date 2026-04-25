@@ -14,66 +14,11 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { 
   verifyPasswordForSignature, 
-  applyElectronicSignature,
-  SignatureRequest 
+  applyElectronicSignature
 } from './esignature.service';
+import type { TransferRequest, Transfer, TransferApproval, TransferCancellation } from '@accura-trial/shared-types';
 
-// ============================================================================
-// Types
-// ============================================================================
-
-export interface TransferRequest {
-  studySubjectId: number;
-  destinationSiteId: number;
-  reasonForTransfer: string;
-  notes?: string;
-  initiatedBy: number;
-  requiresApprovals?: boolean; // Default true
-}
-
-export interface TransferApproval {
-  transferId: number;
-  approvalType: 'source' | 'destination';
-  approvedBy: number;
-  password: string; // For e-signature verification
-}
-
-export interface TransferCancellation {
-  transferId: number;
-  cancelledBy: number;
-  cancelReason: string;
-}
-
-export interface Transfer {
-  transferId: number;
-  studySubjectId: number;
-  studyId: number;
-  subjectLabel: string;
-  sourceSiteId: number;
-  sourceSiteName: string;
-  destinationSiteId: number;
-  destinationSiteName: string;
-  reasonForTransfer: string;
-  transferStatus: 'pending' | 'approved' | 'completed' | 'cancelled';
-  requiresApprovals: boolean;
-  initiatedBy: number;
-  initiatedByName: string;
-  initiatedAt: Date;
-  sourceApprovedBy?: number;
-  sourceApprovedByName?: string;
-  sourceApprovedAt?: Date;
-  destinationApprovedBy?: number;
-  destinationApprovedByName?: string;
-  destinationApprovedAt?: Date;
-  completedBy?: number;
-  completedByName?: string;
-  completedAt?: Date;
-  cancelledBy?: number;
-  cancelledByName?: string;
-  cancelledAt?: Date;
-  cancelReason?: string;
-  notes?: string;
-}
+export type { TransferRequest, Transfer, TransferApproval, TransferCancellation };
 
 // ============================================================================
 // Helper Functions
@@ -287,14 +232,14 @@ export async function approveTransfer(approval: TransferApproval): Promise<Trans
     const userFullName = `${user.firstName} ${user.lastName}`;
 
     // 3. Apply e-signature (includes password verification)
-    const signatureRequest: SignatureRequest = {
+    const signatureRequest = {
       userId: approval.approvedBy,
       username: username,
       userFullName: userFullName,
-      entityType: 'study_subject', // Use valid entity type for LibreClinica
+      entityType: 'study_subject' as const,
       entityId: transfer.studySubjectId,
       password: approval.password,
-      meaning: 'approval',
+      meaning: 'approval' as const,
       reasonForSigning: `Approved ${approval.approvalType} site transfer for subject ${transfer.studySubjectId}`
     };
 

@@ -11,29 +11,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
-
-// Study parameter configuration matching LibreClinica's structure
-export interface StudyParameterConfig {
-  collectDob: 'required' | 'year_only' | 'not_used';  // 1, 2, 3 in DB
-  discrepancyManagement: boolean;
-  subjectPersonIdRequired: 'required' | 'optional' | 'not_used';
-  genderRequired: boolean;
-  subjectIdGeneration: 'manual' | 'auto_editable' | 'auto_non_editable';
-  subjectIdPrefixSuffix: string;
-  interviewerNameRequired: 'required' | 'optional' | 'not_used';
-  interviewerNameDefault: 'blank' | 'user_name';
-  interviewerNameEditable: boolean;
-  interviewDateRequired: 'required' | 'optional' | 'not_used';
-  queryDueDays: number;
-  interviewDateDefault: 'blank' | 'eventDate';
-  interviewDateEditable: boolean;
-  personIdShownOnCRF: boolean;
-  secondaryLabelViewable: boolean;
-  adminForcedReasonForChange: boolean;
-  eventLocationRequired: 'required' | 'optional' | 'not_used';
-  participantPortal: 'enabled' | 'disabled';
-  randomization: 'enabled' | 'disabled';
-}
+import { StudyParameterConfig } from '../../types';
 
 // Raw parameter value from database
 interface RawParameter {

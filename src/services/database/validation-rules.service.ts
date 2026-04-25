@@ -21,6 +21,7 @@ import { parseExtendedProps } from '../../utils/extended-props';
 import { updateFormQueryCounts } from './query.service';
 import { getStudyParameters } from './studyParameters.service';
 import { getOrgMemberUserIds as getOrgMemberUserIdsShared } from '../../utils/org.util';
+import { ValidationRule, CreateValidationRuleRequest } from '@accura-trial/shared-types';
 
 /**
  * Helper: get org member user IDs for the caller.
@@ -29,91 +30,6 @@ import { getOrgMemberUserIds as getOrgMemberUserIdsShared } from '../../utils/or
 const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
   return getOrgMemberUserIdsShared(pool, callerUserId);
 };
-
-export interface ValidationRule {
-  id: number;
-  crfId: number;
-  crfVersionId?: number;
-  itemId?: number;
-  name: string;
-  description: string;
-  ruleType: 'range' | 'format' | 'required' | 'consistency' | 'business_logic' | 'cross_form' | 'formula' | 'value_match' | 'pattern_match';
-  fieldPath: string;
-  severity: 'error' | 'warning';
-  errorMessage: string;
-  warningMessage?: string;
-  active: boolean;
-  minValue?: number;
-  maxValue?: number;
-  pattern?: string;
-  formatType?: string;
-  operator?: string;
-  compareFieldPath?: string;
-  compareValue?: string;
-  customExpression?: string;
-  /** Blood pressure per-component validation limits (stored in bp_systolic_min/max, bp_diastolic_min/max) */
-  bpSystolicMin?: number;
-  bpSystolicMax?: number;
-  bpDiastolicMin?: number;
-  bpDiastolicMax?: number;
-  dateCreated: Date;
-  dateUpdated?: Date;
-  createdBy: number;
-  updatedBy?: number;
-
-  /** Cell-level targeting for table/question_table fields (stored as JSONB) */
-  tableCellTarget?: {
-    tableFieldPath: string;
-    /** Stable identifier for the target table item (item.item_id). When two
-     *  tables share a name, this disambiguates them. Optional for backward
-     *  compatibility with rules created before the field was added. */
-    tableItemId?: number;
-    columnId: string;
-    columnType: string;
-    rowIndex?: number;
-    rowId?: string;
-    allRows: boolean;
-    displayPath: string;
-  } | null;
-}
-
-export interface CreateValidationRuleRequest {
-  crfId: number;
-  crfVersionId?: number;
-  itemId?: number;
-  name: string;
-  description?: string;
-  ruleType: string;
-  fieldPath: string;
-  severity: string;
-  errorMessage: string;
-  warningMessage?: string;
-  minValue?: number;
-  maxValue?: number;
-  pattern?: string;
-  formatType?: string;
-  operator?: string;
-  compareFieldPath?: string;
-  compareValue?: string;
-  customExpression?: string;
-  /** Blood pressure per-component range limits (stored in bp_systolic_min/max, bp_diastolic_min/max) */
-  bpSystolicMin?: number;
-  bpSystolicMax?: number;
-  bpDiastolicMin?: number;
-  bpDiastolicMax?: number;
-
-  /** Cell-level targeting for table/question_table fields (stored as JSONB) */
-  tableCellTarget?: {
-    tableFieldPath: string;
-    tableItemId?: number;
-    columnId: string;
-    columnType: string;
-    rowIndex?: number;
-    rowId?: string;
-    allRows: boolean;
-    displayPath: string;
-  } | null;
-}
 
 /**
  * FORMAT_TYPE_REGISTRY
@@ -198,7 +114,7 @@ function invalidateRulesCache(crfId?: number): void {
 export const getRulesForCrf = async (crfId: number, callerUserId?: number): Promise<ValidationRule[]> => {
   logger.info('Getting validation rules for CRF', { crfId, callerUserId });
 
-  // Check cache first (only when no org-scoping needed, or we'll cache per-user combos separately)
+  // Check cache first
   const cacheKey = crfId;
   const cached = _rulesCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) {
@@ -209,19 +125,6 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
   await initializeValidationRulesTable();
 
   try {
-    if (callerUserId) {
-      const orgUserIds = await getOrgMemberUserIds(callerUserId);
-      if (orgUserIds) {
-        const crfOwnerCheck = await pool.query(
-          `SELECT cv.owner_id FROM crf_version cv WHERE cv.crf_id = $1 LIMIT 1`,
-          [crfId]
-        );
-        if (crfOwnerCheck.rows.length > 0 && !orgUserIds.includes(crfOwnerCheck.rows[0].ownerId)) {
-          logger.info('CRF not owned by caller org, returning empty rules', { crfId, callerUserId });
-          return [];
-        }
-      }
-    }
 
     const customRulesQuery = `
       SELECT 
@@ -240,7 +143,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
 
     const itemRulesQuery = `
       SELECT 
-        ifm.item_id as id, cv.crf_id, ifm.crf_version_id, i.item_id, i.name, i.description,
+        50000 + ifm.item_id as id, cv.crf_id, ifm.crf_version_id, i.item_id, i.name, i.description,
         CASE 
           WHEN ifm.regexp IS NOT NULL AND ifm.regexp LIKE '=FORMULA:%' THEN 'formula'
           WHEN ifm.regexp IS NOT NULL THEN 'format'
@@ -292,6 +195,7 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
     const itemRules = itemResult.rows.filter((row: any) => row.ruleType !== null).map(mapDbRowToRule);
     const nativeRules: ValidationRule[] = nativeResult.rows.map((row: any) => ({
       id: row.id + 100000,
+      validationRuleId: row.id + 100000,
       crfId: row.crfId,
       crfVersionId: row.crfVersionId,
       itemId: row.itemId,
@@ -2191,7 +2095,7 @@ async function createValidationQuery(params: {
     let dueDateStr: string | null = null;
     try {
       const studyParams = await getStudyParameters(params.studyId);
-      const dueDays = studyParams.queryDueDays;
+      const dueDays = studyParams.queryDueDays ?? 0;
       if (dueDays > 0) {
         const dueDate = new Date();
         dueDate.setDate(dueDate.getDate() + dueDays);
@@ -2704,7 +2608,7 @@ function applyRule(
         logger.error('Invalid regex pattern in validation rule', {
           pattern: resolvedPattern,
           ruleName: rule.name,
-          ruleId: rule.id,
+          ruleId: rule.validationRuleId,
           error: regexErr.message
         });
         return { valid: false, message: `Invalid regex pattern: ${regexErr.message}` };
@@ -2803,7 +2707,7 @@ function applyRule(
         logger.error('Invalid regex pattern in pattern_match rule', {
           pattern: rule.pattern,
           ruleName: rule.name,
-          ruleId: rule.id,
+          ruleId: rule.validationRuleId,
           error: regexErr.message
         });
         return { valid: false, message: `Invalid regex pattern: ${regexErr.message}` };
@@ -3349,8 +3253,10 @@ function getNestedValue(obj: Record<string, any>, path: string): any {
  * Map database row to ValidationRule interface
  */
 function mapDbRowToRule(row: any): ValidationRule {
+  const ruleId = row.id || row.validationRuleId;
   return {
-    id: row.id || row.validationRuleId,
+    id: ruleId,
+    validationRuleId: ruleId,
     crfId: row.crfId,
     crfVersionId: row.crfVersionId,
     itemId: row.itemId,

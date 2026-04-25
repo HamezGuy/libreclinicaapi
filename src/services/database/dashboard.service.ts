@@ -782,11 +782,12 @@ export const getActivityFeed = async (studyId: number, limit: number = 20): Prom
       FROM audit_log_event ale
       LEFT JOIN audit_log_event_type alet ON ale.audit_log_event_type_id = alet.audit_log_event_type_id
       LEFT JOIN user_account u ON ale.user_id = u.user_id
+      WHERE ale.study_id = $1 OR ale.study_id IS NULL
       ORDER BY ale.audit_date DESC
-      LIMIT $1
+      LIMIT $2
     `;
 
-    const result = await pool.query(query, [limit]);
+    const result = await pool.query(query, [studyId, limit]);
     return result.rows.map(row => ({
       id: row.auditId,
       timestamp: row.auditDate,

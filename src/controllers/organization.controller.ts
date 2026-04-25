@@ -7,13 +7,14 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as orgService from '../services/database/organization.service';
+import type { ApiResponse, Organization, OrganizationMembership } from '@accura-trial/shared-types';
 
 // ============================================================================
 // Registration (Public)
 // ============================================================================
 
 export const register = asyncHandler(async (req: Request, res: Response) => {
-  const result = await orgService.registerOrganization(req.body, req.ip);
+  const result: ApiResponse<Organization> = await orgService.registerOrganization(req.body, req.ip);
   res.status(result.success ? 201 : 400).json(result);
 });
 
@@ -23,23 +24,23 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
 
 export const getMyOrganizations = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const result = await orgService.getMyOrganizations(user.userId);
+  const result: ApiResponse<OrganizationMembership[]> = await orgService.getMyOrganizations(user.userId);
   res.json(result);
 });
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const result = await orgService.listOrganizations(req.query, user?.userId);
+  const result: ApiResponse<Organization[]> = await orgService.listOrganizations(req.query, user?.userId);
   res.json(result);
 });
 
 export const listPublic = asyncHandler(async (req: Request, res: Response) => {
-  const result = await orgService.listPublicOrganizations();
+  const result: ApiResponse<Organization[]> = await orgService.listPublicOrganizations();
   res.json(result);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
-  const result = await orgService.getOrganization(parseInt(req.params.id));
+  const result: ApiResponse<Organization> = await orgService.getOrganization(parseInt(req.params.id));
   res.status(result.success ? 200 : 404).json(result);
 });
 
@@ -61,7 +62,7 @@ export const addMember = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getMembers = asyncHandler(async (req: Request, res: Response) => {
-  const result = await orgService.getMembers(parseInt(req.params.id));
+  const result: ApiResponse<OrganizationMembership[]> = await orgService.getMembers(parseInt(req.params.id));
   res.json(result);
 });
 

@@ -185,7 +185,7 @@ export const saveFormData = async (
     };
   }
 
-  // ===== PRE-SAVE VALIDATION (dry run - no query creation) =====
+  // ===== PRE-SAVE VALIDATION (dry run first, then query creation) =====
   // Pass hiddenFieldIds so validation skips fields hidden by branching —
   // hidden fields carry empty values for data clearing but must never
   // trigger validation errors that would block the save.
@@ -208,16 +208,49 @@ export const saveFormData = async (
       );
 
       if (!validationResult.valid && validationResult.errors.length > 0) {
+        // Create queries for error-severity rule failures even though the
+        // save is blocked. In EDC systems, hard-edit check failures must
+        // still generate discrepancy notes so they appear in the query
+        // workflow and are tracked to resolution.
+        let errorQueriesCreated = 0;
+        if (request.studyId && userId) {
+          try {
+            const queryResult = await validationRulesService.validateFormData(
+              request.crfId,
+              request.formData,
+              {
+                createQueries: true,
+                severityFilter: 'error',
+                studyId: request.studyId,
+                subjectId: request.subjectId,
+                userId: userId,
+                eventCrfId: (request as any).eventCrfId || undefined,
+                hiddenFieldIds: reqHiddenFieldIds.length > 0 ? reqHiddenFieldIds : undefined,
+                hiddenFieldNames: (request as any).hiddenFields || undefined
+              }
+            );
+            errorQueriesCreated = queryResult.queriesCreated || 0;
+            if (errorQueriesCreated > 0) {
+              logger.info('Created queries for hard-edit failures', {
+                crfId: request.crfId, errorQueriesCreated
+              });
+            }
+          } catch (queryErr: any) {
+            logger.warn('Failed to create error queries (non-blocking)', { error: queryErr.message });
+          }
+        }
+
         logger.warn('Form data validation failed - save blocked', { 
           crfId: request.crfId, 
-          errorCount: validationResult.errors.length
+          errorCount: validationResult.errors.length,
+          errorQueriesCreated
         });
         return {
           success: false,
           message: 'Validation failed',
           errors: validationResult.errors,
           warnings: validationResult.warnings,
-          queriesCreated: 0
+          queriesCreated: errorQueriesCreated
         } as any;
       }
 
@@ -282,11 +315,11 @@ export const saveFormData = async (
     saveResult = await saveFormDataDirect(fullRequest, userId, username);
   }
 
-  // Post-save validation: create queries for warning-severity rules.
+  // Post-save validation: create queries for ALL rule violations.
   // Runs after BOTH SOAP and direct-DB paths. The direct-DB path handles its
   // own post-save internally, but the SOAP path previously skipped it entirely.
   // Only run for SOAP-path results to avoid duplicate queries from the direct path.
-  if (saveResult?.success && validationWarnings.length > 0 && saveResult !== null) {
+  if (saveResult?.success && saveResult !== null) {
     const eventCrfId = (saveResult as any).eventCrfId || (saveResult as any).data?.eventCrfId;
     if (eventCrfId && !((saveResult as any)._postSaveValidationRan)) {
       try {
@@ -295,7 +328,6 @@ export const saveFormData = async (
           fullRequest.formData,
           {
             createQueries: true,
-            severityFilter: 'warning',
             studyId: fullRequest.studyId,
             subjectId: fullRequest.subjectId,
             userId,
@@ -303,8 +335,14 @@ export const saveFormData = async (
             hiddenFieldIds: reqHiddenFieldIds.length > 0 ? reqHiddenFieldIds : undefined
           }
         );
-        if (postSaveResult.warnings?.length) {
-          (saveResult as any).validationWarnings = postSaveResult.warnings;
+        const allPostSaveIssues = [
+          ...(postSaveResult.warnings || []),
+          ...(postSaveResult.errors || []).map((e: { fieldPath: string; message: string; queryId?: number }) => ({
+            fieldPath: e.fieldPath, message: e.message, queryId: e.queryId
+          }))
+        ];
+        if (allPostSaveIssues.length > 0 || (postSaveResult as any).queriesCreated) {
+          (saveResult as any).validationWarnings = allPostSaveIssues;
           (saveResult as any).queriesCreated = (postSaveResult as any).queriesCreated || 0;
         }
       } catch (postErr: any) {
@@ -643,13 +681,22 @@ const saveFormDataDirect = async (
     // Pre-fetch all existing item_data rows for this event_crf in a single query
     // to avoid one SELECT per field inside the loop (N+1 problem).
     const existingItemDataResult = await client.query(`
-      SELECT item_id, item_data_id, value FROM item_data
+      SELECT item_id, item_data_id, value, date_updated FROM item_data
       WHERE event_crf_id = $1 AND deleted = false
     `, [eventCrfId]);
-    const existingByItemId = new Map<number, { itemDataId: number; value: string }>();
+    const existingByItemId = new Map<number, { itemDataId: number; value: string; dateUpdated: string | null }>();
     for (const row of existingItemDataResult.rows) {
-      existingByItemId.set(row.itemId, { itemDataId: row.itemDataId, value: row.value });
+      existingByItemId.set(row.itemId, { itemDataId: row.itemDataId, value: row.value, dateUpdated: row.dateUpdated ?? null });
     }
+
+    // Track itemIds already processed in this save loop to prevent duplicate
+    // inserts when the frontend sends deduplicated keys (e.g. "question_table"
+    // and "question_table_2597") that resolve to the same item_id.
+    const processedItemIds = new Set<number>();
+
+    // Optimistic concurrency: track fields that were modified by another user
+    const concurrentModifications: { fieldPath: string; message: string }[] = [];
+    const fieldTimestamps: Record<string, string> = (request as unknown as Record<string, unknown>).fieldTimestamps as Record<string, string> || {};
 
     for (const [fieldName, value] of Object.entries(formData)) {
       // Find the item_id for this field - try multiple matching strategies:
@@ -719,24 +766,30 @@ const saveFormDataDirect = async (
         const nativeValue = (typeof value === 'string') ? tryParseJson(value, value) : value;
         structuredFieldData[canonical] = nativeValue;
 
-        const marker = '__STRUCTURED_DATA__';
-
-        // Use the pre-fetched map instead of a per-field query
-        const existingRow = existingByItemId.get(itemId);
-        if (existingRow) {
-          if (existingRow.value !== marker) {
+        // Only insert the item_data marker once per itemId — multiple deduplicated
+        // form keys (e.g. "question_table" and "question_table_2597") can resolve
+        // to the same itemId when they're different tables with the same base name.
+        if (!processedItemIds.has(itemId)) {
+          processedItemIds.add(itemId);
+          const marker = '__STRUCTURED_DATA__';
+          const existingRow = existingByItemId.get(itemId);
+          if (existingRow) {
+            if (existingRow.value !== marker) {
+              await client.query(`
+                UPDATE item_data
+                SET value = $1, date_updated = NOW(), update_id = $2
+                WHERE item_data_id = $3
+              `, [marker, userId, existingRow.itemDataId]);
+            }
+          } else {
             await client.query(`
-              UPDATE item_data
-              SET value = $1, date_updated = NOW(), update_id = $2
-              WHERE item_data_id = $3
-            `, [marker, userId, existingRow.itemDataId]);
+              INSERT INTO item_data (
+                item_id, event_crf_id, value, status_id, owner_id, date_created, ordinal
+              ) VALUES ($1, $2, $3, 1, $4, NOW(), 1)
+              ON CONFLICT ON CONSTRAINT pk_item_data_new
+              DO UPDATE SET value = EXCLUDED.value, date_updated = NOW(), update_id = EXCLUDED.owner_id
+            `, [itemId, eventCrfId, marker, userId]);
           }
-        } else {
-          await client.query(`
-            INSERT INTO item_data (
-              item_id, event_crf_id, value, status_id, owner_id, date_created, ordinal
-            ) VALUES ($1, $2, $3, 1, $4, NOW(), 1)
-          `, [itemId, eventCrfId, marker, userId]);
         }
 
         savedCount++;
@@ -811,11 +864,34 @@ const saveFormDataDirect = async (
         // Update existing
         const oldValue = existingResult.rows[0].value;
         if (oldValue !== stringValue) {
-          await client.query(`
-            UPDATE item_data
-            SET value = $1, date_updated = NOW(), update_id = $2
-            WHERE item_data_id = $3
-          `, [stringValue, userId, existingResult.rows[0].itemDataId]);
+          // Optimistic concurrency: if the frontend supplied a timestamp for this
+          // field, verify it matches the DB date_updated before overwriting.
+          const clientTimestamp = fieldTimestamps[fieldName]
+            || fieldTimestamps[fieldName.toLowerCase()]
+            || null;
+          const existing = existingByItemId.get(itemId);
+
+          if (clientTimestamp && existing?.dateUpdated) {
+            const updateResult = await client.query(`
+              UPDATE item_data
+              SET value = $1, date_updated = NOW(), update_id = $2
+              WHERE item_data_id = $3 AND (date_updated = $4 OR date_updated IS NULL)
+            `, [stringValue, userId, existingResult.rows[0].itemDataId, clientTimestamp]);
+
+            if ((updateResult.rowCount ?? 0) === 0) {
+              concurrentModifications.push({
+                fieldPath: fieldName,
+                message: 'Value was modified by another user since you loaded the form'
+              });
+              continue;
+            }
+          } else {
+            await client.query(`
+              UPDATE item_data
+              SET value = $1, date_updated = NOW(), update_id = $2
+              WHERE item_data_id = $3
+            `, [stringValue, userId, existingResult.rows[0].itemDataId]);
+          }
 
           // Log change to audit trail (21 CFR Part 11 §11.10(e) — include reason_for_change)
           await client.query(`
@@ -829,11 +905,13 @@ const saveFormDataDirect = async (
           `, [userId, existingResult.rows[0].itemDataId, oldValue, stringValue, eventCrfId, request.reasonForChange || 'Reason not given']);
         }
       } else {
-        // Insert new
+        // Insert new (upsert to handle race conditions / double-submits)
         const insertResult = await client.query(`
           INSERT INTO item_data (
             item_id, event_crf_id, value, status_id, owner_id, date_created, ordinal
           ) VALUES ($1, $2, $3, 1, $4, NOW(), 1)
+          ON CONFLICT ON CONSTRAINT pk_item_data_new
+          DO UPDATE SET value = EXCLUDED.value, date_updated = NOW(), update_id = EXCLUDED.owner_id
           RETURNING item_data_id
         `, [itemId, eventCrfId, stringValue, userId]);
 
@@ -993,9 +1071,8 @@ const saveFormDataDirect = async (
       totalFilled = parseInt(completionCountResult.rows[0]?.totalFilled) || 0;
     }
 
-    const isComplete = requiredTotal > 0
-      ? requiredFilled >= requiredTotal
-      : savedCount > 0;
+    // Any successful save = form is complete. No partial-save limbo.
+    const isComplete = savedCount > 0;
     const completionStatusId = isComplete ? 4 : 2;
 
     await client.query(`
@@ -1242,9 +1319,11 @@ const saveFormDataDirect = async (
       saveWarnings.push({ fieldPath: '_workflow', message: `Workflow trigger failed: ${workflowError.message}` });
     }
 
-    // ===== POST-SAVE VALIDATION: Create queries for warnings ONLY =====
-    // Hard edit errors were already caught in the pre-save pass and blocked the save.
-    // Use severityFilter: 'warning' so only soft edits create queries post-save.
+    // ===== POST-SAVE VALIDATION: Create queries for ALL violated rules =====
+    // The pre-save dry-run blocked saves for error-severity violations, but
+    // if data passed pre-save (errors were fixed or only warnings remain),
+    // run all rules with query creation enabled so both warning AND error
+    // severity rule violations produce discrepancy notes.
     let queriesCreated = 0;
     let postSaveWarnings: { fieldPath: string; message: string; queryId?: number }[] = [];
     if (request.crfId && request.formData && eventCrfId) {
@@ -1264,7 +1343,6 @@ const saveFormDataDirect = async (
           request.formData,
           {
             createQueries: true,
-            severityFilter: 'warning',
             studyId: request.studyId,
             subjectId: request.subjectId,
             eventCrfId: eventCrfId,
@@ -1274,11 +1352,14 @@ const saveFormDataDirect = async (
           }
         );
         queriesCreated = postSaveValidation.queriesCreated || 0;
-        postSaveWarnings = postSaveValidation.warnings || [];
+        postSaveWarnings = [
+          ...(postSaveValidation.warnings || []),
+          ...(postSaveValidation.errors || []).map(e => ({ fieldPath: e.fieldPath, message: e.message, queryId: e.queryId }))
+        ];
         if (queriesCreated > 0) {
           logger.info('Post-save validation created queries', { 
             eventCrfId, crfId: request.crfId, queriesCreated,
-            warningFields: postSaveWarnings.map(w => w.fieldPath)
+            fields: postSaveWarnings.map(w => w.fieldPath)
           });
         }
       } catch (postValidationError: any) {
@@ -1307,7 +1388,8 @@ const saveFormDataDirect = async (
       data: { eventCrfId, studyEventId, savedCount },
       message: `Form data saved successfully (${savedCount} fields)`,
       queriesCreated,
-      validationWarnings: [...postSaveWarnings, ...saveWarnings],
+      warnings: [...postSaveWarnings, ...saveWarnings],
+      concurrentModifications: concurrentModifications.length > 0 ? concurrentModifications : undefined,
       _postSaveValidationRan: true
     } as any;
   } catch (error: any) {
@@ -2104,6 +2186,7 @@ export const getFormStatus = async (eventCrfId: number): Promise<any> => {
     const query = `
       SELECT 
         ec.event_crf_id,
+        ec.status_id,
         ec.completion_status_id,
         cs.name as completion_status,
         ec.date_created,
@@ -2113,7 +2196,9 @@ export const getFormStatus = async (eventCrfId: number): Promise<any> => {
         ec.validator_id,
         u3.user_name as validated_by,
         ec.date_validate,
-        ec.sdv_status
+        ec.sdv_status,
+        COALESCE(ec.frozen, false) as frozen,
+        COALESCE(ec.electronic_signature_status, false) as signed
       FROM event_crf ec
       INNER JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
       LEFT JOIN user_account u1 ON ec.owner_id = u1.user_id
@@ -2128,7 +2213,11 @@ export const getFormStatus = async (eventCrfId: number): Promise<any> => {
       return null;
     }
 
-    return result.rows[0];
+    const row = result.rows[0];
+    return {
+      ...row,
+      locked: row.statusId === 6
+    };
   } catch (error: any) {
     logger.error('Get form status error', { error: error.message });
     throw error;
@@ -6418,11 +6507,13 @@ export const updateFieldData = async (
       }
       savedItemDataId = itemDataId;
     } else {
-      // Insert new
+      // Insert new (upsert to handle race conditions)
       const insertResult = await client.query(`
         INSERT INTO item_data (
           item_id, event_crf_id, value, status_id, owner_id, date_created, ordinal
         ) VALUES ($1, $2, $3, 1, $4, NOW(), 1)
+        ON CONFLICT ON CONSTRAINT pk_item_data_new
+        DO UPDATE SET value = EXCLUDED.value, date_updated = NOW(), update_id = EXCLUDED.owner_id
         RETURNING item_data_id
       `, [itemId, eventCrfId, stringValue, userId]);
 
@@ -6588,9 +6679,10 @@ export const markFormComplete = async (
     }
 
     let missingCount = 0;
-    if (hiddenItemIds.size > 0) {
-      const hiddenIdArray = Array.from(hiddenItemIds);
-      const missingResult = await client.query(`
+    const hiddenIdArray = hiddenItemIds.size > 0 ? Array.from(hiddenItemIds) : [];
+
+    if (hiddenIdArray.length > 0) {
+      const result = await client.query(`
         SELECT COUNT(*) AS missing_count
         FROM item_form_metadata ifm
         INNER JOIN item i ON ifm.item_id = i.item_id
@@ -6598,7 +6690,7 @@ export const markFormComplete = async (
           AND ifm.required = true
           AND i.description NOT LIKE '%"type":"section_header"%'
           AND i.description NOT LIKE '%"type":"static_text"%'
-          AND ifm.item_id != ALL($3::int[])
+          AND NOT (ifm.item_id = ANY($3::int[]))
           AND NOT EXISTS (
             SELECT 1 FROM item_data id
             WHERE id.item_id = ifm.item_id
@@ -6607,14 +6699,13 @@ export const markFormComplete = async (
               AND TRIM(id.value) <> ''
           )
       `, [ec.crfVersionId, eventCrfId, hiddenIdArray]);
-      missingCount = parseInt(missingResult.rows[0]?.missingCount || '0');
+      missingCount = parseInt(result.rows[0]?.missingCount || '0');
     } else {
-      const missingResult = await client.query(`
+      const result = await client.query(`
         SELECT COUNT(*) AS missing_count
         FROM item_form_metadata ifm
-        INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
         INNER JOIN item i ON ifm.item_id = i.item_id
-        WHERE cv.crf_id = $1
+        WHERE ifm.crf_version_id = $1
           AND ifm.required = true
           AND i.description NOT LIKE '%"type":"section_header"%'
           AND i.description NOT LIKE '%"type":"static_text"%'
@@ -6625,8 +6716,8 @@ export const markFormComplete = async (
               AND id.value IS NOT NULL
               AND TRIM(id.value) <> ''
           )
-      `, [ec.crfId, eventCrfId]);
-      missingCount = parseInt(missingResult.rows[0]?.missingCount || '0');
+      `, [ec.crfVersionId, eventCrfId]);
+      missingCount = parseInt(result.rows[0]?.missingCount || '0');
     }
 
     if (missingCount > 0) {
@@ -6684,6 +6775,23 @@ export const markFormComplete = async (
   }
 };
 
+/**
+ * Look up the active organization IDs for a given user.
+ * Returns an empty array if the user has no memberships or if the
+ * acc_organization_member table doesn't exist (legacy installs).
+ */
+export const getActiveOrganizationIds = async (userId: number): Promise<number[]> => {
+  try {
+    const result = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    );
+    return result.rows.map((r: any) => r.organizationId);
+  } catch {
+    return [];
+  }
+};
+
 export default {
   saveFormData,
   getFormData,
@@ -6711,6 +6819,8 @@ export default {
   markFormComplete,
   // Reference data
   getNullValueTypes,
-  getMeasurementUnits
+  getMeasurementUnits,
+  // Organization membership lookup
+  getActiveOrganizationIds
 };
 

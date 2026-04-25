@@ -258,13 +258,28 @@ export const getPatientEventCRFs = async (studyEventId: number): Promise<any[]> 
         ec.date_validate,
         ec.sdv_status,
         u.user_name as owner_name,
-        -- Count of filled fields
-        (SELECT COUNT(*) FROM item_data id WHERE id.event_crf_id = ec.event_crf_id AND id.deleted = false) as filled_fields,
-        -- Total fields in this CRF version
-        (SELECT COUNT(DISTINCT i.item_id) 
-         FROM item i 
-         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id 
-         WHERE igm.crf_version_id = ec.crf_version_id) as total_fields
+        -- Count of filled fields (exclude markers, empties, section headers, static text, calculated, bmi)
+        (SELECT COUNT(DISTINCT id.item_id)
+         FROM item_data id
+         INNER JOIN item ifl ON id.item_id = ifl.item_id
+         WHERE id.event_crf_id = ec.event_crf_id
+           AND id.deleted = false
+           AND id.value IS NOT NULL AND id.value != '' AND id.value != '[]' AND id.value != '{}' AND id.value != '__STRUCTURED_DATA__'
+           AND ifl.description NOT LIKE '%"type":"section_header"%'
+           AND ifl.description NOT LIKE '%"type":"static_text"%'
+           AND ifl.description NOT LIKE '%"type":"calculated"%'
+           AND ifl.description NOT LIKE '%"type":"bmi"%'
+        ) as filled_fields,
+        -- Total answerable fields in this CRF version (exclude decorative/computed)
+        (SELECT COUNT(DISTINCT i.item_id)
+         FROM item i
+         INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
+         WHERE igm.crf_version_id = ec.crf_version_id
+           AND i.description NOT LIKE '%"type":"section_header"%'
+           AND i.description NOT LIKE '%"type":"static_text"%'
+           AND i.description NOT LIKE '%"type":"calculated"%'
+           AND i.description NOT LIKE '%"type":"bmi"%'
+        ) as total_fields
       FROM event_crf ec
       INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
       INNER JOIN crf c ON cv.crf_id = c.crf_id
@@ -324,14 +339,28 @@ export const getVisitForms = async (studyEventId: number): Promise<any[]> => {
         ec.date_created    AS started_at,
         ec.date_completed  AS completed_at,
         COALESCE(
-          (SELECT COUNT(*) FROM item_data id2
-           WHERE id2.event_crf_id = ec.event_crf_id AND id2.deleted = false), 0
+          (SELECT COUNT(DISTINCT id2.item_id)
+           FROM item_data id2
+           INNER JOIN item ifl ON id2.item_id = ifl.item_id
+           WHERE id2.event_crf_id = ec.event_crf_id
+             AND id2.deleted = false
+             AND id2.value IS NOT NULL AND id2.value != '' AND id2.value != '[]' AND id2.value != '{}' AND id2.value != '__STRUCTURED_DATA__'
+             AND ifl.description NOT LIKE '%"type":"section_header"%'
+             AND ifl.description NOT LIKE '%"type":"static_text"%'
+             AND ifl.description NOT LIKE '%"type":"calculated"%'
+             AND ifl.description NOT LIKE '%"type":"bmi"%'
+          ), 0
         ) AS filled_fields,
         COALESCE(
           (SELECT COUNT(DISTINCT i.item_id)
            FROM item i
            INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
-           WHERE igm.crf_version_id = COALESCE(ec.crf_version_id, edc.default_version_id)), 0
+           WHERE igm.crf_version_id = COALESCE(ec.crf_version_id, edc.default_version_id)
+             AND i.description NOT LIKE '%"type":"section_header"%'
+             AND i.description NOT LIKE '%"type":"static_text"%'
+             AND i.description NOT LIKE '%"type":"calculated"%'
+             AND i.description NOT LIKE '%"type":"bmi"%'
+          ), 0
         ) AS total_fields
       FROM event_definition_crf edc
       INNER JOIN crf c ON edc.crf_id = c.crf_id
@@ -2053,10 +2082,35 @@ export const savePatientFormData = async (
           date_updated = NOW(),
           updated_by = $2
       WHERE patient_event_form_id = $3
+      RETURNING event_crf_id
     `, [JSON.stringify(cleanedData), userId, patientEventFormId]);
 
     if (result.rowCount === 0) {
       return { success: false, message: `Patient form snapshot ${patientEventFormId} not found`, statusCode: 404 };
+    }
+
+    // After saving JSONB, sync completion_status with the authoritative
+    // event_crf.completion_status_id so the visit-detail UI shows the
+    // correct badge. The event_crf row is the source of truth (it is
+    // updated by saveFormDataDirect when item_data is persisted).
+    const eventCrfId = result.rows[0]?.eventCrfId;
+    if (eventCrfId) {
+      try {
+        const ecResult = await pool.query(
+          `SELECT completion_status_id FROM event_crf WHERE event_crf_id = $1`,
+          [eventCrfId]
+        );
+        if (ecResult.rows.length > 0) {
+          const csId = ecResult.rows[0].completionStatusId;
+          const csLabel = csId >= 4 ? 'complete' : (csId >= 2 ? 'in_progress' : 'not_started');
+          await pool.query(
+            `UPDATE patient_event_form SET completion_status = $1 WHERE patient_event_form_id = $2`,
+            [csLabel, patientEventFormId]
+          );
+        }
+      } catch (syncErr: any) {
+        logger.warn('Could not sync patient_event_form completion_status', { error: syncErr.message });
+      }
     }
 
     return { success: true, message: 'Form data saved' };

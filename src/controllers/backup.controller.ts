@@ -12,6 +12,7 @@ import { logger } from '../config/logger';
 import * as backupService from '../services/backup/backup.service';
 import * as schedulerService from '../services/backup/backup-scheduler.service';
 import { BackupType } from '../services/backup/backup.service';
+import type { ApiResponse } from '@accura-trial/shared-types';
 
 /**
  * Get backup system status and statistics
@@ -24,14 +25,15 @@ export const getBackupStatus = async (req: Request, res: Response): Promise<void
       Promise.resolve(schedulerService.getSchedulerStatus())
     ]);
     
-    res.json({
+    const response: ApiResponse = {
       success: true,
       data: {
         statistics: statsResult.data,
         scheduler: schedulerStatus,
         config: backupService.getBackupConfig()
       }
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to get backup status', { error: error.message });
     res.status(500).json({
@@ -54,11 +56,12 @@ export const listBackups = async (req: Request, res: Response): Promise<void> =>
     
     const result = await backupService.listBackups(type, limit);
     
-    res.json({
+    const response: ApiResponse = {
       success: result.success,
       data: result.data,
       message: result.message
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to list backups', { error: error.message });
     res.status(500).json({
@@ -80,17 +83,19 @@ export const getBackup = async (req: Request, res: Response): Promise<void> => {
     const result = await backupService.getBackup(backupId);
     
     if (!result.success) {
-      res.status(404).json({
+      const response: ApiResponse = {
         success: false,
         message: result.message
-      });
+      };
+      res.status(404).json(response);
       return;
     }
     
-    res.json({
+    const response: ApiResponse = {
       success: true,
       data: result.data
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to get backup', { error: error.message });
     res.status(500).json({
@@ -114,10 +119,11 @@ export const triggerBackup = async (req: Request, res: Response): Promise<void> 
     const username = (req as any).user?.userName || (req as any).user?.username || 'api_user';
     
     if (!type || !Object.values(BackupType).includes(type)) {
-      res.status(400).json({
+      const response: ApiResponse = {
         success: false,
         message: `Invalid backup type. Must be one of: ${Object.values(BackupType).join(', ')}`
-      });
+      };
+      res.status(400).json(response);
       return;
     }
     
@@ -125,13 +131,14 @@ export const triggerBackup = async (req: Request, res: Response): Promise<void> 
     
     const result = await schedulerService.triggerImmediateBackup(type, userId, username);
     
-    res.json({
+    const response: ApiResponse = {
       success: result.success,
       data: {
         backupId: result.backupId
       },
       message: result.message
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to trigger backup', { error: error.message });
     res.status(500).json({
@@ -154,11 +161,12 @@ export const verifyBackup = async (req: Request, res: Response): Promise<void> =
     
     const result = await backupService.verifyBackup(backupId, userId, username);
     
-    res.json({
+    const response: ApiResponse = {
       success: result.success,
       data: result.data,
       message: result.message
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to verify backup', { error: error.message });
     res.status(500).json({
@@ -194,11 +202,12 @@ export const restoreBackup = async (req: Request, res: Response): Promise<void> 
     
     const result = await backupService.restoreBackup(backupId, userId, username);
     
-    res.json({
+    const response: ApiResponse = {
       success: result.success,
       data: result.data,
       message: result.message
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to restore backup', { error: error.message });
     res.status(500).json({
@@ -223,11 +232,12 @@ export const startScheduler = async (req: Request, res: Response): Promise<void>
       config.schedules.transactionLog
     );
     
-    res.json({
+    const response: ApiResponse = {
       success: true,
       data: schedulerService.getSchedulerStatus(),
       message: 'Backup scheduler started'
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to start scheduler', { error: error.message });
     res.status(500).json({
@@ -246,11 +256,12 @@ export const stopScheduler = async (req: Request, res: Response): Promise<void> 
   try {
     await schedulerService.stopScheduler();
     
-    res.json({
+    const response: ApiResponse = {
       success: true,
       data: schedulerService.getSchedulerStatus(),
       message: 'Backup scheduler stopped'
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to stop scheduler', { error: error.message });
     res.status(500).json({
@@ -269,10 +280,11 @@ export const getSchedulerStatus = async (req: Request, res: Response): Promise<v
   try {
     const status = schedulerService.getSchedulerStatus();
     
-    res.json({
+    const response: ApiResponse = {
       success: true,
       data: status
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to get scheduler status', { error: error.message });
     res.status(500).json({
@@ -294,11 +306,12 @@ export const cleanupBackups = async (req: Request, res: Response): Promise<void>
     
     const result = await backupService.cleanupOldBackups(userId, username);
     
-    res.json({
+    const response: ApiResponse = {
       success: result.success,
       data: result.data,
       message: result.message
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to cleanup backups', { error: error.message });
     res.status(500).json({
@@ -322,10 +335,11 @@ export const getBackupConfig = async (req: Request, res: Response): Promise<void
       ...config
     };
     
-    res.json({
+    const response: ApiResponse = {
       success: true,
       data: safeConfig
-    });
+    };
+    res.json(response);
   } catch (error: any) {
     logger.error('Failed to get backup config', { error: error.message });
     res.status(500).json({

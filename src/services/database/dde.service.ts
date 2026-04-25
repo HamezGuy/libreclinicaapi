@@ -20,81 +20,7 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { stripExtendedProps } from '../../utils/extended-props';
 import { updateFormQueryCounts } from './query.service';
-
-// ============================================================================
-// Types
-// ============================================================================
-
-export interface DDEEntryRequest {
-  eventCrfId: number;
-  entries: { itemId: number; value: string }[];
-  userId: number;
-}
-
-export interface DDEStatus {
-  statusId: number;
-  eventCrfId: number;
-  firstEntryStatus: 'pending' | 'in_progress' | 'complete';
-  firstEntryBy?: number;
-  firstEntryByName?: string;
-  firstEntryAt?: Date;
-  secondEntryStatus: 'pending' | 'in_progress' | 'complete';
-  secondEntryBy?: number;
-  secondEntryByName?: string;
-  secondEntryAt?: Date;
-  comparisonStatus: 'pending' | 'matched' | 'discrepancies' | 'resolved';
-  totalItems: number;
-  matchedItems: number;
-  discrepancyCount: number;
-  resolvedCount: number;
-  ddeComplete: boolean;
-}
-
-export interface DDEItemComparison {
-  itemId: number;
-  itemName: string;
-  itemDescription?: string;
-  firstValue: string;
-  secondValue: string;
-  matches: boolean;
-  discrepancyId?: number;
-  resolutionStatus?: string;
-  resolvedValue?: string;
-  resolvedBy?: string;
-}
-
-export interface DDEComparison {
-  eventCrfId: number;
-  subjectLabel: string;
-  formName: string;
-  items: DDEItemComparison[];
-  summary: {
-    total: number;
-    matched: number;
-    discrepancies: number;
-    resolved: number;
-  };
-}
-
-export interface DDEResolution {
-  discrepancyId: number;
-  resolution: 'first_correct' | 'second_correct' | 'new_value' | 'adjudicated';
-  newValue?: string;
-  adjudicationNotes?: string;
-  resolvedBy: number;
-}
-
-export interface DDEDashboardItem {
-  eventCrfId: number;
-  studySubjectId: number;
-  subjectLabel: string;
-  studyName: string;
-  siteName: string;
-  formName: string;
-  eventName: string;
-  ddeStatus: DDEStatus;
-  daysWaiting: number;
-}
+import type { DDEEntryRequest, DDEStatus, DDEItemComparison, DDEComparison, DDEResolution, DDEDashboardItem } from '../../types';
 
 // ============================================================================
 // LibreClinica Completion Status IDs
@@ -215,7 +141,7 @@ export async function canUserPerformDDE(
     }
 
     // Different user required for second entry
-    if (status.firstEntryBy === userId) {
+    if (status.firstEntryUserId === userId) {
       return { 
         allowed: false, 
         reason: 'Different user required for second entry. First entry was done by ' + status.firstEntryByName 
@@ -285,8 +211,8 @@ export async function markFirstEntryComplete(
 export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDEStatus> {
   logger.info('Submitting second entry', { 
     eventCrfId: request.eventCrfId, 
-    userId: request.userId,
-    itemCount: request.entries.length 
+    userId: request.enteredBy,
+    itemCount: request.items.length 
   });
 
   const client = await pool.connect();
@@ -305,13 +231,13 @@ export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDESt
     }
 
     // Verify user can perform second entry
-    const canDo = await canUserPerformDDE(request.eventCrfId, request.userId);
+    const canDo = await canUserPerformDDE(request.eventCrfId, request.enteredBy);
     if (!canDo.allowed || canDo.entryType !== 'second') {
       throw new Error(canDo.reason || 'Cannot perform second entry');
     }
 
     // Store second entry values in validator_annotations as JSON
-    const secondEntryData = JSON.stringify(request.entries.map(e => ({
+    const secondEntryData = JSON.stringify(request.items.map(e => ({
       itemId: e.itemId,
       value: e.value
     })));
@@ -326,7 +252,7 @@ export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDESt
           date_updated = CURRENT_TIMESTAMP,
           update_id = $2
       WHERE event_crf_id = $1
-    `, [request.eventCrfId, request.userId, secondEntryData]);
+    `, [request.eventCrfId, request.enteredBy, secondEntryData]);
 
     // Log audit event
     await client.query(`
@@ -339,7 +265,7 @@ export async function submitSecondEntry(request: DDEEntryRequest): Promise<DDESt
         'initial_data_entry_complete', 'double_data_entry', 2,
         'Second data entry submitted for comparison', $2
       )
-    `, [request.userId, request.eventCrfId]);
+    `, [request.enteredBy, request.eventCrfId]);
 
     await client.query('COMMIT');
 
@@ -517,6 +443,9 @@ export async function compareEntries(eventCrfId: number): Promise<DDEComparison>
     subjectLabel: eventCrf.subjectLabel || '',
     formName: eventCrf.formName || '',
     items: comparisons,
+    totalItems: comparisons.length,
+    matchingItems: matched,
+    discrepantItems: discrepancies,
     summary: {
       total: comparisons.length,
       matched,
@@ -866,6 +795,8 @@ function mapRowToDDEStatus(row: any): DDEStatus {
   return {
     statusId: row.eventCrfId,
     eventCrfId: row.eventCrfId,
+    firstEntryComplete: firstEntryStatus === 'complete',
+    secondEntryComplete: secondEntryStatus === 'complete',
     firstEntryStatus,
     firstEntryBy: row.firstEntryBy,
     firstEntryByName: row.firstEntryByName,
@@ -877,23 +808,23 @@ function mapRowToDDEStatus(row: any): DDEStatus {
     comparisonStatus,
     totalItems: parseInt(row.totalItems || '0'),
     matchedItems: parseInt(row.totalItems || '0') - parseInt(row.openDiscrepancies || '0'),
+    discrepanciesFound: parseInt(row.openDiscrepancies || '0'),
+    discrepanciesResolved: 0,
     discrepancyCount: parseInt(row.openDiscrepancies || '0'),
     resolvedCount: 0,
+    isFinalized: ddeComplete,
     ddeComplete
   };
 }
 
 function mapRowToDashboardItem(row: any): DDEDashboardItem {
+  const ddeStatus = mapRowToDDEStatus(row);
   return {
     eventCrfId: row.eventCrfId,
-    studySubjectId: row.studySubjectId,
     subjectLabel: row.subjectLabel,
-    studyName: row.studyName,
-    siteName: row.siteName,
     formName: row.formName,
-    eventName: row.eventName,
-    ddeStatus: mapRowToDDEStatus(row),
-    daysWaiting: parseInt(row.daysWaiting || '0')
+    status: ddeStatus.comparisonStatus || ddeStatus.firstEntryStatus || 'pending',
+    discrepancyCount: ddeStatus.discrepanciesFound,
   };
 }
 

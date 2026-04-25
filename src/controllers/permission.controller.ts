@@ -16,6 +16,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as permissionService from '../services/database/permission.service';
 import { logger } from '../config/logger';
+import type { ApiResponse } from '@accura-trial/shared-types';
 
 /**
  * GET /api/permissions/available
@@ -30,7 +31,11 @@ export const getAvailable = asyncHandler(async (req: Request, res: Response) => 
     grouped[perm.category].push({ key: perm.key, label: perm.label });
   }
 
-  res.json({ success: true, data: { permissions, grouped } });
+  const response: ApiResponse<{ permissions: Array<{ key: string; label: string; category: string }>; grouped: Record<string, { key: string; label: string }[]> }> = {
+    success: true,
+    data: { permissions, grouped }
+  };
+  res.json(response);
 });
 
 /**
@@ -46,7 +51,8 @@ export const getMyPermissions = asyncHandler(async (req: Request, res: Response)
   }
 
   const customPermissions = await permissionService.getUserCustomPermissions(user.userId);
-  res.json({ success: true, data: { userId: user.userId, customPermissions } });
+  const response: ApiResponse<{ userId: number; customPermissions: Record<string, boolean> }> = { success: true, data: { userId: user.userId, customPermissions } };
+  res.json(response);
 });
 
 /**
@@ -62,7 +68,8 @@ export const getUserPermissions = asyncHandler(async (req: Request, res: Respons
   }
 
   const customPermissions = await permissionService.getUserCustomPermissions(userId);
-  res.json({ success: true, data: { userId, customPermissions } });
+  const response: ApiResponse<{ userId: number; customPermissions: Record<string, boolean> }> = { success: true, data: { userId, customPermissions } };
+  res.json(response);
 });
 
 /**

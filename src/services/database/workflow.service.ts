@@ -6,34 +6,8 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
-import { WorkflowType, WorkflowPriority, WorkflowStatus } from '../../types/libreclinica-models';
+import { WorkflowType, WorkflowPriority, WorkflowStatus, CrfLifecyclePhaseName, CrfLifecycleStatus } from '../../types/libreclinica-models';
 import { getFormWorkflowConfig } from './workflow-config.provider';
-
-/**
- * CRF Lifecycle phases (ordered).
- */
-export type CrfLifecyclePhase =
-  | 'not_started'
-  | 'data_entry'
-  | 'data_entry_complete'
-  | 'dde_verified'
-  | 'sdv_complete'
-  | 'signed'
-  | 'locked';
-
-export interface CrfLifecycleStatus {
-  eventCrfId: number;
-  currentPhase: CrfLifecyclePhase;
-  completedPhases: CrfLifecyclePhase[];
-  pendingPhases: CrfLifecyclePhase[];
-  availableTransitions: CrfLifecyclePhase[];
-  workflowConfig: {
-    requiresSDV: boolean;
-    requiresSignature: boolean;
-    requiresDDE: boolean;
-  };
-  openQueryCount: number;
-}
 
 /**
  * Compute the full CRF lifecycle status for a form instance, respecting the
@@ -68,9 +42,9 @@ export const getCrfLifecycleStatus = async (
 
     // 2. Load workflow config via shared provider
     const wfConfig = await getFormWorkflowConfig(crfId);
-    const requiresSDV = wfConfig.requiresSDV;
+    const requiresSdv = wfConfig.requiresSdv;
     const requiresSignature = wfConfig.requiresSignature;
-    const requiresDDE = wfConfig.requiresDDE;
+    const requiresDde = wfConfig.requiresDde;
 
     // 3. Count open queries
     let openQueryCount = 0;
@@ -86,7 +60,7 @@ export const getCrfLifecycleStatus = async (
     } catch { /* ignore */ }
 
     // 4. Determine current phase
-    let currentPhase: CrfLifecyclePhase = 'not_started';
+    let currentPhase: CrfLifecyclePhaseName = 'not_started';
     if (statusId === 6) {
       currentPhase = 'locked';
     } else if (completionStatusId >= 5 || isSigned) {
@@ -100,13 +74,13 @@ export const getCrfLifecycleStatus = async (
     }
 
     // 5. Build ordered list of applicable phases for this CRF
-    const allPhases: CrfLifecyclePhase[] = [
+    const allPhases: CrfLifecyclePhaseName[] = [
       'not_started',
       'data_entry',
       'data_entry_complete'
     ];
-    if (requiresDDE) allPhases.push('dde_verified');
-    if (requiresSDV) allPhases.push('sdv_complete');
+    if (requiresDde) allPhases.push('dde_verified');
+    if (requiresSdv) allPhases.push('sdv_complete');
     if (requiresSignature) allPhases.push('signed');
     allPhases.push('locked');
 
@@ -115,7 +89,7 @@ export const getCrfLifecycleStatus = async (
     const pendingPhases = allPhases.slice(currentIdx + 1);
 
     // 6. Available transitions: next phase(s) the user can move to
-    const availableTransitions: CrfLifecyclePhase[] = [];
+    const availableTransitions: CrfLifecyclePhaseName[] = [];
     if (currentIdx >= 0 && currentIdx < allPhases.length - 1) {
       availableTransitions.push(allPhases[currentIdx + 1]);
     }
@@ -130,7 +104,7 @@ export const getCrfLifecycleStatus = async (
       completedPhases,
       pendingPhases,
       availableTransitions,
-      workflowConfig: { requiresSDV, requiresSignature, requiresDDE },
+      workflowConfig: { requiresSdv, requiresSignature, requiresDde },
       openQueryCount
     };
   } catch (error: any) {
@@ -210,7 +184,7 @@ export const triggerFormSubmittedWorkflow = async (
     const crfId = crfResult.rows[0].crfId;
 
     const wfConfig = await getFormWorkflowConfig(crfId, studyId);
-    const needsAction = wfConfig.requiresSDV || wfConfig.requiresDDE || wfConfig.requiresSignature;
+    const needsAction = wfConfig.requiresSdv || wfConfig.requiresDde || wfConfig.requiresSignature;
 
     if (!needsAction) return; // No workflow steps required — nothing to dispatch
 
@@ -228,13 +202,13 @@ export const triggerFormSubmittedWorkflow = async (
     }
 
     // 4. Determine task type and description
-    const taskType = wfConfig.requiresDDE ? 'dde'
-      : wfConfig.requiresSDV ? 'sdv'
+    const taskType = wfConfig.requiresDde ? 'dde'
+      : wfConfig.requiresSdv ? 'sdv'
       : 'signature';
 
-    const taskTitle = wfConfig.requiresDDE
+    const taskTitle = wfConfig.requiresDde
       ? `DDE Required: ${formName}`
-      : wfConfig.requiresSDV
+      : wfConfig.requiresSdv
       ? `SDV Required: ${formName}`
       : `Signature Required: ${formName}`;
 
@@ -264,8 +238,8 @@ export const triggerFormSubmittedWorkflow = async (
         JSON.stringify({
           crfId,
           subjectId,
-          requiresSDV: wfConfig.requiresSDV,
-          requiresDDE: wfConfig.requiresDDE,
+          requiresSDV: wfConfig.requiresSdv,
+          requiresDDE: wfConfig.requiresDde,
           requiresSignature: wfConfig.requiresSignature,
           triggeredBy: userId
         })
@@ -275,11 +249,11 @@ export const triggerFormSubmittedWorkflow = async (
 
     // 6. Fire-and-forget: notify all assignees
     const { notifyFormSDVRequired, notifyUsers } = await import('./notification.service');
-    if (wfConfig.requiresSDV) {
+    if (wfConfig.requiresSdv) {
       await notifyFormSDVRequired(allAssigneeIds, formName, eventCrfId, studyId, `subject-${subjectId}`);
     } else {
-      const notifType = wfConfig.requiresDDE ? 'form_sdv_required' : 'form_signature_required';
-      const notifTitle = wfConfig.requiresDDE ? `DDE required: ${formName}` : `Signature required: ${formName}`;
+      const notifType = wfConfig.requiresDde ? 'form_sdv_required' : 'form_signature_required';
+      const notifTitle = wfConfig.requiresDde ? `DDE required: ${formName}` : `Signature required: ${formName}`;
       await notifyUsers(
         allAssigneeIds,
         notifType,
@@ -621,7 +595,7 @@ export const createWorkflow = async (
     let assigneeIds: number[] = [];
     if (input.assignedTo?.length) {
       const userResult = await client.query(
-        `SELECT user_id FROM user_account WHERE user_name = ANY($1) AND enabled = true`,
+        `SELECT user_id FROM user_account WHERE user_name = ANY($1) AND status_id = 1`,
         [input.assignedTo]
       );
       assigneeIds = userResult.rows.map((r: any) => r.userId);
@@ -706,27 +680,29 @@ export const updateWorkflowStatus = async (
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
 
-    const currentResult = await pool.query(
-      'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
-      [taskId]
-    );
-    if (currentResult.rows.length === 0) {
-      return { success: false, message: 'Workflow task not found' };
-    }
-    const currentStatus = currentResult.rows[0].status;
-    const allowed = VALID_STATUS_TRANSITIONS[currentStatus] || [];
-    if (!allowed.includes(status)) {
-      return { success: false, message: `Invalid transition from '${currentStatus}' to '${status}'` };
-    }
+    return await pool.transaction(async (client) => {
+      const currentResult = await client.query(
+        'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+        [taskId]
+      );
+      if (currentResult.rows.length === 0) {
+        return { success: false, message: 'Workflow task not found' };
+      }
+      const currentStatus = currentResult.rows[0].status;
+      const allowed = VALID_STATUS_TRANSITIONS[currentStatus] || [];
+      if (!allowed.includes(status)) {
+        return { success: false, message: `Invalid transition from '${currentStatus}' to '${status}'` };
+      }
 
-    await pool.query(`
-      UPDATE acc_workflow_tasks
-      SET status = $1, date_updated = NOW()
-      WHERE task_id = $2
-    `, [status, taskId]);
+      await client.query(`
+        UPDATE acc_workflow_tasks
+        SET status = $1, date_updated = NOW()
+        WHERE task_id = $2
+      `, [status, taskId]);
 
-    logger.info('Workflow status updated', { taskId, status, userId });
-    return { success: true, message: `Workflow ${workflowId} updated to ${status}` };
+      logger.info('Workflow status updated', { taskId, status, userId });
+      return { success: true, message: `Workflow ${workflowId} updated to ${status}` };
+    });
   } catch (error: any) {
     logger.error('Failed to update workflow status', { error: error.message });
     return { success: false, message: error.message };
@@ -745,27 +721,29 @@ export const completeWorkflow = async (
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
 
-    const currentResult = await pool.query(
-      'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
-      [taskId]
-    );
-    if (currentResult.rows.length === 0) {
-      return { success: false, message: 'Workflow task not found' };
-    }
-    const currentStatus = currentResult.rows[0].status;
-    if (currentStatus !== 'pending' && currentStatus !== 'in_progress') {
-      return { success: false, message: `Cannot complete a task with status '${currentStatus}'` };
-    }
+    return await pool.transaction(async (client) => {
+      const lockResult = await client.query(
+        'SELECT task_id, status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+        [taskId]
+      );
+      if (lockResult.rows.length === 0) {
+        return { success: false, message: `Task ${workflowId} not found` };
+      }
+      const currentStatus = lockResult.rows[0].status;
+      if (currentStatus !== 'pending' && currentStatus !== 'in_progress') {
+        return { success: false, message: `Task ${workflowId} is already '${currentStatus}' — cannot complete` };
+      }
 
-    await pool.query(`
-      UPDATE acc_workflow_tasks
-      SET status = 'completed', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
-          metadata = metadata || $2
-      WHERE task_id = $3 AND status IN ('pending', 'in_progress')
-    `, [userId, JSON.stringify({ signedBy: signature ? userId : null }), taskId]);
+      await client.query(`
+        UPDATE acc_workflow_tasks
+        SET status = 'completed', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
+            metadata = metadata || $2
+        WHERE task_id = $3
+      `, [userId, JSON.stringify({ signedBy: signature ? userId : null }), taskId]);
 
-    logger.info('Workflow completed', { taskId, userId });
-    return { success: true, message: `Workflow ${workflowId} completed` };
+      logger.info('Workflow completed', { taskId, userId });
+      return { success: true, message: `Workflow ${workflowId} completed` };
+    });
   } catch (error: any) {
     logger.error('Failed to complete workflow', { error: error.message });
     return { success: false, message: error.message };
@@ -784,26 +762,28 @@ export const approveWorkflow = async (
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
 
-    const currentResult = await pool.query(
-      'SELECT status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
-      [taskId]
-    );
-    if (currentResult.rows.length === 0) {
-      return { success: false, message: 'Workflow task not found' };
-    }
-    if (currentResult.rows[0].status !== 'completed') {
-      return { success: false, message: `Cannot approve a task with status '${currentResult.rows[0].status}' (must be 'completed')` };
-    }
+    return await pool.transaction(async (client) => {
+      const lockResult = await client.query(
+        'SELECT task_id, status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+        [taskId]
+      );
+      if (lockResult.rows.length === 0) {
+        return { success: false, message: `Task ${workflowId} not found` };
+      }
+      if (lockResult.rows[0].status !== 'completed') {
+        return { success: false, message: `Task ${workflowId} is '${lockResult.rows[0].status}' — must be 'completed' to approve` };
+      }
 
-    await pool.query(`
-      UPDATE acc_workflow_tasks
-      SET status = 'approved', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
-          metadata = metadata || $2
-      WHERE task_id = $3 AND status = 'completed'
-    `, [userId, JSON.stringify({ approvedBy: userId, approvalReason: reason }), taskId]);
+      await client.query(`
+        UPDATE acc_workflow_tasks
+        SET status = 'approved', completed_by = $1, date_completed = NOW(), date_updated = NOW(),
+            metadata = metadata || $2
+        WHERE task_id = $3
+      `, [userId, JSON.stringify({ approvedBy: userId, approvalReason: reason }), taskId]);
 
-    logger.info('Workflow approved', { taskId, userId, reason });
-    return { success: true, message: `Workflow ${workflowId} approved` };
+      logger.info('Workflow approved', { taskId, userId, reason });
+      return { success: true, message: `Workflow ${workflowId} approved` };
+    });
   } catch (error: any) {
     logger.error('Failed to approve workflow', { error: error.message });
     return { success: false, message: error.message };
@@ -822,15 +802,28 @@ export const rejectWorkflow = async (
     const taskId = parseInt(workflowId);
     if (isNaN(taskId)) return { success: false, message: 'Invalid workflow ID' };
 
-    await pool.query(`
-      UPDATE acc_workflow_tasks
-      SET status = 'rejected', date_updated = NOW(),
-          metadata = metadata || $1
-      WHERE task_id = $2
-    `, [JSON.stringify({ rejectedBy: userId, rejectionReason: reason }), taskId]);
+    return await pool.transaction(async (client) => {
+      const lockResult = await client.query(
+        'SELECT task_id, status FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+        [taskId]
+      );
+      if (lockResult.rows.length === 0) {
+        return { success: false, message: `Task ${workflowId} not found` };
+      }
+      if (lockResult.rows[0].status !== 'completed') {
+        return { success: false, message: `Task ${workflowId} is '${lockResult.rows[0].status}' — must be 'completed' to reject` };
+      }
 
-    logger.info('Workflow rejected', { taskId, userId, reason });
-    return { success: true, message: `Workflow ${workflowId} rejected` };
+      await client.query(`
+        UPDATE acc_workflow_tasks
+        SET status = 'rejected', date_updated = NOW(),
+            metadata = metadata || $1
+        WHERE task_id = $2
+      `, [JSON.stringify({ rejectedBy: userId, rejectionReason: reason }), taskId]);
+
+      logger.info('Workflow rejected', { taskId, userId, reason });
+      return { success: true, message: `Workflow ${workflowId} rejected` };
+    });
   } catch (error: any) {
     logger.error('Failed to reject workflow', { error: error.message });
     return { success: false, message: error.message };
@@ -851,26 +844,148 @@ export const handoffWorkflow = async (
     const targetUserId = parseInt(toUserId);
     if (isNaN(taskId) || isNaN(targetUserId)) return { success: false, message: 'Invalid IDs' };
 
-    await pool.query(`
-      UPDATE acc_workflow_tasks
-      SET assigned_to_user_ids = array_append(
-            array_remove(assigned_to_user_ids, $1), $2
-          ),
-          date_updated = NOW(),
-          metadata = metadata || $3
-      WHERE task_id = $4
-    `, [fromUserId, targetUserId, JSON.stringify({ handoffFrom: fromUserId, handoffTo: targetUserId, handoffReason: reason }), taskId]);
+    return await pool.transaction(async (client) => {
+      const lockResult = await client.query(
+        'SELECT task_id, status, assigned_to_user_ids FROM acc_workflow_tasks WHERE task_id = $1 FOR UPDATE',
+        [taskId]
+      );
+      if (lockResult.rows.length === 0) {
+        return { success: false, message: `Task ${workflowId} not found` };
+      }
+      const currentStatus = lockResult.rows[0].status;
+      if (currentStatus === 'completed' || currentStatus === 'cancelled' || currentStatus === 'approved' || currentStatus === 'rejected') {
+        return { success: false, message: `Task ${workflowId} is '${currentStatus}' — cannot handoff` };
+      }
 
-    logger.info('Workflow handed off', { taskId, fromUserId, toUserId, reason });
-    return { success: true, message: `Workflow ${workflowId} handed off to user ${toUserId}` };
+      await client.query(`
+        UPDATE acc_workflow_tasks
+        SET assigned_to_user_ids = array_append(
+              array_remove(assigned_to_user_ids, $1), $2
+            ),
+            date_updated = NOW(),
+            metadata = metadata || $3
+        WHERE task_id = $4
+      `, [fromUserId, targetUserId, JSON.stringify({ handoffFrom: fromUserId, handoffTo: targetUserId, handoffReason: reason }), taskId]);
+
+      logger.info('Workflow handed off', { taskId, fromUserId, toUserId, reason });
+      return { success: true, message: `Workflow ${workflowId} handed off to user ${toUserId}` };
+    });
   } catch (error: any) {
     logger.error('Failed to handoff workflow', { error: error.message });
     return { success: false, message: error.message };
   }
 };
 
+/**
+ * Get CRF lifecycle summary for all patient form instances in a study.
+ * Returns per-instance lifecycle phase, open query counts, and aggregate summary.
+ */
+export const getCrfLifecycleSummary = async (studyId: number): Promise<{ items: any[]; summary: Record<string, number>; totalInstances: number }> => {
+  const ecResult = await pool.query(`
+    SELECT 
+      ec.event_crf_id,
+      ec.status_id,
+      ec.completion_status_id,
+      COALESCE(ec.sdv_status, false) as sdv_verified,
+      COALESCE(ec.electronic_signature_status, false) as is_signed,
+      ec.date_created as form_started,
+      ec.date_updated as form_updated,
+      cv.crf_id,
+      c.name as form_name,
+      cv.name as version_name,
+      ss.study_subject_id as subject_id,
+      ss.label as subject_label,
+      sed.name as visit_name,
+      se.study_event_id
+    FROM event_crf ec
+    INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+    INNER JOIN crf c ON cv.crf_id = c.crf_id
+    INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+    INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+    WHERE ss.study_id = $1
+      AND ec.status_id NOT IN (5, 7)
+    ORDER BY ss.label, sed.ordinal, c.name
+  `, [studyId]);
+
+  let configMap: Record<number, any> = {};
+  try {
+    const cfgResult = await pool.query(`
+      SELECT crf_id, requires_sdv, requires_signature, requires_dde
+      FROM acc_form_workflow_config
+      WHERE study_id = $1 OR study_id IS NULL
+    `, [studyId]);
+    for (const row of cfgResult.rows) {
+      configMap[row.crfId] = row;
+    }
+  } catch { /* table may not exist */ }
+
+  let queryCountMap: Record<number, number> = {};
+  try {
+    const qResult = await pool.query(`
+      SELECT dem.event_crf_id, COUNT(*) as cnt
+      FROM discrepancy_note dn
+      INNER JOIN dn_event_crf_map dem ON dn.discrepancy_note_id = dem.discrepancy_note_id
+      INNER JOIN event_crf ec ON dem.event_crf_id = ec.event_crf_id
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      INNER JOIN study_subject ss ON se.study_subject_id = ss.study_subject_id
+      WHERE ss.study_id = $1
+        AND dn.resolution_status_id IN (1, 2, 3)
+        AND dn.parent_dn_id IS NULL
+      GROUP BY dem.event_crf_id
+    `, [studyId]);
+    for (const row of qResult.rows) {
+      queryCountMap[row.eventCrfId] = parseInt(row.cnt);
+    }
+  } catch { /* ignore */ }
+
+  const items = ecResult.rows.map((row: any) => {
+    const cfg = configMap[row.crfId] || {};
+    const requiresSDV = cfg.requiresSdv || false;
+    const requiresSignature = cfg.requiresSignature || false;
+    const requiresDDE = cfg.requiresDde || false;
+
+    let currentPhase = 'not_started';
+    if (row.statusId === 6) {
+      currentPhase = 'locked';
+    } else if (row.completionStatusId >= 5 || row.isSigned) {
+      currentPhase = 'signed';
+    } else if (row.sdvVerified) {
+      currentPhase = 'sdv_complete';
+    } else if (row.completionStatusId >= 4 || row.statusId === 2) {
+      currentPhase = 'data_entry_complete';
+    } else if (row.completionStatusId >= 2) {
+      currentPhase = 'data_entry';
+    }
+
+    return {
+      eventCrfId: row.eventCrfId,
+      crfId: row.crfId,
+      formName: row.formName,
+      versionName: row.versionName,
+      subjectId: row.subjectId,
+      subjectLabel: row.subjectLabel,
+      visitName: row.visitName,
+      studyEventId: row.studyEventId,
+      currentPhase,
+      formStarted: row.formStarted,
+      formUpdated: row.formUpdated,
+      openQueryCount: queryCountMap[row.eventCrfId] || 0,
+      workflowConfig: { requiresSDV, requiresSignature, requiresDDE }
+    };
+  });
+
+  const summary: Record<string, number> = {};
+  for (const item of items) {
+    summary[item.currentPhase] = (summary[item.currentPhase] || 0) + 1;
+  }
+
+  return { items, summary, totalInstances: items.length };
+};
+
 export default {
   getCrfLifecycleStatus,
+  getCrfLifecycleSummary,
   triggerSDVCompletedWorkflow,
   triggerFormSubmittedWorkflow,
   triggerSubjectEnrolledWorkflow,

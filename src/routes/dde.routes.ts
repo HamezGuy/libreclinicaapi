@@ -137,8 +137,8 @@ router.post('/forms/:eventCrfId/second-entry', authMiddleware, requireRole('coor
 
     const status = await submitSecondEntry({
       eventCrfId,
-      entries,
-      userId
+      items: entries,
+      enteredBy: userId
     });
 
     res.json({ success: true, data: status });

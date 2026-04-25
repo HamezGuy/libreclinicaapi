@@ -12,13 +12,13 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as subjectService from '../services/hybrid/subject.service';
-import { pool } from '../config/database';
 import { logger } from '../config/logger';
 import { trackUserAction } from '../services/database/audit.service';
-import { formatDate as formatIsoDate, parseDateLocal } from '../utils/date.util';
+import type { SubjectCreateRequest, SubjectUpdateRequest, ApiResponse, StudySubject } from '@accura-trial/shared-types';
+import type { Part11Request } from '../middleware/part11.middleware';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const { studyId, status, page, limit, search, includeArchived } = req.query;
+  const { studyId, status, page, limit, search, siteId, includeArchived } = req.query;
   const user = (req as any).user;
 
   // Validate studyId
@@ -30,14 +30,16 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
       message: 'Valid studyId is required',
       data: [],
       pagination: { page: 1, limit: 20, total: 0, totalPages: 0 }
-    });
+    } as ApiResponse & { pagination: unknown });
     return;
   }
 
   const result = await subjectService.getSubjectList(
     parsedStudyId,
     { 
-      status: status as string, 
+      status: status as string,
+      search: search as string,
+      siteId: siteId ? parseInt(siteId as string) : undefined,
       page: parseInt(page as string) || 1, 
       limit: parseInt(limit as string) || 20,
       includeArchived: includeArchived === 'true'
@@ -58,7 +60,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     });
   }
 
-  res.json(result);
+  res.json(result as ApiResponse<StudySubject[]>);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
@@ -68,7 +70,7 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
   const result = await subjectService.getSubjectById(parseInt(id));
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'Subject not found' });
+    res.status(404).json({ success: false, message: 'Subject not found' } satisfies ApiResponse);
     return;
   }
 
@@ -85,13 +87,11 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
     });
   }
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } satisfies ApiResponse<StudySubject>);
 });
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  
-  // Handle both username and userName from auth middleware
   const username = user?.username || user?.userName;
   
   if (!user?.userId || !username) {
@@ -102,7 +102,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
     res.status(401).json({ 
       success: false, 
       message: 'User authentication required for subject creation' 
-    });
+    } satisfies ApiResponse);
     return;
   }
   
@@ -123,7 +123,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
     });
   }
 
-  res.status(result.success ? 201 : 400).json(result);
+  res.status(result.success ? 201 : 400).json(result as ApiResponse<StudySubject>);
 });
 
 export const getProgress = asyncHandler(async (req: Request, res: Response) => {
@@ -132,11 +132,11 @@ export const getProgress = asyncHandler(async (req: Request, res: Response) => {
   const result = await subjectService.getSubjectProgress(parseInt(id));
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'Subject not found' });
+    res.status(404).json({ success: false, message: 'Subject not found' } satisfies ApiResponse);
     return;
   }
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } satisfies ApiResponse);
 });
 
 /**
@@ -149,220 +149,16 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
   
   logger.info('Updating subject', { subjectId: id, userId: user.userId });
 
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
-
-    const updateFields: string[] = [];
-    const params: any[] = [];
-    let paramIndex = 1;
-
-    // Update study_subject fields
-    if (updates.secondaryLabel !== undefined) {
-      updateFields.push(`secondary_label = $${paramIndex++}`);
-      params.push(updates.secondaryLabel);
-    }
-
-    if (updates.enrollmentDate !== undefined) {
-      updateFields.push(`enrollment_date = $${paramIndex++}`);
-      params.push(updates.enrollmentDate || null);
-    }
-
-    if (updates.screeningDate !== undefined) {
-      updateFields.push(`screening_date = $${paramIndex++}`);
-      params.push(updates.screeningDate || null);
-    }
-
-    if (updates.personId !== undefined) {
-      // personId maps to subject.unique_identifier (not study_subject)
-      // It will be updated below in the demographics section with study scoping
-    }
-
-    if (updates.enrollmentStatus !== undefined) {
-      const statusMap: Record<string, number> = {
-        'enrolled': 1,
-        'screening': 4,
-        'screen_failure': 5,
-      };
-      const statusId = statusMap[updates.enrollmentStatus];
-      if (statusId !== undefined) {
-        updateFields.push(`status_id = $${paramIndex++}`);
-        params.push(statusId);
-      }
-    }
-
-    if (updates.visitDateReference !== undefined) {
-      updateFields.push(`visit_date_reference = $${paramIndex++}`);
-      params.push(updates.visitDateReference);
-    }
-
-    if (updates.visitDateCustom !== undefined) {
-      updateFields.push(`visit_date_custom = $${paramIndex++}`);
-      params.push(updates.visitDateCustom || null);
-    }
-
-    if (updateFields.length > 0) {
-      updateFields.push(`date_updated = NOW()`);
-      updateFields.push(`update_id = $${paramIndex++}`);
-      params.push(user.userId);
-      params.push(parseInt(id));
-
-      const updateQuery = `
-        UPDATE study_subject
-        SET ${updateFields.join(', ')}
-        WHERE study_subject_id = $${paramIndex}
-      `;
-
-      await client.query(updateQuery, params);
-    }
-
-    // Reschedule visit due dates when any anchor-relevant field changes.
-    // The anchor is determined by the patient's visit_date_reference setting:
-    //   'enrollment_date' → enrollment_date
-    //   'custom_date'     → visit_date_custom
-    //   'scheduling_date' → screening_date (initial scheduling anchor)
-    // Each visit's scheduled_date = anchor + schedule_day offset.
-    const anchorFieldChanged =
-      updates.enrollmentDate !== undefined ||
-      updates.screeningDate !== undefined ||
-      updates.visitDateReference !== undefined ||
-      updates.visitDateCustom !== undefined ||
-      updates.enrollmentStatus !== undefined;
-
-    if (anchorFieldChanged) {
-      const subjectRow = await client.query(
-        `SELECT ss.enrollment_date, ss.screening_date,
-                ss.visit_date_reference, ss.visit_date_custom,
-                COALESCE(s.parent_study_id, ss.study_id) AS parent_study_id
-         FROM study_subject ss
-         JOIN study s ON ss.study_id = s.study_id
-         WHERE ss.study_subject_id = $1`,
-        [parseInt(id)]
-      );
-      const subj = subjectRow.rows[0];
-
-      if (subj) {
-        const ref = updates.visitDateReference ?? subj.visitDateReference ?? 'scheduling_date';
-        let anchorStr: string | null = null;
-
-        if (ref === 'enrollment_date') {
-          anchorStr = updates.enrollmentDate ?? subj.enrollmentDate;
-        } else if (ref === 'custom_date') {
-          anchorStr = updates.visitDateCustom ?? subj.visitDateCustom;
-        } else {
-          anchorStr = updates.screeningDate ?? subj.screeningDate ?? updates.enrollmentDate ?? subj.enrollmentDate;
-        }
-
-        const anchor = anchorStr ? parseDateLocal(anchorStr) : null;
-
-        if (anchor && subj.parentStudyId) {
-          const visitRows = await client.query(`
-            SELECT se.study_event_id, sed.ordinal, sed.schedule_day
-            FROM study_event se
-            JOIN study_event_definition sed
-              ON se.study_event_definition_id = sed.study_event_definition_id
-            WHERE se.study_subject_id = $1
-              AND sed.study_id = $2
-              AND COALESCE(se.is_unscheduled, false) = false
-            ORDER BY sed.ordinal
-          `, [parseInt(id), subj.parentStudyId]);
-
-          for (const row of visitRows.rows) {
-            if (row.scheduleDay == null) {
-              logger.warn('Skipping reschedule for visit without schedule_day', {
-                studyEventId: row.studyEventId,
-                ordinal: row.ordinal
-              });
-              continue;
-            }
-            const daysOffset = row.scheduleDay;
-            const visitDate = new Date(anchor.getTime());
-            visitDate.setDate(visitDate.getDate() + daysOffset);
-            const isoDate = formatIsoDate(visitDate);
-
-            await client.query(`
-              UPDATE study_event
-              SET scheduled_date = $1::date
-              WHERE study_event_id = $2
-            `, [isoDate, row.studyEventId]);
-          }
-
-          logger.info('Rescheduled visit due dates', {
-            studySubjectId: parseInt(id),
-            reference: ref,
-            anchorDate: anchorStr,
-            visitsUpdated: visitRows.rows.length
-          });
-        }
-      }
-    }
-
-    // Update subject table if demographic info or personId provided
-    if (updates.dateOfBirth || updates.gender || updates.personId !== undefined) {
-      const subjectQuery = `SELECT ss.subject_id FROM study_subject ss WHERE ss.study_subject_id = $1`;
-      const subjectResult = await client.query(subjectQuery, [parseInt(id)]);
-      
-      if (subjectResult.rows.length > 0) {
-        const subjectId = subjectResult.rows[0].subjectId;
-        const subjectUpdates: string[] = [];
-        const subjectParams: any[] = [];
-        let subjectParamIndex = 1;
-
-        if (updates.dateOfBirth) {
-          subjectUpdates.push(`date_of_birth = $${subjectParamIndex++}`);
-          subjectParams.push(updates.dateOfBirth);
-        }
-
-        if (updates.gender) {
-          subjectUpdates.push(`gender = $${subjectParamIndex++}`);
-          subjectParams.push(updates.gender === 'male' ? 'm' : updates.gender === 'female' ? 'f' : updates.gender);
-        }
-
-        if (updates.personId !== undefined) {
-          // personId is a user-facing display field, not the internal identifier.
-          // The subject.unique_identifier holds the immutable UUID; we do NOT overwrite it.
-          // personId updates are recorded in the audit trail only.
-          logger.info('personId update requested (display-only, does not change internal UUID)', {
-            studySubjectId: parseInt(id), personId: updates.personId
-          });
-        }
-
-        if (subjectUpdates.length > 0) {
-          subjectParams.push(subjectId);
-          const subjectUpdateQuery = `
-            UPDATE subject
-            SET ${subjectUpdates.join(', ')}
-            WHERE subject_id = $${subjectParamIndex}
-          `;
-          await client.query(subjectUpdateQuery, subjectParams);
-        }
-      }
-    }
-
-    // Log audit event
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name,
-        audit_log_event_type_id
-      ) VALUES (
-        NOW(), 'study_subject', $1, $2, 'Subject',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Update%' LIMIT 1)
-      )
-    `, [user.userId, parseInt(id)]);
-
-    await client.query('COMMIT');
+    await subjectService.updateSubject(parseInt(id), updates, user.userId);
 
     // Fetch updated subject
     const updatedSubject = await subjectService.getSubjectById(parseInt(id));
 
-    res.json({ success: true, data: updatedSubject, message: 'Subject updated successfully' });
+    res.json({ success: true, data: updatedSubject, message: 'Subject updated successfully' } satisfies ApiResponse<StudySubject>);
   } catch (error: any) {
-    await client.query('ROLLBACK');
     logger.error('Update subject error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
-  } finally {
-    client.release();
+    res.status(500).json({ success: false, message: error.message } satisfies ApiResponse);
   }
 });
 
@@ -370,56 +166,28 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
  * Update subject status
  */
 export const updateStatus = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Subject status update attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to update subject status (21 CFR Part 11 §11.50)' } satisfies ApiResponse);
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
   const { statusId, reason } = req.body;
 
   logger.info('Updating subject status', { subjectId: id, statusId, userId: user.userId });
 
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
-
-    // Get current status for audit
-    const currentQuery = `SELECT status_id FROM study_subject WHERE study_subject_id = $1`;
-    const currentResult = await client.query(currentQuery, [parseInt(id)]);
-
-    if (currentResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      res.status(404).json({ success: false, message: 'Subject not found' });
+    await subjectService.updateSubjectStatus(parseInt(id), statusId, user.userId, reason);
+    res.json({ success: true, message: 'Subject status updated successfully' } satisfies ApiResponse);
+  } catch (error: any) {
+    if (error.statusCode === 404) {
+      res.status(404).json({ success: false, message: 'Subject not found' } satisfies ApiResponse);
       return;
     }
-
-    const oldStatus = currentResult.rows[0].statusId;
-
-    // Update status
-    await client.query(`
-      UPDATE study_subject
-      SET status_id = $1, date_updated = NOW(), update_id = $2
-      WHERE study_subject_id = $3
-    `, [statusId, user.userId, parseInt(id)]);
-
-    // Log audit event
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, reason_for_change,
-        audit_log_event_type_id
-      ) VALUES (
-        NOW(), 'study_subject', $1, $2, 'Subject', $3, $4, $5,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Status%' LIMIT 1)
-      )
-    `, [user.userId, parseInt(id), oldStatus.toString(), statusId.toString(), reason || 'Status change']);
-
-    await client.query('COMMIT');
-
-    res.json({ success: true, message: 'Subject status updated successfully' });
-  } catch (error: any) {
-    await client.query('ROLLBACK');
     logger.error('Update subject status error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
-  } finally {
-    client.release();
+    res.status(500).json({ success: false, message: error.message } satisfies ApiResponse);
   }
 });
 
@@ -427,53 +195,27 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
  * Soft delete subject (set status to removed)
  */
 export const remove = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Subject removal attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to remove a subject (21 CFR Part 11 §11.50)' } satisfies ApiResponse);
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
 
   logger.info('Removing subject', { subjectId: id, userId: user.userId });
 
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
-
-    // Check if subject exists
-    const checkQuery = `SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1`;
-    const checkResult = await client.query(checkQuery, [parseInt(id)]);
-
-    if (checkResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      res.status(404).json({ success: false, message: 'Subject not found' });
+    await subjectService.removeSubject(parseInt(id), user.userId);
+    res.json({ success: true, message: 'Subject removed successfully' } satisfies ApiResponse);
+  } catch (error: any) {
+    if (error.statusCode === 404) {
+      res.status(404).json({ success: false, message: 'Subject not found' } satisfies ApiResponse);
       return;
     }
-
-    // Soft delete (set status to removed = 5)
-    await client.query(`
-      UPDATE study_subject
-      SET status_id = 5, date_updated = NOW(), update_id = $1
-      WHERE study_subject_id = $2
-    `, [user.userId, parseInt(id)]);
-
-    // Log audit event
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date, audit_table, user_id, entity_id, entity_name,
-        audit_log_event_type_id
-      ) VALUES (
-        NOW(), 'study_subject', $1, $2, 'Subject',
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name LIKE '%Remove%' OR name LIKE '%Delete%' LIMIT 1)
-      )
-    `, [user.userId, parseInt(id)]);
-
-    await client.query('COMMIT');
-
-    res.json({ success: true, message: 'Subject removed successfully' });
-  } catch (error: any) {
-    await client.query('ROLLBACK');
     logger.error('Remove subject error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
-  } finally {
-    client.release();
+    res.status(500).json({ success: false, message: error.message } satisfies ApiResponse);
   }
 });
 
@@ -486,57 +228,14 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
   logger.info('Getting subject events', { subjectId: id });
 
   try {
-    const query = `
-      SELECT 
-        se.study_event_id,
-        se.study_subject_id,
-        sed.study_event_definition_id,
-        sed.name as event_name,
-        sed.description as event_description,
-        sed.type as event_type,
-        sed.ordinal as event_order,
-        sed.schedule_day,
-        sed.min_day,
-        sed.max_day,
-        se.sample_ordinal,
-        se.date_start,
-        se.date_end,
-        se.location,
-        se.scheduled_date,
-        COALESCE(se.is_unscheduled, false) as is_unscheduled,
-        se.date_created,
-        -- Total forms: count assigned forms from the study definition, not just started event_crf rows
-        GREATEST(
-          (SELECT COUNT(*) FROM event_definition_crf edc2
-           INNER JOIN crf c2 ON edc2.crf_id = c2.crf_id
-           WHERE edc2.study_event_definition_id = sed.study_event_definition_id
-             AND edc2.status_id = 1 AND c2.status_id NOT IN (5, 6, 7)),
-          (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7))
-        ) as total_forms,
-        -- Completed forms: completion_status_id >= 4 means explicitly marked complete
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 4 AND ec.status_id NOT IN (5, 7)) as completed_forms,
-        -- Started forms: any form with data entry (completion_status_id >= 2 means at least initial data entry)
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.completion_status_id >= 2 AND ec.status_id NOT IN (5, 7)) as started_forms,
-        -- Locked forms
-        (SELECT COUNT(*) FROM event_crf ec WHERE ec.study_event_id = se.study_event_id AND ec.status_id = 6) as locked_forms
-      FROM study_event se
-      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
-      WHERE se.study_subject_id = $1
-      ORDER BY 
-        COALESCE(se.scheduled_date, se.date_start, se.date_created) ASC,
-        sed.ordinal ASC,
-        se.sample_ordinal ASC
-    `;
+    const rows = await subjectService.getSubjectEvents(parseInt(id));
 
-    const result = await pool.query(query, [parseInt(id)]);
-
-    const events = result.rows.map(event => {
+    const events = rows.map(event => {
       const totalForms = parseInt(event.totalForms) || 0;
       const completedForms = parseInt(event.completedForms) || 0;
       const startedForms = parseInt(event.startedForms) || 0;
       const lockedForms = parseInt(event.lockedForms) || 0;
 
-      // Compute status from actual form data
       let status: string;
       if (totalForms > 0 && lockedForms >= totalForms) {
         status = 'locked';
@@ -550,47 +249,36 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
 
       return {
         id: event.studyEventId.toString(),
-        study_event_id: event.studyEventId,
         eventDefinitionId: event.studyEventDefinitionId.toString(),
-        study_event_definition_id: event.studyEventDefinitionId,
         name: event.eventName,
         description: event.eventDescription || '',
         type: event.eventType || 'scheduled',
-        event_type: event.eventType || 'scheduled',
         order: event.eventOrder,
         ordinal: event.eventOrder,
         occurrence: event.sampleOrdinal,
         startDate: event.dateStart,
-        date_start: event.dateStart,
         endDate: event.dateEnd,
-        date_end: event.dateEnd,
         scheduledDate: event.scheduledDate,
-        scheduled_date: event.scheduledDate,
         isUnscheduled: event.isUnscheduled,
-        is_unscheduled: event.isUnscheduled,
         location: event.location || '',
-        schedule_day: event.scheduleDay,
-        min_day: event.minDay,
-        max_day: event.maxDay,
+        scheduleDay: event.scheduleDay,
+        minDay: event.minDay,
+        maxDay: event.maxDay,
         status,
-        status_name: status,
+        statusName: status,
         dateCreated: event.dateCreated,
         totalForms,
-        total_forms: totalForms,
         completedForms,
-        completed_forms: completedForms,
-        crf_count: totalForms,
-        completed_crf_count: completedForms,
         completionPercentage: totalForms > 0 
           ? Math.round((completedForms / totalForms) * 100) 
           : 0
       };
     });
 
-    res.json({ success: true, data: events });
+    res.json({ success: true, data: events } satisfies ApiResponse);
   } catch (error: any) {
     logger.error('Get subject events error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message } satisfies ApiResponse);
   }
 });
 
@@ -603,83 +291,15 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
   logger.info('Getting subject forms', { subjectId: id });
 
   try {
-    // Get forms WITH existing data (event_crf entries)
-    const existingFormsQuery = `
-      SELECT 
-        ec.event_crf_id,
-        ec.study_event_id,
-        se.study_subject_id,
-        sed.name as event_name,
-        sed.study_event_definition_id,
-        c.crf_id,
-        c.name as form_name,
-        c.description as form_description,
-        cv.crf_version_id,
-        cv.name as version_name,
-        ec.date_interviewed,
-        ec.interviewer_name,
-        COALESCE(cs.name, 'initial_data_entry') as completion_status,
-        st.name as status,
-        ec.date_created,
-        ec.date_updated,
-        ec.validator_id,
-        ec.date_validate,
-        ec.date_completed,
-        COALESCE(edc.required_crf, false) as required_crf
-      FROM event_crf ec
-      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
-      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
-      INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-      INNER JOIN crf c ON cv.crf_id = c.crf_id
-      LEFT JOIN completion_status cs ON ec.completion_status_id = cs.completion_status_id
-      INNER JOIN status st ON ec.status_id = st.status_id
-      LEFT JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id AND edc.crf_id = c.crf_id
-      WHERE se.study_subject_id = $1
-        AND ec.status_id NOT IN (5, 7)
-      ORDER BY sed.ordinal, c.name
-    `;
+    const { existingRows, assignedRows } = await subjectService.getSubjectForms(parseInt(id));
 
-    const existingResult = await pool.query(existingFormsQuery, [parseInt(id)]);
-    
     // Track which (study_event_id, crf_id) pairs already have event_crf entries
     const existingPairs = new Set(
-      existingResult.rows.map((r: any) => `${r.studyEventId}_${r.crfId}`)
+      existingRows.map((r: any) => `${r.studyEventId}_${r.crfId}`)
     );
 
-    // Get forms ASSIGNED to events but WITHOUT data yet (from event_definition_crf)
-    // These are forms the patient should fill out but hasn't started
-    const assignedFormsQuery = `
-      SELECT 
-        se.study_event_id,
-        se.study_subject_id,
-        sed.name as event_name,
-        sed.study_event_definition_id,
-        edc.crf_id,
-        c.name as form_name,
-        c.description as form_description,
-        (SELECT cv2.crf_version_id FROM crf_version cv2 
-         WHERE cv2.crf_id = edc.crf_id AND cv2.status_id NOT IN (5, 7) 
-         ORDER BY cv2.crf_version_id DESC LIMIT 1) as crf_version_id,
-        (SELECT cv2.name FROM crf_version cv2 
-         WHERE cv2.crf_id = edc.crf_id AND cv2.status_id NOT IN (5, 7) 
-         ORDER BY cv2.crf_version_id DESC LIMIT 1) as version_name,
-        edc.required_crf,
-        edc.ordinal as crf_ordinal
-      FROM study_event se
-      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
-      INNER JOIN event_definition_crf edc ON edc.study_event_definition_id = sed.study_event_definition_id
-      INNER JOIN crf c ON edc.crf_id = c.crf_id
-      WHERE se.study_subject_id = $1
-        AND se.status_id NOT IN (5, 7)
-        AND edc.status_id NOT IN (5, 7)
-        AND c.status_id NOT IN (5, 7)
-      ORDER BY sed.ordinal, edc.ordinal, c.name
-    `;
-
-    const assignedResult = await pool.query(assignedFormsQuery, [parseInt(id)]);
-
     // Map existing forms (with data)
-    const forms = existingResult.rows.map((form: any) => ({
+    const forms = existingRows.map((form: any) => ({
       id: form.eventCrfId.toString(),
       eventId: form.studyEventId.toString(),
       eventName: form.eventName,
@@ -701,7 +321,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
     }));
 
     // Add assigned but not-yet-started forms (no event_crf entry yet)
-    for (const assigned of assignedResult.rows) {
+    for (const assigned of assignedRows) {
       const pairKey = `${assigned.studyEventId}_${assigned.crfId}`;
       if (!existingPairs.has(pairKey)) {
         forms.push({
@@ -724,15 +344,14 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
           dateValidated: null,
           validatorId: null
         });
-        // Track this pair so we don't add duplicates
         existingPairs.add(pairKey);
       }
     }
 
-    res.json({ success: true, data: forms });
+    res.json({ success: true, data: forms } satisfies ApiResponse);
   } catch (error: any) {
     logger.error('Get subject forms error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message } satisfies ApiResponse);
   }
 });
 
@@ -752,25 +371,38 @@ export const getQueryCounts = asyncHandler(async (req: Request, res: Response) =
   const { studySubjectIds } = req.body;
   
   if (!Array.isArray(studySubjectIds) || studySubjectIds.length === 0) {
-    res.status(400).json({ success: false, message: 'studySubjectIds array is required' });
+    res.status(400).json({ success: false, message: 'studySubjectIds array is required' } satisfies ApiResponse);
     return;
   }
 
   const ids = studySubjectIds.map((id: any) => parseInt(id)).filter((id: number) => !isNaN(id));
   const counts = await subjectService.getQueryCountsForSubjects(ids);
-  res.json({ success: true, data: counts });
+  res.json({ success: true, data: counts } satisfies ApiResponse);
 });
 
 export const getFormsWithQueries = asyncHandler(async (req: Request, res: Response) => {
   const { studySubjectIds } = req.body;
   
   if (!Array.isArray(studySubjectIds) || studySubjectIds.length === 0) {
-    res.status(400).json({ success: false, message: 'studySubjectIds array is required' });
+    res.status(400).json({ success: false, message: 'studySubjectIds array is required' } satisfies ApiResponse);
     return;
   }
 
   const ids = studySubjectIds.map((id: any) => parseInt(id)).filter((id: number) => !isNaN(id));
   const forms = await subjectService.getFormsWithQueriesForSubjects(ids);
-  res.json({ success: true, data: forms });
+  res.json({ success: true, data: forms } satisfies ApiResponse);
+});
+
+export const checkLabel = asyncHandler(async (req: Request, res: Response) => {
+  const studyId = parseInt(req.params.studyId);
+  const label = decodeURIComponent(req.params.label).trim();
+
+  if (isNaN(studyId) || !label) {
+    res.status(400).json({ success: false, message: 'Invalid study ID or label' } satisfies ApiResponse);
+    return;
+  }
+
+  const exists = await subjectService.checkLabelExists(studyId, label);
+  res.json({ success: true, data: { exists, label } } satisfies ApiResponse);
 });
 

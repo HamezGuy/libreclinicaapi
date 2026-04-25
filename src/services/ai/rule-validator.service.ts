@@ -26,8 +26,8 @@ import { logger } from '../../config/logger';
 import {
   testRuleDirectly,
   FORMAT_TYPE_REGISTRY,
-  ValidationRule as RuntimeValidationRule,
 } from '../database/validation-rules.service';
+import { ValidationRule as RuntimeValidationRule } from '@accura-trial/shared-types';
 import {
   FieldContextEntry,
   SuggestedRule,
@@ -724,6 +724,7 @@ function runSelfTestGate(
   // testRuleDirectly evaluates it identically to a real one.
   const runtime: RuntimeValidationRule = {
     id: 0,
+    validationRuleId: 0,
     crfId: 0,
     name: rule.name,
     description: rule.description || '',

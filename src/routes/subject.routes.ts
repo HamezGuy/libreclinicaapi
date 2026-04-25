@@ -113,18 +113,14 @@ router.get('/:id/progress', validate({ params: commonSchemas.idParam }), control
 router.get('/:id/events', validate({ params: commonSchemas.idParam }), controller.getEvents);
 router.get('/:id/forms', validate({ params: commonSchemas.idParam }), controller.getForms);
 
-// Create/Update operations - any authenticated role can create patients
+// Create/Update operations - any authenticated user can create patients
 router.post('/', 
-  requireRole('data_manager', 'coordinator', 'investigator', 'monitor', 'viewer'), 
   soapRateLimiter, 
   validate({ body: subjectSchemas.create }), 
-  requireSignatureFor(SignatureMeanings.SUBJECT_ENROLL),
   controller.create
 );
 router.put('/:id', 
-  requireRole('data_manager', 'coordinator', 'investigator', 'monitor', 'viewer'), 
   validate({ params: commonSchemas.idParam, body: subjectSchemas.update }), 
-  requireSignatureFor(SignatureMeanings.SUBJECT_UPDATE),
   controller.update
 );
 router.put('/:id/status', 

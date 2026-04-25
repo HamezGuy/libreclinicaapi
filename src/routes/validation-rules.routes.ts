@@ -75,7 +75,7 @@ router.get('/all-crfs', controller.getAllCrfsWithRules);
 
 // Toggle field required status (direct field property, not a validation rule)
 router.put('/field-required',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   ruleSignature('I authorize changing this field required status'),
   controller.toggleFieldRequired
 );
@@ -94,7 +94,7 @@ router.get('/:ruleId', validate({ params: ruleIdParam }), controller.getRule);
 
 // Create a new rule
 router.post('/',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   ruleSignature('I authorize creation of this validation rule'),
   validate({ body: validationRuleSchemas.create }),
   controller.createRule
@@ -102,7 +102,7 @@ router.post('/',
 
 // Update a rule
 router.put('/:ruleId',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   ruleSignature('I authorize modification of this validation rule'),
   validate({ params: ruleIdParam, body: validationRuleSchemas.update }),
   controller.updateRule
@@ -110,7 +110,7 @@ router.put('/:ruleId',
 
 // Toggle rule active state
 router.patch('/:ruleId/toggle',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   ruleSignature('I authorize toggling this validation rule'),
   validate({ params: ruleIdParam }),
   controller.toggleRule
@@ -144,7 +144,7 @@ router.post('/test',
 //     the kill-switch is off, the description has PHI, or every
 //     provider failed. The caller inspects `data.flags` and `data.warnings`.
 router.post('/compile',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   aiCompileRateLimiter,
   validate({ body: validationRuleSchemas.compile }),
   controller.compileRulesFromText

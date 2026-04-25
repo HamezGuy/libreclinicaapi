@@ -111,6 +111,10 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'audit_hash_chain_columns', fn: addAuditHashChainColumns },
     { name: 'interop_audit_log', fn: createInteropAuditLogTable },
     { name: 'crf_fork_provenance', fn: createCrfForkProvenanceColumns },
+    { name: 'study_subject_label_unique', fn: addStudySubjectLabelUniqueIndex },
+    { name: 'pef_query_count_trigger', fn: createPefQueryCountTrigger },
+    { name: 'repair_patients_without_events', fn: repairPatientsWithoutEvents },
+    { name: 'query_cell_target_columns', fn: addQueryCellTargetColumns },
   ];
 
   let successCount = 0;
@@ -1360,6 +1364,19 @@ async function createVisitWindowColumns(pool: any): Promise<void> {
   await pool.query(`ALTER TABLE study_event_definition ADD COLUMN IF NOT EXISTS max_day INTEGER`);
   await pool.query(`ALTER TABLE study_event_definition ADD COLUMN IF NOT EXISTS reference_event_id INTEGER`);
 
+  // Backfill NULL schedule_day to 0 (Day 0) so that enrollment can always
+  // create study_event + event_crf + patient_event_form records.
+  // Without this, createSubjectDirect skips phases with NULL schedule_day,
+  // leaving patients with zero forms.
+  const backfilled = await pool.query(`
+    UPDATE study_event_definition
+    SET schedule_day = 0
+    WHERE schedule_day IS NULL AND type != 'unscheduled'
+  `);
+  if (backfilled.rowCount > 0) {
+    logger.info(`Backfilled schedule_day=0 on ${backfilled.rowCount} event definitions`);
+  }
+
   logger.info('Visit window columns verified on study_event_definition');
 }
 
@@ -1442,6 +1459,8 @@ async function createValidationRulesTable(pool: any): Promise<void> {
     { name: 'bp_diastolic_max', type: 'NUMERIC' },
     // Literal compare value for consistency rules and value_match triggers
     { name: 'compare_value', type: 'TEXT' },
+    // Cell-level targeting for table/question_table column-specific rules
+    { name: 'table_cell_target', type: 'JSONB' },
   ];
   for (const col of columnsToAdd) {
     try {
@@ -2516,4 +2535,269 @@ async function createCrfForkProvenanceColumns(pool: any): Promise<void> {
     logger.warn('Could not index crf fork columns', { error: e.message });
   }
   logger.info('CRF fork provenance columns verified');
+}
+
+async function addStudySubjectLabelUniqueIndex(pool: any): Promise<void> {
+  try {
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_study_subject_study_label_active
+      ON study_subject (study_id, label)
+      WHERE status_id NOT IN (5, 6, 7)
+    `);
+    logger.info('study_subject unique index on (study_id, label) for active rows verified');
+  } catch (e: any) {
+    logger.warn('study_subject label unique index migration warning:', e.message);
+  }
+}
+
+// ============================================================================
+// Patient Event Form Query Count Trigger
+//
+// Keeps patient_event_form.open_query_count and closed_query_count in sync
+// whenever a discrepancy_note row is inserted, updated, or deleted.
+// The trigger function resolves the event_crf_id via dn_event_crf_map, then
+// recalculates counts from discrepancy_note and writes them back.
+// ============================================================================
+async function createPefQueryCountTrigger(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION sync_pef_query_counts()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_dn_id   INTEGER;
+      v_ec_id   INTEGER;
+    BEGIN
+      IF TG_OP = 'DELETE' THEN
+        v_dn_id := OLD.discrepancy_note_id;
+      ELSE
+        v_dn_id := NEW.discrepancy_note_id;
+      END IF;
+
+      SELECT event_crf_id INTO v_ec_id
+        FROM dn_event_crf_map
+       WHERE discrepancy_note_id = v_dn_id
+       LIMIT 1;
+
+      IF v_ec_id IS NULL THEN
+        IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+      END IF;
+
+      UPDATE patient_event_form
+         SET open_query_count = COALESCE(sub.open_cnt, 0),
+             closed_query_count = COALESCE(sub.closed_cnt, 0)
+        FROM (
+          SELECT
+            COUNT(*) FILTER (WHERE dn.resolution_status_id = 1)       AS open_cnt,
+            COUNT(*) FILTER (WHERE dn.resolution_status_id IN (4, 5)) AS closed_cnt
+          FROM discrepancy_note dn
+          INNER JOIN dn_event_crf_map dm ON dn.discrepancy_note_id = dm.discrepancy_note_id
+          WHERE dm.event_crf_id = v_ec_id
+        ) sub
+       WHERE patient_event_form.event_crf_id = v_ec_id;
+
+      IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+    END;
+    $$ LANGUAGE plpgsql
+  `);
+
+  await pool.query(`
+    DROP TRIGGER IF EXISTS trg_sync_pef_query_counts_insert ON discrepancy_note;
+    CREATE TRIGGER trg_sync_pef_query_counts_insert
+      AFTER INSERT ON discrepancy_note
+      FOR EACH ROW EXECUTE FUNCTION sync_pef_query_counts();
+
+    DROP TRIGGER IF EXISTS trg_sync_pef_query_counts_update ON discrepancy_note;
+    CREATE TRIGGER trg_sync_pef_query_counts_update
+      AFTER UPDATE ON discrepancy_note
+      FOR EACH ROW EXECUTE FUNCTION sync_pef_query_counts();
+
+    DROP TRIGGER IF EXISTS trg_sync_pef_query_counts_delete ON discrepancy_note;
+    CREATE TRIGGER trg_sync_pef_query_counts_delete
+      AFTER DELETE ON discrepancy_note
+      FOR EACH ROW EXECUTE FUNCTION sync_pef_query_counts();
+  `);
+
+  logger.info('patient_event_form query count trigger (sync_pef_query_counts) verified');
+}
+
+// ============================================================================
+// Repair patients enrolled with zero study_events
+//
+// Root cause: schedule_day was NULL on study_event_definition rows, which
+// caused createSubjectDirect() to throw per-phase and roll back each phase
+// via SAVEPOINT. The subject was committed but with zero study_events,
+// zero event_crfs, and zero patient_event_form records.
+//
+// This migration creates study_event + event_crf rows for affected subjects.
+// patient_event_form snapshots are NOT created here (they require complex
+// form metadata parsing from the services layer). Use the
+// POST /api/events/verify/subject/:id/repair endpoint per patient after this
+// migration runs to create the full JSONB snapshots.
+// ============================================================================
+async function repairPatientsWithoutEvents(pool: any): Promise<void> {
+  // Find subjects who are enrolled (status_id NOT IN 5,6,7) but have zero study_events
+  const orphanedSubjects = await pool.query(`
+    SELECT ss.study_subject_id, ss.study_id, ss.owner_id,
+           COALESCE(s2.parent_study_id, ss.study_id) AS parent_study_id,
+           ss.enrollment_date
+    FROM study_subject ss
+    LEFT JOIN study s2 ON ss.study_id = s2.study_id
+    WHERE ss.status_id NOT IN (5, 6, 7)
+      AND NOT EXISTS (
+        SELECT 1 FROM study_event se WHERE se.study_subject_id = ss.study_subject_id
+      )
+  `);
+
+  if (orphanedSubjects.rows.length === 0) {
+    logger.info('No orphaned patients found — no repair needed');
+    return;
+  }
+
+  logger.info(`Found ${orphanedSubjects.rows.length} patient(s) with zero study_events — repairing`);
+
+  let totalEventsCreated = 0;
+  let totalCrfsCreated = 0;
+
+  for (const subj of orphanedSubjects.rows) {
+    const parentStudyId = subj.parentStudyId || subj.studyId;
+    const userId = subj.ownerId || 1;
+
+    // Get event definitions for this study
+    const eventDefs = await pool.query(`
+      SELECT study_event_definition_id, name, ordinal, type, repeating,
+             COALESCE(schedule_day, 0) AS schedule_day
+      FROM study_event_definition
+      WHERE study_id = $1 AND status_id = 1 AND type != 'unscheduled'
+      ORDER BY ordinal
+    `, [parentStudyId]);
+
+    if (eventDefs.rows.length === 0) continue;
+
+    const anchorDate = subj.enrollmentDate || new Date();
+
+    for (const eventDef of eventDefs.rows) {
+      try {
+        const daysOffset = eventDef.scheduleDay;
+        const eventDueDate = new Date(new Date(anchorDate).getTime());
+        eventDueDate.setDate(eventDueDate.getDate() + daysOffset);
+
+        // Resolve subject_event_status_id
+        const sesResult = await pool.query(
+          `SELECT subject_event_status_id FROM subject_event_status WHERE name = 'scheduled' LIMIT 1`
+        );
+        const sesId = sesResult.rows[0]?.subjectEventStatusId ?? 1;
+
+        // Create study_event
+        let eventResult;
+        try {
+          eventResult = await pool.query(`
+            INSERT INTO study_event (
+              study_event_definition_id, study_subject_id, location,
+              sample_ordinal, date_start, date_end,
+              owner_id, status_id, subject_event_status_id, date_created,
+              scheduled_date, is_unscheduled
+            ) VALUES ($1, $2, '', 1, $3::timestamp, $3::timestamp, $4, 1, $5, NOW(), $6::date, false)
+            RETURNING study_event_id
+          `, [
+            eventDef.studyEventDefinitionId,
+            subj.studySubjectId,
+            new Date(anchorDate).toISOString(),
+            userId,
+            sesId,
+            eventDueDate.toISOString().split('T')[0]
+          ]);
+        } catch {
+          eventResult = await pool.query(`
+            INSERT INTO study_event (
+              study_event_definition_id, study_subject_id, location,
+              sample_ordinal, date_start, date_end,
+              owner_id, status_id, subject_event_status_id, date_created
+            ) VALUES ($1, $2, '', 1, $3::timestamp, $3::timestamp, $4, 1, $5, NOW())
+            RETURNING study_event_id
+          `, [
+            eventDef.studyEventDefinitionId,
+            subj.studySubjectId,
+            new Date(anchorDate).toISOString(),
+            userId,
+            sesId
+          ]);
+        }
+
+        const studyEventId = eventResult.rows[0]?.studyEventId;
+        if (!studyEventId) continue;
+        totalEventsCreated++;
+
+        // Get CRF assignments for this event definition
+        const crfAssignments = await pool.query(`
+          SELECT edc.crf_id, edc.default_version_id, c.name as crf_name
+          FROM event_definition_crf edc
+          INNER JOIN crf c ON edc.crf_id = c.crf_id
+          WHERE edc.study_event_definition_id = $1
+            AND edc.status_id = 1
+            AND c.status_id NOT IN (5, 7)
+          ORDER BY edc.ordinal
+        `, [eventDef.studyEventDefinitionId]);
+
+        for (const crfAssign of crfAssignments.rows) {
+          let crfVersionId = crfAssign.defaultVersionId;
+          if (!crfVersionId) {
+            const vr = await pool.query(
+              `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 AND status_id NOT IN (5, 7) ORDER BY crf_version_id DESC LIMIT 1`,
+              [crfAssign.crfId]
+            );
+            if (vr.rows.length > 0) crfVersionId = vr.rows[0].crfVersionId;
+            else continue;
+          }
+
+          try {
+            await pool.query(`
+              INSERT INTO event_crf (
+                study_event_id, crf_version_id, study_subject_id,
+                completion_status_id, status_id, owner_id, date_created
+              ) VALUES ($1, $2, $3, 1, 1, $4, NOW())
+            `, [studyEventId, crfVersionId, subj.studySubjectId, userId]);
+            totalCrfsCreated++;
+          } catch (crfErr: any) {
+            logger.warn(`Repair: failed to create event_crf for subject ${subj.studySubjectId}`, {
+              error: crfErr.message
+            });
+          }
+        }
+      } catch (err: any) {
+        logger.warn(`Repair: failed to schedule event for subject ${subj.studySubjectId}`, {
+          eventDef: eventDef.name,
+          error: err.message
+        });
+      }
+    }
+  }
+
+  logger.info(`Patient repair complete: ${totalEventsCreated} study_events and ${totalCrfsCreated} event_crfs created for ${orphanedSubjects.rows.length} patient(s)`);
+}
+
+// ============================================================================
+// Query Cell Target JSONB Columns
+//
+// Adds structured cell_target JSONB columns to dn_item_data_map and
+// dn_event_crf_map for table/question_table cell-level queries.
+// Without these columns, GET /api/queries/form/:id will 500.
+// ============================================================================
+async function addQueryCellTargetColumns(pool: any): Promise<void> {
+  await pool.query(`ALTER TABLE dn_item_data_map ADD COLUMN IF NOT EXISTS cell_target JSONB`);
+  await pool.query(`ALTER TABLE dn_item_data_map ADD COLUMN IF NOT EXISTS column_name VARCHAR(500)`);
+  await pool.query(`ALTER TABLE dn_event_crf_map ADD COLUMN IF NOT EXISTS cell_target JSONB`);
+  await pool.query(`ALTER TABLE dn_event_crf_map ADD COLUMN IF NOT EXISTS column_name VARCHAR(500)`);
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS entity_type VARCHAR(50)`);
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS assigned_user_id INTEGER`);
+  await pool.query(`ALTER TABLE discrepancy_note ADD COLUMN IF NOT EXISTS study_id INTEGER`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dn_study_subject_map (
+      dn_study_subject_map_id SERIAL PRIMARY KEY,
+      discrepancy_note_id INTEGER NOT NULL,
+      study_subject_id INTEGER NOT NULL,
+      column_name VARCHAR(500)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_dn_ssm_dn ON dn_study_subject_map(discrepancy_note_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_dn_ssm_ss ON dn_study_subject_map(study_subject_id)`);
+  logger.info('cell_target, column_name, entity_type, assigned_user_id, study_id columns and dn_study_subject_map verified');
 }

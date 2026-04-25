@@ -14,6 +14,7 @@ declare namespace Express {
       userType: string;
       role: string;
       studyIds?: number[];
+      organizationIds?: number[];
     };
     auditId?: string;
     signatureVerified?: boolean;

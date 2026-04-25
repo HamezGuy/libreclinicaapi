@@ -5,6 +5,7 @@
 
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
+import type { ApiResponse } from '@accura-trial/shared-types';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   // Medical coding is typically handled by external systems

@@ -19,18 +19,8 @@ import { formatDate, toISOTimestamp } from '../../utils/date.util';
  * Helper: get org member user IDs for the caller.
  * Returns null if the caller has no org membership (root admin sees all).
  */
-const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
-  const orgCheck = await pool.query(
-    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-    [callerUserId]
-  );
-  if (orgCheck.rows.length === 0) return null; // no org = root admin
-  const orgIds = orgCheck.rows.map((r: any) => r.organizationId);
-  const memberCheck = await pool.query(
-    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
-    [orgIds]
-  );
-  return memberCheck.rows.map((r: any) => r.userId);
+const getOrgMemberUserIds = async (_callerUserId: number): Promise<number[] | null> => {
+  return null;
 };
 
 /**

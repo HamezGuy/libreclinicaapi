@@ -23,10 +23,11 @@ import {
   cancelEmail,
   retryEmail,
   getUserPreferences,
-  updatePreference
+  updatePreference,
+  updateTemplate,
+  getQueueEntries
 } from '../services/email/email.service';
 import { UpdatePreferenceRequest, NotificationType } from '../services/email/email.types';
-import { pool } from '../config/database';
 import {
   Part11EventTypes,
   recordPart11Audit,
@@ -106,39 +107,13 @@ router.put('/templates/:id', authMiddleware, requireAdmin, async (req: Part11Req
     const userId = req.user?.userId || 0;
     const userName = req.user?.userName || 'system';
 
-    // Get old values before update
-    const oldResult = await pool.query(
-      'SELECT template_name, subject, version FROM acc_email_template WHERE template_id = $1',
-      [templateId]
-    );
-    const oldData = oldResult.rows[0];
+    const updated = await updateTemplate(templateId, { subject, htmlBody, textBody, description });
 
-    // Update template in database (increment version for audit trail)
-    const query = `
-      UPDATE acc_email_template
-      SET subject = COALESCE($1, subject),
-          html_body = COALESCE($2, html_body),
-          text_body = COALESCE($3, text_body),
-          description = COALESCE($4, description),
-          version = version + 1,
-          date_updated = CURRENT_TIMESTAMP
-      WHERE template_id = $5
-      RETURNING *
-    `;
-
-    const result = await pool.query(query, [
-      subject,
-      htmlBody,
-      textBody,
-      description,
-      templateId
-    ]);
-
-    if (result.rows.length === 0) {
+    if (!updated) {
       return res.status(404).json({ success: false, message: 'Template not found' });
     }
 
-    const newData = result.rows[0];
+    const { oldData, newData } = updated;
 
     // Part 11 Audit: Record template update (§11.10(e))
     await recordPart11Audit(
@@ -161,7 +136,20 @@ router.put('/templates/:id', authMiddleware, requireAdmin, async (req: Part11Req
       newVersion: newData.version 
     });
 
-    res.json({ success: true, data: newData });
+    res.json({
+      success: true,
+      data: {
+        templateId: newData.templateId,
+        templateName: newData.templateName,
+        subject: newData.subject,
+        htmlBody: newData.htmlBody,
+        textBody: newData.textBody,
+        description: newData.description,
+        version: newData.version,
+        dateCreated: newData.dateCreated,
+        dateUpdated: newData.dateUpdated
+      }
+    });
   } catch (error: any) {
     logger.error('Error updating template', { error: error.message });
     res.status(500).json({ success: false, message: 'Failed to update template' });
@@ -182,32 +170,13 @@ router.get('/queue', authMiddleware, requireAdmin, async (req: Request, res: Res
     const limit = parseInt(req.query.limit as string) || 50;
     const statusFilter = req.query.status as string;
 
-    // Get recent queue entries
-    let query = `
-      SELECT 
-        queue_id, recipient_email, subject, status, 
-        priority, attempts, last_attempt, sent_at, 
-        error_message, study_id, entity_type, entity_id,
-        date_created, scheduled_for
-      FROM acc_email_queue
-    `;
-    
-    const params: any[] = [];
-    if (statusFilter) {
-      query += ' WHERE status = $1';
-      params.push(statusFilter);
-    }
-    
-    query += ' ORDER BY date_created DESC LIMIT $' + (params.length + 1);
-    params.push(limit);
-
-    const result = await pool.query(query, params);
+    const entries = await getQueueEntries(limit, statusFilter);
 
     res.json({ 
       success: true, 
       data: {
         status,
-        entries: result.rows
+        entries
       }
     });
   } catch (error: any) {

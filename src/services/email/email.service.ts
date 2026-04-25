@@ -293,6 +293,12 @@ export async function sendEmailDirect(
 export async function processEmailQueue(batchSize: number = 10): Promise<QueueProcessResult> {
   logger.info('Processing email queue', { batchSize });
 
+  // Recover emails stuck in 'processing' from a previous crash
+  await pool.query(`
+    UPDATE acc_email_queue SET status = 'pending', last_attempt = NOW()
+    WHERE status = 'processing' AND last_attempt < NOW() - INTERVAL '5 minutes'
+  `);
+
   const result: QueueProcessResult = {
     processed: 0,
     sent: 0,
@@ -597,6 +603,90 @@ export async function retryEmail(queueId: number): Promise<boolean> {
   }
 }
 
+/**
+ * Update an email template (with version increment for Part 11 audit trail)
+ * Returns { oldData, newData } for audit logging by the caller.
+ */
+export async function updateTemplate(
+  templateId: number,
+  fields: { subject?: string; htmlBody?: string; textBody?: string; description?: string }
+): Promise<{ oldData: any; newData: any } | null> {
+  const oldResult = await pool.query(
+    'SELECT template_name, subject, version FROM acc_email_template WHERE template_id = $1',
+    [templateId]
+  );
+  const oldData = oldResult.rows[0] ?? null;
+
+  const query = `
+    UPDATE acc_email_template
+    SET subject = COALESCE($1, subject),
+        html_body = COALESCE($2, html_body),
+        text_body = COALESCE($3, text_body),
+        description = COALESCE($4, description),
+        version = version + 1,
+        date_updated = CURRENT_TIMESTAMP
+    WHERE template_id = $5
+    RETURNING *
+  `;
+
+  const result = await pool.query(query, [
+    fields.subject,
+    fields.htmlBody,
+    fields.textBody,
+    fields.description,
+    templateId
+  ]);
+
+  if (result.rows.length === 0) return null;
+
+  return { oldData, newData: result.rows[0] };
+}
+
+/**
+ * Get recent email queue entries with optional status filter
+ */
+export async function getQueueEntries(
+  limit: number = 50,
+  statusFilter?: string
+): Promise<any[]> {
+  let query = `
+    SELECT 
+      queue_id, recipient_email, subject, status, 
+      priority, attempts, last_attempt, sent_at, 
+      error_message, study_id, entity_type, entity_id,
+      date_created, scheduled_for
+    FROM acc_email_queue
+  `;
+
+  const params: any[] = [];
+  if (statusFilter) {
+    query += ' WHERE status = $1';
+    params.push(statusFilter);
+  }
+
+  query += ' ORDER BY date_created DESC LIMIT $' + (params.length + 1);
+  params.push(limit);
+
+  const result = await pool.query(query, params);
+
+  return result.rows.map(row => ({
+    queueId: row.queueId,
+    recipientEmail: row.recipientEmail,
+    subject: row.subject,
+    status: row.status,
+    priority: row.priority,
+    attempts: row.attempts,
+    lastAttempt: row.lastAttempt,
+    sentAt: row.sentAt,
+    errorMessage: row.errorMessage,
+    studyId: row.studyId,
+    entityType: row.entityType,
+    entityId: row.entityId,
+    dateCreated: row.dateCreated,
+    scheduledFor: row.scheduledFor
+  }));
+}
+
 export default {
   getTemplate,
   listTemplates,
@@ -611,6 +701,8 @@ export default {
   shouldIncludeInDigest,
   getQueueStatus,
   cancelEmail,
-  retryEmail
+  retryEmail,
+  updateTemplate,
+  getQueueEntries
 };
 

@@ -16,35 +16,9 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import * as notificationService from './notification.service';
+import type { UnlockRequest, CreateUnlockRequestData } from '@accura-trial/shared-types';
 
-export interface UnlockRequest {
-  unlockRequestId: number;
-  eventCrfId: number;
-  studySubjectId?: number;
-  studyId?: number;
-  requestedById: number;
-  requestedByName?: string;
-  requestedAt: string;
-  reason: string;
-  priority: 'low' | 'medium' | 'high' | 'urgent';
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
-  reviewedById?: number;
-  reviewedByName?: string;
-  reviewedAt?: string;
-  reviewNotes?: string;
-  // Joined fields for display
-  subjectLabel?: string;
-  crfName?: string;
-  eventName?: string;
-}
-
-export interface CreateUnlockRequestData {
-  eventCrfId: number;
-  studySubjectId?: number;
-  studyId?: number;
-  reason: string;
-  priority?: 'low' | 'medium' | 'high' | 'urgent';
-}
+export type { UnlockRequest, CreateUnlockRequestData };
 
 /**
  * Create a new unlock request for a locked eCRF.

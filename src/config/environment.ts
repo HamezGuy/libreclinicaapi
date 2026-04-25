@@ -47,8 +47,13 @@ export const config = {
     // IMPORTANT: Password must be MD5 hash for WS-Security!
     // Default "12345678" -> MD5: "25d55ad283aa400af464c76d713c07ad"
     soapPassword: process.env.SOAP_PASSWORD || '25d55ad283aa400af464c76d713c07ad',
-    // Enable SOAP by default for GxP compliance (set DISABLE_SOAP=true to use direct DB only)
-    soapEnabled: process.env.DISABLE_SOAP !== 'true',
+    // SOAP disabled — direct DB is the primary data path.
+    // The SOAP enrichment layer had a bug where studySubjectId was lost
+    // during the SOAP-to-DB stats merge (enrichSubjectsWithStats used the
+    // wrong lookup key), causing /api/subjects/NaN for every patient.
+    // All CRUD operations already go through direct DB with full audit
+    // trails, so SOAP adds no compliance value and only risk.
+    soapEnabled: false,
     
     // Database Configuration - connects to LibreClinica's PostgreSQL database
     database: {

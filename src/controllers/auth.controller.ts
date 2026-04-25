@@ -16,6 +16,7 @@ import * as jwtUtil from '../utils/jwt.util';
 import { logger } from '../config/logger';
 import { config } from '../config/environment';
 import jwt from 'jsonwebtoken';
+import type { ApiResponse, LoginResponse, UserProfile } from '@accura-trial/shared-types';
 
 /**
  * Login with username/password
@@ -27,21 +28,19 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const result = await authService.authenticateUser(username, password, ipAddress);
 
   if (!result.success || !result.data) {
-    res.status(401).json({
+    const body: ApiResponse<never> = {
       success: false,
       message: result.message || 'Authentication failed'
-    });
+    };
+    res.status(401).json(body);
     return;
   }
 
-  // Generate JWT tokens
   const jwtPayload = await authService.buildJwtPayload(result.data);
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
-
-  // Fetch per-user custom permission overrides (à la carte)
   const customPermissions = await authService.fetchCustomPermissions(result.data.userId);
 
-  res.json({
+  const body: LoginResponse & { organizations: { organizationId: string; organizationName: string; role: string }[] } = {
     success: true,
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,
@@ -62,7 +61,9 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       organizationName: o.organizationName,
       role: o.role
     }))
-  });
+  };
+
+  res.json(body);
 });
 
 /**
@@ -75,20 +76,19 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
   const result = await authService.authenticateWithGoogle(idToken, ipAddress);
 
   if (!result.success || !result.data) {
-    res.status(401).json({
+    const body: ApiResponse<never> = {
       success: false,
       message: result.message || 'Google authentication failed'
-    });
+    };
+    res.status(401).json(body);
     return;
   }
 
   const jwtPayload = await authService.buildJwtPayload(result.data);
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
-
-  // Fetch per-user custom permission overrides (à la carte)
   const customPermissions = await authService.fetchCustomPermissions(result.data.userId);
 
-  res.json({
+  const body: LoginResponse & { organizations: { organizationId: string; organizationName: string; role: string }[] } = {
     success: true,
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,
@@ -109,7 +109,9 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
       organizationName: o.organizationName,
       role: o.role
     }))
-  });
+  };
+
+  res.json(body);
 });
 
 /**
@@ -119,22 +121,19 @@ export const refresh = asyncHandler(async (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
   const getUserData = async (userId: number) => {
-    const query = `SELECT * FROM user_account WHERE user_id = $1`;
-    const { pool } = await import('../config/database');
-    const result = await pool.query(query, [userId]);
-    
-    if (result.rows.length === 0) return null;
-    
-    return await authService.buildJwtPayload(result.rows[0]);
+    const user = await authService.getUserById(userId);
+    if (!user) return null;
+    return await authService.buildJwtPayload(user);
   };
 
   const tokens = await jwtUtil.refreshAccessToken(refreshToken, getUserData);
 
   if (!tokens) {
-    res.status(401).json({
+    const body: ApiResponse<never> = {
       success: false,
       message: 'Invalid refresh token'
-    });
+    };
+    res.status(401).json(body);
     return;
   }
 
@@ -143,7 +142,7 @@ export const refresh = asyncHandler(async (req: Request, res: Response) => {
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,
     expiresIn: tokens.expiresIn
-  });
+  } as ApiResponse<unknown> & { accessToken: string; refreshToken: string; expiresIn: number });
 });
 
 /**
@@ -153,23 +152,26 @@ export const verify = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
 
   if (!user) {
-    res.status(401).json({
+    const body: ApiResponse<never> = {
       success: false,
       message: 'Authentication required'
-    });
+    };
+    res.status(401).json(body);
     return;
   }
 
-  res.json({
+  const body: ApiResponse<{ userId: number; username: string; email: string; userType: string; organizationIds: number[] }> = {
     success: true,
-    user: {
+    data: {
       userId: user.userId,
       username: user.userName || user.username,
       email: user.email,
       userType: user.userType,
       organizationIds: user.organizationIds || []
     }
-  });
+  };
+
+  res.json(body);
 });
 
 /**
@@ -180,8 +182,6 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const ipAddress = req.ip || 'unknown';
 
-  // Record logout in audit trail
-  // Note: JWT payload uses userName (not username)
   const username = user?.userName || user?.username;
   if (user?.userId && username) {
     await authService.logUserLogout(user.userId, username, ipAddress);
@@ -189,28 +189,57 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
 
   logger.info('User logged out', { userId: user?.userId, username });
 
-  res.json({
+  const body: ApiResponse<null> = {
     success: true,
     message: 'Logged out successfully'
-  });
+  };
+  res.json(body);
 });
 
 // ============================================================================
 // CAPTURE TOKEN (WoundScanner iOS App)
 // ============================================================================
 
+interface CaptureTokenResponse {
+  token: string;
+  expiresAt: string;
+  universalLink: string;
+}
+
+interface CaptureTokenValidation {
+  valid: boolean;
+  user?: {
+    id: string;
+    email: string;
+    fullName: string;
+    role: string;
+    permissions: string[];
+    siteId: string | null;
+    studyId: string;
+  };
+  context?: {
+    patientId: string;
+    patientInitials: string;
+    templateId: string;
+    templateName: string;
+    studyId: string;
+    studyEventId: string;
+    siteId: string | null;
+  };
+  expiresAt?: string;
+  error?: string;
+}
+
 /**
  * Generate a capture token for WoundScanner iOS app
  * POST /api/auth/capture-token
- * 
- * This creates a short-lived token that includes patient/template context
- * for the iOS app to use during wound capture.
  */
 export const generateCaptureToken = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   
   if (!user) {
-    res.status(401).json({ success: false, message: 'Unauthorized' });
+    const body: ApiResponse<never> = { success: false, message: 'Unauthorized' };
+    res.status(401).json(body);
     return;
   }
 
@@ -222,7 +251,6 @@ export const generateCaptureToken = asyncHandler(async (req: Request, res: Respo
     expires_in, expiresIn 
   } = req.body;
 
-  // Support both snake_case and camelCase
   const finalPatientId = patient_id || patientId;
   const finalTemplateId = template_id || templateId;
   const finalStudyId = study_id || studyId;
@@ -230,22 +258,21 @@ export const generateCaptureToken = asyncHandler(async (req: Request, res: Respo
   const expiresInValue = expires_in || expiresIn || '15m';
 
   if (!finalPatientId || !finalTemplateId) {
-    res.status(400).json({
+    const body: ApiResponse<never> = {
       success: false,
-      message: 'patient_id and template_id are required'
-    });
+      message: 'patientId and templateId are required'
+    };
+    res.status(400).json(body);
     return;
   }
 
-  // Parse expiration time
-  let expirationSeconds = 900; // 15 minutes default
+  let expirationSeconds = 900;
   if (expiresInValue.endsWith('m')) {
     expirationSeconds = parseInt(expiresInValue) * 60;
   } else if (expiresInValue.endsWith('h')) {
     expirationSeconds = parseInt(expiresInValue) * 3600;
   }
 
-  // Create capture token payload
   const capturePayload = {
     type: 'capture',
     userId: user.userId,
@@ -260,19 +287,17 @@ export const generateCaptureToken = asyncHandler(async (req: Request, res: Respo
     exp: Math.floor(Date.now() / 1000) + expirationSeconds
   };
 
-  // Sign the token
   const captureToken = jwt.sign(capturePayload, config.jwt.secret);
   const expiresAt = new Date(Date.now() + expirationSeconds * 1000);
 
-  // Build Universal Link
   const appDomain = config.woundScanner?.appDomain || 'yourapp.com';
   const universalLinkParams = new URLSearchParams({
     token: captureToken,
-    patient_id: finalPatientId,
-    template_id: finalTemplateId
+    patientId: finalPatientId,
+    templateId: finalTemplateId
   });
-  if (finalStudyId) universalLinkParams.set('study_id', finalStudyId);
-  if (finalStudyEventId) universalLinkParams.set('study_event_id', finalStudyEventId);
+  if (finalStudyId) universalLinkParams.set('studyId', finalStudyId);
+  if (finalStudyEventId) universalLinkParams.set('studyEventId', finalStudyEventId);
   
   const universalLink = `https://${appDomain}/app/capture?${universalLinkParams.toString()}`;
 
@@ -286,19 +311,14 @@ export const generateCaptureToken = asyncHandler(async (req: Request, res: Respo
   res.json({
     success: true,
     token: captureToken,
-    expires_at: expiresAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
-    universal_link: universalLink,
     universalLink
-  });
+  } satisfies ApiResponse<unknown> & CaptureTokenResponse);
 });
 
 /**
  * Validate a capture token from WoundScanner iOS app
  * POST /api/auth/validate-token
- * 
- * Called by iOS app when it receives a deep link with a token.
- * Validates the token and returns user/patient context.
  */
 export const validateCaptureToken = asyncHandler(async (req: Request, res: Response) => {
   const { token, device_id, deviceId, device_info, deviceInfo } = req.body;
@@ -307,82 +327,34 @@ export const validateCaptureToken = asyncHandler(async (req: Request, res: Respo
   const finalDeviceInfo = device_info || deviceInfo || {};
 
   if (!token) {
-    res.status(400).json({
-      valid: false,
-      error: 'Token is required'
-    });
+    const body: CaptureTokenValidation = { valid: false, error: 'Token is required' };
+    res.status(400).json(body);
     return;
   }
 
   try {
-    // Verify and decode token
     const decoded = jwt.verify(token, config.jwt.secret) as any;
 
-    // Check token type
     if (decoded.type !== 'capture') {
-      res.status(401).json({
-        valid: false,
-        error: 'Invalid token type'
-      });
+      const body: CaptureTokenValidation = { valid: false, error: 'Invalid token type' };
+      res.status(401).json(body);
       return;
     }
 
-    // Register/update device if deviceId provided
     if (finalDeviceId) {
-      try {
-        const { pool } = await import('../config/database');
-        await pool.query(`
-          INSERT INTO devices (id, device_id, model, os_version, app_version, user_id, first_seen_at, last_seen_at, is_active, created_at, updated_at)
-          VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW(), true, NOW(), NOW())
-          ON CONFLICT (device_id) DO UPDATE SET
-            model = COALESCE($2, devices.model),
-            os_version = COALESCE($3, devices.os_version),
-            app_version = COALESCE($4, devices.app_version),
-            user_id = $5,
-            last_seen_at = NOW(),
-            updated_at = NOW()
-        `, [
-          finalDeviceId,
-          finalDeviceInfo.model || null,
-          finalDeviceInfo.os_version || finalDeviceInfo.osVersion || null,
-          finalDeviceInfo.app_version || finalDeviceInfo.appVersion || null,
-          decoded.userId?.toString() || null
-        ]);
-      } catch (dbError: any) {
-        logger.warn('Failed to register device', { error: dbError.message, deviceId: finalDeviceId });
-      }
+      await authService.registerDevice(
+        finalDeviceId,
+        {
+          model: finalDeviceInfo.model || undefined,
+          osVersion: finalDeviceInfo.osVersion || finalDeviceInfo.os_version || undefined,
+          appVersion: finalDeviceInfo.appVersion || finalDeviceInfo.app_version || undefined
+        },
+        decoded.userId?.toString() || null
+      );
     }
 
-    // Get patient info for context
-    let patientInitials = '';
-    try {
-      const { pool } = await import('../config/database');
-      const patientResult = await pool.query(
-        'SELECT label FROM study_subject WHERE study_subject_id = $1',
-        [parseInt(decoded.patientId)]
-      );
-      if (patientResult.rows.length > 0) {
-        const label = patientResult.rows[0].label || '';
-        patientInitials = label.substring(0, 2).toUpperCase();
-      }
-    } catch (dbError: any) {
-      logger.warn('Failed to get patient info', { error: dbError.message });
-    }
-
-    // Get template info
-    let templateName = decoded.templateId;
-    try {
-      const { pool } = await import('../config/database');
-      const templateResult = await pool.query(
-        "SELECT name FROM crf WHERE oc_oid = $1 OR name LIKE $2 LIMIT 1",
-        [decoded.templateId, `%${decoded.templateId}%`]
-      );
-      if (templateResult.rows.length > 0) {
-        templateName = templateResult.rows[0].name;
-      }
-    } catch (dbError: any) {
-      logger.warn('Failed to get template info', { error: dbError.message });
-    }
+    const patientInitials = await authService.getPatientInitials(parseInt(decoded.patientId));
+    const templateName = await authService.getTemplateName(decoded.templateId);
 
     logger.info('Validated capture token', {
       userId: decoded.userId,
@@ -390,7 +362,7 @@ export const validateCaptureToken = asyncHandler(async (req: Request, res: Respo
       deviceId: finalDeviceId
     });
 
-    res.json({
+    const body: CaptureTokenValidation = {
       valid: true,
       user: {
         id: decoded.userId?.toString(),
@@ -410,22 +382,19 @@ export const validateCaptureToken = asyncHandler(async (req: Request, res: Respo
         studyEventId: decoded.studyEventId,
         siteId: null
       },
-      expires_at: new Date(decoded.exp * 1000).toISOString(),
       expiresAt: new Date(decoded.exp * 1000).toISOString()
-    });
-  } catch (error: any) {
-    logger.warn('Invalid capture token', { error: error.message });
+    };
+    res.json(body);
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    logger.warn('Invalid capture token', { error: err.message });
     
-    if (error.name === 'TokenExpiredError') {
-      res.status(401).json({
-        valid: false,
-        error: 'Token has expired'
-      });
+    if (err.name === 'TokenExpiredError') {
+      const body: CaptureTokenValidation = { valid: false, error: 'Token has expired' };
+      res.status(401).json(body);
     } else {
-      res.status(401).json({
-        valid: false,
-        error: 'Invalid token'
-      });
+      const body: CaptureTokenValidation = { valid: false, error: 'Invalid token' };
+      res.status(401).json(body);
     }
   }
 });
@@ -438,94 +407,41 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
 
   if (!user) {
-    res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
+    const body: ApiResponse<never> = { success: false, message: 'Authentication required' };
+    res.status(401).json(body);
     return;
   }
 
-  // Get full profile from database
-  const { pool } = await import('../config/database');
-  const result = await pool.query(`
-    SELECT 
-      user_id,
-      user_name,
-      first_name,
-      last_name,
-      email,
-      phone,
-      institutional_affiliation,
-      status_id,
-      user_type_id,
-      time_zone,
-      date_created,
-      date_updated
-    FROM user_account 
-    WHERE user_id = $1
-  `, [user.userId]);
+  const profile = await authService.getProfile(user.userId);
 
-  if (result.rows.length === 0) {
-    res.status(404).json({
-      success: false,
-      message: 'User not found'
-    });
+  if (!profile) {
+    const body: ApiResponse<never> = { success: false, message: 'User not found' };
+    res.status(404).json(body);
     return;
   }
 
-  const dbUser = result.rows[0];
-  
-  // Get user type name (column is 'user_type', not 'name')
-  const typeResult = await pool.query(
-    'SELECT user_type FROM user_type WHERE user_type_id = $1',
-    [dbUser.user_type_id]
-  );
-  const userTypeName = typeResult.rows.length > 0 ? typeResult.rows[0].user_type : 'unknown';
-
-  let primaryRole: string;
-  const userTypeId = dbUser.user_type_id;
-
-  if (userTypeId === 1 || userTypeId === 0) {
-    primaryRole = 'admin';
-  } else {
-    // Single source of truth: platform_role
-    const platformResult = await pool.query(
-      `SELECT platform_role, secondary_role FROM user_account_extended WHERE user_id = $1`,
-      [user.userId]
-    );
-    if (platformResult.rows.length > 0 && platformResult.rows[0].platform_role) {
-      primaryRole = platformResult.rows[0].platform_role;
-    } else {
-      primaryRole = 'coordinator';
-    }
-  }
-
-  const secondaryRoleResult = await pool.query(
-    `SELECT secondary_role FROM user_account_extended WHERE user_id = $1`,
-    [user.userId]
-  );
-  const secondaryRole = secondaryRoleResult.rows.length > 0 ? secondaryRoleResult.rows[0].secondary_role || '' : '';
-
-  res.json({
+  const body: ApiResponse<UserProfile & { secondaryRole: string; userTypeId: number; isActive: boolean; createdAt: Date | string | null; updatedAt: Date | string | null }> = {
     success: true,
     data: {
-      userId: dbUser.user_id,
-      username: dbUser.user_name,
-      firstName: dbUser.first_name,
-      lastName: dbUser.last_name,
-      email: dbUser.email,
-      phone: dbUser.phone || '',
-      institutionalAffiliation: dbUser.institutional_affiliation || '',
-      role: primaryRole,
-      secondaryRole,
-      userType: userTypeName,
-      userTypeId: userTypeId,
-      timeZone: dbUser.time_zone || 'America/New_York',
-      isActive: dbUser.status_id === 1,
-      createdAt: dbUser.date_created,
-      updatedAt: dbUser.date_updated
+      userId: profile.userId,
+      userName: profile.userName,
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      email: profile.email,
+      phone: profile.phone,
+      institutionalAffiliation: profile.institutionalAffiliation,
+      role: profile.role,
+      secondaryRole: profile.secondaryRole,
+      userTypeId: profile.userTypeId,
+      timeZone: profile.timeZone,
+      enabled: profile.isActive,
+      isActive: profile.isActive,
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt
     }
-  });
+  };
+
+  res.json(body);
 });
 
 /**
@@ -533,213 +449,74 @@ export const getProfile = asyncHandler(async (req: Request, res: Response) => {
  * PUT /api/auth/profile
  * 
  * Users can update their own: firstName, lastName, email, phone, institutionalAffiliation, timeZone
- * They CANNOT change: username, role, status
+ * They CANNOT change: role, status
  */
 export const updateProfile = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const ipAddress = req.ip || 'unknown';
 
   if (!user) {
-    res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
+    const body: ApiResponse<never> = { success: false, message: 'Authentication required' };
+    res.status(401).json(body);
     return;
   }
 
   const { firstName, lastName, email, phone, institutionalAffiliation, timeZone, secondaryRole, username } = req.body;
 
-  // Validate at least one field is provided
   if (!firstName && !lastName && !email && !phone && institutionalAffiliation === undefined && !timeZone && secondaryRole === undefined && !username) {
-    res.status(400).json({
-      success: false,
-      message: 'At least one field to update is required'
-    });
+    const body: ApiResponse<never> = { success: false, message: 'At least one field to update is required' };
+    res.status(400).json(body);
     return;
   }
 
-  // Validate email format if provided
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    res.status(400).json({
-      success: false,
-      message: 'Invalid email format'
-    });
+    const body: ApiResponse<never> = { success: false, message: 'Invalid email format' };
+    res.status(400).json(body);
     return;
   }
 
-  // Validate username format if provided
   if (username !== undefined) {
     if (typeof username !== 'string' || username.length < 3 || username.length > 50) {
-      res.status(400).json({
-        success: false,
-        message: 'Username must be between 3 and 50 characters'
-      });
+      const body: ApiResponse<never> = { success: false, message: 'Username must be between 3 and 50 characters' };
+      res.status(400).json(body);
       return;
     }
     if (!/^[a-zA-Z0-9._-]+$/.test(username)) {
-      res.status(400).json({
-        success: false,
-        message: 'Username can only contain letters, numbers, dots, hyphens, and underscores'
-      });
+      const body: ApiResponse<never> = { success: false, message: 'Username can only contain letters, numbers, dots, hyphens, and underscores' };
+      res.status(400).json(body);
       return;
     }
   }
 
-  const { pool } = await import('../config/database');
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
+    const updated = await authService.updateProfile(user.userId, {
+      firstName, lastName, username, email, phone,
+      institutionalAffiliation, timeZone, secondaryRole
+    });
 
-    // Build dynamic update query
-    const updates: string[] = [];
-    const params: any[] = [];
-    let paramIndex = 1;
-
-    if (firstName !== undefined) {
-      updates.push(`first_name = $${paramIndex++}`);
-      params.push(firstName);
-    }
-
-    if (lastName !== undefined) {
-      updates.push(`last_name = $${paramIndex++}`);
-      params.push(lastName);
-    }
-
-    if (username !== undefined) {
-      const usernameCheck = await client.query(
-        'SELECT user_id FROM user_account WHERE user_name = $1 AND user_id != $2',
-        [username, user.userId]
-      );
-      if (usernameCheck.rows.length > 0) {
-        await client.query('ROLLBACK');
-        res.status(400).json({
-          success: false,
-          message: 'Username is already taken'
-        });
-        return;
-      }
-      updates.push(`user_name = $${paramIndex++}`);
-      params.push(username);
-    }
-
-    if (email !== undefined) {
-      // Check if email is already used by another user
-      const emailCheck = await client.query(
-        'SELECT user_id FROM user_account WHERE email = $1 AND user_id != $2',
-        [email, user.userId]
-      );
-      if (emailCheck.rows.length > 0) {
-        await client.query('ROLLBACK');
-        res.status(400).json({
-          success: false,
-          message: 'Email is already in use by another user'
-        });
-        return;
-      }
-      updates.push(`email = $${paramIndex++}`);
-      params.push(email);
-    }
-
-    if (phone !== undefined) {
-      updates.push(`phone = $${paramIndex++}`);
-      params.push(phone);
-    }
-
-    if (institutionalAffiliation !== undefined) {
-      updates.push(`institutional_affiliation = $${paramIndex++}`);
-      params.push(institutionalAffiliation);
-    }
-
-    if (timeZone !== undefined) {
-      updates.push(`time_zone = $${paramIndex++}`);
-      params.push(timeZone);
-    }
-
-    updates.push(`date_updated = NOW()`);
-
-    params.push(user.userId);
-    const updateQuery = `
-      UPDATE user_account 
-      SET ${updates.join(', ')}
-      WHERE user_id = $${paramIndex}
-      RETURNING user_id, user_name, first_name, last_name, email, phone, institutional_affiliation, time_zone
-    `;
-
-    const result = await client.query(updateQuery, params);
-
-    if (result.rows.length === 0) {
-      await client.query('ROLLBACK');
-      res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+    if (!updated) {
+      const body: ApiResponse<never> = { success: false, message: 'User not found' };
+      res.status(404).json(body);
       return;
     }
 
-    // Update secondary_role in user_account_extended if provided
-    if (secondaryRole !== undefined) {
-      await client.query(`
-        INSERT INTO user_account_extended (user_id, secondary_role)
-        VALUES ($1, $2)
-        ON CONFLICT (user_id) DO UPDATE SET secondary_role = EXCLUDED.secondary_role
-      `, [user.userId, secondaryRole || null]);
-    }
-
-    // Create audit log entry
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_log_event_type_id,
-        audit_date,
-        entity_id,
-        entity_name,
-        user_id,
-        audit_table,
-        reason_for_change,
-        old_value,
-        new_value
-      ) VALUES (
-        44, NOW(), $1, 'Profile Updated', $2, 'user_account', 
-        'User updated their profile', '', $3
-      )
-    `, [
-      user.userId,
-      user.userId,
-      JSON.stringify(result.rows[0])
-    ]);
-
-    await client.query('COMMIT');
-
-    const updatedUser = result.rows[0];
-    
     logger.info('Profile updated', { userId: user.userId, fields: Object.keys(req.body) });
 
-    res.json({
+    const body: ApiResponse<typeof updated> = {
       success: true,
       message: 'Profile updated successfully',
-      data: {
-        userId: updatedUser.user_id,
-        username: updatedUser.user_name,
-        firstName: updatedUser.first_name,
-        lastName: updatedUser.last_name,
-        email: updatedUser.email,
-        phone: updatedUser.phone || '',
-        institutionalAffiliation: updatedUser.institutional_affiliation || '',
-        timeZone: updatedUser.time_zone || 'America/New_York',
-        secondaryRole: secondaryRole !== undefined ? (secondaryRole || '') : undefined
-      }
-    });
-
-  } catch (error: any) {
-    await client.query('ROLLBACK');
-    logger.error('Profile update error', { error: error.message, userId: user.userId });
-    
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update profile'
-    });
-  } finally {
-    client.release();
+      data: updated
+    };
+    res.json(body);
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    if (err.message === 'Username is already taken' || err.message === 'Email is already in use by another user') {
+      const body: ApiResponse<never> = { success: false, message: err.message };
+      res.status(400).json(body);
+      return;
+    }
+    logger.error('Profile update error', { error: err.message, userId: user.userId });
+    const body: ApiResponse<never> = { success: false, message: 'Failed to update profile' };
+    res.status(500).json(body);
   }
 });
 
@@ -751,105 +528,55 @@ export const updateProfile = asyncHandler(async (req: Request, res: Response) =>
  */
 export const changePassword = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const ipAddress = req.ip || 'unknown';
 
   if (!user) {
-    res.status(401).json({ success: false, message: 'Authentication required' });
+    const body: ApiResponse<never> = { success: false, message: 'Authentication required' };
+    res.status(401).json(body);
     return;
   }
 
   const { currentPassword, newPassword } = req.body;
 
   if (!currentPassword || !newPassword) {
-    res.status(400).json({ success: false, message: 'Current password and new password are required' });
+    const body: ApiResponse<never> = { success: false, message: 'Current password and new password are required' };
+    res.status(400).json(body);
     return;
   }
 
   if (newPassword.length < 8) {
-    res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
+    const body: ApiResponse<never> = { success: false, message: 'New password must be at least 8 characters' };
+    res.status(400).json(body);
     return;
   }
 
   if (!/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
-    res.status(400).json({
+    const body: ApiResponse<never> = {
       success: false,
       message: 'New password must contain at least one uppercase letter, one lowercase letter, and one number'
-    });
+    };
+    res.status(400).json(body);
     return;
   }
 
-  const { pool } = await import('../config/database');
-  const { verifyAndUpgrade, hashPasswordMD5, hashPasswordBcrypt } = await import('../utils/password.util');
-
-  const userResult = await pool.query(
-    `SELECT u.user_id, u.passwd, uae.bcrypt_passwd
-     FROM user_account u
-     LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
-     WHERE u.user_id = $1`,
-    [user.userId]
-  );
-
-  if (userResult.rows.length === 0) {
-    res.status(404).json({ success: false, message: 'User not found' });
-    return;
-  }
-
-  const dbUser = userResult.rows[0];
-
-  const verification = await verifyAndUpgrade(
-    currentPassword,
-    dbUser.passwd,
-    dbUser.bcrypt_passwd
-  );
-
-  if (!verification.valid) {
-    res.status(400).json({ success: false, message: 'Current password is incorrect' });
-    return;
-  }
-
-  const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    const result = await authService.changePassword(user.userId, currentPassword, newPassword);
 
-    const md5Hash = hashPasswordMD5(newPassword);
-    const bcryptHash = await hashPasswordBcrypt(newPassword);
-
-    await client.query(
-      `UPDATE user_account SET passwd = $1, passwd_timestamp = NOW(), date_updated = NOW() WHERE user_id = $2`,
-      [md5Hash, user.userId]
-    );
-
-    await client.query(
-      `INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
-       VALUES ($1, $2, NOW(), 2)
-       ON CONFLICT (user_id) DO UPDATE SET
-         bcrypt_passwd = EXCLUDED.bcrypt_passwd,
-         passwd_upgraded_at = NOW(),
-         password_version = 2`,
-      [user.userId, bcryptHash]
-    );
-
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_log_event_type_id, audit_date, entity_id, entity_name,
-        user_id, audit_table, reason_for_change, old_value, new_value
-      ) VALUES (
-        44, NOW(), $1, 'Password Changed', $2, 'user_account',
-        'User changed their password', '', ''
-      )
-    `, [user.userId, user.userId]);
-
-    await client.query('COMMIT');
+    if (!result.success) {
+      const statusCode = result.message === 'User not found' ? 404 : 400;
+      const body: ApiResponse<never> = { success: false, message: result.message };
+      res.status(statusCode).json(body);
+      return;
+    }
 
     logger.info('Password changed', { userId: user.userId });
 
-    res.json({ success: true, message: 'Password changed successfully' });
-  } catch (error: any) {
-    await client.query('ROLLBACK');
-    logger.error('Password change error', { error: error.message, userId: user.userId });
-    res.status(500).json({ success: false, message: 'Failed to change password' });
-  } finally {
-    client.release();
+    const body: ApiResponse<null> = { success: true, message: result.message };
+    res.json(body);
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    logger.error('Password change error', { error: err.message, userId: user.userId });
+    const body: ApiResponse<never> = { success: false, message: 'Failed to change password' };
+    res.status(500).json(body);
   }
 });
 
@@ -865,4 +592,3 @@ export default {
   updateProfile,
   changePassword
 };
-

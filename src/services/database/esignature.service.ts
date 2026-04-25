@@ -24,51 +24,47 @@ import {
   logElectronicSignature as logToLibreClinica, 
   LibreClinicaAuditEventType 
 } from './compliance.service';
+import type { SignatureMeaning, SignatureRecord, SignableEntityType } from '@accura-trial/shared-types';
 
-/**
- * Signature meaning types per 21 CFR Part 11 §11.50
- */
-export type SignatureMeaning = 
-  | 'authorship'        // I am the author of this data
-  | 'approval'          // I approve this data
-  | 'responsibility'    // I take responsibility for this data
-  | 'review'            // I have reviewed this data
-  | 'verification'      // I verify this data against source documents
-  | 'acknowledgment';   // I acknowledge this information
+export type { SignatureMeaning, SignatureRecord, SignableEntityType };
 
-/**
- * Entity types that can be signed
- */
-export type SignableEntityType = 
-  | 'event_crf'         // Form/CRF completion
-  | 'study_event'       // Study event completion
-  | 'study_subject'     // Subject enrollment
-  | 'discrepancy_note'  // Query closure
-  | 'data_lock'         // Data lock confirmation
-  | 'study'             // Study create/update
-  | 'consent';          // eConsent signature
-
-export interface SignatureRequest {
+interface SignatureRequestInternal {
   userId: number;
   username: string;
   userFullName: string;
-  entityType: SignableEntityType;
+  entityType: SignableEntityType | string;
   entityId: number;
   password: string;
   meaning: SignatureMeaning;
   reasonForSigning?: string;
 }
 
-export interface SignatureRecord {
-  signatureId: number;
-  entityType: string;
-  entityId: number;
-  signedBy: string;
-  signedByFullName: string;
-  signedAt: Date;
-  meaning: SignatureMeaning;
-  reasonForSigning: string;
-  ipAddress?: string;
+/**
+ * Maps camelCase DTO entity types to the snake_case values used in the DB.
+ * The DTO contract (shared-types) uses camelCase; the database stores snake_case.
+ */
+const ENTITY_TYPE_TO_DB: Record<string, string> = {
+  eventCrf: 'event_crf',
+  studyEvent: 'study_event',
+  studySubject: 'study_subject',
+  discrepancyNote: 'discrepancy_note',
+  dataLock: 'data_lock',
+  consent: 'consent',
+  study: 'study',
+  validationRule: 'validation_rule',
+  validationRuleBatch: 'validation_rule_batch',
+  // Pass-through for values already in DB format
+  event_crf: 'event_crf',
+  study_event: 'study_event',
+  study_subject: 'study_subject',
+  discrepancy_note: 'discrepancy_note',
+  data_lock: 'data_lock',
+  validation_rule: 'validation_rule',
+  validation_rule_batch: 'validation_rule_batch',
+};
+
+function toDbEntityType(entityType: string): string {
+  return ENTITY_TYPE_TO_DB[entityType] || entityType;
 }
 
 /**
@@ -91,14 +87,14 @@ export const verifyPasswordForSignature = async (
     let result;
     try {
       result = await pool.query(`
-        SELECT u.passwd, u.enabled, uae.bcrypt_passwd
+        SELECT u.passwd, u.status_id, uae.bcrypt_passwd
         FROM user_account u
         LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
         WHERE u.user_id = $1
       `, [userId]);
     } catch {
       result = await pool.query(`
-        SELECT passwd, enabled FROM user_account WHERE user_id = $1
+        SELECT passwd, status_id FROM user_account WHERE user_id = $1
       `, [userId]);
     }
 
@@ -109,7 +105,7 @@ export const verifyPasswordForSignature = async (
 
     const user = result.rows[0];
 
-    if (!user.enabled) {
+    if (user.statusId !== 1) {
       await logSignatureAttempt(userId, username, 'password_verification', 0, false, 'Account disabled');
       return { success: false, data: { valid: false }, message: 'Account is disabled' };
     }
@@ -154,263 +150,241 @@ export const verifyPasswordForSignature = async (
  * 21 CFR Part 11 compliant signature application
  */
 export const applyElectronicSignature = async (
-  request: SignatureRequest
+  request: SignatureRequestInternal
 ): Promise<{ success: boolean; data?: { signatureId: number }; message?: string }> => {
+  const dbEntityType = toDbEntityType(request.entityType as string);
+  const req = { ...request, entityType: dbEntityType };
   logger.info('Applying electronic signature', {
-    userId: request.userId,
-    username: request.username,
-    entityType: request.entityType,
-    entityId: request.entityId,
-    meaning: request.meaning
+    userId: req.userId,
+    username: req.username,
+    entityType: req.entityType,
+    entityId: req.entityId,
+    meaning: req.meaning
   });
 
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
-
     // Step 1: Verify password first (§11.200 - two distinct identification components)
     const passwordVerification = await verifyPasswordForSignature(
-      request.userId,
-      request.username,
-      request.password
+      req.userId,
+      req.username,
+      req.password
     );
 
     if (!passwordVerification.data?.valid) {
-      await client.query('ROLLBACK');
       return { success: false, message: passwordVerification.message || 'Password verification failed' };
     }
 
-    // Step 2: Lock and update the entity's electronic signature status
-    // Lock the target entity row first to prevent concurrent signature application
-    switch (request.entityType) {
-      case 'event_crf': {
-        const lockResult = await client.query(
-          'SELECT event_crf_id, electronic_signature_status FROM event_crf WHERE event_crf_id = $1 FOR UPDATE',
-          [request.entityId]
-        );
-        if (lockResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return { success: false, message: 'event_crf not found' };
+    return await pool.transaction(async (client) => {
+      // Step 2: Lock the target entity row to prevent concurrent signature application
+      switch (req.entityType) {
+        case 'event_crf': {
+          const lockResult = await client.query(
+            'SELECT event_crf_id, electronic_signature_status FROM event_crf WHERE event_crf_id = $1 FOR UPDATE',
+            [req.entityId]
+          );
+          if (lockResult.rows.length === 0) {
+            return { success: false, message: 'event_crf not found' };
+          }
+          if (lockResult.rows[0].electronicSignatureStatus === true) {
+            return { success: false, message: 'Entity is already signed' };
+          }
+          break;
         }
-        if (lockResult.rows[0].electronicSignatureStatus === true) {
-          await client.query('ROLLBACK');
-          return { success: false, message: 'Entity is already signed' };
+        case 'study_event': {
+          const lockResult = await client.query(
+            'SELECT study_event_id FROM study_event WHERE study_event_id = $1 FOR UPDATE',
+            [req.entityId]
+          );
+          if (lockResult.rows.length === 0) {
+            return { success: false, message: 'study_event not found' };
+          }
+          const existingSig = await client.query(
+            `SELECT 1 FROM audit_log_event
+             WHERE audit_table = 'study_event' AND entity_id = $1
+               AND entity_name = 'Electronic Signature Applied'
+             LIMIT 1`,
+            [req.entityId]
+          );
+          if (existingSig.rows.length > 0) {
+            return { success: false, message: 'Entity is already signed' };
+          }
+          break;
         }
-        break;
+        case 'study_subject':
+        case 'consent': {
+          const lockResult = await client.query(
+            'SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1 FOR UPDATE',
+            [req.entityId]
+          );
+          if (lockResult.rows.length === 0) {
+            return { success: false, message: 'study_subject not found' };
+          }
+          const existingSubjectSig = await client.query(
+            `SELECT 1 FROM audit_log_event
+             WHERE audit_table = $1 AND entity_id = $2
+               AND entity_name = 'Electronic Signature Applied'
+             LIMIT 1`,
+            [req.entityType, req.entityId]
+          );
+          if (existingSubjectSig.rows.length > 0) {
+            return { success: false, message: 'Entity is already signed' };
+          }
+          break;
+        }
       }
-      case 'study_event': {
-        const lockResult = await client.query(
-          'SELECT study_event_id FROM study_event WHERE study_event_id = $1 FOR UPDATE',
-          [request.entityId]
-        );
-        if (lockResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return { success: false, message: 'study_event not found' };
-        }
-        const existingSig = await client.query(
-          `SELECT 1 FROM audit_log_event
-           WHERE audit_table = 'study_event' AND entity_id = $1
-             AND entity_name = 'Electronic Signature Applied'
-           LIMIT 1`,
-          [request.entityId]
-        );
-        if (existingSig.rows.length > 0) {
-          await client.query('ROLLBACK');
-          return { success: false, message: 'Entity is already signed' };
-        }
-        break;
+
+      let updateQuery: string;
+      let updateParams: any[];
+
+      switch (req.entityType) {
+        case 'event_crf':
+          updateQuery = `
+            UPDATE event_crf 
+            SET electronic_signature_status = true,
+                completion_status_id = GREATEST(COALESCE(completion_status_id, 0), 5),
+                date_updated = CURRENT_TIMESTAMP,
+                update_id = $2
+            WHERE event_crf_id = $1
+            RETURNING event_crf_id as entity_id
+          `;
+          updateParams = [req.entityId, req.userId];
+          break;
+
+        case 'study_event':
+          updateQuery = `
+            UPDATE study_event
+            SET date_updated = CURRENT_TIMESTAMP,
+                update_id = $2
+            WHERE study_event_id = $1
+            RETURNING study_event_id as entity_id
+          `;
+          updateParams = [req.entityId, req.userId];
+          break;
+
+        case 'study_subject':
+          updateQuery = `
+            UPDATE study_subject
+            SET date_updated = CURRENT_TIMESTAMP,
+                update_id = $2
+            WHERE study_subject_id = $1
+            RETURNING study_subject_id as entity_id
+          `;
+          updateParams = [req.entityId, req.userId];
+          break;
+
+        case 'consent':
+          updateQuery = `
+            UPDATE study_subject
+            SET date_updated = CURRENT_TIMESTAMP,
+                update_id = $2
+            WHERE study_subject_id = $1
+            RETURNING study_subject_id as entity_id
+          `;
+          updateParams = [req.entityId, req.userId];
+          break;
+
+        default:
+          updateQuery = '';
+          updateParams = [];
       }
-      case 'study_subject':
-      case 'consent': {
-        const lockResult = await client.query(
-          'SELECT study_subject_id FROM study_subject WHERE study_subject_id = $1 FOR UPDATE',
-          [request.entityId]
-        );
-        if (lockResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return { success: false, message: 'study_subject not found' };
+
+      if (updateQuery) {
+        const updateResult = await client.query(updateQuery, updateParams);
+        if (updateResult.rows.length === 0) {
+          return { success: false, message: `${req.entityType} not found` };
         }
-        const existingSubjectSig = await client.query(
-          `SELECT 1 FROM audit_log_event
-           WHERE audit_table = $1 AND entity_id = $2
-             AND entity_name = 'Electronic Signature Applied'
-           LIMIT 1`,
-          [request.entityType, request.entityId]
-        );
-        if (existingSubjectSig.rows.length > 0) {
-          await client.query('ROLLBACK');
-          return { success: false, message: 'Entity is already signed' };
+      }
+
+      // Step 3: Record signature in audit trail (§11.50)
+      const signatureManifest = JSON.stringify({
+        type: 'electronic_signature',
+        version: '1.0',
+        meaning: req.meaning,
+        signed_by: req.username,
+        signed_by_full_name: req.userFullName,
+        signed_at: new Date().toISOString(),
+        entity_type: req.entityType,
+        entity_id: req.entityId,
+        reason: req.reasonForSigning || `Electronic signature: ${req.meaning}`,
+        cfr_compliance: {
+          '11.50': 'Signature manifestations included',
+          '11.100': 'Unique identification verified',
+          '11.200': 'Two-factor authentication (username + password)'
         }
-        break;
+      });
+
+      let eventTypeId: number;
+      switch (req.entityType) {
+        case 'event_crf':
+          eventTypeId = LibreClinicaAuditEventType.EVENT_CRF_COMPLETE_WITH_PASSWORD;
+          break;
+        case 'study_event':
+          eventTypeId = LibreClinicaAuditEventType.STUDY_EVENT_SIGNED;
+          break;
+        default:
+          eventTypeId = LibreClinicaAuditEventType.EVENT_CRF_COMPLETE_WITH_PASSWORD;
       }
-    }
 
-    let updateQuery: string;
-    let updateParams: any[];
+      const auditQuery = `
+        INSERT INTO audit_log_event (
+          audit_date,
+          audit_table,
+          user_id,
+          entity_id,
+          entity_name,
+          old_value,
+          new_value,
+          audit_log_event_type_id,
+          reason_for_change,
+          event_crf_id,
+          study_event_id
+        )
+        VALUES (
+          CURRENT_TIMESTAMP,
+          $1,
+          $2,
+          $3,
+          'Electronic Signature Applied',
+          NULL,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8
+        )
+        RETURNING audit_id
+      `;
 
-    switch (request.entityType) {
-      case 'event_crf':
-        updateQuery = `
-          UPDATE event_crf 
-          SET electronic_signature_status = true,
-              completion_status_id = GREATEST(COALESCE(completion_status_id, 0), 5),
-              date_updated = CURRENT_TIMESTAMP,
-              update_id = $2
-          WHERE event_crf_id = $1
-          RETURNING event_crf_id as entity_id
-        `;
-        updateParams = [request.entityId, request.userId];
-        break;
+      const auditResult = await client.query(auditQuery, [
+        req.entityType,
+        req.userId,
+        req.entityId,
+        signatureManifest,
+        eventTypeId,
+        req.reasonForSigning || `Electronic signature: ${req.meaning}`,
+        req.entityType === 'event_crf' ? req.entityId : null,
+        req.entityType === 'study_event' ? req.entityId : null
+      ]);
 
-      case 'study_event':
-        updateQuery = `
-          UPDATE study_event
-          SET date_updated = CURRENT_TIMESTAMP,
-              update_id = $2
-          WHERE study_event_id = $1
-          RETURNING study_event_id as entity_id
-        `;
-        updateParams = [request.entityId, request.userId];
-        break;
+      const signatureId = auditResult.rows[0].auditId;
 
-      case 'study_subject':
-        updateQuery = `
-          UPDATE study_subject
-          SET date_updated = CURRENT_TIMESTAMP,
-              update_id = $2
-          WHERE study_subject_id = $1
-          RETURNING study_subject_id as entity_id
-        `;
-        updateParams = [request.entityId, request.userId];
-        break;
+      logger.info('Electronic signature applied successfully', {
+        signatureId,
+        entityType: req.entityType,
+        entityId: req.entityId,
+        signedBy: req.username
+      });
 
-      case 'consent':
-        updateQuery = `
-          UPDATE study_subject
-          SET date_updated = CURRENT_TIMESTAMP,
-              update_id = $2
-          WHERE study_subject_id = $1
-          RETURNING study_subject_id as entity_id
-        `;
-        updateParams = [request.entityId, request.userId];
-        break;
-
-      default:
-        // For other entity types, we just record the signature in audit
-        updateQuery = '';
-        updateParams = [];
-    }
-
-    // Execute update if applicable
-    if (updateQuery) {
-      const updateResult = await client.query(updateQuery, updateParams);
-      if (updateResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return { success: false, message: `${request.entityType} not found` };
-      }
-    }
-
-    // Step 3: Record signature in audit trail
-    // Format signature data per 21 CFR Part 11 §11.50
-    const signatureManifest = JSON.stringify({
-      type: 'electronic_signature',
-      version: '1.0',
-      meaning: request.meaning,
-      signed_by: request.username,
-      signed_by_full_name: request.userFullName,
-      signed_at: new Date().toISOString(),
-      entity_type: request.entityType,
-      entity_id: request.entityId,
-      reason: request.reasonForSigning || `Electronic signature: ${request.meaning}`,
-      cfr_compliance: {
-        '11.50': 'Signature manifestations included',
-        '11.100': 'Unique identification verified',
-        '11.200': 'Two-factor authentication (username + password)'
-      }
+      return {
+        success: true,
+        data: { signatureId },
+        message: 'Electronic signature applied successfully'
+      };
     });
-
-    // Determine the correct LibreClinica e-signature event type
-    // 14 = Event CRF complete with password
-    // 15 = Event CRF IDE complete with password  
-    // 16 = Event CRF DDE complete with password
-    // 31 = Study Event signed
-    let eventTypeId: number;
-    switch (request.entityType) {
-      case 'event_crf':
-        eventTypeId = LibreClinicaAuditEventType.EVENT_CRF_COMPLETE_WITH_PASSWORD; // 14
-        break;
-      case 'study_event':
-        eventTypeId = LibreClinicaAuditEventType.STUDY_EVENT_SIGNED; // 31
-        break;
-      default:
-        eventTypeId = LibreClinicaAuditEventType.EVENT_CRF_COMPLETE_WITH_PASSWORD; // 14
-    }
-
-    const auditQuery = `
-      INSERT INTO audit_log_event (
-        audit_date,
-        audit_table,
-        user_id,
-        entity_id,
-        entity_name,
-        old_value,
-        new_value,
-        audit_log_event_type_id,
-        reason_for_change,
-        event_crf_id,
-        study_event_id
-      )
-      VALUES (
-        CURRENT_TIMESTAMP,
-        $1,
-        $2,
-        $3,
-        'Electronic Signature Applied',
-        NULL,
-        $4,
-        $5,
-        $6,
-        $7,
-        $8
-      )
-      RETURNING audit_id
-    `;
-
-    const auditResult = await client.query(auditQuery, [
-      request.entityType,
-      request.userId,
-      request.entityId,
-      signatureManifest,
-      eventTypeId,
-      request.reasonForSigning || `Electronic signature: ${request.meaning}`,
-      request.entityType === 'event_crf' ? request.entityId : null,
-      request.entityType === 'study_event' ? request.entityId : null
-    ]);
-
-    const signatureId = auditResult.rows[0].auditId;
-
-    await client.query('COMMIT');
-
-    logger.info('Electronic signature applied successfully', {
-      signatureId,
-      entityType: request.entityType,
-      entityId: request.entityId,
-      signedBy: request.username
-    });
-
-    return {
-      success: true,
-      data: { signatureId },
-      message: 'Electronic signature applied successfully'
-    };
 
   } catch (error: any) {
-    await client.query('ROLLBACK');
     logger.error('Failed to apply electronic signature', { error: error.message });
     return { success: false, message: error.message };
-  } finally {
-    client.release();
   }
 };
 
@@ -421,13 +395,14 @@ export const getSignatureStatus = async (
   entityType: string,
   entityId: number
 ): Promise<{ success: boolean; data?: any; message?: string }> => {
-  logger.info('Getting signature status', { entityType, entityId });
+  const dbType = toDbEntityType(entityType);
+  logger.info('Getting signature status', { entityType: dbType, entityId });
 
   try {
     let query: string;
     let params: any[] = [entityId];
 
-    switch (entityType) {
+    switch (dbType) {
       case 'event_crf':
         query = `
           SELECT 
@@ -530,7 +505,8 @@ export const getSignatureHistory = async (
   entityType: string,
   entityId: number
 ): Promise<{ success: boolean; data?: SignatureRecord[]; message?: string }> => {
-  logger.info('Getting signature history', { entityType, entityId });
+  const dbType = toDbEntityType(entityType);
+  logger.info('Getting signature history', { entityType: dbType, entityId });
 
   try {
     const query = `
@@ -551,7 +527,7 @@ export const getSignatureHistory = async (
       ORDER BY ale.audit_date DESC
     `;
 
-    const result = await pool.query(query, [entityType, entityId]);
+    const result = await pool.query(query, [dbType, entityId]);
 
     const history: SignatureRecord[] = result.rows.map(row => {
       let signatureData: any = {};
@@ -829,71 +805,75 @@ export const invalidateSignature = async (
   reason: string,
   invalidatedBy?: string
 ): Promise<{ success: boolean; message?: string }> => {
-  logger.info('Invalidating signature', { entityType, entityId, reason });
-
-  const client = await pool.connect();
+  const dbType = toDbEntityType(entityType);
+  logger.info('Invalidating signature', { entityType: dbType, entityId, reason });
 
   try {
-    await client.query('BEGIN');
+    return await pool.transaction(async (client) => {
+      // Lock the row first to prevent concurrent invalidation
+      if (dbType === 'event_crf') {
+        const lockResult = await client.query(
+          'SELECT event_crf_id, electronic_signature_status FROM event_crf WHERE event_crf_id = $1 FOR UPDATE',
+          [entityId]
+        );
+        if (lockResult.rows.length === 0) {
+          return { success: false, message: 'event_crf not found' };
+        }
+        if (lockResult.rows[0].electronicSignatureStatus === false || lockResult.rows[0].electronicSignatureStatus === null) {
+          return { success: false, message: 'Signature is not currently active' };
+        }
 
-    // Update entity signature status if applicable
-    if (entityType === 'event_crf') {
-      await client.query(`
-        UPDATE event_crf 
-        SET electronic_signature_status = false,
-            date_updated = CURRENT_TIMESTAMP
-        WHERE event_crf_id = $1
-      `, [entityId]);
-    }
-
-    // Record invalidation in audit trail
-    const invalidationData = JSON.stringify({
-      type: 'signature_invalidation',
-      version: '1.0',
-      entity_type: entityType,
-      entity_id: entityId,
-      reason: reason,
-      invalidated_by: invalidatedBy || 'system',
-      invalidated_at: new Date().toISOString(),
-      cfr_compliance: {
-        '11.70': 'Signature invalidated due to record modification'
+        await client.query(`
+          UPDATE event_crf 
+          SET electronic_signature_status = false,
+              date_updated = CURRENT_TIMESTAMP
+          WHERE event_crf_id = $1
+        `, [entityId]);
       }
+
+      const invalidationData = JSON.stringify({
+        type: 'signature_invalidation',
+        version: '1.0',
+        entity_type: dbType,
+        entity_id: entityId,
+        reason: reason,
+        invalidated_by: invalidatedBy || 'system',
+        invalidated_at: new Date().toISOString(),
+        cfr_compliance: {
+          '11.70': 'Signature invalidated due to record modification'
+        }
+      });
+
+      await client.query(`
+        INSERT INTO audit_log_event (
+          audit_date,
+          audit_table,
+          user_id,
+          entity_id,
+          entity_name,
+          new_value,
+          audit_log_event_type_id,
+          reason_for_change
+        )
+        VALUES (
+          CURRENT_TIMESTAMP,
+          $1,
+          (SELECT user_id FROM user_account WHERE user_name = $4 LIMIT 1),
+          $2,
+          'Electronic Signature Invalidated',
+          $3,
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
+          $5
+        )
+      `, [dbType, entityId, invalidationData, invalidatedBy || 'system', reason]);
+
+      logger.info('Signature invalidated successfully', { entityType: dbType, entityId });
+      return { success: true, message: 'Signature invalidated successfully' };
     });
 
-    await client.query(`
-      INSERT INTO audit_log_event (
-        audit_date,
-        audit_table,
-        user_id,
-        entity_id,
-        entity_name,
-        new_value,
-        audit_log_event_type_id,
-        reason_for_change
-      )
-      VALUES (
-        CURRENT_TIMESTAMP,
-        $1,
-        (SELECT user_id FROM user_account WHERE user_name = $4 LIMIT 1),
-        $2,
-        'Electronic Signature Invalidated',
-        $3,
-        (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
-        $5
-      )
-    `, [entityType, entityId, invalidationData, invalidatedBy || 'system', reason]);
-
-    await client.query('COMMIT');
-
-    logger.info('Signature invalidated successfully', { entityType, entityId });
-    return { success: true, message: 'Signature invalidated successfully' };
-
   } catch (error: any) {
-    await client.query('ROLLBACK');
     logger.error('Failed to invalidate signature', { error: error.message });
     return { success: false, message: error.message };
-  } finally {
-    client.release();
   }
 };
 

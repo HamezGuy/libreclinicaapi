@@ -29,22 +29,22 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import type {
+  LockEligibility,
+  SanitationReport,
+  SanitationSubjectRow,
+  StudyLockStatus,
+  CasebookReadiness,
+  LockHistory,
+} from '@accura-trial/shared-types';
+
+export type { LockEligibility, SanitationReport, SanitationSubjectRow, StudyLockStatus, CasebookReadiness, LockHistory };
+
+type LockHistoryEntry = LockHistory;
 
 // ═══════════════════════════════════════════════════════════════════
 // LOCK ELIGIBILITY CHECKING
 // ═══════════════════════════════════════════════════════════════════
-
-export interface LockEligibility {
-  canLock: boolean;
-  reasons: string[];
-  openQueries: number;
-  incompleteForms: number;
-  totalForms: number;
-  completedForms: number;
-  pendingSDV: number;
-  subjectId?: number;
-  studyEventId?: number;
-}
 
 /**
  * Check if a subject's data is eligible for locking
@@ -152,7 +152,7 @@ export const checkSubjectLockEligibility = async (studySubjectId: number, client
       totalForms,
       completedForms,
       pendingSDV,
-      subjectId: studySubjectId
+      studySubjectId
     };
   } catch (error: any) {
     logger.error('Check lock eligibility error', { studySubjectId, error: error.message });
@@ -234,7 +234,7 @@ export const checkEventLockEligibility = async (studyEventId: number, client?: a
       totalForms,
       completedForms,
       pendingSDV: 0,
-      subjectId,
+      studySubjectId: subjectId,
       studyEventId
     };
   } catch (error: any) {
@@ -287,6 +287,19 @@ export const lockSubjectData = async (
     `;
     const lockResult = await client.query(lockQuery, [studySubjectId, userId]);
     const lockedCount = lockResult.rowCount || 0;
+
+    // Sync patient_event_form for all locked forms
+    if (lockedCount > 0) {
+      await client.query(`
+        UPDATE patient_event_form pef
+        SET is_locked = true, is_frozen = false
+        FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        WHERE pef.event_crf_id = ec.event_crf_id
+          AND se.study_subject_id = $1
+          AND ec.status_id = 6
+      `, [studySubjectId]);
+    }
 
     // Get subject label for audit log
     const subjectQuery = `SELECT label FROM study_subject WHERE study_subject_id = $1`;
@@ -356,6 +369,18 @@ export const lockEventData = async (
     const lockResult = await client.query(lockQuery, [studyEventId, userId]);
     const lockedCount = lockResult.rowCount || 0;
 
+    // Sync patient_event_form for all locked forms
+    if (lockedCount > 0) {
+      await client.query(`
+        UPDATE patient_event_form pef
+        SET is_locked = true, is_frozen = false
+        FROM event_crf ec
+        WHERE pef.event_crf_id = ec.event_crf_id
+          AND ec.study_event_id = $1
+          AND ec.status_id = 6
+      `, [studyEventId]);
+    }
+
     // Get event name for audit
     const eventQuery = `
       SELECT sed.name, ss.label as subject_label
@@ -404,10 +429,20 @@ export const unlockSubjectData = async (
   try {
     await client.query('BEGIN');
 
+    // Acquire row locks on all locked event_crf rows for this subject
+    await client.query(`
+      SELECT ec.event_crf_id
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      WHERE se.study_subject_id = $1
+        AND ec.status_id = 6
+      FOR UPDATE OF ec
+    `, [studySubjectId]);
+
     // Unlock all event CRFs
     const unlockQuery = `
       UPDATE event_crf ec
-      SET status_id = 2, update_id = $2, date_updated = CURRENT_TIMESTAMP
+      SET status_id = 2, frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
       FROM study_event se
       WHERE ec.study_event_id = se.study_event_id
         AND se.study_subject_id = $1
@@ -416,6 +451,18 @@ export const unlockSubjectData = async (
     `;
     const unlockResult = await client.query(unlockQuery, [studySubjectId, userId]);
     const unlockedCount = unlockResult.rowCount || 0;
+
+    // Sync patient_event_form for all unlocked forms
+    if (unlockedCount > 0) {
+      await client.query(`
+        UPDATE patient_event_form pef
+        SET is_locked = false, is_frozen = false
+        FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        WHERE pef.event_crf_id = ec.event_crf_id
+          AND se.study_subject_id = $1
+      `, [studySubjectId]);
+    }
 
     // Get subject label
     const subjectQuery = `SELECT label FROM study_subject WHERE study_subject_id = $1`;
@@ -447,6 +494,40 @@ export const unlockSubjectData = async (
 // ═══════════════════════════════════════════════════════════════════
 // EXISTING FUNCTIONS (Enhanced)
 // ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get lock/freeze status for a single event CRF record.
+ * Returns locked, frozen, and sdv_status flags for the given form.
+ */
+export const getRecordLockStatus = async (eventCrfId: number): Promise<{
+  eventCrfId: number;
+  locked: boolean;
+  frozen: boolean;
+  sdvVerified: boolean;
+  statusId: number;
+}> => {
+  const result = await pool.query(
+    `SELECT ec.event_crf_id, ec.status_id,
+            COALESCE(ec.frozen, false) AS frozen,
+            COALESCE(ec.sdv_status, false) AS sdv_status
+     FROM event_crf ec
+     WHERE ec.event_crf_id = $1`,
+    [eventCrfId]
+  );
+
+  if (!result.rows.length) {
+    return { eventCrfId, locked: false, frozen: false, sdvVerified: false, statusId: 0 };
+  }
+
+  const row = result.rows[0];
+  return {
+    eventCrfId,
+    locked: row.statusId === 6,
+    frozen: row.frozen === true,
+    sdvVerified: row.sdvStatus === true,
+    statusId: row.statusId
+  };
+};
 
 export const getLockedRecords = async (filters: {
   studyId?: number;
@@ -669,7 +750,14 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
       return { success: false, message: 'Record not found or already locked' };
     }
 
-    // 5. Audit log
+    // 5. Sync patient_event_form so lock state is consistent across both tables
+    await client.query(`
+      UPDATE patient_event_form
+      SET is_locked = true, is_frozen = false
+      WHERE event_crf_id = $1
+    `, [eventCrfId]);
+
+    // 6. Audit log
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
       VALUES (CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'Data Locked', $3,
@@ -693,7 +781,8 @@ export const lockRecord = async (eventCrfId: number, userId: number, reason?: st
 
 /**
  * Batch lock multiple CRF records.  Validates each before locking.
- * Returns summary of how many succeeded / failed.
+ * All operations run in a single transaction with SELECT FOR UPDATE to
+ * prevent concurrent batch operations from interfering.
  */
 export const batchLockRecords = async (
   eventCrfIds: number[],
@@ -701,30 +790,118 @@ export const batchLockRecords = async (
   reason?: string
 ): Promise<{ success: boolean; locked: number; failed: number; errors: string[] }> => {
   logger.info('Batch locking records', { count: eventCrfIds.length, userId });
-  let locked = 0;
-  let failed = 0;
-  const errors: string[] = [];
 
-  for (const ecId of eventCrfIds) {
-    try {
-      const result = await lockRecord(ecId, userId, reason);
-      if (result.success) {
-        locked++;
-      } else {
-        failed++;
-        errors.push(`CRF ${ecId}: ${result.message}`);
-      }
-    } catch (e: any) {
-      failed++;
-      errors.push(`CRF ${ecId}: ${e.message}`);
-    }
+  if (eventCrfIds.length === 0) {
+    return { success: true, locked: 0, failed: 0, errors: [] };
   }
 
-  return { success: failed === 0, locked, failed, errors };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    let locked = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const ecId of eventCrfIds) {
+      // Lock the row to prevent concurrent modifications
+      const ecResult = await client.query(`
+        SELECT ec.event_crf_id, ec.status_id, ec.completion_status_id,
+               COALESCE(ec.sdv_status, false) as sdv_verified,
+               COALESCE(ec.electronic_signature_status, false) as is_signed,
+               cv.crf_id
+        FROM event_crf ec
+        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+        WHERE ec.event_crf_id = $1
+        FOR UPDATE OF ec
+      `, [ecId]);
+
+      if (ecResult.rows.length === 0) {
+        failed++;
+        errors.push(`CRF ${ecId}: not found`);
+        continue;
+      }
+
+      const ec = ecResult.rows[0];
+      if (ec.statusId === 6) {
+        errors.push(`CRF ${ecId}: already locked`);
+        continue;
+      }
+
+      // Must be at least data_entry_complete
+      if (ec.completionStatusId < 4 && ec.statusId !== 2) {
+        failed++;
+        errors.push(`CRF ${ecId}: form must be marked as complete before locking`);
+        continue;
+      }
+
+      // Check open queries on this CRF
+      const queryResult = await client.query(`
+        SELECT COUNT(DISTINCT dn.discrepancy_note_id) as cnt
+        FROM discrepancy_note dn
+        WHERE dn.resolution_status_id NOT IN (4, 5)
+          AND dn.parent_dn_id IS NULL
+          AND (
+            EXISTS (
+              SELECT 1 FROM dn_event_crf_map dem
+              WHERE dem.discrepancy_note_id = dn.discrepancy_note_id
+                AND dem.event_crf_id = $1
+            )
+            OR EXISTS (
+              SELECT 1 FROM dn_item_data_map dim
+              INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+              WHERE dim.discrepancy_note_id = dn.discrepancy_note_id
+                AND id.event_crf_id = $1
+            )
+          )
+      `, [ecId]);
+      const openQueries = parseInt(queryResult.rows[0]?.cnt || '0');
+      if (openQueries > 0) {
+        failed++;
+        errors.push(`CRF ${ecId}: ${openQueries} open queries must be resolved`);
+        continue;
+      }
+
+      // Lock the record
+      await client.query(`
+        UPDATE event_crf
+        SET status_id = 6, frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
+        WHERE event_crf_id = $1 AND status_id != 6
+      `, [ecId, userId]);
+
+      // Sync patient_event_form
+      await client.query(`
+        UPDATE patient_event_form
+        SET is_locked = true, is_frozen = false
+        WHERE event_crf_id = $1
+      `, [ecId]);
+
+      // Audit log
+      await client.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+        VALUES (CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'Data Locked', $3,
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      `, [userId, ecId, reason || null]);
+
+      locked++;
+    }
+
+    await client.query('COMMIT');
+    logger.info('Batch lock complete', { locked, failed });
+    return { success: failed === 0, locked, failed, errors };
+  } catch (e: unknown) {
+    await client.query('ROLLBACK');
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.error('Batch lock failed — rolled back', { error: msg });
+    return { success: false, locked: 0, failed: eventCrfIds.length, errors: [msg] };
+  } finally {
+    client.release();
+  }
 };
 
 /**
  * Batch unlock multiple CRF records.
+ * All operations run in a single transaction with SELECT FOR UPDATE.
  */
 export const batchUnlockRecords = async (
   eventCrfIds: number[],
@@ -732,26 +909,73 @@ export const batchUnlockRecords = async (
   reason?: string
 ): Promise<{ success: boolean; unlocked: number; failed: number; errors: string[] }> => {
   logger.info('Batch unlocking records', { count: eventCrfIds.length, userId });
-  let unlocked = 0;
-  let failed = 0;
-  const errors: string[] = [];
 
-  for (const ecId of eventCrfIds) {
-    try {
-      const result = await unlockRecord(ecId, userId, reason);
-      if (result.success) {
-        unlocked++;
-      } else {
-        failed++;
-        errors.push(`CRF ${ecId}: ${result.message}`);
-      }
-    } catch (e: any) {
-      failed++;
-      errors.push(`CRF ${ecId}: ${e.message}`);
-    }
+  if (eventCrfIds.length === 0) {
+    return { success: true, unlocked: 0, failed: 0, errors: [] };
   }
 
-  return { success: failed === 0, unlocked, failed, errors };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    let unlocked = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const ecId of eventCrfIds) {
+      // Lock the row to prevent concurrent modifications
+      const ecResult = await client.query(`
+        SELECT event_crf_id, status_id FROM event_crf
+        WHERE event_crf_id = $1
+        FOR UPDATE
+      `, [ecId]);
+
+      if (ecResult.rows.length === 0) {
+        failed++;
+        errors.push(`CRF ${ecId}: not found`);
+        continue;
+      }
+
+      if (ecResult.rows[0].statusId !== 6) {
+        failed++;
+        errors.push(`CRF ${ecId}: not locked`);
+        continue;
+      }
+
+      await client.query(`
+        UPDATE event_crf
+        SET status_id = 2, frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
+        WHERE event_crf_id = $1 AND status_id = 6
+      `, [ecId, userId]);
+
+      // Sync patient_event_form
+      await client.query(`
+        UPDATE patient_event_form
+        SET is_locked = false, is_frozen = false
+        WHERE event_crf_id = $1
+      `, [ecId]);
+
+      // Audit log
+      await client.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
+        VALUES (CURRENT_TIMESTAMP, 'event_crf', $1, $2, 'Data Unlocked', $3,
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      `, [userId, ecId, reason || null]);
+
+      unlocked++;
+    }
+
+    await client.query('COMMIT');
+    logger.info('Batch unlock complete', { unlocked, failed });
+    return { success: failed === 0, unlocked, failed, errors };
+  } catch (e: unknown) {
+    await client.query('ROLLBACK');
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.error('Batch unlock failed — rolled back', { error: msg });
+    return { success: false, unlocked: 0, failed: eventCrfIds.length, errors: [msg] };
+  } finally {
+    client.release();
+  }
 };
 
 /**
@@ -899,6 +1123,13 @@ export const freezeRecord = async (
       [userId, eventCrfId]
     );
 
+    // Sync patient_event_form
+    await client.query(`
+      UPDATE patient_event_form
+      SET is_frozen = true
+      WHERE event_crf_id = $1
+    `, [eventCrfId]);
+
     // Audit
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
@@ -932,16 +1163,28 @@ export const unfreezeRecord = async (
   try {
     await client.query('BEGIN');
 
-    const result = await client.query(
-      `UPDATE event_crf SET frozen = false, date_updated = NOW(), update_id = $1
-       WHERE event_crf_id = $2 AND frozen = true RETURNING event_crf_id`,
-      [userId, eventCrfId]
+    // Acquire row lock to prevent concurrent unfreeze/freeze
+    const lockCheck = await client.query(
+      `SELECT event_crf_id, frozen, status_id FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`,
+      [eventCrfId]
     );
-
-    if ((result.rowCount || 0) === 0) {
+    if (lockCheck.rows.length === 0 || !lockCheck.rows[0].frozen) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Form is not frozen or not found' };
     }
+
+    await client.query(
+      `UPDATE event_crf SET frozen = false, date_updated = NOW(), update_id = $1
+       WHERE event_crf_id = $2`,
+      [userId, eventCrfId]
+    );
+
+    // Sync patient_event_form
+    await client.query(`
+      UPDATE patient_event_form
+      SET is_frozen = false
+      WHERE event_crf_id = $1
+    `, [eventCrfId]);
 
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
@@ -962,56 +1205,121 @@ export const unfreezeRecord = async (
 
 /**
  * Batch freeze multiple CRF records.
+ * All operations run in a single transaction with SELECT FOR UPDATE.
  */
 export const batchFreezeRecords = async (
   eventCrfIds: number[],
   userId: number
 ): Promise<{ success: boolean; frozen: number; failed: number; errors: string[] }> => {
   await ensureFrozenColumn();
-  let frozen = 0;
-  let failed = 0;
-  const errors: string[] = [];
 
-  for (const ecId of eventCrfIds) {
-    const result = await freezeRecord(ecId, userId);
-    if (result.success) { frozen++; } else { failed++; errors.push(`CRF ${ecId}: ${result.message}`); }
+  if (eventCrfIds.length === 0) {
+    return { success: true, frozen: 0, failed: 0, errors: [] };
   }
 
-  return { success: failed === 0, frozen, failed, errors };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    let frozen = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const ecId of eventCrfIds) {
+      // Lock the row to prevent concurrent modifications
+      const ecResult = await client.query(
+        `SELECT status_id, completion_status_id, frozen FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`,
+        [ecId]
+      );
+
+      if (ecResult.rows.length === 0) {
+        failed++;
+        errors.push(`CRF ${ecId}: not found`);
+        continue;
+      }
+
+      const ec = ecResult.rows[0];
+      if (ec.statusId === 6) {
+        failed++;
+        errors.push(`CRF ${ecId}: already locked — cannot freeze a locked form`);
+        continue;
+      }
+      if (ec.frozen) {
+        errors.push(`CRF ${ecId}: already frozen`);
+        continue;
+      }
+      if (ec.completionStatusId < 4 && ec.statusId !== 2) {
+        failed++;
+        errors.push(`CRF ${ecId}: form must be marked as complete before freezing`);
+        continue;
+      }
+
+      // Check open queries
+      const qResult = await client.query(`
+        SELECT COUNT(DISTINCT dn.discrepancy_note_id) as cnt
+        FROM discrepancy_note dn
+        WHERE dn.resolution_status_id NOT IN (4, 5)
+          AND dn.parent_dn_id IS NULL
+          AND (
+            EXISTS (
+              SELECT 1 FROM dn_event_crf_map dem
+              WHERE dem.discrepancy_note_id = dn.discrepancy_note_id
+                AND dem.event_crf_id = $1
+            )
+            OR EXISTS (
+              SELECT 1 FROM dn_item_data_map dim
+              INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+              WHERE dim.discrepancy_note_id = dn.discrepancy_note_id
+                AND id.event_crf_id = $1
+            )
+          )
+      `, [ecId]);
+      const openQueries = parseInt(qResult.rows[0]?.cnt || '0');
+      if (openQueries > 0) {
+        failed++;
+        errors.push(`CRF ${ecId}: ${openQueries} open queries must be resolved before freezing`);
+        continue;
+      }
+
+      // Freeze the record
+      await client.query(
+        `UPDATE event_crf SET frozen = true, date_updated = NOW(), update_id = $1 WHERE event_crf_id = $2`,
+        [userId, ecId]
+      );
+
+      // Sync patient_event_form
+      await client.query(`
+        UPDATE patient_event_form
+        SET is_frozen = true
+        WHERE event_crf_id = $1
+      `, [ecId]);
+
+      // Audit log
+      await client.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, audit_log_event_type_id)
+        VALUES (NOW(), 'event_crf', $1, $2, 'Data Frozen',
+          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1))
+      `, [userId, ecId]);
+
+      frozen++;
+    }
+
+    await client.query('COMMIT');
+    logger.info('Batch freeze complete', { frozen, failed });
+    return { success: failed === 0, frozen, failed, errors };
+  } catch (e: unknown) {
+    await client.query('ROLLBACK');
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.error('Batch freeze failed — rolled back', { error: msg });
+    return { success: false, frozen: 0, failed: eventCrfIds.length, errors: [msg] };
+  } finally {
+    client.release();
+  }
 };
 
 // ═══════════════════════════════════════════════════════════════════
 // DATA SANITATION (Study-wide pre-lock quality check)
 // ═══════════════════════════════════════════════════════════════════
-
-export interface SanitationReport {
-  studyId: number;
-  totalSubjects: number;
-  subjectsByStatus: {
-    noData: number;
-    inProgress: number;
-    complete: number;
-    frozen: number;
-    locked: number;
-  };
-  openQueriesTotal: number;
-  incompleteFormsTotal: number;
-  missingRequiredFieldsTotal: number;
-  pendingSDVTotal: number;
-  lockReadinessScore: number; // 0-100
-}
-
-export interface SanitationSubjectRow {
-  studySubjectId: number;
-  subjectLabel: string;
-  totalForms: number;
-  completeForms: number;
-  frozenForms: number;
-  lockedForms: number;
-  openQueries: number;
-  pendingSDV: number;
-  overallStatus: 'locked' | 'frozen' | 'complete' | 'in_progress' | 'no_data';
-}
 
 /**
  * Get a study-wide data quality / sanitation snapshot.
@@ -1171,7 +1479,11 @@ export const getStudySanitationReport = async (
 
     return {
       studyId,
+      generatedAt: new Date().toISOString(),
       totalSubjects,
+      readyCount: locked,
+      notReadyCount: totalSubjects - locked,
+      subjects: [],
       subjectsByStatus: { noData, inProgress, complete, frozen, locked },
       openQueriesTotal,
       incompleteFormsTotal,
@@ -1221,10 +1533,14 @@ export const getSanitationSubjects = async (
       SELECT
         ss.study_subject_id,
         ss.label AS subject_label,
+        COALESCE(site.name, '') AS site_name,
         COUNT(ec.event_crf_id) FILTER (WHERE ec.status_id NOT IN (5,7)) AS total_forms,
         COUNT(ec.event_crf_id) FILTER (WHERE ec.status_id IN (2) AND COALESCE(ec.frozen,false)=false) AS complete_forms,
         COUNT(ec.event_crf_id) FILTER (WHERE COALESCE(ec.frozen,false)=true AND ec.status_id!=6) AS frozen_forms,
         COUNT(ec.event_crf_id) FILTER (WHERE ec.status_id=6) AS locked_forms,
+        COUNT(ec.event_crf_id) FILTER (WHERE ec.status_id NOT IN (2,5,6,7) AND COALESCE(ec.frozen,false)=false) AS incomplete_forms,
+        COUNT(ec.event_crf_id) FILTER (WHERE COALESCE(ec.electronic_signature_status, false) = false AND ec.status_id NOT IN (5,7)) AS unsigned_forms,
+        COUNT(ec.event_crf_id) FILTER (WHERE COALESCE(ec.sdv_status, false) = false AND ec.status_id NOT IN (5,7)) AS unverified_forms,
         (
           SELECT COUNT(DISTINCT dn.discrepancy_note_id)
           FROM discrepancy_note dn
@@ -1255,11 +1571,12 @@ export const getSanitationSubjects = async (
         ) AS open_queries,
         ${sdvSubquery} AS pending_sdv
       FROM study_subject ss
+      LEFT JOIN study site ON ss.study_id = site.study_id
       LEFT JOIN study_event se ON ss.study_subject_id = se.study_subject_id
       LEFT JOIN event_crf ec ON se.study_event_id = ec.study_event_id
       WHERE ss.study_id = $1
         AND ss.status_id NOT IN (5,7)
-      GROUP BY ss.study_subject_id, ss.label
+      GROUP BY ss.study_subject_id, ss.label, site.name
       ORDER BY ss.label
       LIMIT $2 OFFSET $3
     `, [studyId, limit, offset]);
@@ -1277,6 +1594,9 @@ export const getSanitationSubjects = async (
       const lockedForms = parseInt(r.lockedForms || '0');
       const openQueries = parseInt(r.openQueries || '0');
       const pendingSDV = parseInt(r.pendingSdv || '0');
+      const incompleteForms = parseInt(r.incompleteForms || '0');
+      const unsignedForms = parseInt(r.unsignedForms || '0');
+      const unverifiedForms = parseInt(r.unverifiedForms || '0');
 
       let overallStatus: SanitationSubjectRow['overallStatus'] = 'no_data';
       if (totalForms === 0) overallStatus = 'no_data';
@@ -1285,9 +1605,17 @@ export const getSanitationSubjects = async (
       else if (completeForms + frozenForms + lockedForms === totalForms) overallStatus = 'complete';
       else overallStatus = 'in_progress';
 
+      const isReady = openQueries === 0 && incompleteForms === 0;
+
       return {
         studySubjectId: r.studySubjectId,
+        label: r.subjectLabel || '',
         subjectLabel: r.subjectLabel,
+        siteName: r.siteName || '',
+        isReady,
+        incompleteForms,
+        unsignedForms,
+        unverifiedForms,
         totalForms,
         completeForms,
         frozenForms,
@@ -1308,13 +1636,6 @@ export const getSanitationSubjects = async (
 // ═══════════════════════════════════════════════════════════════════
 // STUDY-LEVEL LOCK
 // ═══════════════════════════════════════════════════════════════════
-
-export interface StudyLockStatus {
-  studyId: number;
-  isLocked: boolean;
-  databaseLockDate?: string;
-  lockedByName?: string;
-}
 
 /**
  * Get the lock status of a study.
@@ -1504,19 +1825,32 @@ export const unlockRecord = async (eventCrfId: number, userId: number, reason?: 
   try {
     await client.query('BEGIN');
 
-    const updateQuery = `
-      UPDATE event_crf
-      SET status_id = 2, frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
-      WHERE event_crf_id = $1 AND status_id = 6
-      RETURNING *
-    `;
-
-    const result = await client.query(updateQuery, [eventCrfId, userId]);
-
-    if (result.rows.length === 0) {
+    // Acquire row lock to prevent concurrent unlock/lock
+    const lockCheck = await client.query(
+      `SELECT event_crf_id, status_id FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`,
+      [eventCrfId]
+    );
+    if (lockCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return { success: false, message: 'Record not found or not locked' };
     }
+    if (lockCheck.rows[0].statusId !== 6) {
+      await client.query('ROLLBACK');
+      return { success: false, message: 'Record not found or not locked' };
+    }
+
+    await client.query(`
+      UPDATE event_crf
+      SET status_id = 2, frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
+      WHERE event_crf_id = $1 AND status_id = 6
+    `, [eventCrfId, userId]);
+
+    // Sync patient_event_form
+    await client.query(`
+      UPDATE patient_event_form
+      SET is_locked = false, is_frozen = false
+      WHERE event_crf_id = $1
+    `, [eventCrfId]);
 
     await client.query(`
       INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, reason_for_change, audit_log_event_type_id)
@@ -1548,6 +1882,13 @@ export const unlockEventData = async (
   try {
     await client.query('BEGIN');
 
+    // Acquire row locks on all locked event_crf rows for this event
+    await client.query(`
+      SELECT event_crf_id FROM event_crf
+      WHERE study_event_id = $1 AND status_id = 6
+      FOR UPDATE
+    `, [studyEventId]);
+
     const unlockResult = await client.query(
       `UPDATE event_crf
        SET status_id = 2, frozen = false, update_id = $1, date_updated = CURRENT_TIMESTAMP
@@ -1556,6 +1897,17 @@ export const unlockEventData = async (
       [userId, studyEventId]
     );
     const unlockedCount = unlockResult.rowCount || 0;
+
+    // Sync patient_event_form for all unlocked forms
+    if (unlockedCount > 0) {
+      await client.query(`
+        UPDATE patient_event_form pef
+        SET is_locked = false, is_frozen = false
+        FROM event_crf ec
+        WHERE pef.event_crf_id = ec.event_crf_id
+          AND ec.study_event_id = $1
+      `, [studyEventId]);
+    }
 
     for (const row of unlockResult.rows) {
       await client.query(
@@ -1596,18 +1948,6 @@ export const unlockEventData = async (
 // CASEBOOK READINESS
 // ═══════════════════════════════════════════════════════════════════
 
-export interface CasebookReadiness {
-  studySubjectId: number;
-  subjectLabel: string;
-  totalForms: number;
-  completedForms: number;
-  sdvForms: number;
-  signedForms: number;
-  lockedForms: number;
-  frozenForms: number;
-  readinessPercent: number;
-}
-
 export const getSubjectCasebookReadiness = async (
   studySubjectId: number
 ): Promise<CasebookReadiness> => {
@@ -1632,6 +1972,35 @@ export const getSubjectCasebookReadiness = async (
     WHERE se.study_subject_id = $1
   `, [studySubjectId]);
 
+  const openQueriesResult = await pool.query(`
+    SELECT COUNT(DISTINCT dn.discrepancy_note_id) AS cnt
+    FROM discrepancy_note dn
+    WHERE dn.resolution_status_id NOT IN (4, 5)
+      AND dn.parent_dn_id IS NULL
+      AND (
+        EXISTS (
+          SELECT 1 FROM dn_event_crf_map dem
+          INNER JOIN event_crf ec ON dem.event_crf_id = ec.event_crf_id
+          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+          WHERE dem.discrepancy_note_id = dn.discrepancy_note_id
+            AND se.study_subject_id = $1
+        )
+        OR EXISTS (
+          SELECT 1 FROM dn_item_data_map dim
+          INNER JOIN item_data id ON dim.item_data_id = id.item_data_id
+          INNER JOIN event_crf ec ON id.event_crf_id = ec.event_crf_id
+          INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+          WHERE dim.discrepancy_note_id = dn.discrepancy_note_id
+            AND se.study_subject_id = $1
+        )
+        OR EXISTS (
+          SELECT 1 FROM dn_study_subject_map dssm
+          WHERE dssm.discrepancy_note_id = dn.discrepancy_note_id
+            AND dssm.study_subject_id = $1
+        )
+      )
+  `, [studySubjectId]);
+
   const r = result.rows[0] || {};
   const totalForms = parseInt(r.totalForms || '0');
   const completedForms = parseInt(r.completedForms || '0');
@@ -1639,6 +2008,13 @@ export const getSubjectCasebookReadiness = async (
   const signedForms = parseInt(r.signedForms || '0');
   const lockedForms = parseInt(r.lockedForms || '0');
   const frozenForms = parseInt(r.frozenForms || '0');
+  const openQueries = parseInt(openQueriesResult.rows[0]?.cnt || '0');
+
+  const allComplete = totalForms > 0 && completedForms === totalForms;
+  const allQueriesResolved = openQueries === 0;
+  const allSdvd = totalForms > 0 && sdvForms === totalForms;
+  const allSigned = totalForms > 0 && signedForms === totalForms;
+  const lockReady = allComplete && allQueriesResolved;
 
   let readinessPercent = 0;
   if (totalForms > 0) {
@@ -1652,6 +2028,12 @@ export const getSubjectCasebookReadiness = async (
   return {
     studySubjectId,
     subjectLabel,
+    allComplete,
+    allQueriesResolved,
+    allSdvd,
+    allSigned,
+    lockReady,
+    openQueries,
     totalForms,
     completedForms,
     sdvForms,
@@ -1712,20 +2094,14 @@ export const getStudyCasebookReadiness = async (
 // LOCK AUDIT HISTORY
 // ═══════════════════════════════════════════════════════════════════
 
-export interface LockHistoryEntry {
-  auditDate: string;
-  userName: string;
-  action: string;
-  reason: string | null;
-  entityId: number;
-}
-
 export const getFormLockHistory = async (
   eventCrfId: number
 ): Promise<LockHistoryEntry[]> => {
   const result = await pool.query(`
     SELECT
+      ale.audit_log_event_id,
       ale.audit_date,
+      ale.user_id,
       COALESCE(ua.first_name || ' ' || ua.last_name, 'System') AS user_name,
       ale.entity_name AS action,
       ale.reason_for_change AS reason,
@@ -1738,13 +2114,24 @@ export const getFormLockHistory = async (
     ORDER BY ale.audit_date DESC
   `, [eventCrfId]);
 
-  return result.rows.map((r: any) => ({
-    auditDate: r.auditDate,
-    userName: r.userName,
-    action: r.action,
-    reason: r.reason,
-    entityId: r.entityId
-  }));
+  return result.rows.map((r: any) => {
+    const actionStr: string = r.action || '';
+    let mappedAction: LockHistory['action'] = 'lock';
+    if (actionStr.includes('Unlocked')) mappedAction = 'unlock';
+    else if (actionStr.includes('Unfrozen')) mappedAction = 'unfreeze';
+    else if (actionStr.includes('Frozen')) mappedAction = 'freeze';
+
+    return {
+      lockId: r.auditLogEventId,
+      entityType: 'event_crf',
+      entityId: r.entityId,
+      action: mappedAction,
+      reason: r.reason,
+      performedBy: r.userId,
+      performedByName: r.userName,
+      performedAt: r.auditDate,
+    };
+  });
 };
 
 export const getSubjectLockHistory = async (
@@ -1752,7 +2139,10 @@ export const getSubjectLockHistory = async (
 ): Promise<LockHistoryEntry[]> => {
   const result = await pool.query(`
     SELECT
+      ale.audit_log_event_id,
       ale.audit_date,
+      ale.audit_table,
+      ale.user_id,
       COALESCE(ua.first_name || ' ' || ua.last_name, 'System') AS user_name,
       ale.entity_name AS action,
       ale.reason_for_change AS reason,
@@ -1778,13 +2168,24 @@ export const getSubjectLockHistory = async (
     ORDER BY ale.audit_date DESC
   `, [studySubjectId]);
 
-  return result.rows.map((r: any) => ({
-    auditDate: r.auditDate,
-    userName: r.userName,
-    action: r.action,
-    reason: r.reason,
-    entityId: r.entityId
-  }));
+  return result.rows.map((r: any) => {
+    const actionStr: string = r.action || '';
+    let mappedAction: LockHistory['action'] = 'lock';
+    if (actionStr.toLowerCase().includes('unlock')) mappedAction = 'unlock';
+    else if (actionStr.toLowerCase().includes('unfro')) mappedAction = 'unfreeze';
+    else if (actionStr.toLowerCase().includes('fro') && !actionStr.toLowerCase().includes('unfro')) mappedAction = 'freeze';
+
+    return {
+      lockId: r.auditLogEventId,
+      entityType: r.auditTable === 'study_subject' ? 'study_subject' : 'event_crf',
+      entityId: r.entityId,
+      action: mappedAction,
+      reason: r.reason,
+      performedBy: r.userId,
+      performedByName: r.userName,
+      performedAt: r.auditDate,
+    };
+  });
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1823,6 +2224,20 @@ export const freezeSubjectData = async (
       RETURNING ec.event_crf_id
     `, [studySubjectId, userId]);
     const frozenCount = freezeResult.rowCount || 0;
+
+    // Sync patient_event_form for all frozen forms
+    if (frozenCount > 0) {
+      await client.query(`
+        UPDATE patient_event_form pef
+        SET is_frozen = true
+        FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        WHERE pef.event_crf_id = ec.event_crf_id
+          AND se.study_subject_id = $1
+          AND ec.frozen = true
+          AND ec.status_id NOT IN (5, 6, 7)
+      `, [studySubjectId]);
+    }
 
     const subjectResult = await client.query(
       `SELECT label FROM study_subject WHERE study_subject_id = $1`,
@@ -1872,6 +2287,17 @@ export const unfreezeSubjectData = async (
   try {
     await client.query('BEGIN');
 
+    // Acquire row locks on all frozen event_crf rows for this subject
+    await client.query(`
+      SELECT ec.event_crf_id
+      FROM event_crf ec
+      INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+      WHERE se.study_subject_id = $1
+        AND ec.frozen = true
+        AND ec.status_id NOT IN (5, 6, 7)
+      FOR UPDATE OF ec
+    `, [studySubjectId]);
+
     const unfreezeResult = await client.query(`
       UPDATE event_crf ec
       SET frozen = false, update_id = $2, date_updated = CURRENT_TIMESTAMP
@@ -1883,6 +2309,18 @@ export const unfreezeSubjectData = async (
       RETURNING ec.event_crf_id
     `, [studySubjectId, userId]);
     const unfrozenCount = unfreezeResult.rowCount || 0;
+
+    // Sync patient_event_form for all unfrozen forms
+    if (unfrozenCount > 0) {
+      await client.query(`
+        UPDATE patient_event_form pef
+        SET is_frozen = false
+        FROM event_crf ec
+        INNER JOIN study_event se ON ec.study_event_id = se.study_event_id
+        WHERE pef.event_crf_id = ec.event_crf_id
+          AND se.study_subject_id = $1
+      `, [studySubjectId]);
+    }
 
     const subjectResult = await client.query(
       `SELECT label FROM study_subject WHERE study_subject_id = $1`,

@@ -263,13 +263,20 @@ export const bulkVerifySDV = async (eventCrfIds: number[], userId: number) => {
 
     await client.query('COMMIT');
 
-    for (const eventCrfId of verifiedIds) {
-      try {
-        await workflowService.triggerSDVCompletedWorkflow(eventCrfId, userId);
-        logger.info('Auto-completed SDV workflow tasks (bulk)', { eventCrfId });
-      } catch (workflowError: any) {
-        logger.warn('Failed to auto-complete SDV workflows (bulk)', { eventCrfId, error: workflowError.message });
+    // Workflow triggers run after COMMIT intentionally — workflow failures
+    // must not roll back SDV verification (the audit-critical operation).
+    // Each trigger is isolated so one failure doesn't prevent others.
+    try {
+      for (const eventCrfId of verifiedIds) {
+        try {
+          await workflowService.triggerSDVCompletedWorkflow(eventCrfId, userId);
+          logger.info('Auto-completed SDV workflow tasks (bulk)', { eventCrfId });
+        } catch (workflowError: any) {
+          logger.error('Failed to auto-complete SDV workflows (bulk)', { eventCrfId, error: workflowError.message });
+        }
       }
+    } catch (outerError: any) {
+      logger.error('Unexpected error in SDV workflow trigger loop', { error: outerError.message });
     }
 
     return { 

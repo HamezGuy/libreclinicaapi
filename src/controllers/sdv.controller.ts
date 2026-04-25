@@ -12,6 +12,9 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as sdvService from '../services/database/sdv.service';
+import { logger } from '../config/logger';
+import type { Part11Request } from '../middleware/part11.middleware';
+import type { ApiResponse, SDVRecord, SDVStats } from '@accura-trial/shared-types';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, subjectId, status, page, limit } = req.query;
@@ -24,7 +27,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     limit: parseInt(limit as string) || 20
   });
 
-  res.json(result);
+  res.json(result as ApiResponse<SDVRecord[]>);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
@@ -37,7 +40,8 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<SDVRecord> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -49,22 +53,34 @@ export const getFormData = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await sdvService.getSDVFormData(parseInt(id));
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 export const verify = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('SDV verification attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required for source data verification (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const user = (req as any).user;
   const { id } = req.params;
 
   const result = await sdvService.verifySDV(parseInt(id), user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
  * Bulk verify multiple SDV records
  */
 export const bulkVerify = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Bulk SDV verification attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required for bulk source data verification (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const user = (req as any).user;
   const { eventCrfIds } = req.body;
 
@@ -75,7 +91,7 @@ export const bulkVerify = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await sdvService.bulkVerifySDV(eventCrfIds, user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -86,7 +102,7 @@ export const getSubjectStatus = asyncHandler(async (req: Request, res: Response)
 
   const result = await sdvService.getSubjectSDVStatus(parseInt(subjectId));
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -102,7 +118,7 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await sdvService.getSDVStats(parseInt(studyId as string));
 
-  res.json(result);
+  res.json(result as ApiResponse<SDVStats>);
 });
 
 /**
@@ -118,19 +134,25 @@ export const getByVisit = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await sdvService.getSDVByVisit(parseInt(studyId as string));
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
  * Unverify SDV record
  */
 export const unverify = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('SDV unverify attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to remove SDV verification (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const user = (req as any).user;
   const { id } = req.params;
 
   const result = await sdvService.unverifySDV(parseInt(id), user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 export default { list, get, verify, bulkVerify, getSubjectStatus, getStats, getByVisit, unverify };

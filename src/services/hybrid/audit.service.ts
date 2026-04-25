@@ -22,22 +22,9 @@ import * as auditSoap from '../soap/auditSoap.service';
 import * as auditDb from '../database/audit.service';
 import { ApiResponse } from '../../types';
 import { AuditEventType, AuditRecord } from '../soap/auditSoap.service';
+import type { AuditQueryParams } from '@accura-trial/shared-types';
 
-/**
- * Audit query parameters
- */
-export interface AuditQueryParams {
-  studyId?: number;
-  subjectId?: number;
-  eventCrfId?: number;
-  userId?: number;
-  eventType?: string;
-  startDate?: string;
-  endDate?: string;
-  limit?: number;
-  offset?: number;
-  page?: number;
-}
+export type { AuditQueryParams };
 
 /**
  * Record an audit event

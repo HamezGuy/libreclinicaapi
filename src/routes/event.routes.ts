@@ -45,13 +45,13 @@ router.get('/instance/:studyEventId/lock-eligibility', controller.getVisitLockEl
 
 // Create/Update/Delete - require coordinator or admin role + signature
 router.post('/', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ body: eventSchemas.create }), 
   requireSignatureFor(SignatureMeanings.EVENT_CREATE),
   controller.create
 );
 router.put('/:id', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: eventSchemas.update }), 
   requireSignatureFor(SignatureMeanings.EVENT_UPDATE),
   controller.update
@@ -81,7 +81,7 @@ router.get('/study/:studyId/event/:eventId/available-crfs', controller.getAvaila
 
 // Assign CRF to event (signature required)
 router.post('/:eventId/crfs', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ body: eventSchemas.assignCrf }),
   requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
   controller.assignCrf
@@ -89,28 +89,28 @@ router.post('/:eventId/crfs',
 
 // Update CRF assignment settings (signature required)
 router.put('/crf-assignment/:crfAssignmentId', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.updateEventCrf
 );
 
 // Remove CRF from event (signature required)
 router.delete('/crf-assignment/:crfAssignmentId', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator'), 
   requireSignatureFor(SignatureMeanings.CRF_DELETE),
   controller.removeCrf
 );
 
 // Reorder CRFs within an event (signature required)
 router.put('/:eventId/crfs/reorder', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.reorderCrfs
 );
 
 // Bulk assign CRFs to event (signature required)
 router.post('/:eventId/crfs/bulk', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
   controller.bulkAssignCrfs
 );
@@ -121,14 +121,14 @@ router.post('/:eventId/crfs/bulk',
 
 // Assign form to a specific patient visit instance (does NOT modify template)
 router.post('/instance/:studyEventId/crfs', 
-  requireRole('admin', 'data_manager', 'coordinator'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
   validate({ body: eventSchemas.assignFormToPatientVisit }),
   controller.assignFormToPatientVisit
 );
 
 // Remove form from a specific patient visit instance (does NOT modify template)
 router.delete('/instance/:studyEventId/crfs/:eventCrfId', 
-  requireRole('admin', 'data_manager', 'coordinator'),
+  requireRole('admin', 'data_manager', 'coordinator', 'investigator'),
   controller.removeFormFromPatientVisit
 );
 
@@ -161,13 +161,13 @@ router.get('/verify/subject/:subjectId',
 
 // Repair missing patient_event_form snapshots
 router.post('/verify/subject/:subjectId/repair',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   controller.repairMissingSnapshots
 );
 
 // Refresh ALL snapshots (delete + re-create from current metadata)
 router.post('/verify/subject/:subjectId/refresh-snapshots',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   controller.refreshAllSnapshots
 );
 

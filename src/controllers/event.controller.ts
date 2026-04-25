@@ -7,6 +7,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as eventService from '../services/hybrid/event.service';
+import type { ApiResponse, CreateEventRequest, UpdateEventRequest, ScheduleEventRequest, StudyEventDefinition, EventCRF, LockEligibility } from '@accura-trial/shared-types';
 
 /**
  * List events - accepts studyId as query param for frontend compatibility
@@ -16,17 +17,19 @@ export const listEvents = asyncHandler(async (req: Request, res: Response) => {
   
   if (subjectId) {
     const result = await eventService.getSubjectEvents(parseInt(subjectId as string));
-    res.json({ success: true, data: result });
+    const response: ApiResponse<typeof result> = { success: true, data: result };
+    res.json(response);
     return;
   }
   
   if (studyId) {
     const result = await eventService.getStudyEvents(parseInt(studyId as string));
-    res.json({ success: true, data: result });
+    const response: ApiResponse<StudyEventDefinition[]> = { success: true, data: result };
+    res.json(response);
     return;
   }
   
-  res.json({ success: true, data: [] });
+  res.json({ success: true, data: [] } as ApiResponse<StudyEventDefinition[]>);
 });
 
 export const getStudyEvents = asyncHandler(async (req: Request, res: Response) => {
@@ -34,7 +37,8 @@ export const getStudyEvents = asyncHandler(async (req: Request, res: Response) =
 
   const result = await eventService.getStudyEvents(parseInt(studyId));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<StudyEventDefinition[]> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getEvent = asyncHandler(async (req: Request, res: Response) => {
@@ -43,11 +47,12 @@ export const getEvent = asyncHandler(async (req: Request, res: Response) => {
   const result = await eventService.getStudyEventById(parseInt(id));
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'Event not found' });
+    res.status(404).json({ success: false, message: 'Event not found' } as ApiResponse<null>);
     return;
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<StudyEventDefinition> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getSubjectEvents = asyncHandler(async (req: Request, res: Response) => {
@@ -55,7 +60,8 @@ export const getSubjectEvents = asyncHandler(async (req: Request, res: Response)
 
   const result = await eventService.getSubjectEvents(parseInt(subjectId));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getEventCRFs = asyncHandler(async (req: Request, res: Response) => {
@@ -63,7 +69,8 @@ export const getEventCRFs = asyncHandler(async (req: Request, res: Response) => 
 
   const result = await eventService.getEventCRFs(parseInt(id));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<EventCRF[]> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -75,7 +82,8 @@ export const getPatientEventCRFs = asyncHandler(async (req: Request, res: Respon
 
   const result = await eventService.getPatientEventCRFs(parseInt(studyEventId));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<EventCRF[]> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -88,16 +96,17 @@ export const getPatientEventCRFStatuses = asyncHandler(async (req: Request, res:
   const eventCrfs = await eventService.getPatientEventCRFs(parseInt(studyEventId));
 
   const statuses = eventCrfs.map((ec: any) => ({
-    crf_id: ec.crfId,
-    crf_name: ec.crfName,
-    event_crf_id: ec.eventCrfId,
+    crfId: ec.crfId,
+    crfName: ec.crfName,
+    eventCrfId: ec.eventCrfId,
     status: ec.completionStatus || 'not_started',
-    status_id: ec.completionStatusId,
-    completed_fields: parseInt(ec.filledFields) || 0,
-    total_fields: parseInt(ec.totalFields) || 0
+    statusId: ec.completionStatusId,
+    completedFields: parseInt(ec.filledFields) || 0,
+    totalFields: parseInt(ec.totalFields) || 0
   }));
 
-  res.json({ success: true, data: statuses });
+  const response: ApiResponse<typeof statuses> = { success: true, data: statuses };
+  res.json(response);
 });
 
 /**
@@ -135,7 +144,8 @@ export const getVisitForms = asyncHandler(async (req: Request, res: Response) =>
       : null
   }));
 
-  res.json({ success: true, data: forms });
+  const response: ApiResponse<typeof forms> = { success: true, data: forms };
+  res.json(response);
 });
 
 /**
@@ -145,11 +155,11 @@ export const getVisitForms = asyncHandler(async (req: Request, res: Response) =>
 export const getVisitLockEligibility = asyncHandler(async (req: Request, res: Response) => {
   const studyEventId = parseInt(req.params.studyEventId);
 
-  // Reuse the data-locks eligibility check
   const { checkEventLockEligibility } = await import('../services/database/data-locks.service');
   const eligibility = await checkEventLockEligibility(studyEventId);
 
-  res.json({ success: true, data: eligibility });
+  const response: ApiResponse<LockEligibility> = { success: true, data: eligibility };
+  res.json(response);
 });
 
 export const scheduleEvent = asyncHandler(async (req: Request, res: Response) => {
@@ -208,7 +218,8 @@ export const getAvailableCrfs = asyncHandler(async (req: Request, res: Response)
     user?.userId
   );
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -344,7 +355,7 @@ export const removeFormFromPatientVisit = asyncHandler(async (req: Request, res:
 export const createUnscheduledVisit = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   if (!user || !user.userId) {
-    res.status(401).json({ success: false, message: 'Authentication required' });
+    res.status(401).json({ success: false, message: 'Authentication required' } as ApiResponse<null>);
     return;
   }
 
@@ -365,7 +376,8 @@ export const getPatientFormSnapshots = asyncHandler(async (req: Request, res: Re
 
   const result = await eventService.getPatientFormSnapshots(parseInt(studyEventId));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -395,7 +407,8 @@ export const verifyPatientFormIntegrity = asyncHandler(async (req: Request, res:
 
   const result = await eventService.verifyPatientFormIntegrity(parseInt(subjectId));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -407,7 +420,8 @@ export const repairMissingSnapshots = asyncHandler(async (req: Request, res: Res
 
   const result = await eventService.repairMissingSnapshots(parseInt(subjectId), user.userId);
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -420,7 +434,8 @@ export const refreshAllSnapshots = asyncHandler(async (req: Request, res: Respon
 
   const result = await eventService.refreshAllSnapshots(parseInt(subjectId), user.userId);
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 export default { 

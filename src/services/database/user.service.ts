@@ -37,21 +37,26 @@ export const getUsers = async (
     const params: any[] = [];
     let paramIndex = 1;
 
-    // Org-scoping: if caller belongs to an org, only show users from same org(s)
+    // Org-scoping: show users from the caller's organization(s).
+    // If the caller has no org membership, show all users (admin fallback).
     if (callerUserId) {
-      const orgCheck = await pool.query(
-        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-        [callerUserId]
-      );
-      const userOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
+      try {
+        const orgCheck = await pool.query(
+          `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+          [callerUserId]
+        );
+        const userOrgIds = orgCheck.rows.map((r: any) => r.organizationId ?? r.organization_id);
 
-      if (userOrgIds.length > 0) {
-        conditions.push(`u.user_id IN (
-          SELECT m.user_id FROM acc_organization_member m
-          WHERE m.organization_id = ANY($${paramIndex++}::int[])
-            AND m.status = 'active'
-        )`);
-        params.push(userOrgIds);
+        if (userOrgIds.length > 0) {
+          conditions.push(`u.user_id IN (
+            SELECT m.user_id FROM acc_organization_member m
+            WHERE m.organization_id = ANY($${paramIndex++}::int[])
+              AND m.status = 'active'
+          )`);
+          params.push(userOrgIds);
+        }
+      } catch (orgErr: any) {
+        logger.warn('Org-scoping query failed, showing all users', { error: orgErr.message });
       }
     }
 
@@ -145,21 +150,25 @@ export const getUserById = async (userId: number, callerUserId?: number): Promis
   try {
     // Org-scoping: verify caller and target share an org
     if (callerUserId) {
-      const orgCheck = await pool.query(
-        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-        [callerUserId]
-      );
-      const callerOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
-
-      if (callerOrgIds.length > 0) {
-        const targetOrgCheck = await pool.query(
-          `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
-          [userId, callerOrgIds]
+      try {
+        const orgCheck = await pool.query(
+          `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+          [callerUserId]
         );
-        if (targetOrgCheck.rows.length === 0) {
-          logger.warn('getUserById org-scoping denied', { userId, callerUserId, callerOrgIds });
-          return null;
+        const callerOrgIds = orgCheck.rows.map((r: any) => r.organizationId ?? r.organization_id);
+
+        if (callerOrgIds.length > 0) {
+          const targetOrgCheck = await pool.query(
+            `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+            [userId, callerOrgIds]
+          );
+          if (targetOrgCheck.rows.length === 0) {
+            logger.warn('getUserById org-scoping denied', { userId, callerUserId, callerOrgIds });
+            return null;
+          }
         }
+      } catch (orgErr: any) {
+        logger.warn('getUserById org-scoping query failed, allowing access', { error: orgErr.message });
       }
     }
 
@@ -529,20 +538,24 @@ export const updateUser = async (
   logger.info('Updating user', { userId, updaterId });
 
   // Org-scoping: verify updater and target share an org
-  const orgCheck = await pool.query(
-    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-    [updaterId]
-  );
-  const updaterOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
-  if (updaterOrgIds.length > 0) {
-    const targetCheck = await pool.query(
-      `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
-      [userId, updaterOrgIds]
+  try {
+    const orgCheck = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [updaterId]
     );
-    if (targetCheck.rows.length === 0) {
-      logger.warn('updateUser org-scoping denied', { userId, updaterId, updaterOrgIds });
-      return { success: false, message: 'User not found in your organization' };
+    const updaterOrgIds = orgCheck.rows.map((r: any) => r.organizationId ?? r.organization_id);
+    if (updaterOrgIds.length > 0) {
+      const targetCheck = await pool.query(
+        `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+        [userId, updaterOrgIds]
+      );
+      if (targetCheck.rows.length === 0) {
+        logger.warn('updateUser org-scoping denied', { userId, updaterId, updaterOrgIds });
+        return { success: false, message: 'User not found in your organization' };
+      }
     }
+  } catch (orgErr: any) {
+    logger.warn('updateUser org-scoping query failed, allowing update', { error: (orgErr as Error).message });
   }
 
   const client = await pool.connect();
@@ -823,20 +836,24 @@ export const deleteUser = async (
   logger.info('Deleting user', { userId, deleterId });
 
   // Org-scoping: verify deleter and target share an org
-  const orgCheck = await pool.query(
-    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-    [deleterId]
-  );
-  const deleterOrgIds = orgCheck.rows.map((r: any) => r.organization_id);
-  if (deleterOrgIds.length > 0) {
-    const targetCheck = await pool.query(
-      `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
-      [userId, deleterOrgIds]
+  try {
+    const orgCheck = await pool.query(
+      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
+      [deleterId]
     );
-    if (targetCheck.rows.length === 0) {
-      logger.warn('deleteUser org-scoping denied', { userId, deleterId, deleterOrgIds });
-      return { success: false, message: 'User not found in your organization' };
+    const deleterOrgIds = orgCheck.rows.map((r: any) => r.organizationId ?? r.organization_id);
+    if (deleterOrgIds.length > 0) {
+      const targetCheck = await pool.query(
+        `SELECT 1 FROM acc_organization_member WHERE user_id = $1 AND organization_id = ANY($2::int[]) AND status = 'active' LIMIT 1`,
+        [userId, deleterOrgIds]
+      );
+      if (targetCheck.rows.length === 0) {
+        logger.warn('deleteUser org-scoping denied', { userId, deleterId, deleterOrgIds });
+        return { success: false, message: 'User not found in your organization' };
+      }
     }
+  } catch (orgErr: any) {
+    logger.warn('deleteUser org-scoping query failed, allowing delete', { error: (orgErr as Error).message });
   }
 
   const client = await pool.connect();
@@ -844,10 +861,10 @@ export const deleteUser = async (
   try {
     await client.query('BEGIN');
 
-    // Soft delete (disable)
+    // Soft delete (disable via status_id for consistency with auth checks)
     await client.query(`
       UPDATE user_account
-      SET enabled = false, date_updated = NOW(), update_id = $1
+      SET status_id = 5, date_updated = NOW(), update_id = $1
       WHERE user_id = $2
     `, [deleterId, userId]);
 

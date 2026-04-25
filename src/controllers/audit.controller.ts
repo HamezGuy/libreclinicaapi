@@ -5,6 +5,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as auditService from '../services/database/audit.service';
+import type { ApiResponse, AuditLogEvent } from '@accura-trial/shared-types';
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, subjectId, userId, eventType, startDate, endDate, page, limit } = req.query;
@@ -21,7 +22,7 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
     limit: parseInt(limit as string) || 50
   }, caller?.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse<AuditLogEvent[]>);
 });
 
 export const exportCsv = asyncHandler(async (req: Request, res: Response) => {
@@ -52,7 +53,7 @@ export const getSubjectAudit = asyncHandler(async (req: Request, res: Response) 
     caller?.userId
   );
 
-  res.json(result);
+  res.json(result as ApiResponse<AuditLogEvent[]>);
 });
 
 /**
@@ -60,7 +61,8 @@ export const getSubjectAudit = asyncHandler(async (req: Request, res: Response) 
  */
 export const getEventTypes = asyncHandler(async (req: Request, res: Response) => {
   const result = await auditService.getAuditEventTypes();
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -68,7 +70,8 @@ export const getEventTypes = asyncHandler(async (req: Request, res: Response) =>
  */
 export const getTables = asyncHandler(async (req: Request, res: Response) => {
   const result = await auditService.getAuditableTables();
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -83,7 +86,8 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
     caller?.userId
   );
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -95,7 +99,8 @@ export const getFormAudit = asyncHandler(async (req: Request, res: Response) => 
 
   const result = await auditService.getFormAudit(parseInt(eventCrfId), caller?.userId);
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<AuditLogEvent[]> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -106,7 +111,7 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
   const caller = (req as any).user;
 
   if (!startDate || !endDate) {
-    res.status(400).json({ success: false, message: 'startDate and endDate are required' });
+    res.status(400).json({ success: false, message: 'startDate and endDate are required' } as ApiResponse<null>);
     return;
   }
 
@@ -116,7 +121,7 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
     caller?.userId
   );
 
-  res.json(result);
+  res.json(result as ApiResponse<typeof result>);
 });
 
 /**
@@ -127,7 +132,7 @@ export const getComplianceReport = asyncHandler(async (req: Request, res: Respon
   const caller = (req as any).user;
 
   if (!startDate || !endDate) {
-    res.status(400).json({ success: false, message: 'startDate and endDate are required' });
+    res.status(400).json({ success: false, message: 'startDate and endDate are required' } as ApiResponse<null>);
     return;
   }
 
@@ -137,7 +142,7 @@ export const getComplianceReport = asyncHandler(async (req: Request, res: Respon
     studyId: studyId ? parseInt(studyId as string) : undefined
   }, caller?.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse<typeof result>);
 });
 
 /**
@@ -152,7 +157,8 @@ export const getRecent = asyncHandler(async (req: Request, res: Response) => {
     caller?.userId
   );
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<AuditLogEvent[]> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -175,7 +181,7 @@ export const getLoginHistory = asyncHandler(async (req: Request, res: Response) 
     offset: parseInt(offset as string) || 0
   }, caller?.userId);
 
-  res.json(result);
+  res.json(result as unknown as ApiResponse<typeof result>);
 });
 
 /**
@@ -191,7 +197,7 @@ export const getLoginStats = asyncHandler(async (req: Request, res: Response) =>
     caller?.userId
   );
 
-  res.json(result);
+  res.json(result as unknown as ApiResponse<typeof result>);
 });
 
 export default { 

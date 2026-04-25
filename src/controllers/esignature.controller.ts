@@ -14,6 +14,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as esignatureService from '../services/database/esignature.service';
 import { logger } from '../config/logger';
+import type { ApiResponse, SignatureRequest, SignatureRecord } from '@accura-trial/shared-types';
 
 /**
  * Verify user's password for electronic signature
@@ -75,7 +76,11 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   }
 
   // Validate entity type
-  const validEntityTypes = ['event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock', 'consent', 'study'];
+  const validEntityTypes = [
+    'event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock', 'consent', 'study',
+    'eventCrf', 'studyEvent', 'studySubject', 'discrepancyNote', 'dataLock',
+    'validationRule', 'validationRuleBatch', 'validation_rule', 'validation_rule_batch'
+  ];
   if (!validEntityTypes.includes(entityType)) {
     res.status(400).json({
       success: false,
@@ -86,12 +91,16 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
 
   // Validate meaning (21 CFR Part 11 §11.50)
   const validMeanings = [
-    'authorship',           // I am the author of this data
-    'approval',             // I approve this data
-    'responsibility',       // I take responsibility for this data
-    'review',               // I have reviewed this data
-    'verification',         // I verify this data against source documents
-    'acknowledgment'        // I acknowledge this information
+    'authorship',
+    'approval',
+    'responsibility',
+    'review',
+    'verification',
+    'acknowledgment',
+    'rule_authorship',
+    'rule_modification',
+    'rule_retirement',
+    'rule_batch_authorship'
   ];
   
   if (!validMeanings.includes(meaning)) {
@@ -143,7 +152,7 @@ export const getSignatureStatus = asyncHandler(async (req: Request, res: Respons
     return;
   }
 
-  const result = await esignatureService.getSignatureStatus(
+  const result: ApiResponse<SignatureRecord> = await esignatureService.getSignatureStatus(
     entityType,
     parseInt(entityId)
   );
@@ -165,7 +174,7 @@ export const getSignatureHistory = asyncHandler(async (req: Request, res: Respon
     return;
   }
 
-  const result = await esignatureService.getSignatureHistory(
+  const result: ApiResponse<SignatureRecord[]> = await esignatureService.getSignatureHistory(
     entityType,
     parseInt(entityId)
   );
@@ -255,18 +264,20 @@ export const invalidateSignature = asyncHandler(async (req: Request, res: Respon
   const user = (req as any).user;
   const { entityType, entityId, reason } = req.body;
 
-  if (!entityType || !entityId || !reason) {
+  if (!entityType || !entityId) {
     res.status(400).json({
       success: false,
-      message: 'entityType, entityId, and reason are required'
+      message: 'entityType and entityId are required'
     });
     return;
   }
 
+  const resolvedReason = reason || 'Record modified (auto-invalidation)';
+
   const result = await esignatureService.invalidateSignature(
     entityType,
     parseInt(entityId),
-    reason,
+    resolvedReason,
     user.userName || user.username
   );
 
@@ -275,7 +286,7 @@ export const invalidateSignature = asyncHandler(async (req: Request, res: Respon
       userId: user.userId,
       entityType,
       entityId,
-      reason,
+      reason: resolvedReason,
       timestamp: new Date().toISOString()
     });
   }
@@ -302,7 +313,11 @@ export const getCertificationStatus = asyncHandler(async (req: Request, res: Res
 export const logFailedAttempt = asyncHandler(async (req: Request, res: Response) => {
   const { entityType, entityId, username, reason, userAgent, timestamp } = req.body;
 
-  if (!entityType || !entityId || !username) {
+  // Prefer authenticated user's real username to prevent spoofing
+  // Rate limiting should be applied at the route level for this endpoint
+  const effectiveUsername = (req as any).user?.userName || username;
+
+  if (!entityType || !entityId || !effectiveUsername) {
     res.status(400).json({
       success: false,
       message: 'entityType, entityId, and username are required'
@@ -310,10 +325,10 @@ export const logFailedAttempt = asyncHandler(async (req: Request, res: Response)
     return;
   }
 
-  const result = await esignatureService.logFailedSignatureAttempt(
+  const result: ApiResponse<SignatureRecord> = await esignatureService.logFailedSignatureAttempt(
     entityType,
     parseInt(entityId),
-    username,
+    effectiveUsername,
     reason || 'Unknown failure',
     userAgent,
     timestamp

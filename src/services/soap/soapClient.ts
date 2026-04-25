@@ -18,7 +18,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../../config/environment';
 import { logger } from '../../config/logger';
-import { parseStringPromise } from 'xml2js';
+import { safeXmlParse } from '../../utils/xml-safe-parse';
 
 /**
  * SOAP client configuration
@@ -179,11 +179,11 @@ export class SoapClient {
    */
   private async parseSoapResponse(xmlResponse: string): Promise<any> {
     try {
-      const result = await parseStringPromise(xmlResponse, {
+      const result = await safeXmlParse(xmlResponse, {
         explicitArray: false,
         ignoreAttrs: false,
-        tagNameProcessors: [(name) => name.replace(/^.*:/, '')]
-      });
+        tagNameProcessors: [(name: string) => name.replace(/^.*:/, '')]
+      }) as Record<string, any>;
       
       // Extract body content
       const envelope = result.Envelope || result['SOAP-ENV:Envelope'] || result;

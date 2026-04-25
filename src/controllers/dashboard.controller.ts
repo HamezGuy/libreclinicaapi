@@ -5,6 +5,14 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as dashboardService from '../services/database/dashboard.service';
+import type {
+  ApiResponse, DashboardSummary, EnrollmentStats, CompletionStats,
+  QueryStats, UserActivityStats, SitePerformance, DataQualityMetrics,
+  SubjectStatusDistribution, ActivityFeedItem, StudyHealthScore,
+  EnrollmentTrendPoint, CompletionTrendPoint, FormCompletionRate,
+  SubjectProgressResponse, OverdueForm, DataLockProgress, SubjectLockReadiness,
+  CrfLifecycleResponse, ActionItemsSummary
+} from '@accura-trial/shared-types';
 
 /**
  * Get dashboard summary (combined stats for frontend)
@@ -45,7 +53,7 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
       }))
     ]);
 
-    res.json({
+    const response: ApiResponse<DashboardSummary> = {
       success: true,
       data: {
         studyId: sid,
@@ -53,11 +61,13 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
         completion,
         queries,
         lastUpdated: new Date()
-      }
-    });
+      } as DashboardSummary
+    };
+
+    res.json(response);
   } catch (error) {
     // Return empty summary on error
-    res.json({
+    const fallback: ApiResponse<DashboardSummary> = {
       success: true,
       data: {
         studyId: sid,
@@ -65,8 +75,9 @@ export const getSummary = asyncHandler(async (req: Request, res: Response) => {
         completion: { totalCRFs: 0, completedCRFs: 0, incompleteCRFs: 0, completionPercentage: 0, completionByForm: [], averageCompletionTime: 0 },
         queries: { totalQueries: 0, openQueries: 0, closedQueries: 0, queriesByType: [], queriesByStatus: [], averageResolutionTime: 0, queryRate: 0 },
         lastUpdated: new Date()
-      }
-    });
+      } as DashboardSummary
+    };
+    res.json(fallback);
   }
 });
 
@@ -94,7 +105,7 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
       auditEvents30Days: 0
     }));
 
-    res.json({
+    const response: ApiResponse<{ studyId: number; healthScore: StudyHealthScore; dataQuality: DataQualityMetrics; lastUpdated: Date }> = {
       success: true,
       data: {
         studyId: sid,
@@ -102,17 +113,20 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
         dataQuality,
         lastUpdated: new Date()
       }
-    });
+    };
+
+    res.json(response);
   } catch (error) {
-    res.json({
+    const fallback: ApiResponse<{ studyId: number; healthScore: StudyHealthScore; dataQuality: DataQualityMetrics; lastUpdated: Date }> = {
       success: true,
       data: {
         studyId: sid,
         healthScore: { score: 0, factors: {} },
         dataQuality: {},
         lastUpdated: new Date()
-      }
-    });
+      } as { studyId: number; healthScore: StudyHealthScore; dataQuality: DataQualityMetrics; lastUpdated: Date }
+    };
+    res.json(fallback);
   }
 });
 
@@ -125,7 +139,8 @@ export const getEnrollment = asyncHandler(async (req: Request, res: Response) =>
     endDate ? new Date(endDate as string) : undefined
   );
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<EnrollmentStats> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getCompletion = asyncHandler(async (req: Request, res: Response) => {
@@ -133,7 +148,8 @@ export const getCompletion = asyncHandler(async (req: Request, res: Response) =>
 
   const result = await dashboardService.getCompletionStats(parseInt(studyId as string));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<CompletionStats> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getQueries = asyncHandler(async (req: Request, res: Response) => {
@@ -144,7 +160,7 @@ export const getQueries = asyncHandler(async (req: Request, res: Response) => {
     (timeframe as 'week' | 'month' | 'quarter' | 'year') || 'month'
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<QueryStats>);
 });
 
 export const getActivity = asyncHandler(async (req: Request, res: Response) => {
@@ -155,7 +171,7 @@ export const getActivity = asyncHandler(async (req: Request, res: Response) => {
     parseInt(days as string) || 30
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<UserActivityStats>);
 });
 
 /**
@@ -169,7 +185,7 @@ export const getEnrollmentTrend = asyncHandler(async (req: Request, res: Respons
     parseInt(days as string) || 30
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<EnrollmentTrendPoint[]>);
 });
 
 /**
@@ -183,7 +199,7 @@ export const getCompletionTrend = asyncHandler(async (req: Request, res: Respons
     parseInt(days as string) || 30
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<CompletionTrendPoint[]>);
 });
 
 /**
@@ -194,7 +210,7 @@ export const getSitePerformance = asyncHandler(async (req: Request, res: Respons
 
   const result = await dashboardService.getSitePerformance(parseInt(studyId as string));
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<SitePerformance[]>);
 });
 
 /**
@@ -209,7 +225,7 @@ export const getFormCompletionRates = asyncHandler(async (req: Request, res: Res
     user?.userId
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<FormCompletionRate[]>);
 });
 
 /**
@@ -220,7 +236,7 @@ export const getDataQualityMetrics = asyncHandler(async (req: Request, res: Resp
 
   const result = await dashboardService.getDataQualityMetrics(parseInt(studyId as string));
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<DataQualityMetrics>);
 });
 
 /**
@@ -231,7 +247,7 @@ export const getSubjectStatusDistribution = asyncHandler(async (req: Request, re
 
   const result = await dashboardService.getSubjectStatusDistribution(parseInt(studyId as string));
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<SubjectStatusDistribution[]>);
 });
 
 /**
@@ -245,7 +261,7 @@ export const getActivityFeed = asyncHandler(async (req: Request, res: Response) 
     parseInt(limit as string) || 20
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<ActivityFeedItem[]>);
 });
 
 /**
@@ -256,7 +272,7 @@ export const getStudyHealthScore = asyncHandler(async (req: Request, res: Respon
 
   const result = await dashboardService.getStudyHealthScore(parseInt(studyId as string));
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<StudyHealthScore>);
 });
 
 /**
@@ -271,7 +287,7 @@ export const getUserAnalytics = asyncHandler(async (req: Request, res: Response)
     parseInt(days as string) || 30
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<UserActivityStats>);
 });
 
 /**
@@ -286,19 +302,19 @@ export const getTopPerformers = asyncHandler(async (req: Request, res: Response)
     parseInt(limit as string) || 10
   );
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<UserActivityStats[]>);
 });
 
 export const getQueryAgingAnalysis = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   const result = await dashboardService.getQueryAgingAnalysis(parseInt(studyId as string) || 1);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<QueryStats>);
 });
 
 export const getVisitWindowCompliance = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   const result = await dashboardService.getVisitWindowCompliance(parseInt(studyId as string) || 1);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse);
 });
 
 export const getSubjectProgressMatrix = asyncHandler(async (req: Request, res: Response) => {
@@ -309,31 +325,31 @@ export const getSubjectProgressMatrix = asyncHandler(async (req: Request, res: R
     parseInt(page as string) || 1,
     parseInt(pageSize as string) || 50
   );
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<SubjectProgressResponse>);
 });
 
 export const getOverdueForms = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   const result = await dashboardService.getOverdueForms(parseInt(studyId as string) || 1);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<OverdueForm[]>);
 });
 
 export const getDataLockProgress = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   const result = await dashboardService.getDataLockProgress(parseInt(studyId as string) || 1);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<DataLockProgress>);
 });
 
 export const getCrfLifecycle = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   const result = await dashboardService.getCrfLifecycleSummary(parseInt(studyId as string) || 1);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<CrfLifecycleResponse>);
 });
 
 export const getActionItems = asyncHandler(async (req: Request, res: Response) => {
   const { studyId } = req.query;
   const result = await dashboardService.getActionItems(parseInt(studyId as string) || 1);
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } as ApiResponse<ActionItemsSummary>);
 });
 
 export default { 

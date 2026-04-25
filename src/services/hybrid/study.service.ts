@@ -68,6 +68,7 @@ export const getStudies = async (
   userId: number,
   filters: {
     status?: string;
+    search?: string;
     page?: number;
     limit?: number;
   },
@@ -76,7 +77,7 @@ export const getStudies = async (
   logger.info('📋 Getting studies for user (SOAP primary)', { userId, filters, soapEnabled: config.libreclinica.soapEnabled });
 
   try {
-    const { status, page = 1, limit = 20 } = filters;
+    const { status, search, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
 
     // NOTE: Disabled SOAP for study listing because SOAP returns studies that may not exist
@@ -191,6 +192,17 @@ export const getStudies = async (
       // By default, exclude archived/removed studies (status_id = 5 and 7)
       // Users must explicitly request status='removed' to see archived studies
       conditions.push(`s.status_id NOT IN (5, 7)`);
+    }
+
+    if (search && search.trim()) {
+      conditions.push(`(
+        s.name ILIKE $${paramIndex} 
+        OR s.unique_identifier ILIKE $${paramIndex}
+        OR s.summary ILIKE $${paramIndex}
+        OR s.principal_investigator ILIKE $${paramIndex}
+      )`);
+      params.push(`%${search.trim()}%`);
+      paramIndex++;
     }
 
     const whereClause = conditions.join(' AND ');
@@ -665,32 +677,150 @@ async function getStudyMetadataFromDb(studyId: number): Promise<StudyMetadata> {
 }
 
 /**
- * Get study sites
+ * Get study sites (child studies with parent_study_id = studyId)
+ * Returns full site detail including facility, contact, and enrollment data.
  */
-export const getStudySites = async (studyId: number): Promise<any[]> => {
+export const getStudySites = async (studyId: number, userId?: number): Promise<Record<string, unknown>[]> => {
   logger.info('Getting study sites', { studyId });
 
-  try {
-    const query = `
-      SELECT DISTINCT
-        s.study_id,
-        s.unique_identifier,
-        s.name,
-        s.status_id,
-        st.name as status_name
-      FROM study s
-      INNER JOIN status st ON s.status_id = st.status_id
-      WHERE s.parent_study_id = $1 OR s.study_id = $1
-      ORDER BY s.name
-    `;
+  const query = `
+    SELECT 
+      s.study_id,
+      s.unique_identifier,
+      s.name,
+      s.summary,
+      s.principal_investigator,
+      s.facility_name,
+      s.facility_address,
+      s.facility_city,
+      s.facility_state,
+      s.facility_zip,
+      s.facility_country,
+      s.facility_recruitment_status,
+      s.facility_contact_name,
+      s.facility_contact_degree,
+      s.facility_contact_email,
+      s.facility_contact_phone,
+      st.name as status_name,
+      s.status_id,
+      s.date_created,
+      s.expected_total_enrollment,
+      (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects
+    FROM study s
+    INNER JOIN status st ON s.status_id = st.status_id
+    WHERE s.parent_study_id = $1
+    ORDER BY s.name
+  `;
 
-    const result = await pool.query(query, [studyId]);
+  const result = await pool.query(query, [studyId]);
+  return result.rows;
+};
 
-    return result.rows;
-  } catch (error: any) {
-    logger.error('Get study sites error', { error: error.message });
-    throw error;
-  }
+/**
+ * Get study event definitions (visits/phases) with form counts.
+ * Excludes removed/auto-removed events (status_id NOT IN 5, 7).
+ */
+export const getStudyEventDefinitions = async (studyId: number): Promise<Record<string, unknown>[]> => {
+  logger.info('Getting study event definitions', { studyId });
+
+  const query = `
+    SELECT 
+      sed.study_event_definition_id,
+      sed.oc_oid,
+      sed.name,
+      sed.description,
+      sed.type,
+      sed.repeating,
+      sed.category,
+      sed.ordinal,
+      sed.schedule_day,
+      sed.min_day,
+      sed.max_day,
+      sed.reference_event_id,
+      st.name as status_name,
+      sed.status_id,
+      (
+        SELECT COUNT(DISTINCT edc.crf_id)
+        FROM event_definition_crf edc
+        WHERE edc.study_event_definition_id = sed.study_event_definition_id
+          AND edc.status_id NOT IN (5, 7)
+      ) as form_count
+    FROM study_event_definition sed
+    INNER JOIN status st ON sed.status_id = st.status_id
+    WHERE sed.study_id = $1
+      AND sed.status_id NOT IN (5, 7)
+    ORDER BY sed.ordinal
+  `;
+
+  const result = await pool.query(query, [studyId]);
+  return result.rows;
+};
+
+/**
+ * Get aggregate study statistics: enrollment, queries, sites, events, forms.
+ * Returns null when the study does not exist.
+ */
+export const getStudyStats = async (studyId: number): Promise<Record<string, unknown> | null> => {
+  logger.info('Getting study statistics', { studyId });
+
+  const query = `
+    SELECT 
+      s.expected_total_enrollment as target_enrollment,
+      (SELECT COUNT(*) FROM study_subject WHERE study_id = $1) as total_subjects,
+      (SELECT COUNT(*) FROM study_subject WHERE study_id = $1 AND status_id = 1) as active_subjects,
+      (SELECT COUNT(*) FROM study_subject ss
+       INNER JOIN study_event se ON ss.study_subject_id = se.study_subject_id
+       INNER JOIN subject_event_status ses ON se.subject_event_status_id = ses.subject_event_status_id
+       WHERE ss.study_id = $1 AND ses.name = 'completed') as completed_subjects,
+      (SELECT COUNT(*) FROM discrepancy_note dn
+       INNER JOIN dn_study_subject_map dnm ON dn.discrepancy_note_id = dnm.discrepancy_note_id
+       INNER JOIN study_subject ss ON dnm.study_subject_id = ss.study_subject_id
+       WHERE ss.study_id = $1 AND dn.parent_dn_id IS NULL) as total_queries,
+      (SELECT COUNT(*) FROM discrepancy_note dn
+       INNER JOIN dn_study_subject_map dnm ON dn.discrepancy_note_id = dnm.discrepancy_note_id
+       INNER JOIN study_subject ss ON dnm.study_subject_id = ss.study_subject_id
+       INNER JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
+       WHERE ss.study_id = $1 AND dn.parent_dn_id IS NULL 
+       AND rs.name NOT IN ('Closed', 'Not Applicable')) as open_queries,
+      (SELECT COUNT(DISTINCT s2.study_id) FROM study s2 WHERE s2.parent_study_id = $1) as site_count,
+      (SELECT COUNT(*) FROM study_event_definition WHERE study_id = $1) as event_count,
+      (SELECT COUNT(*) FROM crf WHERE source_study_id = $1 AND status_id NOT IN (5, 6, 7)) as form_count
+    FROM study s
+    WHERE s.study_id = $1
+  `;
+
+  const result = await pool.query(query, [studyId]);
+  if (result.rows.length === 0) return null;
+  return result.rows[0];
+};
+
+/**
+ * Get users assigned to a study with their roles.
+ * Only returns active assignments (status_id = 1).
+ */
+export const getStudyUsers = async (studyId: number): Promise<Record<string, unknown>[]> => {
+  logger.info('Getting study users', { studyId });
+
+  const query = `
+    SELECT 
+      u.user_id,
+      u.user_name,
+      u.first_name,
+      u.last_name,
+      u.email,
+      u.phone,
+      sur.role_name,
+      sur.date_created,
+      st.name as status_name
+    FROM study_user_role sur
+    INNER JOIN user_account u ON sur.user_name = u.user_name
+    INNER JOIN status st ON sur.status_id = st.status_id
+    WHERE sur.study_id = $1 AND sur.status_id = 1
+    ORDER BY sur.role_name, u.last_name
+  `;
+
+  const result = await pool.query(query, [studyId]);
+  return result.rows;
 };
 
 // NOTE: getStudyForms moved to form.service.ts to avoid duplication
@@ -2119,6 +2249,9 @@ export default {
   getStudyById,
   getStudyMetadata,
   getStudySites,
+  getStudyEventDefinitions,
+  getStudyStats,
+  getStudyUsers,
   createStudy,
   updateStudy,
   deleteStudy

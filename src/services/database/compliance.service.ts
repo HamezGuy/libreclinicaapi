@@ -72,15 +72,7 @@ export enum LibreClinicaAuditEventType {
   EVENT_CRF_STARTED = 41
 }
 
-/**
- * Signature meaning types for 21 CFR Part 11 §11.50
- */
-export type SignatureMeaning = 
-  | 'authorship'        // I am the author of this data
-  | 'approval'          // I approve this data
-  | 'responsibility'    // I take responsibility for this data
-  | 'review'            // I have reviewed this data
-  | 'verification';     // I verify this data (SDV)
+import { SignatureMeaning } from '../../types';
 
 /**
  * Log an audit event using LibreClinica's audit_log_event table

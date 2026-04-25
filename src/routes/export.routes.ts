@@ -6,7 +6,6 @@
 import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as exportService from '../services/export/export.service';
-import { pool } from '../config/database';
 import { logger } from '../config/logger';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
@@ -25,23 +24,7 @@ router.get('/forms/:studyId', asyncHandler(async (req: Request, res: Response) =
   logger.info('Getting study forms for export', { studyId });
 
   try {
-    const query = `
-      SELECT DISTINCT c.crf_id, c.name, c.description, c.oc_oid,
-        (SELECT COUNT(*) FROM crf_version cv WHERE cv.crf_id = c.crf_id AND cv.status_id = 1) as version_count
-      FROM crf c
-      WHERE c.source_study_id = $1 AND c.status_id = 1
-      ORDER BY c.name
-    `;
-    const result = await pool.query(query, [parseInt(studyId)]);
-    
-    const forms = result.rows.map(row => ({
-      crfId: row.crfId,
-      name: row.name,
-      description: row.description || '',
-      oid: row.ocOid,
-      versionCount: parseInt(row.versionCount) || 0
-    }));
-    
+    const forms = await exportService.getStudyForms(parseInt(studyId));
     res.json({ success: true, data: forms });
   } catch (error: any) {
     logger.error('Error fetching study forms for export', { error: error.message });
@@ -59,28 +42,7 @@ router.get('/events/:studyId', asyncHandler(async (req: Request, res: Response) 
   logger.info('Getting study events for export', { studyId });
 
   try {
-    const query = `
-      SELECT sed.study_event_definition_id, sed.name, sed.description, sed.oc_oid,
-        sed.ordinal, sed.type, sed.repeating,
-        (SELECT COUNT(DISTINCT se.study_subject_id) 
-         FROM study_event se WHERE se.study_event_definition_id = sed.study_event_definition_id) as subject_count
-      FROM study_event_definition sed
-      WHERE sed.study_id = $1 AND sed.status_id = 1
-      ORDER BY sed.ordinal
-    `;
-    const result = await pool.query(query, [parseInt(studyId)]);
-    
-    const events = result.rows.map(row => ({
-      eventDefinitionId: row.studyEventDefinitionId,
-      name: row.name,
-      description: row.description || '',
-      oid: row.ocOid,
-      ordinal: row.ordinal,
-      type: row.type || 'scheduled',
-      repeating: row.repeating || false,
-      subjectCount: parseInt(row.subjectCount) || 0
-    }));
-    
+    const events = await exportService.getStudyEvents(parseInt(studyId));
     res.json({ success: true, data: events });
   } catch (error: any) {
     logger.error('Error fetching study events for export', { error: error.message });

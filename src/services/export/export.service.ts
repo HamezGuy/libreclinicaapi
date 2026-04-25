@@ -416,6 +416,8 @@ export const executeExport = async (
         mimeType = 'text/plain';
         extension = 'txt';
         break;
+      case 'spss':
+        throw new Error('SPSS export format is not yet implemented');
       default:
         throw new Error(`Unsupported export format: ${format}`);
     }
@@ -740,7 +742,7 @@ export const buildFullOdmExport = async (
     </GlobalVariables>
     <MetaDataVersion OID="v1.0.0" Name="Version 1.0.0">`;
   
-  // Get all CRFs for this study
+  // Get all CRFs for this study (metadata section — small fixed set, not N+1)
   const crfsResult = await pool.query(`
     SELECT DISTINCT c.crf_id, c.name, c.oc_oid, cv.crf_version_id, cv.oc_oid as version_oid
     FROM crf c
@@ -749,22 +751,34 @@ export const buildFullOdmExport = async (
     ORDER BY c.name
   `, [study.studyId]);
   
+  const crfVersionIds = crfsResult.rows.map((crf: Record<string, unknown>) => crf.crfVersionId);
+
+  // Batch-fetch all item groups for all CRF versions in one query
+  let itemGroupsByCrfVersion = new Map<number, Array<Record<string, unknown>>>();
+  if (crfVersionIds.length > 0) {
+    const igResult = await pool.query(`
+      SELECT DISTINCT ig.item_group_id, ig.name, ig.oc_oid, igm.crf_version_id
+      FROM item_group ig
+      INNER JOIN item_group_metadata igm ON ig.item_group_id = igm.item_group_id
+      WHERE igm.crf_version_id = ANY($1)
+    `, [crfVersionIds]);
+
+    for (const row of igResult.rows) {
+      const list = itemGroupsByCrfVersion.get(row.crfVersionId as number) || [];
+      list.push(row as Record<string, unknown>);
+      itemGroupsByCrfVersion.set(row.crfVersionId as number, list);
+    }
+  }
+
   // Add FormDef elements
   for (const crf of crfsResult.rows) {
     odmXml += `
       <FormDef OID="${escapeXml(crf.ocOid)}" Name="${escapeXml(crf.name)}" Repeating="No">`;
     
-    // Get item groups for this CRF
-    const itemGroupsResult = await pool.query(`
-      SELECT DISTINCT ig.item_group_id, ig.name, ig.oc_oid
-      FROM item_group ig
-      INNER JOIN item_group_metadata igm ON ig.item_group_id = igm.item_group_id
-      WHERE igm.crf_version_id = $1
-    `, [crf.crfVersionId]);
-    
-    for (const ig of itemGroupsResult.rows) {
+    const itemGroups = itemGroupsByCrfVersion.get(crf.crfVersionId) || [];
+    for (const ig of itemGroups) {
       odmXml += `
-        <ItemGroupRef ItemGroupOID="${escapeXml(ig.ocOid)}" Mandatory="No"/>`;
+        <ItemGroupRef ItemGroupOID="${escapeXml(ig.ocOid as string)}" Mandatory="No"/>`;
     }
     
     odmXml += `
@@ -776,106 +790,121 @@ export const buildFullOdmExport = async (
   </Study>
   <ClinicalData StudyOID="${escapeXml(study.ocOid)}" MetaDataVersionOID="v1.0.0">`;
   
-  // Get all subjects with their data
-  const subjectsResult = await pool.query(`
+  // Single JOINed query: fetch all clinical data in one round-trip
+  const clinicalDataResult = await pool.query(`
     SELECT 
-      ss.study_subject_id,
-      ss.label as study_subject_id_label,
-      ss.oc_oid,
-      s.unique_identifier as subject_id,
-      s.gender,
-      s.date_of_birth,
-      ss.status_id
+      ss.oc_oid as subject_oid, ss.label, s.unique_identifier as subject_unique_id,
+      s.gender, s.date_of_birth,
+      sed.oc_oid as event_oid, se.sample_ordinal,
+      cv.oc_oid as form_oid,
+      ig.oc_oid as item_group_oid,
+      i.oc_oid as item_oid, id.value, id.ordinal as item_ordinal
     FROM study_subject ss
     INNER JOIN subject s ON ss.subject_id = s.subject_id
-    WHERE ss.study_id = $1
-    ORDER BY ss.label
+    LEFT JOIN study_event se ON se.study_subject_id = ss.study_subject_id
+    LEFT JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
+    LEFT JOIN event_crf ec ON ec.study_event_id = se.study_event_id AND ec.status_id NOT IN (5, 7)
+    LEFT JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
+    LEFT JOIN item_data id ON id.event_crf_id = ec.event_crf_id AND id.deleted = false AND id.status_id NOT IN (5, 7)
+    LEFT JOIN item i ON id.item_id = i.item_id
+    LEFT JOIN item_group_metadata igm ON i.item_id = igm.item_id AND igm.crf_version_id = cv.crf_version_id
+    LEFT JOIN item_group ig ON igm.item_group_id = ig.item_group_id
+    WHERE ss.study_id = $1 AND ss.status_id NOT IN (5, 7)
+    ORDER BY ss.label, sed.ordinal, se.sample_ordinal, cv.oc_oid, ig.oc_oid, i.oc_oid
   `, [study.studyId]);
-  
-  for (const subject of subjectsResult.rows) {
+
+  // Group flat result set into nested XML tree:
+  // subject -> event+repeatKey -> form -> itemGroup -> items
+  interface ItemEntry { itemOid: string; value: string }
+  interface GroupEntry { items: ItemEntry[] }
+  interface FormEntry { groups: Map<string, GroupEntry> }
+  interface EventEntry { sampleOrdinal: number; forms: Map<string, FormEntry> }
+  interface SubjectEntry {
+    oid: string;
+    label: string;
+    events: Map<string, EventEntry>;
+  }
+
+  const subjects = new Map<string, SubjectEntry>();
+
+  for (const row of clinicalDataResult.rows) {
+    const subjectKey = row.subjectOid as string;
+
+    if (!subjects.has(subjectKey)) {
+      subjects.set(subjectKey, {
+        oid: row.subjectOid as string,
+        label: row.label as string,
+        events: new Map()
+      });
+    }
+    const subject = subjects.get(subjectKey)!;
+
+    if (!row.eventOid) continue;
+
+    const eventKey = `${row.eventOid}_${row.sampleOrdinal}`;
+    if (!subject.events.has(eventKey)) {
+      subject.events.set(eventKey, {
+        sampleOrdinal: row.sampleOrdinal as number,
+        forms: new Map()
+      });
+    }
+    const event = subject.events.get(eventKey)!;
+
+    if (!row.formOid) continue;
+
+    const formKey = row.formOid as string;
+    if (!event.forms.has(formKey)) {
+      event.forms.set(formKey, { groups: new Map() });
+    }
+    const form = event.forms.get(formKey)!;
+
+    if (!row.itemOid || !row.itemGroupOid) continue;
+
+    const groupKey = row.itemGroupOid as string;
+    if (!form.groups.has(groupKey)) {
+      form.groups.set(groupKey, { items: [] });
+    }
+    form.groups.get(groupKey)!.items.push({
+      itemOid: row.itemOid as string,
+      value: (row.value as string) || ''
+    });
+  }
+
+  // Render the grouped data into ODM XML
+  for (const subject of subjects.values()) {
     odmXml += `
-    <SubjectData SubjectKey="${escapeXml(subject.ocOid)}" OpenClinica:StudySubjectID="${escapeXml(subject.studySubjectIdLabel)}">`;
-    
-    // Get study events for this subject
-    const eventsResult = await pool.query(`
-      SELECT 
-        se.study_event_id,
-        sed.oc_oid as event_oid,
-        sed.name as event_name,
-        se.sample_ordinal,
-        se.date_start,
-        se.date_end,
-        se.location
-      FROM study_event se
-      INNER JOIN study_event_definition sed ON se.study_event_definition_id = sed.study_event_definition_id
-      WHERE se.study_subject_id = $1
-      ORDER BY se.sample_ordinal
-    `, [subject.studySubjectId]);
-    
-    for (const event of eventsResult.rows) {
+    <SubjectData SubjectKey="${escapeXml(subject.oid)}" OpenClinica:StudySubjectID="${escapeXml(subject.label)}">`;
+
+    for (const [eventKey, event] of subject.events) {
+      const eventOid = eventKey.substring(0, eventKey.lastIndexOf('_'));
       odmXml += `
-      <StudyEventData StudyEventOID="${escapeXml(event.eventOid)}" StudyEventRepeatKey="${event.sampleOrdinal}">`;
-      
-      // Get CRF data for this event
-      const eventCrfsResult = await pool.query(`
-        SELECT 
-          ec.event_crf_id,
-          cv.oc_oid as form_oid,
-          c.name as form_name
-        FROM event_crf ec
-        INNER JOIN crf_version cv ON ec.crf_version_id = cv.crf_version_id
-        INNER JOIN crf c ON cv.crf_id = c.crf_id
-        WHERE ec.study_event_id = $1
-      `, [event.studyEventId]);
-      
-      for (const eventCrf of eventCrfsResult.rows) {
+      <StudyEventData StudyEventOID="${escapeXml(eventOid)}" StudyEventRepeatKey="${event.sampleOrdinal}">`;
+
+      for (const [formOid, form] of event.forms) {
         odmXml += `
-        <FormData FormOID="${escapeXml(eventCrf.formOid)}">`;
-        
-        // Get item data
-        const itemDataResult = await pool.query(`
-          SELECT 
-            id.item_data_id,
-            i.oc_oid as item_oid,
-            i.name as item_name,
-            id.value,
-            ig.oc_oid as item_group_oid
-          FROM item_data id
-          INNER JOIN item i ON id.item_id = i.item_id
-          INNER JOIN item_group_metadata igm ON i.item_id = igm.item_id
-          INNER JOIN item_group ig ON igm.item_group_id = ig.item_group_id
-          WHERE id.event_crf_id = $1 AND id.deleted = false
-        `, [eventCrf.eventCrfId]);
-        
-        // Group items by item_group
-        const itemsByGroup = new Map<string, any[]>();
-        for (const item of itemDataResult.rows) {
-          const groupItems = itemsByGroup.get(item.itemGroupOid) || [];
-          groupItems.push(item);
-          itemsByGroup.set(item.itemGroupOid, groupItems);
-        }
-        
-        for (const [groupOid, items] of itemsByGroup) {
+        <FormData FormOID="${escapeXml(formOid)}">`;
+
+        for (const [groupOid, group] of form.groups) {
           odmXml += `
           <ItemGroupData ItemGroupOID="${escapeXml(groupOid)}" ItemGroupRepeatKey="1">`;
-          
-          for (const item of items) {
+
+          for (const item of group.items) {
             odmXml += `
-            <ItemData ItemOID="${escapeXml(item.itemOid)}" Value="${escapeXml(item.value || '')}"/>`;
+            <ItemData ItemOID="${escapeXml(item.itemOid)}" Value="${escapeXml(item.value)}"/>`;
           }
-          
+
           odmXml += `
           </ItemGroupData>`;
         }
-        
+
         odmXml += `
         </FormData>`;
       }
-      
+
       odmXml += `
       </StudyEventData>`;
     }
-    
+
     odmXml += `
     </SubjectData>`;
   }
@@ -885,6 +914,55 @@ export const buildFullOdmExport = async (
 </ODM>`;
   
   return odmXml;
+};
+
+/**
+ * Get available forms/CRFs for a study (used by export modal)
+ */
+export const getStudyForms = async (studyId: number): Promise<any[]> => {
+  const query = `
+    SELECT DISTINCT c.crf_id, c.name, c.description, c.oc_oid,
+      (SELECT COUNT(*) FROM crf_version cv WHERE cv.crf_id = c.crf_id AND cv.status_id = 1) as version_count
+    FROM crf c
+    WHERE c.source_study_id = $1 AND c.status_id = 1
+    ORDER BY c.name
+  `;
+  const result = await pool.query(query, [studyId]);
+
+  return result.rows.map(row => ({
+    crfId: row.crfId,
+    name: row.name,
+    description: row.description || '',
+    oid: row.ocOid,
+    versionCount: parseInt(row.versionCount) || 0
+  }));
+};
+
+/**
+ * Get available events for a study (used by export modal)
+ */
+export const getStudyEvents = async (studyId: number): Promise<any[]> => {
+  const query = `
+    SELECT sed.study_event_definition_id, sed.name, sed.description, sed.oc_oid,
+      sed.ordinal, sed.type, sed.repeating,
+      (SELECT COUNT(DISTINCT se.study_subject_id) 
+       FROM study_event se WHERE se.study_event_definition_id = sed.study_event_definition_id) as subject_count
+    FROM study_event_definition sed
+    WHERE sed.study_id = $1 AND sed.status_id = 1
+    ORDER BY sed.ordinal
+  `;
+  const result = await pool.query(query, [studyId]);
+
+  return result.rows.map(row => ({
+    eventDefinitionId: row.studyEventDefinitionId,
+    name: row.name,
+    description: row.description || '',
+    oid: row.ocOid,
+    ordinal: row.ordinal,
+    type: row.type || 'scheduled',
+    repeating: row.repeating || false,
+    subjectCount: parseInt(row.subjectCount) || 0
+  }));
 };
 
 export default {
@@ -897,6 +975,8 @@ export default {
   createDataset,
   getDatasets,
   archiveExportedFile,
-  getArchivedExports
+  getArchivedExports,
+  getStudyForms,
+  getStudyEvents
 };
 

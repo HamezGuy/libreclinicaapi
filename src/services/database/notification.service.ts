@@ -12,21 +12,7 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
-
-export type NotificationType =
-  | 'query_assigned'
-  | 'query_response'
-  | 'query_closed'
-  | 'query_reopened'
-  | 'form_ready_for_review'
-  | 'form_sdv_required'
-  | 'form_signature_required'
-  | 'form_locked'
-  | 'form_unlocked'
-  | 'form_frozen'
-  | 'task_assigned'
-  | 'task_completed'
-  | 'general';
+import { NotificationType } from '../../types';
 
 interface CreateNotificationInput {
   userId: number;

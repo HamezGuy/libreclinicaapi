@@ -11,9 +11,10 @@ import { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import type { ApiResponse } from '@accura-trial/shared-types';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as protocolParseService from '../services/ai/protocol-parse.service';
-import { pool } from '../config/database';
+import type { ProtocolDocument, CreatedEvent, JobStatusResult, JobResult } from '../services/ai/protocol-parse.service';
 import { logger } from '../config/logger';
 
 const UPLOAD_DIR = process.env.PROTOCOL_UPLOAD_DIR || path.join(process.cwd(), 'uploads', 'protocols');
@@ -24,23 +25,29 @@ function ensureUploadDir(): void {
   }
 }
 
+interface UploadData {
+  jobId: string;
+  documentId: number | null;
+  message: string;
+  fileSizeMb: number;
+}
+
 /**
  * POST /api/protocol-parse/upload
  * Saves PDF, submits to pipeline, returns job_id immediately.
  */
 export const uploadProtocol = asyncHandler(async (req: Request, res: Response) => {
   if (!req.file) {
-    return res.status(400).json({ success: false, message: 'No file uploaded' });
+    return res.status(400).json({ success: false, message: 'No file uploaded' } satisfies ApiResponse);
   }
   if (!req.file.mimetype.includes('pdf')) {
-    return res.status(400).json({ success: false, message: 'Only PDF files are accepted' });
+    return res.status(400).json({ success: false, message: 'Only PDF files are accepted' } satisfies ApiResponse);
   }
 
   const parserBackend = (req.body.parserBackend as string) || 'unstructured';
   const studyId = req.body.studyId ? parseInt(req.body.studyId, 10) : null;
   const userId = (req as any).userId;
 
-  // Save file to disk
   ensureUploadDir();
   const checksum = crypto.createHash('md5').update(req.file.buffer).digest('hex');
   const storedName = `${Date.now()}_${checksum}.pdf`;
@@ -49,30 +56,26 @@ export const uploadProtocol = asyncHandler(async (req: Request, res: Response) =
 
   logger.info(`[protocol-parse] Saved ${req.file.originalname} (${(req.file.size/(1024*1024)).toFixed(1)} MB) → ${storedName}`);
 
-  // Submit to Python pipeline (returns immediately with job_id)
   const submitResult = await protocolParseService.submitProtocol(
     req.file.buffer, req.file.originalname, parserBackend
   );
 
   if (submitResult.status === 'error') {
-    return res.status(503).json({ success: false, message: submitResult.message });
+    return res.status(503).json({ success: false, message: submitResult.message } satisfies ApiResponse);
   }
 
-  // Save to DB
-  let docId: number | null = null;
-  try {
-    const result = await pool.query(`
-      INSERT INTO acc_protocol_documents
-        (study_id, filename, mime_type, file_size, checksum_md5, storage_path, pipeline_status, thread_id, uploaded_by)
-      VALUES ($1, $2, $3, $4, $5, $6, 'processing', $7, $8)
-      RETURNING id
-    `, [studyId, req.file.originalname, req.file.mimetype, req.file.size, checksum, storagePath, submitResult.jobId, userId]);
-    docId = result.rows[0]?.id;
-  } catch (dbErr: any) {
-    logger.warn(`[protocol-parse] DB insert failed (table may not exist yet): ${dbErr.message}`);
-  }
+  const docId = await protocolParseService.saveDocument({
+    studyId,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    fileSize: req.file.size,
+    checksum,
+    storagePath,
+    jobId: submitResult.jobId,
+    uploadedBy: userId,
+  });
 
-  return res.status(202).json({
+  const body: ApiResponse<UploadData> = {
     success: true,
     data: {
       jobId: submitResult.jobId,
@@ -80,7 +83,8 @@ export const uploadProtocol = asyncHandler(async (req: Request, res: Response) =
       message: submitResult.message,
       fileSizeMb: +(req.file.size / (1024 * 1024)).toFixed(1),
     },
-  });
+  };
+  return res.status(202).json(body);
 });
 
 /**
@@ -89,21 +93,18 @@ export const uploadProtocol = asyncHandler(async (req: Request, res: Response) =
  */
 export const getJobStatus = asyncHandler(async (req: Request, res: Response) => {
   const { jobId } = req.params;
-  if (!jobId) return res.status(400).json({ success: false, message: 'jobId required' });
+  if (!jobId) {
+    return res.status(400).json({ success: false, message: 'jobId required' } satisfies ApiResponse);
+  }
 
   const status = await protocolParseService.getJobStatus(jobId);
 
-  // If completed, update DB
   if (status.status === 'completed' || status.status === 'failed') {
-    try {
-      await pool.query(`
-        UPDATE acc_protocol_documents SET pipeline_status = $2, processed_at = NOW()
-        WHERE thread_id = $1 AND pipeline_status = 'processing'
-      `, [jobId, status.status]);
-    } catch { /* table may not exist */ }
+    await protocolParseService.updateDocumentStatus(jobId, status.status);
   }
 
-  return res.status(200).json({ success: true, data: status });
+  const body: ApiResponse<JobStatusResult> = { success: true, data: status };
+  return res.status(200).json(body);
 });
 
 /**
@@ -112,28 +113,19 @@ export const getJobStatus = asyncHandler(async (req: Request, res: Response) => 
  */
 export const getJobResult = asyncHandler(async (req: Request, res: Response) => {
   const { jobId } = req.params;
-  if (!jobId) return res.status(400).json({ success: false, message: 'jobId required' });
+  if (!jobId) {
+    return res.status(400).json({ success: false, message: 'jobId required' } satisfies ApiResponse);
+  }
 
   const result = await protocolParseService.getJobResult(jobId);
   if (!result) {
-    return res.status(409).json({ success: false, message: 'Job not complete or result unavailable' });
+    return res.status(409).json({ success: false, message: 'Job not complete or result unavailable' } satisfies ApiResponse);
   }
 
-  // Cache result in DB
-  try {
-    await pool.query(`
-      UPDATE acc_protocol_documents SET
-        generated_bundle = $2,
-        conflict_log = $3,
-        total_forms_generated = $4,
-        total_rules_extracted = $5,
-        total_conflicts = $6
-      WHERE thread_id = $1
-    `, [jobId, JSON.stringify(result.bundle), JSON.stringify(result.conflicts),
-        result.summary?.total_forms, result.summary?.total_rules, result.summary?.total_conflicts]);
-  } catch { /* table may not exist */ }
+  await protocolParseService.updateDocumentResult(jobId, result);
 
-  return res.status(200).json({ success: true, data: result });
+  const body: ApiResponse<JobResult> = { success: true, data: result };
+  return res.status(200).json(body);
 });
 
 /**
@@ -141,13 +133,16 @@ export const getJobResult = asyncHandler(async (req: Request, res: Response) => 
  */
 export const recompile = asyncHandler(async (req: Request, res: Response) => {
   const { blueprint } = req.body;
-  if (!blueprint) return res.status(400).json({ success: false, message: 'blueprint required' });
+  if (!blueprint) {
+    return res.status(400).json({ success: false, message: 'blueprint required' } satisfies ApiResponse);
+  }
 
   try {
     const result = await protocolParseService.recompileBlueprint(blueprint);
-    return res.status(200).json({ success: true, data: result });
+    const body: ApiResponse<typeof result> = { success: true, data: result };
+    return res.status(200).json(body);
   } catch (error: any) {
-    return res.status(422).json({ success: false, message: error.message });
+    return res.status(422).json({ success: false, message: error.message } satisfies ApiResponse);
   }
 });
 
@@ -156,26 +151,26 @@ export const recompile = asyncHandler(async (req: Request, res: Response) => {
  */
 export const healthCheck = asyncHandler(async (req: Request, res: Response) => {
   const healthy = await protocolParseService.checkPipelineHealth();
-  return res.status(healthy ? 200 : 503).json({
+  const body: ApiResponse = {
     success: healthy,
     message: healthy ? 'Pipeline healthy' : 'Pipeline unreachable',
-  });
+  };
+  return res.status(healthy ? 200 : 503).json(body);
 });
 
 /**
  * POST /api/protocol-parse/import-visits
  * Creates study event definitions and CRF assignments from AI-generated visit definitions.
- * Called after forms have been imported via /api/forms/import-bundle.
  */
 export const importVisitDefinitions = asyncHandler(async (req: Request, res: Response) => {
   const { visitDefinitions, targetStudyId, createdForms } = req.body;
   const userId = (req as any).userId;
 
   if (!visitDefinitions || !targetStudyId) {
-    return res.status(400).json({ success: false, message: 'visitDefinitions and targetStudyId are required' });
+    return res.status(400).json({ success: false, message: 'visitDefinitions and targetStudyId are required' } satisfies ApiResponse);
   }
   if (!Array.isArray(visitDefinitions) || visitDefinitions.length === 0) {
-    return res.status(400).json({ success: false, message: 'visitDefinitions must be a non-empty array' });
+    return res.status(400).json({ success: false, message: 'visitDefinitions must be a non-empty array' } satisfies ApiResponse);
   }
 
   const formRefToCrfId = new Map<string, number>();
@@ -185,119 +180,20 @@ export const importVisitDefinitions = asyncHandler(async (req: Request, res: Res
     }
   }
 
-  const client = await pool.connect();
-  const warnings: string[] = [];
-  const createdEvents: { name: string; eventDefId: number }[] = [];
-
   try {
-    await client.query('BEGIN');
-
-    const parentCheck = await client.query(
-      `SELECT COALESCE(parent_study_id, study_id) AS parent_study_id FROM study WHERE study_id = $1`,
-      [targetStudyId]
+    const { createdEvents, warnings } = await protocolParseService.importVisitDefinitions(
+      targetStudyId, visitDefinitions, formRefToCrfId, userId
     );
-    const resolvedStudyId = parentCheck.rows.length > 0 ? parentCheck.rows[0].parent_study_id : targetStudyId;
 
-    for (const visit of visitDefinitions) {
-      const sanitizedName = (visit.name || 'Visit').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
-      const randomSuffix = Math.random().toString(36).substring(2, 6);
-      const eventOid = `SE_${resolvedStudyId}_${sanitizedName}_${randomSuffix}`;
-
-      const eventResult = await client.query(`
-        INSERT INTO study_event_definition (
-          study_id, name, description, ordinal, type, repeating, category,
-          schedule_day, min_day, max_day,
-          status_id, owner_id, date_created, oc_oid
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, NOW(), $12)
-        RETURNING study_event_definition_id
-      `, [
-        resolvedStudyId,
-        visit.name || `Visit ${visit.ordinal || 1}`,
-        visit.description || '',
-        visit.ordinal || 1,
-        visit.type || 'scheduled',
-        visit.repeating || false,
-        visit.category || 'Study Event',
-        visit.scheduleDay ?? null,
-        visit.minDay ?? null,
-        visit.maxDay ?? null,
-        userId,
-        eventOid
-      ]);
-
-      const eventDefId = eventResult.rows[0].study_event_definition_id;
-      createdEvents.push({ name: visit.name, eventDefId });
-
-      if (Array.isArray(visit.crfAssignments)) {
-        const seenCrfIds = new Set<number>();
-        for (let i = 0; i < visit.crfAssignments.length; i++) {
-          const assign = visit.crfAssignments[i];
-
-          let crfId: number | null = null;
-          if (assign.formRefKey && formRefToCrfId.has(assign.formRefKey)) {
-            crfId = formRefToCrfId.get(assign.formRefKey)!;
-          } else if (assign.formName) {
-            const lookup = await client.query(
-              `SELECT crf_id FROM crf WHERE name = $1 AND source_study_id = $2 AND status_id NOT IN (5,7) LIMIT 1`,
-              [assign.formName, resolvedStudyId]
-            );
-            if (lookup.rows.length > 0) crfId = lookup.rows[0].crf_id;
-          }
-
-          if (!crfId) {
-            warnings.push(`Visit "${visit.name}": could not resolve form "${assign.formRefKey || assign.formName}" — assignment skipped`);
-            continue;
-          }
-          if (seenCrfIds.has(crfId)) continue;
-          seenCrfIds.add(crfId);
-
-          let defaultVersionId: number | null = null;
-          const vr = await client.query(
-            `SELECT crf_version_id FROM crf_version WHERE crf_id = $1 ORDER BY crf_version_id DESC LIMIT 1`,
-            [crfId]
-          );
-          if (vr.rows.length > 0) defaultVersionId = vr.rows[0].crf_version_id;
-
-          await client.query(`
-            INSERT INTO event_definition_crf (
-              study_event_definition_id, study_id, crf_id, required_crf,
-              double_entry, hide_crf, ordinal, status_id, owner_id,
-              date_created, default_version_id, electronic_signature
-            ) VALUES ($1, $2, $3, $4, $5, false, $6, 1, $7, NOW(), $8, $9)
-            ON CONFLICT (study_event_definition_id, study_id, crf_id) DO NOTHING
-          `, [
-            eventDefId,
-            resolvedStudyId,
-            crfId,
-            assign.required ?? false,
-            assign.doubleDataEntry ?? false,
-            assign.ordinal ?? i,
-            userId,
-            defaultVersionId,
-            assign.electronicSignature ?? false
-          ]);
-        }
-      }
-    }
-
-    await client.query('COMMIT');
-    logger.info('[protocol-parse] Visit definitions imported', {
-      eventCount: createdEvents.length, studyId: resolvedStudyId, warnings: warnings.length
-    });
-
-    return res.status(201).json({
+    const body: ApiResponse<{ createdEvents: CreatedEvent[]; warnings: string[] }> = {
       success: true,
-      createdEvents,
+      data: { createdEvents, warnings },
+      message: `Created ${createdEvents.length} visit definition(s)`,
       warnings,
-      message: `Created ${createdEvents.length} visit definition(s)`
-    });
-
+    };
+    return res.status(201).json(body);
   } catch (err: any) {
-    await client.query('ROLLBACK');
-    logger.error('[protocol-parse] Visit definition import failed', { error: err.message });
-    return res.status(500).json({ success: false, message: err.message, warnings });
-  } finally {
-    client.release();
+    return res.status(500).json({ success: false, message: err.message } satisfies ApiResponse);
   }
 });
 
@@ -306,16 +202,7 @@ export const importVisitDefinitions = asyncHandler(async (req: Request, res: Res
  */
 export const listDocuments = asyncHandler(async (req: Request, res: Response) => {
   const studyId = req.query.studyId ? parseInt(req.query.studyId as string, 10) : null;
-  try {
-    let query = `SELECT id, study_id, filename, file_size, pipeline_status, thread_id,
-                   total_forms_generated, total_conflicts, uploaded_at, processed_at
-                 FROM acc_protocol_documents WHERE deleted_at IS NULL`;
-    const params: any[] = [];
-    if (studyId) { params.push(studyId); query += ` AND study_id = $${params.length}`; }
-    query += ' ORDER BY uploaded_at DESC LIMIT 50';
-    const result = await pool.query(query, params);
-    return res.status(200).json({ success: true, data: result.rows });
-  } catch {
-    return res.status(200).json({ success: true, data: [] });
-  }
+  const documents = await protocolParseService.listDocuments(studyId);
+  const body: ApiResponse<ProtocolDocument[]> = { success: true, data: documents };
+  return res.status(200).json(body);
 });

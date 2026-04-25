@@ -8,13 +8,16 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as formService from '../services/hybrid/form.service';
 import * as templateBundleService from '../services/hybrid/template-bundle.service';
+import * as workflowConfigProvider from '../services/database/workflow-config.provider';
 import { trackDocumentAccess, trackUserAction } from '../services/database/audit.service';
-import { pool } from '../config/database';
+import { logger } from '../config/logger';
+import type { Part11Request } from '../middleware/part11.middleware';
+import type { ApiResponse, CRF, CRFVersion } from '@accura-trial/shared-types';
 
 export const saveData = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
 
-  const result = await formService.saveFormData(req.body, user.userId, user.username || user.userName);
+  const result: ApiResponse = await formService.saveFormData(req.body, user.userId, user.username || user.userName);
 
   if (result.success) {
     trackUserAction({
@@ -59,7 +62,8 @@ export const getData = asyncHandler(async (req: Request, res: Response) => {
     ).catch(() => {}); // fire-and-forget, do not fail the response
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse = { success: true, data: result };
+  res.json(response);
 });
 
 export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
@@ -90,7 +94,8 @@ export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
     ).catch(() => {});
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<CRF> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getStatus = asyncHandler(async (req: Request, res: Response) => {
@@ -108,7 +113,8 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse = { success: true, data: result };
+  res.json(response);
 });
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
@@ -117,7 +123,8 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
   const result = await formService.getAllForms(user?.userId);
   console.log(`[form.controller.list] Returning ${result.length} forms`);
   
-  res.json({ success: true, data: result });
+  const response: ApiResponse<CRF[]> = { success: true, data: result };
+  res.json(response);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
@@ -131,7 +138,8 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<CRF> = { success: true, data: result };
+  res.json(response);
 });
 
 export const getByStudy = asyncHandler(async (req: Request, res: Response) => {
@@ -144,17 +152,24 @@ export const getByStudy = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await formService.getStudyForms(parseInt(studyId as string));
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<CRF[]> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
  * Create a new form template (CRF)
  */
 export const create = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form creation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to create a form (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const user = (req as any).user;
   console.log(`[form.controller.create] Starting form creation for user=${user.userId}, name="${req.body.name}"`);
 
-  const result = await formService.createForm(req.body, user.userId);
+  const result: ApiResponse & { crfId?: number } = await formService.createForm(req.body, user.userId);
   console.log(`[form.controller.create] createForm returned:`, { success: result.success, crfId: result.crfId, message: result.message });
 
   if (result.success) {
@@ -176,6 +191,12 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
  * Update a form template
  */
 export const update = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form update attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to update a form (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -200,6 +221,12 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
  * NOTE: For 21 CFR Part 11 compliance, this now archives instead of deletes
  */
 export const remove = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form deletion attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to delete a form (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -229,6 +256,12 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
  * Archived forms are hidden from regular users but can be viewed/restored by admins
  */
 export const archive = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form archive attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to archive a form (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
   const { reason } = req.body;
@@ -254,6 +287,12 @@ export const archive = asyncHandler(async (req: Request, res: Response) => {
  * 21 CFR Part 11 compliant - maintains full audit trail
  */
 export const restore = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form restore attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to restore a form (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
   const { reason } = req.body;
@@ -295,7 +334,8 @@ export const getArchivedForms = asyncHandler(async (req: Request, res: Response)
     'view'
   );
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<CRF[]> = { success: true, data: result };
+  res.json(response);
 });
 
 // =============================================================================
@@ -323,7 +363,7 @@ export const getVersions = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  res.status(result.success ? 200 : 400).json(result);
+  res.status(result.success ? 200 : 400).json(result as ApiResponse<CRFVersion[]>);
 });
 
 /**
@@ -331,6 +371,12 @@ export const getVersions = asyncHandler(async (req: Request, res: Response) => {
  * This is "forking" at the version level - same CRF, new version
  */
 export const createVersion = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form version creation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to create a form version (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -371,6 +417,12 @@ export const createVersion = asyncHandler(async (req: Request, res: Response) =>
  * controller-level audit call (would have produced duplicate rows).
  */
 export const fork = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form fork attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to fork a form (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -381,19 +433,7 @@ export const fork = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  // Resolve caller's active org memberships for org-isolation checks.
-  let callerOrgIds: number[] = [];
-  try {
-    const orgRes = await pool.query(
-      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-      [user.userId]
-    );
-    callerOrgIds = orgRes.rows.map((r: any) => r.organizationId);
-  } catch (e: any) {
-    // If the org table doesn't exist (very old installs), fall back to
-    // unrestricted — same behavior as the rest of the codebase.
-    callerOrgIds = [];
-  }
+  const callerOrgIds = await formService.getActiveOrganizationIds(user.userId);
 
   const result = await formService.forkForm(
     parseInt(id),
@@ -432,6 +472,12 @@ export const fork = asyncHandler(async (req: Request, res: Response) => {
  * those linked forms, they call this endpoint to reconnect the references.
  */
 export const relinkFormLinks = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form relink attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to relink form references (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { id } = req.params;
   const user = (req as any).user;
   const { relinks } = req.body;
@@ -464,20 +510,16 @@ export const relinkFormLinks = asyncHandler(async (req: Request, res: Response) 
  * recommendations.
  */
 export const batchFork = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Batch fork attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required for batch fork (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const user = (req as any).user;
   const { sourceCrfIds, targetStudyId, nameMap } = req.body;
 
-  // Resolve caller's org memberships
-  let callerOrgIds: number[] = [];
-  try {
-    const orgRes = await pool.query(
-      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-      [user.userId]
-    );
-    callerOrgIds = orgRes.rows.map((r: any) => r.organizationId);
-  } catch {
-    callerOrgIds = [];
-  }
+  const callerOrgIds = await formService.getActiveOrganizationIds(user.userId);
 
   const result = await formService.batchForkForms(
     sourceCrfIds,
@@ -503,6 +545,12 @@ export const batchFork = asyncHandler(async (req: Request, res: Response) => {
  * 4. Logs to audit trail
  */
 export const updateField = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Field update attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to update form fields (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const { eventCrfId } = req.params;
   const parsedId = parseInt(eventCrfId, 10);
   if (isNaN(parsedId) || parsedId <= 0) {
@@ -589,12 +637,14 @@ export const validateField = asyncHandler(async (req: Request, res: Response) =>
 // Reference data endpoints
 export const getNullValueTypes = asyncHandler(async (req: Request, res: Response) => {
   const data = await formService.getNullValueTypes();
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 export const getMeasurementUnits = asyncHandler(async (req: Request, res: Response) => {
   const data = await formService.getMeasurementUnits();
-  res.json({ success: true, data });
+  const response: ApiResponse = { success: true, data };
+  res.json(response);
 });
 
 /**
@@ -605,6 +655,12 @@ export const getMeasurementUnits = asyncHandler(async (req: Request, res: Respon
  * This is a prerequisite for freezing and locking the form.
  */
 export const markComplete = asyncHandler(async (req: Request, res: Response) => {
+  const p11 = req as Part11Request;
+  if (!p11.signatureVerified) {
+    logger.warn('Form completion attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+    res.status(403).json({ success: false, message: 'Electronic signature required to mark form as complete (21 CFR Part 11 §11.50)' });
+    return;
+  }
   const user = (req as any).user;
   const eventCrfId = parseInt(req.params.eventCrfId, 10);
 
@@ -658,7 +714,8 @@ export const exportBundle = asyncHandler(async (req: Request, res: Response) => 
     details: `Exported ${bundle.forms.length} form(s) as template bundle`
   }).catch(() => {});
 
-  res.json({ success: true, data: bundle });
+  const response: ApiResponse = { success: true, data: bundle };
+  res.json(response);
 });
 
 export const importBundle = asyncHandler(async (req: Request, res: Response) => {
@@ -690,6 +747,37 @@ export const importBundle = asyncHandler(async (req: Request, res: Response) => 
   res.status(result.success ? 201 : 400).json(result);
 });
 
+// ============================================================================
+// WORKFLOW CONFIG CONTROLLERS
+// ============================================================================
+
+export const getWorkflowConfigBulk = asyncHandler(async (req: Request, res: Response) => {
+  const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : null;
+  const data = await workflowConfigProvider.getAllWorkflowConfigs(studyId);
+  res.json({ success: true, data } satisfies ApiResponse);
+});
+
+export const getWorkflowConfigSingle = asyncHandler(async (req: Request, res: Response) => {
+  const crfId = parseInt(req.params.crfId);
+  const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : null;
+  const data = await workflowConfigProvider.getSingleWorkflowConfig(crfId, studyId);
+  res.json({ success: true, data } satisfies ApiResponse);
+});
+
+export const saveWorkflowConfig = asyncHandler(async (req: Request, res: Response) => {
+  const crfId = parseInt(req.params.crfId);
+  const { requiresSDV, requiresSignature, requiresDDE, queryRouteToUsers, studyId } = req.body;
+  const userId = (req as any).user?.userId;
+
+  await workflowConfigProvider.saveWorkflowConfig(
+    crfId,
+    { requiresSDV, requiresSignature, requiresDDE, queryRouteToUsers, studyId: studyId || null },
+    userId
+  );
+
+  res.json({ success: true, message: 'Workflow configuration saved' } satisfies ApiResponse);
+});
+
 export default { 
   saveData, getData, getMetadata, getStatus, 
   list, get, getByStudy, 
@@ -705,6 +793,8 @@ export default {
   // Reference data
   getNullValueTypes, getMeasurementUnits,
   // Template bundle export/import
-  exportBundle, importBundle
+  exportBundle, importBundle,
+  // Workflow config
+  getWorkflowConfigBulk, getWorkflowConfigSingle, saveWorkflowConfig
 };
 

@@ -22,6 +22,7 @@
 import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
+import { requireEntityStudyAccess } from '../middleware/study-scope.middleware';
 import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
 import { validate, sdvSchemas } from '../middleware/validation.middleware';
 import * as sdvController from '../controllers/sdv.controller';
@@ -38,16 +39,21 @@ router.get('/subject/:subjectId', sdvController.getSubjectStatus);
 
 // Individual record with form data preview (no signature required)
 router.get('/:id', sdvController.get);
-router.get('/:id/form-data', sdvController.getFormData);
+router.get('/:id/form-data',
+  requireEntityStudyAccess('eventCrf', 'id'),
+  sdvController.getFormData
+);
 
 // Verification actions (requires monitor or admin role + signature)
 router.put('/:id/verify', 
   requireRole('monitor', 'admin'), 
+  requireEntityStudyAccess('eventCrf', 'id'),
   requireSignatureFor(SignatureMeanings.VERIFY),
   sdvController.verify
 );
 router.put('/:id/unverify', 
   requireRole('monitor', 'admin'), 
+  requireEntityStudyAccess('eventCrf', 'id'),
   requireSignatureFor('I authorize removal of SDV verification'),
   sdvController.unverify
 );

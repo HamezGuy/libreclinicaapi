@@ -20,7 +20,8 @@ import { getSoapClient } from './soapClient';
 import { logger } from '../../config/logger';
 import { config } from '../../config/environment';
 import { ApiResponse } from '../../types';
-import xml2js from 'xml2js';
+import { safeXmlParse } from '../../utils/xml-safe-parse';
+import type { AuditQueryParams as SharedAuditQueryParams } from '@accura-trial/shared-types';
 
 /**
  * Audit event types matching LibreClinica's audit_log_event_type table
@@ -95,19 +96,11 @@ export interface AuditRecord {
 }
 
 /**
- * Audit query parameters
+ * SOAP-specific audit query parameters — extends shared-types with SOAP enum fields.
  */
-export interface AuditQueryParams {
-  studyId?: number;
-  subjectId?: number;
-  eventCrfId?: number;
-  userId?: number;
+export interface AuditQueryParams extends SharedAuditQueryParams {
   eventTypeId?: AuditEventType;
-  startDate?: string;
-  endDate?: string;
   entityType?: 'study' | 'subject' | 'event' | 'crf' | 'item';
-  limit?: number;
-  offset?: number;
 }
 
 /**
@@ -565,12 +558,10 @@ async function parseAuditTrailOdm(odmXml: string | any): Promise<AuditRecord[]> 
       return auditRecords;
     }
 
-    const parser = new xml2js.Parser({
+    const result = await safeXmlParse(xmlString, {
       explicitArray: false,
       mergeAttrs: true
-    });
-
-    const result = await parser.parseStringPromise(xmlString);
+    }) as Record<string, any>;
 
     // Parse AuditRecords from AdminData
     if (result.ODM?.AdminData?.AuditRecords?.AuditRecord) {

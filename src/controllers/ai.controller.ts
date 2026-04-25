@@ -5,6 +5,7 @@
 
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
+import type { ApiResponse } from '@accura-trial/shared-types';
 
 export const chat = asyncHandler(async (req: Request, res: Response) => {
   res.status(501).json({

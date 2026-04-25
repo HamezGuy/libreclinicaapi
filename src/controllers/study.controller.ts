@@ -10,21 +10,22 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as studyService from '../services/hybrid/study.service';
-import { pool } from '../config/database';
 import { logger } from '../config/logger';
+import type { ApiResponse, Study, Site } from '@accura-trial/shared-types';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { status, page, limit } = req.query;
+  const { status, page, limit, search } = req.query;
 
   logger.info('📋 Study list request', {
     userId: user.userId,
     username: user.userName,
-    filters: { status, page, limit }
+    filters: { status, page, limit, search }
   });
 
   const result = await studyService.getStudies(user.userId, {
     status: status as string,
+    search: search as string,
     page: parseInt(page as string) || 1,
     limit: parseInt(limit as string) || 20
   });
@@ -35,7 +36,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     total: result.pagination?.total || 0
   });
 
-  res.json(result);
+  res.json(result as ApiResponse<Study[]>);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
@@ -45,11 +46,11 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
   const result = await studyService.getStudyById(parseInt(id), user.userId);
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'Study not found' });
+    res.status(404).json({ success: false, message: 'Study not found' } satisfies ApiResponse);
     return;
   }
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } satisfies ApiResponse<Study>);
 });
 
 export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
@@ -59,11 +60,11 @@ export const getMetadata = asyncHandler(async (req: Request, res: Response) => {
   const result = await studyService.getStudyMetadata(parseInt(id), user.userId, user.username);
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'Study not found' });
+    res.status(404).json({ success: false, message: 'Study not found' } satisfies ApiResponse);
     return;
   }
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } satisfies ApiResponse);
 });
 
 export const getForms = asyncHandler(async (req: Request, res: Response) => {
@@ -71,7 +72,7 @@ export const getForms = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await studyService.getStudyForms(parseInt(id));
 
-  res.json({ success: true, data: result });
+  res.json({ success: true, data: result } satisfies ApiResponse);
 });
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
@@ -87,7 +88,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 
   logger.info('📤 Study creation result', { result });
 
-  res.status(result.success ? 201 : 400).json(result);
+  res.status(result.success ? 201 : 400).json(result as ApiResponse<Study>);
 });
 
 export const update = asyncHandler(async (req: Request, res: Response) => {
@@ -96,7 +97,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await studyService.updateStudy(parseInt(id), req.body, user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse<Study>);
 });
 
 export const remove = asyncHandler(async (req: Request, res: Response) => {
@@ -105,7 +106,7 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await studyService.archiveStudy(parseInt(id), user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -117,7 +118,7 @@ export const archive = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await studyService.archiveStudy(parseInt(id), user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -129,7 +130,7 @@ export const restore = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await studyService.restoreStudy(parseInt(id), user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -140,7 +141,7 @@ export const getArchived = asyncHandler(async (req: Request, res: Response) => {
 
   const result = await studyService.getArchivedStudies(user.userId);
 
-  res.json(result);
+  res.json(result as ApiResponse<Study[]>);
 });
 
 /**
@@ -150,81 +151,48 @@ export const getSites = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   logger.info('Getting study sites', { studyId: id });
 
-  try {
-    const query = `
-      SELECT 
-        s.study_id,
-        s.unique_identifier,
-        s.name,
-        s.summary,
-        s.principal_investigator,
-        s.facility_name,
-        s.facility_address,
-        s.facility_city,
-        s.facility_state,
-        s.facility_zip,
-        s.facility_country,
-        s.facility_recruitment_status,
-        s.facility_contact_name,
-        s.facility_contact_degree,
-        s.facility_contact_email,
-        s.facility_contact_phone,
-        st.name as status_name,
-        s.status_id,
-        s.date_created,
-        s.expected_total_enrollment,
-        (SELECT COUNT(*) FROM study_subject WHERE study_id = s.study_id) as enrolled_subjects
-      FROM study s
-      INNER JOIN status st ON s.status_id = st.status_id
-      WHERE s.parent_study_id = $1
-      ORDER BY s.name
-    `;
+  const rows = await studyService.getStudySites(parseInt(id));
 
-    const result = await pool.query(query, [parseInt(id)]);
+  const sites = rows.map((site: Record<string, unknown>) => ({
+    id: String(site.studyId),
+    siteNumber: site.uniqueIdentifier,
+    siteName: site.name,
+    uniqueIdentifier: site.uniqueIdentifier,
+    description: (site.summary as string) || '',
+    principalInvestigator: (site.principalInvestigator as string) || '',
+    status: mapSiteStatus(site.statusId as number),
+    address: {
+      facility: (site.facilityName as string) || '',
+      street: (site.facilityAddress as string) || '',
+      city: (site.facilityCity as string) || '',
+      state: (site.facilityState as string) || '',
+      zip: (site.facilityZip as string) || '',
+      country: (site.facilityCountry as string) || ''
+    },
+    facilityName: (site.facilityName as string) || '',
+    facilityAddress: (site.facilityAddress as string) || '',
+    facilityCity: (site.facilityCity as string) || '',
+    facilityState: (site.facilityState as string) || '',
+    facilityZip: (site.facilityZip as string) || '',
+    facilityCountry: (site.facilityCountry as string) || '',
+    facilityRecruitmentStatus: (site.facilityRecruitmentStatus as string) || '',
+    facilityContactName: (site.facilityContactName as string) || '',
+    facilityContactDegree: (site.facilityContactDegree as string) || '',
+    facilityContactEmail: (site.facilityContactEmail as string) || '',
+    facilityContactPhone: (site.facilityContactPhone as string) || '',
+    contact: {
+      name: (site.facilityContactName as string) || '',
+      degree: (site.facilityContactDegree as string) || '',
+      email: (site.facilityContactEmail as string) || '',
+      phone: (site.facilityContactPhone as string) || ''
+    },
+    targetEnrollment: (site.expectedTotalEnrollment as number) || 0,
+    actualEnrollment: parseInt(String(site.enrolledSubjects)) || 0,
+    dateCreated: site.dateCreated
+  }));
 
-    const sites = result.rows.map(site => ({
-      id: site.studyId.toString(),
-      siteNumber: site.uniqueIdentifier,
-      siteName: site.name,
-      uniqueIdentifier: site.uniqueIdentifier,
-      description: site.summary || '',
-      principalInvestigator: site.principalInvestigator || '',
-      status: mapSiteStatus(site.statusId),
-      address: {
-        facility: site.facilityName || '',
-        street: site.facilityAddress || '',
-        city: site.facilityCity || '',
-        state: site.facilityState || '',
-        zip: site.facilityZip || '',
-        country: site.facilityCountry || ''
-      },
-      facilityName: site.facilityName || '',
-      facilityAddress: site.facilityAddress || '',
-      facilityCity: site.facilityCity || '',
-      facilityState: site.facilityState || '',
-      facilityZip: site.facilityZip || '',
-      facilityCountry: site.facilityCountry || '',
-      facilityRecruitmentStatus: site.facilityRecruitmentStatus || '',
-      facilityContactName: site.facilityContactName || '',
-      facilityContactDegree: site.facilityContactDegree || '',
-      facilityContactEmail: site.facilityContactEmail || '',
-      facilityContactPhone: site.facilityContactPhone || '',
-      contact: {
-        name: site.facilityContactName || '',
-        degree: site.facilityContactDegree || '',
-        email: site.facilityContactEmail || '',
-        phone: site.facilityContactPhone || ''
-      },
-      targetEnrollment: site.expectedTotalEnrollment || 0,
-      actualEnrollment: parseInt(site.enrolledSubjects) || 0,
-      dateCreated: site.dateCreated
-    }));
-
-    res.json({ success: true, data: sites });
-  } catch (error: any) {
-    logger.error('Get study sites error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
-  }
+  const response: ApiResponse<typeof sites> = { success: true, data: sites };
+  res.json(response);
 });
 
 /**
@@ -234,60 +202,27 @@ export const getEvents = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   logger.info('Getting study events', { studyId: id });
 
-  try {
-    const query = `
-      SELECT 
-        sed.study_event_definition_id,
-        sed.oc_oid,
-        sed.name,
-        sed.description,
-        sed.type,
-        sed.repeating,
-        sed.category,
-        sed.ordinal,
-        sed.schedule_day,
-        sed.min_day,
-        sed.max_day,
-        sed.reference_event_id,
-        st.name as status_name,
-        sed.status_id,
-        (
-          SELECT COUNT(DISTINCT edc.crf_id)
-          FROM event_definition_crf edc
-          WHERE edc.study_event_definition_id = sed.study_event_definition_id
-            AND edc.status_id NOT IN (5, 7)
-        ) as form_count
-      FROM study_event_definition sed
-      INNER JOIN status st ON sed.status_id = st.status_id
-      WHERE sed.study_id = $1
-        AND sed.status_id NOT IN (5, 7)
-      ORDER BY sed.ordinal
-    `;
+  const rows = await studyService.getStudyEventDefinitions(parseInt(id));
 
-    const result = await pool.query(query, [parseInt(id)]);
+  const events = rows.map((event: Record<string, unknown>) => ({
+    id: String(event.studyEventDefinitionId),
+    oid: event.ocOid,
+    name: event.name,
+    description: (event.description as string) || '',
+    type: (event.type as string) || 'scheduled',
+    repeating: event.repeating || false,
+    category: (event.category as string) || '',
+    order: event.ordinal,
+    status: event.statusName,
+    formCount: parseInt(String(event.formCount)) || 0,
+    scheduleDay: event.scheduleDay,
+    minDay: event.minDay,
+    maxDay: event.maxDay,
+    referenceEventId: event.referenceEventId
+  }));
 
-    const events = result.rows.map(event => ({
-      id: event.studyEventDefinitionId.toString(),
-      oid: event.ocOid,
-      name: event.name,
-      description: event.description || '',
-      type: event.type || 'scheduled',
-      repeating: event.repeating || false,
-      category: event.category || '',
-      order: event.ordinal,
-      status: event.statusName,
-      formCount: parseInt(event.formCount) || 0,
-      scheduleDay: event.scheduleDay,
-      minDay: event.minDay,
-      maxDay: event.maxDay,
-      referenceEventId: event.referenceEventId
-    }));
-
-    res.json({ success: true, data: events });
-  } catch (error: any) {
-    logger.error('Get study events error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
-  }
+  const response: ApiResponse<typeof events> = { success: true, data: events };
+  res.json(response);
 });
 
 /**
@@ -297,68 +232,36 @@ export const getStats = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   logger.info('Getting study statistics', { studyId: id });
 
-  try {
-    const statsQuery = `
-      SELECT 
-        s.expected_total_enrollment as target_enrollment,
-        (SELECT COUNT(*) FROM study_subject WHERE study_id = $1) as total_subjects,
-        (SELECT COUNT(*) FROM study_subject WHERE study_id = $1 AND status_id = 1) as active_subjects,
-        (SELECT COUNT(*) FROM study_subject ss
-         INNER JOIN study_event se ON ss.study_subject_id = se.study_subject_id
-         INNER JOIN subject_event_status ses ON se.subject_event_status_id = ses.subject_event_status_id
-         WHERE ss.study_id = $1 AND ses.name = 'completed') as completed_subjects,
-        (SELECT COUNT(*) FROM discrepancy_note dn
-         INNER JOIN dn_study_subject_map dnm ON dn.discrepancy_note_id = dnm.discrepancy_note_id
-         INNER JOIN study_subject ss ON dnm.study_subject_id = ss.study_subject_id
-         WHERE ss.study_id = $1 AND dn.parent_dn_id IS NULL) as total_queries,
-        (SELECT COUNT(*) FROM discrepancy_note dn
-         INNER JOIN dn_study_subject_map dnm ON dn.discrepancy_note_id = dnm.discrepancy_note_id
-         INNER JOIN study_subject ss ON dnm.study_subject_id = ss.study_subject_id
-         INNER JOIN resolution_status rs ON dn.resolution_status_id = rs.resolution_status_id
-         WHERE ss.study_id = $1 AND dn.parent_dn_id IS NULL 
-         AND rs.name NOT IN ('Closed', 'Not Applicable')) as open_queries,
-        (SELECT COUNT(DISTINCT s2.study_id) FROM study s2 WHERE s2.parent_study_id = $1) as site_count,
-        (SELECT COUNT(*) FROM study_event_definition WHERE study_id = $1) as event_count,
-        (SELECT COUNT(*) FROM crf WHERE source_study_id = $1 AND status_id NOT IN (5, 6, 7)) as form_count
-      FROM study s
-      WHERE s.study_id = $1
-    `;
+  const stats = await studyService.getStudyStats(parseInt(id));
 
-    const result = await pool.query(statsQuery, [parseInt(id)]);
-
-    if (result.rows.length === 0) {
-      res.status(404).json({ success: false, message: 'Study not found' });
-      return;
-    }
-
-    const stats = result.rows[0];
-    
-    res.json({
-      success: true,
-      data: {
-        enrollment: {
-          target: parseInt(stats.targetEnrollment) || 0,
-          actual: parseInt(stats.totalSubjects) || 0,
-          active: parseInt(stats.activeSubjects) || 0,
-          completed: parseInt(stats.completedSubjects) || 0,
-          percentage: stats.targetEnrollment > 0 
-            ? Math.round((stats.totalSubjects / stats.targetEnrollment) * 100) 
-            : 0
-        },
-        queries: {
-          total: parseInt(stats.totalQueries) || 0,
-          open: parseInt(stats.openQueries) || 0,
-          closed: (parseInt(stats.totalQueries) || 0) - (parseInt(stats.openQueries) || 0)
-        },
-        sites: parseInt(stats.siteCount) || 0,
-        events: parseInt(stats.eventCount) || 0,
-        forms: parseInt(stats.formCount) || 0
-      }
-    });
-  } catch (error: any) {
-    logger.error('Get study statistics error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
+  if (!stats) {
+    const notFound: ApiResponse<null> = { success: false, message: 'Study not found' };
+    res.status(404).json(notFound);
+    return;
   }
+
+  const data = {
+    enrollment: {
+      target: parseInt(String(stats.targetEnrollment)) || 0,
+      actual: parseInt(String(stats.totalSubjects)) || 0,
+      active: parseInt(String(stats.activeSubjects)) || 0,
+      completed: parseInt(String(stats.completedSubjects)) || 0,
+      percentage: (stats.targetEnrollment as number) > 0
+        ? Math.round(((stats.totalSubjects as number) / (stats.targetEnrollment as number)) * 100)
+        : 0
+    },
+    queries: {
+      total: parseInt(String(stats.totalQueries)) || 0,
+      open: parseInt(String(stats.openQueries)) || 0,
+      closed: (parseInt(String(stats.totalQueries)) || 0) - (parseInt(String(stats.openQueries)) || 0)
+    },
+    sites: parseInt(String(stats.siteCount)) || 0,
+    events: parseInt(String(stats.eventCount)) || 0,
+    forms: parseInt(String(stats.formCount)) || 0
+  };
+
+  const response: ApiResponse<typeof data> = { success: true, data };
+  res.json(response);
 });
 
 /**
@@ -368,44 +271,22 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   logger.info('Getting study users', { studyId: id });
 
-  try {
-    const query = `
-      SELECT 
-        u.user_id,
-        u.user_name,
-        u.first_name,
-        u.last_name,
-        u.email,
-        u.phone,
-        sur.role_name,
-        sur.date_created,
-        st.name as status_name
-      FROM study_user_role sur
-      INNER JOIN user_account u ON sur.user_name = u.user_name
-      INNER JOIN status st ON sur.status_id = st.status_id
-      WHERE sur.study_id = $1 AND sur.status_id = 1
-      ORDER BY sur.role_name, u.last_name
-    `;
+  const rows = await studyService.getStudyUsers(parseInt(id));
 
-    const result = await pool.query(query, [parseInt(id)]);
+  const users = rows.map((user: Record<string, unknown>) => ({
+    userId: user.userId,
+    username: user.userName,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    phone: (user.phone as string) || '',
+    role: user.roleName,
+    assignedDate: user.dateCreated,
+    status: user.statusName
+  }));
 
-    const users = result.rows.map(user => ({
-      userId: user.userId,
-      username: user.userName,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      email: user.email,
-      phone: user.phone || '',
-      role: user.roleName,
-      assignedDate: user.dateCreated,
-      status: user.statusName
-    }));
-
-    res.json({ success: true, data: users });
-  } catch (error: any) {
-    logger.error('Get study users error', { error: error.message });
-    res.status(500).json({ success: false, message: error.message });
-  }
+  const response: ApiResponse<typeof users> = { success: true, data: users };
+  res.json(response);
 });
 
 /**

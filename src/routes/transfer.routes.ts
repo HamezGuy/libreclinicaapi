@@ -151,7 +151,6 @@ router.post('/:transferId/approve', authMiddleware, requireSignature, async (req
       transferId,
       approvalType,
       approvedBy: userId,
-      password: req.body.password // Already verified by requireSignature middleware
     });
 
     // Part 11 Audit: Record transfer approval with e-signature (§11.10(e), §11.50)
@@ -232,7 +231,7 @@ router.post('/:transferId/complete', authMiddleware, requireTransferRole, async 
  * 21 CFR Part 11 Compliance:
  * - §11.10(e): Records transfer cancellation with reason
  */
-router.post('/:transferId/cancel', authMiddleware, async (req: Part11Request, res: Response) => {
+router.post('/:transferId/cancel', authMiddleware, requireTransferRole, async (req: Part11Request, res: Response) => {
   try {
     const transferId = parseInt(req.params.transferId);
     const { cancelReason } = req.body;

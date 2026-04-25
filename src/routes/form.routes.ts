@@ -8,11 +8,10 @@
  * - All changes are logged to audit trail (§11.10(e))
  */
 
-import express, { Request, Response } from 'express';
+import express from 'express';
 import * as controller from '../controllers/form.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
-import { pool } from '../config/database';
 import Joi from 'joi';
 import { validate, formSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
@@ -43,140 +42,17 @@ router.get('/measurement-units', controller.getMeasurementUnits);
 // so /workflow-config would otherwise be captured by /:id and fail validation.
 // ============================================================================
 
-// Helper: parse query_route_to_users JSON from DB row
-function parseRouteUsers(row: any): string[] {
-  try {
-    const raw = row.queryRouteToUsers;
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch { /* ignore parse errors */ }
-  return [];
-}
-
-const defaultConfig = { requiresSDV: false, requiresSignature: false, requiresDDE: false, queryRouteToUsers: [] };
-
 // GET /api/forms/workflow-config - Get workflow config for ALL forms (bulk)
-router.get('/workflow-config', async (req: Request, res: Response) => {
-  try {
-    const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : null;
-
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_form_workflow_config') as exists
-    `);
-    if (!tableCheck.rows[0].exists) {
-      res.json({ success: true, data: {} });
-      return;
-    }
-
-    let result;
-    if (studyId) {
-      result = await pool.query(`
-        SELECT crf_id, requires_sdv, requires_signature, requires_dde, query_route_to_users
-        FROM acc_form_workflow_config
-        WHERE study_id = $1 OR study_id IS NULL
-        ORDER BY crf_id, study_id DESC NULLS LAST
-      `, [studyId]);
-    } else {
-      result = await pool.query(`
-        SELECT crf_id, requires_sdv, requires_signature, requires_dde, query_route_to_users
-        FROM acc_form_workflow_config
-        WHERE study_id IS NULL
-        ORDER BY crf_id
-      `);
-    }
-
-    const configMap: Record<string, any> = {};
-    for (const row of result.rows) {
-      if (configMap[String(row.crfId)]) continue;
-      configMap[String(row.crfId)] = {
-        requiresSDV: row.requiresSdv,
-        requiresSignature: row.requiresSignature,
-        requiresDDE: row.requiresDde,
-        queryRouteToUsers: parseRouteUsers(row)
-      };
-    }
-
-    res.json({ success: true, data: configMap });
-  } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
+router.get('/workflow-config', controller.getWorkflowConfigBulk);
 
 // GET /api/forms/workflow-config/:crfId - Get workflow config for a single form
-router.get('/workflow-config/:crfId', async (req: Request, res: Response) => {
-  try {
-    const crfId = parseInt(req.params.crfId);
-    const studyId = req.query.studyId ? parseInt(req.query.studyId as string) : null;
-
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'acc_form_workflow_config') as exists
-    `);
-    if (!tableCheck.rows[0].exists) {
-      res.json({ success: true, data: { ...defaultConfig } });
-      return;
-    }
-
-    const result = await pool.query(`
-      SELECT requires_sdv, requires_signature, requires_dde, query_route_to_users
-      FROM acc_form_workflow_config
-      WHERE crf_id = $1 AND (study_id = $2 OR study_id IS NULL)
-      ORDER BY study_id DESC NULLS LAST
-      LIMIT 1
-    `, [crfId, studyId]);
-
-    if (result.rows.length > 0) {
-      const row = result.rows[0];
-      res.json({
-        success: true,
-        data: {
-          requiresSDV: row.requiresSdv,
-          requiresSignature: row.requiresSignature,
-          requiresDDE: row.requiresDde,
-          queryRouteToUsers: parseRouteUsers(row)
-        }
-      });
-    } else {
-      res.json({ success: true, data: { ...defaultConfig } });
-    }
-  } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
+router.get('/workflow-config/:crfId', controller.getWorkflowConfigSingle);
 
 // PUT /api/forms/workflow-config/:crfId - Save workflow config for a form
 router.put('/workflow-config/:crfId',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   validate({ body: formSchemas.workflowConfig }),
-  async (req: Request, res: Response) => {
-    try {
-      const crfId = parseInt(req.params.crfId);
-      const { requiresSDV, requiresSignature, requiresDDE, queryRouteToUsers, studyId } = req.body;
-      const userId = (req as any).user?.userId;
-
-      const usersJson = JSON.stringify(queryRouteToUsers || []);
-      const resolvedStudyId = studyId || null;
-
-      await pool.query(`
-        INSERT INTO acc_form_workflow_config
-          (crf_id, study_id, requires_sdv, requires_signature, requires_dde, query_route_to_users, updated_by, date_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-        ON CONFLICT (crf_id, COALESCE(study_id, 0))
-        DO UPDATE SET
-          requires_sdv = EXCLUDED.requires_sdv,
-          requires_signature = EXCLUDED.requires_signature,
-          requires_dde = EXCLUDED.requires_dde,
-          query_route_to_users = EXCLUDED.query_route_to_users,
-          updated_by = EXCLUDED.updated_by,
-          date_updated = NOW()
-      `, [crfId, resolvedStudyId, requiresSDV || false, requiresSignature || false, requiresDDE || false, usersJson, userId]);
-
-      res.json({ success: true, message: 'Workflow configuration saved' });
-    } catch (error: any) {
-      res.status(500).json({ success: false, message: error.message });
-    }
-  }
+  controller.saveWorkflowConfig
 );
 
 // Form templates (CRFs) - read operations (no signature required)
@@ -187,11 +63,11 @@ router.get('/by-study', controller.getByStudy);
 
 // Template bundle export/import (must be before /:id to avoid parameter matching)
 router.post('/export-bundle',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   controller.exportBundle
 );
 router.post('/import-bundle',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   controller.importBundle
 );
 // /data and /status routes are registered later but also benefit from specificity order
@@ -201,13 +77,13 @@ router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 
 // Form templates (CRFs) - write operations (signature required per §11.50)
 router.post('/', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ body: formSchemas.create }),
   requireSignatureFor(SignatureMeanings.CRF_CREATE),
   controller.create
 );
 router.put('/:id', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: formSchemas.update }), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.update
@@ -221,7 +97,7 @@ router.delete('/:id',
 
 // Archive a form (admin only) - replaces delete for compliance
 router.post('/:id/archive', 
-  requireRole('admin'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_DELETE),
   controller.archive
@@ -229,7 +105,7 @@ router.post('/:id/archive',
 
 // Restore an archived form (admin only)
 router.post('/:id/restore', 
-  requireRole('admin'), 
+  requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_UPDATE),
   controller.restore
@@ -238,7 +114,7 @@ router.post('/:id/restore',
 // Template Forking/Versioning - write operations (signature required per §11.50)
 // Create new version of existing CRF
 router.post('/:id/versions', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor(SignatureMeanings.CRF_CREATE),
   controller.createVersion
@@ -249,7 +125,7 @@ router.post('/:id/versions',
 // (a copy, not a brand-new form). Org-isolation on source and target is
 // enforced inside controller.fork → forkForm.
 router.post('/:id/fork', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: formSchemas.fork }),
   requireSignatureFor(SignatureMeanings.CRF_FORK),
   controller.fork
@@ -260,7 +136,7 @@ router.post('/:id/fork',
 // study at copy time, the links are temporarily disabled. Once the linked form
 // is also copied, the user calls this endpoint to reconnect them.
 router.patch('/:id/relink',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   validate({
     params: commonSchemas.idParam,
     body: Joi.object({
@@ -282,7 +158,7 @@ router.patch('/:id/relink',
 // When Form A links to Form B and both are in the batch, the link in the
 // copied Form A automatically points at the copied Form B.
 router.post('/batch-fork',
-  requireRole('admin', 'data_manager'),
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
   validate({
     body: Joi.object({
       sourceCrfIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
@@ -297,12 +173,12 @@ router.post('/batch-fork',
   controller.batchFork
 );
 
-// Form data operations (signature required for data entry per §11.50)
+// Form data save — no e-signature required for saving data.
+// E-signature is a separate action (sign/lock) done after form completion.
 router.post('/save', 
   requireRole('data_manager', 'coordinator', 'investigator'), 
   soapRateLimiter, 
   validate({ body: formSchemas.saveData }), 
-  requireSignatureFor(SignatureMeanings.FORM_DATA_SAVE),
   controller.saveData
 );
 router.get('/data/:eventCrfId', controller.getData);

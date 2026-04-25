@@ -310,12 +310,12 @@ describe('Subject SOAP Service', () => {
       expect(exists).toBe(false);
     });
 
-    it('should return false on SOAP failure', async () => {
+    it('should throw on SOAP failure', async () => {
       mockClient.setFailMode(true);
 
-      const exists = await subjectSoapService.isSubjectExists('S_1', 'SUBJ-001', 1, 'root');
-
-      expect(exists).toBe(false);
+      await expect(
+        subjectSoapService.isSubjectExists('S_1', 'SUBJ-001', 1, 'root')
+      ).rejects.toThrow('Cannot verify subject existence');
     });
   });
 
@@ -595,7 +595,7 @@ describe('Data SOAP Service', () => {
   });
 
   describe('validateOdmStructure', () => {
-    it('should validate correct ODM structure', () => {
+    it('should validate correct ODM structure', async () => {
       const validOdm = `<?xml version="1.0"?>
         <ODM>
           <ClinicalData>
@@ -603,43 +603,43 @@ describe('Data SOAP Service', () => {
           </ClinicalData>
         </ODM>`;
 
-      const result = dataSoapService.validateOdmStructure(validOdm);
+      const result = await dataSoapService.validateOdmStructure(validOdm);
 
       expect(result.isValid).toBe(true);
       expect(result.errors).toHaveLength(0);
     });
 
-    it('should reject ODM without required elements', () => {
+    it('should reject ODM without required elements', async () => {
       const invalidOdm = '<data>not ODM</data>';
 
-      const result = dataSoapService.validateOdmStructure(invalidOdm);
+      const result = await dataSoapService.validateOdmStructure(invalidOdm);
 
       expect(result.isValid).toBe(false);
       expect(result.errors.length).toBeGreaterThan(0);
     });
 
-    it('should check for ODM root element', () => {
+    it('should check for ODM root element', async () => {
       const noOdmRoot = '<ClinicalData><SubjectData/></ClinicalData>';
 
-      const result = dataSoapService.validateOdmStructure(noOdmRoot);
+      const result = await dataSoapService.validateOdmStructure(noOdmRoot);
 
       expect(result.isValid).toBe(false);
       expect(result.errors).toContain('Missing ODM root element');
     });
 
-    it('should check for ClinicalData element', () => {
+    it('should check for ClinicalData element', async () => {
       const noClinicalData = '<ODM><Study/></ODM>';
 
-      const result = dataSoapService.validateOdmStructure(noClinicalData);
+      const result = await dataSoapService.validateOdmStructure(noClinicalData);
 
       expect(result.isValid).toBe(false);
       expect(result.errors).toContain('Missing ClinicalData element');
     });
 
-    it('should check for SubjectData element', () => {
+    it('should check for SubjectData element', async () => {
       const noSubjectData = '<ODM><ClinicalData/></ODM>';
 
-      const result = dataSoapService.validateOdmStructure(noSubjectData);
+      const result = await dataSoapService.validateOdmStructure(noSubjectData);
 
       expect(result.isValid).toBe(false);
       expect(result.errors).toContain('Missing SubjectData element');

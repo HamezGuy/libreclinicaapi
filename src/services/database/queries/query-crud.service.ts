@@ -412,6 +412,30 @@ export const createQuery = async (
     assignedUserId?: number;
     severity?: string;
     dueDate?: string | null;
+    eventCrfId?: number;
+    itemId?: number;
+    itemDataId?: number;
+    fieldName?: string;
+    fieldPath?: string;
+    columnName?: string;
+    cellPath?: string;
+    cellTarget?: {
+      tableFieldPath: string;
+      tableItemId?: number;
+      columnId: string;
+      columnType?: string;
+      rowIndex?: number;
+      rowId?: string;
+      allRows: boolean;
+      tableType: 'table' | 'question_table';
+    } | null;
+    cellType?: string;
+    cellOptions?: Array<{ label: string; value: string }>;
+    cellMin?: number;
+    cellMax?: number;
+    crfId?: number;
+    crfVersionId?: number;
+    generationType?: string;
   },
   userId: number
 ): Promise<{ success: true; queryId: number; message: string }> => {
@@ -452,7 +476,7 @@ export const createQuery = async (
         if (data.entityType === 'eventCrf') {
           eventCrfIdForLookup = data.entityId;
         } else if (data.entityType === 'itemData') {
-          const ecId = (data as any).eventCrfId;
+          const ecId = data.eventCrfId;
           if (ecId) {
             eventCrfIdForLookup = ecId;
           } else {
@@ -496,7 +520,7 @@ export const createQuery = async (
     );
     (data as any)._additionalAssigneeIds = uniqueAdditionalIds;
 
-    const generationType = (data as any).generationType || 'manual';
+    const generationType = data.generationType || 'manual';
 
     if (data.dueDate) {
       const parsed = new Date(data.dueDate);
@@ -526,8 +550,8 @@ export const createQuery = async (
     let resolvedEntityId = data.entityId;
 
     if (data.entityType === 'eventCrf') {
-      if (!resolvedEntityId && (data as any).eventCrfId) {
-        resolvedEntityId = (data as any).eventCrfId;
+      if (!resolvedEntityId && data.eventCrfId) {
+        resolvedEntityId = data.eventCrfId;
       }
       if (!resolvedEntityId) {
         throw new BadRequestError('Cannot create eventCrf query: entityId or eventCrfId is required. Please save the form before creating a query.');
@@ -546,12 +570,12 @@ export const createQuery = async (
     }
 
     if (data.entityType === 'itemData') {
-      if ((data as any).itemDataId) {
-        resolvedEntityId = (data as any).itemDataId;
+      if (data.itemDataId) {
+        resolvedEntityId = data.itemDataId;
       } else {
-        const eventCrfId = (data as any).eventCrfId;
-        let itemId = (data as any).itemId || data.entityId;
-        const fieldName = (data as any).fieldName;
+        const eventCrfId = data.eventCrfId;
+        let itemId = data.itemId || data.entityId;
+        const fieldName = data.fieldName;
 
         if (!eventCrfId) {
           throw new BadRequestError('Cannot create field-level query: eventCrfId is required to resolve the data row. Please save the form before creating a query on this field.');
@@ -604,9 +628,9 @@ export const createQuery = async (
       }
     }
 
-    const cellTarget = (data as any).cellTarget || null;
-    const cellPath = (data as any).cellPath;
-    const fieldPath = cellPath || (data as any).fieldName || (data as any).fieldPath || (data as any).columnName;
+    const cellTarget = data.cellTarget || null;
+    const cellPath = data.cellPath;
+    const fieldPath = cellPath || data.fieldName || data.fieldPath || data.columnName;
 
     if (fieldPath && (mapping.table === 'dn_event_crf_map' || mapping.table === 'dn_item_data_map')) {
       await client.query(`
@@ -679,7 +703,7 @@ export const createQuery = async (
           `, [
             `Query: ${data.description.substring(0, 100)}`, data.description,
             data.severity === 'critical' ? 'high' : data.severity === 'major' ? 'medium' : 'low',
-            queryId, (data as any).eventCrfId || null, data.studyId,
+            queryId, data.eventCrfId || null, data.studyId,
             allQueryAssigneeIds, userId,
             JSON.stringify({
               generationType, queryType: data.queryType || 'Query',
@@ -695,7 +719,7 @@ export const createQuery = async (
 
     const eventCrfIdForCounts = (data.entityType === 'eventCrf')
       ? resolvedEntityId
-      : (data as any).eventCrfId || null;
+      : data.eventCrfId || null;
     if (eventCrfIdForCounts) {
       await updateFormQueryCounts(client, eventCrfIdForCounts);
     } else if (data.entityType === 'itemData' && resolvedEntityId) {

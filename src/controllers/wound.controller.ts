@@ -10,6 +10,14 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as woundService from '../services/hybrid/wound.service';
 import { AuthRequest } from '../middleware/auth.middleware';
 import multer from 'multer';
+import type { ApiResponse } from '@accura-trial/shared-types';
+import type { 
+  WoundSession, WoundMeasurement, WoundApiResponse,
+  CreateSessionResponse, ImageUploadResponse,
+  SubmitMeasurementsResponse, SignSessionResponse,
+  SubmitToLibreClinicaResponse, PaginatedWoundResponse,
+  SyncBatchResponse
+} from '../types/wound.types';
 
 // Configure multer for image uploads
 const upload = multer({
@@ -47,7 +55,7 @@ export const createSession = asyncHandler(async (req: Request, res: Response) =>
     return;
   }
 
-  const result = await woundService.createSession(
+  const result: CreateSessionResponse = await woundService.createSession(
     { patientId, templateId, studyId, studyEventId, siteId, deviceId, source },
     user.userId.toString(),
     user.userName
@@ -63,7 +71,7 @@ export const createSession = asyncHandler(async (req: Request, res: Response) =>
 export const getSession = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  const result = await woundService.getSession(id);
+  const result: WoundApiResponse<WoundSession> = await woundService.getSession(id);
 
   if (!result.success) {
     res.status(404).json(result);
@@ -81,7 +89,7 @@ export const getPatientSessions = asyncHandler(async (req: Request, res: Respons
   const { patientId } = req.params;
   const { page = '1', limit = '20' } = req.query;
 
-  const result = await woundService.getPatientSessions(
+  const result: PaginatedWoundResponse<WoundSession> = await woundService.getPatientSessions(
     patientId,
     parseInt(page as string),
     parseInt(limit as string)
@@ -114,7 +122,7 @@ export const uploadImage = asyncHandler(async (req: Request, res: Response) => {
 
   const hash = req.body.hash || '';
 
-  const result = await woundService.uploadImage(
+  const result: ImageUploadResponse = await woundService.uploadImage(
     sessionId,
     req.file.buffer,
     req.file.originalname,
@@ -133,8 +141,8 @@ export const uploadImage = asyncHandler(async (req: Request, res: Response) => {
 export const getSessionImages = asyncHandler(async (req: Request, res: Response) => {
   const { id: sessionId } = req.params;
 
-  // For now, return success - implement image listing if needed
-  res.json({ success: true, data: [], message: 'Not implemented yet' });
+  const response: WoundApiResponse<never[]> = { success: true, data: [], message: 'Not implemented yet' };
+  res.json(response);
 });
 
 // ============================================================================
@@ -164,7 +172,7 @@ export const submitMeasurements = asyncHandler(async (req: Request, res: Respons
     return;
   }
 
-  const result = await woundService.submitMeasurements(
+  const result: SubmitMeasurementsResponse = await woundService.submitMeasurements(
     { sessionId, measurements, dataHash: dataHash || '' },
     user.userId.toString(),
     user.userName
@@ -180,7 +188,7 @@ export const submitMeasurements = asyncHandler(async (req: Request, res: Respons
 export const getSessionMeasurements = asyncHandler(async (req: Request, res: Response) => {
   const { id: sessionId } = req.params;
 
-  const result = await woundService.getSessionMeasurements(sessionId);
+  const result: WoundApiResponse<WoundMeasurement[]> = await woundService.getSessionMeasurements(sessionId);
 
   res.json(result);
 });
@@ -212,7 +220,7 @@ export const signSession = asyncHandler(async (req: Request, res: Response) => {
     return;
   }
 
-  const result = await woundService.signSession(
+  const result: SignSessionResponse = await woundService.signSession(
     { sessionId, signature },
     user.userId.toString()
   );
@@ -239,7 +247,7 @@ export const submitToLibreClinica = asyncHandler(async (req: Request, res: Respo
 
   const { auditTrail } = req.body;
 
-  const result = await woundService.submitToLibreClinica(
+  const result: SubmitToLibreClinicaResponse = await woundService.submitToLibreClinica(
     { sessionId, auditTrail },
     user.userId,
     user.userName
@@ -267,7 +275,7 @@ export const submitAuditEntries = asyncHandler(async (req: Request, res: Respons
     return;
   }
 
-  const result = await woundService.submitAuditEntries(entries);
+  const result: { received: boolean; count: number } = await woundService.submitAuditEntries(entries);
 
   res.json({ success: true, ...result });
 });
@@ -304,7 +312,7 @@ export const syncBatch = asyncHandler(async (req: Request, res: Response) => {
   for (const pendingSession of sessions) {
     try {
       // Create session
-      const createResult = await woundService.createSession(
+      const createResult: CreateSessionResponse = await woundService.createSession(
         {
           patientId: pendingSession.patientId,
           templateId: pendingSession.templateId,
@@ -351,7 +359,7 @@ export const syncBatch = asyncHandler(async (req: Request, res: Response) => {
       }
 
       // Submit to LibreClinica
-      const submitResult = await woundService.submitToLibreClinica(
+      const submitResult: SubmitToLibreClinicaResponse = await woundService.submitToLibreClinica(
         { sessionId: serverSessionId, auditTrail: pendingSession.auditTrail },
         user.userId,
         user.userName
@@ -371,11 +379,12 @@ export const syncBatch = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  res.json({
+  const response: SyncBatchResponse = {
     success: true,
     syncedSessions,
     failedSessions
-  });
+  };
+  res.json(response);
 });
 
 /**
@@ -383,14 +392,14 @@ export const syncBatch = asyncHandler(async (req: Request, res: Response) => {
  * Get sync status
  */
 export const getSyncStatus = asyncHandler(async (req: Request, res: Response) => {
-  // For now, return placeholder status
-  res.json({
+  const response: WoundApiResponse<{ pendingCount: number; lastSync: Date }> = {
     success: true,
     data: {
       pendingCount: 0,
       lastSync: new Date()
     }
-  });
+  };
+  res.json(response);
 });
 
 export default {

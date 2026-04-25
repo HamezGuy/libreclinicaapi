@@ -6,6 +6,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as userService from '../services/database/user.service';
 import * as featureAccessService from '../services/database/feature-access.service';
+import type { ApiResponse, UserAccount, FeatureDefinition, UserFeatureAccess } from '@accura-trial/shared-types';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, role, enabled, page, limit } = req.query;
@@ -19,7 +20,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     limit: parseInt(limit as string) || 20
   }, user?.userId);
 
-  res.json(result);
+  res.json(result as unknown as ApiResponse<UserAccount[]>);
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
@@ -29,17 +30,18 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
   const result = await userService.getUserById(parseInt(id), caller?.userId);
 
   if (!result) {
-    res.status(404).json({ success: false, message: 'User not found' });
+    res.status(404).json({ success: false, message: 'User not found' } as ApiResponse<null>);
     return;
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<unknown> = { success: true, data: result };
+  res.json(response);
 });
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const creator = (req as any).user;
 
-  const result = await userService.createUser(req.body, creator.userId);
+  const result: ApiResponse<unknown> = await userService.createUser(req.body, creator.userId);
 
   res.status(result.success ? 201 : 400).json(result);
 });
@@ -48,7 +50,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
   const updater = (req as any).user;
   const { id } = req.params;
 
-  const result = await userService.updateUser(parseInt(id), req.body, updater.userId);
+  const result: ApiResponse<unknown> = await userService.updateUser(parseInt(id), req.body, updater.userId);
 
   res.json(result);
 });
@@ -68,7 +70,8 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
 export const getRoles = asyncHandler(async (req: Request, res: Response) => {
   const roles = userService.getAvailableRoles();
 
-  res.json({ success: true, data: roles });
+  const response: ApiResponse<typeof roles> = { success: true, data: roles };
+  res.json(response);
 });
 
 /**
@@ -83,7 +86,7 @@ export const assignToStudy = asyncHandler(async (req: Request, res: Response) =>
     res.status(400).json({
       success: false,
       message: 'studyId and roleName are required'
-    });
+    } as ApiResponse<null>);
     return;
   }
 
@@ -112,11 +115,12 @@ export const getUserRole = asyncHandler(async (req: Request, res: Response) => {
     res.status(404).json({
       success: false,
       message: 'User not assigned to this study'
-    });
+    } as ApiResponse<null>);
     return;
   }
 
-  res.json({ success: true, data: result });
+  const response: ApiResponse<typeof result> = { success: true, data: result };
+  res.json(response);
 });
 
 /**
@@ -124,7 +128,8 @@ export const getUserRole = asyncHandler(async (req: Request, res: Response) => {
  */
 export const getAllFeatures = asyncHandler(async (req: Request, res: Response) => {
   const features = await featureAccessService.getAllFeatures();
-  res.json({ success: true, data: features });
+  const response: ApiResponse<FeatureDefinition[]> = { success: true, data: features };
+  res.json(response);
 });
 
 /**
@@ -133,7 +138,8 @@ export const getAllFeatures = asyncHandler(async (req: Request, res: Response) =
 export const getUserFeatures = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const features = await featureAccessService.getUserFeatureAccess(parseInt(id));
-  res.json({ success: true, data: features });
+  const response: ApiResponse<UserFeatureAccess[]> = { success: true, data: features };
+  res.json(response);
 });
 
 /**
@@ -146,7 +152,7 @@ export const setUserFeatures = asyncHandler(async (req: Request, res: Response) 
   const { features } = req.body;
 
   if (!features || !Array.isArray(features)) {
-    res.status(400).json({ success: false, message: 'features array is required' });
+    res.status(400).json({ success: false, message: 'features array is required' } as ApiResponse<null>);
     return;
   }
 
@@ -169,7 +175,7 @@ export const setOneUserFeature = asyncHandler(async (req: Request, res: Response
   const { isEnabled, notes } = req.body;
 
   if (isEnabled === undefined) {
-    res.status(400).json({ success: false, message: 'isEnabled is required' });
+    res.status(400).json({ success: false, message: 'isEnabled is required' } as ApiResponse<null>);
     return;
   }
 

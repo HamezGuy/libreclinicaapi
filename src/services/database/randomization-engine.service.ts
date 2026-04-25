@@ -28,6 +28,7 @@
 import crypto from 'crypto';
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import type { RandomizationConfig, StratificationFactor, RandomizationListEntry, RandomizationResult } from '../../types';
 
 function safeJsonParse(raw: string | null | undefined, fallback: any, context: string): any {
   if (!raw) return fallback;
@@ -36,65 +37,6 @@ function safeJsonParse(raw: string | null | undefined, fallback: any, context: s
     logger.error(`Corrupted JSON in ${context}`, { error: e.message, raw: raw.substring(0, 200) });
     return fallback;
   }
-}
-
-// ============================================================================
-// TYPES
-// ============================================================================
-
-export interface RandomizationConfig {
-  configId?: number;
-  studyId: number;
-  name: string;
-  description?: string;
-  randomizationType: 'simple' | 'block' | 'stratified';
-  blindingLevel: 'open_label' | 'single_blind' | 'double_blind' | 'triple_blind';
-  blockSize: number;
-  blockSizeVaried: boolean;
-  blockSizesList?: number[];   // e.g., [4, 6, 8] for varied sizes
-  allocationRatios: Record<string, number>; // { "groupId": ratio }
-  stratificationFactors?: StratificationFactor[];
-  studyGroupClassId?: number;  // Link to LibreClinica group class
-  seed?: string;               // Hex-encoded cryptographic seed
-  totalSlots: number;
-  isActive: boolean;
-  isLocked: boolean;
-  drugKitManagement: boolean;
-  drugKitPrefix?: string;
-  siteSpecific: boolean;
-  createdBy?: number;
-  dateCreated?: Date;
-}
-
-export interface StratificationFactor {
-  name: string;
-  values: string[];
-}
-
-export interface RandomizationListEntry {
-  listEntryId?: number;
-  configId: number;
-  sequenceNumber: number;
-  studyGroupId: number;
-  stratumKey: string;         // e.g., 'default' or 'age:<65|gender:M'
-  siteId?: number;
-  blockNumber: number;
-  isUsed: boolean;
-  usedBySubjectId?: number;
-  usedAt?: Date;
-  usedByUserId?: number;
-  randomizationNumber?: string;
-}
-
-export interface RandomizationResult {
-  success: boolean;
-  randomizationNumber: string;
-  studyGroupId: number;
-  groupName: string;
-  sequenceNumber: number;
-  stratumKey: string;
-  isBlinded: boolean;
-  message?: string;
 }
 
 // ============================================================================
@@ -672,177 +614,167 @@ export const randomizeSubject = async (
   userId: number,
   stratumValues?: Record<string, string> // e.g., { "age": "<65", "gender": "M" }
 ): Promise<RandomizationResult> => {
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
+    return await pool.transaction(async (client) => {
+      // 1. Get active config for this study
+      const configResult = await client.query(
+        'SELECT * FROM acc_randomization_config WHERE study_id = $1 AND is_active = true LIMIT 1',
+        [studyId]
+      );
 
-    // 1. Get active config for this study
-    const configResult = await client.query(
-      'SELECT * FROM acc_randomization_config WHERE study_id = $1 AND is_active = true LIMIT 1',
-      [studyId]
-    );
-
-    if (configResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return {
-        success: false,
-        randomizationNumber: '',
-        studyGroupId: 0,
-        groupName: '',
-        sequenceNumber: 0,
-        stratumKey: '',
-        isBlinded: false,
-        message: 'No active randomization scheme for this study. Configure and activate a scheme first.'
-      };
-    }
-
-    const cfg = configResult.rows[0];
-    const configId = cfg.configId;
-
-    // 2. Check if subject is already randomized
-    const existingCheck = await client.query(
-      'SELECT COUNT(*) as cnt FROM acc_randomization_list WHERE config_id = $1 AND used_by_subject_id = $2 AND is_used = true',
-      [configId, studySubjectId]
-    );
-
-    if (parseInt(existingCheck.rows[0].cnt) > 0) {
-      await client.query('ROLLBACK');
-      return {
-        success: false,
-        randomizationNumber: '',
-        studyGroupId: 0,
-        groupName: '',
-        sequenceNumber: 0,
-        stratumKey: '',
-        isBlinded: false,
-        message: 'Subject is already randomized'
-      };
-    }
-
-    // 3. Determine stratum key
-    let stratumKey = 'default';
-    if (cfg.randomizationType === 'stratified' && stratumValues) {
-      const factors: StratificationFactor[] = typeof cfg.stratificationFactors === 'string'
-        ? JSON.parse(cfg.stratificationFactors)
-        : cfg.stratificationFactors || [];
-
-      const parts: string[] = [];
-      for (const factor of factors) {
-        const value = stratumValues[factor.name];
-        if (!value) {
-          await client.query('ROLLBACK');
-          return {
-            success: false,
-            randomizationNumber: '',
-            studyGroupId: 0,
-            groupName: '',
-            sequenceNumber: 0,
-            stratumKey: '',
-            isBlinded: false,
-            message: `Missing stratification value for factor: ${factor.name}`
-          };
-        }
-        parts.push(`${factor.name}:${value}`);
+      if (configResult.rows.length === 0) {
+        return {
+          success: false,
+          randomizationNumber: '',
+          studyGroupId: 0,
+          groupName: '',
+          sequenceNumber: 0,
+          stratumKey: '',
+          isBlinded: false,
+          message: 'No active randomization scheme for this study. Configure and activate a scheme first.'
+        };
       }
-      stratumKey = parts.join('|');
-    }
 
-    // 4. Get the next unused slot from the sealed list (FIFO order)
-    // Use FOR UPDATE SKIP LOCKED for concurrency safety
-    const nextSlot = await client.query(`
-      SELECT rl.*, sg.name as group_name
-      FROM acc_randomization_list rl
-      INNER JOIN study_group sg ON rl.study_group_id = sg.study_group_id
-      WHERE rl.config_id = $1
-        AND rl.stratum_key = $2
-        AND rl.is_used = false
-      ORDER BY rl.sequence_number ASC
-      LIMIT 1
-      FOR UPDATE OF rl SKIP LOCKED
-    `, [configId, stratumKey]);
+      const cfg = configResult.rows[0];
+      const configId = cfg.configId;
 
-    if (nextSlot.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return {
-        success: false,
-        randomizationNumber: '',
-        studyGroupId: 0,
-        groupName: '',
-        sequenceNumber: 0,
+      // 2. Check if subject is already randomized
+      const existingCheck = await client.query(
+        'SELECT COUNT(*) as cnt FROM acc_randomization_list WHERE config_id = $1 AND used_by_subject_id = $2 AND is_used = true',
+        [configId, studySubjectId]
+      );
+
+      if (parseInt(existingCheck.rows[0].cnt) > 0) {
+        return {
+          success: false,
+          randomizationNumber: '',
+          studyGroupId: 0,
+          groupName: '',
+          sequenceNumber: 0,
+          stratumKey: '',
+          isBlinded: false,
+          message: 'Subject is already randomized'
+        };
+      }
+
+      // 3. Determine stratum key
+      let stratumKey = 'default';
+      if (cfg.randomizationType === 'stratified' && stratumValues) {
+        const factors: StratificationFactor[] = typeof cfg.stratificationFactors === 'string'
+          ? JSON.parse(cfg.stratificationFactors)
+          : cfg.stratificationFactors || [];
+
+        const parts: string[] = [];
+        for (const factor of factors) {
+          const value = stratumValues[factor.name];
+          if (!value) {
+            return {
+              success: false,
+              randomizationNumber: '',
+              studyGroupId: 0,
+              groupName: '',
+              sequenceNumber: 0,
+              stratumKey: '',
+              isBlinded: false,
+              message: `Missing stratification value for factor: ${factor.name}`
+            };
+          }
+          parts.push(`${factor.name}:${value}`);
+        }
+        stratumKey = parts.join('|');
+      }
+
+      // 4. Atomically claim the next unused slot with row-level locking.
+      // FOR UPDATE SKIP LOCKED ensures concurrent requests each get a distinct row:
+      // if another transaction already locked the lowest-sequence slot, this query
+      // skips it and grabs the next available one instead of blocking.
+      const nextSlot = await client.query(`
+        SELECT rl.*, sg.name as group_name
+        FROM acc_randomization_list rl
+        INNER JOIN study_group sg ON rl.study_group_id = sg.study_group_id
+        WHERE rl.config_id = $1
+          AND rl.stratum_key = $2
+          AND rl.is_used = false
+        ORDER BY rl.sequence_number ASC
+        LIMIT 1
+        FOR UPDATE OF rl SKIP LOCKED
+      `, [configId, stratumKey]);
+
+      if (nextSlot.rows.length === 0) {
+        return {
+          success: false,
+          randomizationNumber: '',
+          studyGroupId: 0,
+          groupName: '',
+          sequenceNumber: 0,
+          stratumKey,
+          isBlinded: false,
+          message: `No available randomization slots for stratum: ${stratumKey}. The list may be exhausted.`
+        };
+      }
+
+      const slot = nextSlot.rows[0];
+
+      // 5. Mark the slot as used (row is already locked by FOR UPDATE above)
+      await client.query(`
+        UPDATE acc_randomization_list
+        SET is_used = true, used_by_subject_id = $2, used_at = CURRENT_TIMESTAMP, used_by_user_id = $3
+        WHERE list_entry_id = $1
+      `, [slot.listEntryId, studySubjectId, userId]);
+
+      // 6. Create the subject_group_map entry in LibreClinica
+      const groupInfo = await client.query(
+        'SELECT study_group_class_id FROM study_group WHERE study_group_id = $1',
+        [slot.studyGroupId]
+      );
+      const studyGroupClassId = groupInfo.rows[0]?.studyGroupClassId || cfg.studyGroupClassId;
+
+      const existingAssignment = await client.query(
+        'SELECT subject_group_map_id FROM subject_group_map WHERE study_subject_id = $1 AND study_group_class_id = $2',
+        [studySubjectId, studyGroupClassId]
+      );
+
+      if (existingAssignment.rows.length > 0) {
+        await client.query(`
+          UPDATE subject_group_map 
+          SET study_group_id = $1, notes = $2, date_updated = CURRENT_DATE, update_id = $3
+          WHERE study_subject_id = $4 AND study_group_class_id = $5
+        `, [slot.studyGroupId, `Randomization: ${slot.randomizationNumber}`, userId, studySubjectId, studyGroupClassId]);
+      } else {
+        await client.query(`
+          INSERT INTO subject_group_map (study_subject_id, study_group_id, study_group_class_id, owner_id, status_id, notes, date_created)
+          VALUES ($1, $2, $3, $4, 1, $5, CURRENT_DATE)
+        `, [studySubjectId, slot.studyGroupId, studyGroupClassId, userId, `Randomization: ${slot.randomizationNumber}`]);
+      }
+
+      // 7. Audit log — type 28 (Subject Group Assignment)
+      await client.query(`
+        INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
+        VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Randomized', NULL, $3, 28)
+      `, [userId, studySubjectId, `Subject ${studySubjectId} assigned to ${slot.groupName} (${slot.randomizationNumber})`]);
+
+      const isBlinded = cfg.blindingLevel !== 'open_label';
+
+      logger.info('Subject randomized', {
+        studySubjectId,
+        configId,
+        randomizationNumber: slot.randomizationNumber,
+        groupId: slot.studyGroupId,
         stratumKey,
-        isBlinded: false,
-        message: `No available randomization slots for stratum: ${stratumKey}. The list may be exhausted.`
+        isBlinded
+      });
+
+      return {
+        success: true,
+        randomizationNumber: slot.randomizationNumber,
+        studyGroupId: slot.studyGroupId,
+        groupName: isBlinded ? '[Blinded]' : slot.groupName,
+        sequenceNumber: slot.sequenceNumber,
+        stratumKey,
+        isBlinded
       };
-    }
-
-    const slot = nextSlot.rows[0];
-
-    // 5. Mark the slot as used
-    await client.query(`
-      UPDATE acc_randomization_list
-      SET is_used = true, used_by_subject_id = $2, used_at = CURRENT_TIMESTAMP, used_by_user_id = $3
-      WHERE list_entry_id = $1
-    `, [slot.listEntryId, studySubjectId, userId]);
-
-    // 6. Create the subject_group_map entry in LibreClinica
-    // Get study_group_class_id
-    const groupInfo = await client.query(
-      'SELECT study_group_class_id FROM study_group WHERE study_group_id = $1',
-      [slot.studyGroupId]
-    );
-    const studyGroupClassId = groupInfo.rows[0]?.studyGroupClassId || cfg.studyGroupClassId;
-
-    // Check if subject already has an assignment for this group class (prevent duplicates)
-    const existingAssignment = await client.query(
-      'SELECT subject_group_map_id FROM subject_group_map WHERE study_subject_id = $1 AND study_group_class_id = $2',
-      [studySubjectId, studyGroupClassId]
-    );
-
-    if (existingAssignment.rows.length > 0) {
-      // Update existing assignment instead of creating a duplicate
-      await client.query(`
-        UPDATE subject_group_map 
-        SET study_group_id = $1, notes = $2, date_updated = CURRENT_DATE, update_id = $3
-        WHERE study_subject_id = $4 AND study_group_class_id = $5
-      `, [slot.studyGroupId, `Randomization: ${slot.randomizationNumber}`, userId, studySubjectId, studyGroupClassId]);
-    } else {
-      await client.query(`
-        INSERT INTO subject_group_map (study_subject_id, study_group_id, study_group_class_id, owner_id, status_id, notes, date_created)
-        VALUES ($1, $2, $3, $4, 1, $5, CURRENT_DATE)
-      `, [studySubjectId, slot.studyGroupId, studyGroupClassId, userId, `Randomization: ${slot.randomizationNumber}`]);
-    }
-
-    // 7. Audit log — use type 28 (Subject Group Assignment) from LibreClinica's audit_log_event_type
-    await client.query(`
-      INSERT INTO audit_log_event (audit_date, audit_table, user_id, entity_id, entity_name, old_value, new_value, audit_log_event_type_id)
-      VALUES (CURRENT_TIMESTAMP, 'subject_group_map', $1, $2, 'Subject Randomized', NULL, $3, 28)
-    `, [userId, studySubjectId, `Subject ${studySubjectId} assigned to ${slot.groupName} (${slot.randomizationNumber})`]);
-
-    await client.query('COMMIT');
-
-    const isBlinded = cfg.blindingLevel !== 'open_label';
-
-    logger.info('Subject randomized', {
-      studySubjectId,
-      configId,
-      randomizationNumber: slot.randomizationNumber,
-      groupId: slot.studyGroupId,
-      stratumKey,
-      isBlinded
     });
-
-    return {
-      success: true,
-      randomizationNumber: slot.randomizationNumber,
-      studyGroupId: slot.studyGroupId,
-      groupName: isBlinded ? '[Blinded]' : slot.groupName,
-      sequenceNumber: slot.sequenceNumber,
-      stratumKey,
-      isBlinded
-    };
   } catch (error: any) {
-    await client.query('ROLLBACK');
     logger.error('Randomization failed', { studySubjectId, error: error.message });
     return {
       success: false,
@@ -854,8 +786,6 @@ export const randomizeSubject = async (
       isBlinded: false,
       message: `Randomization failed: ${error.message}`
     };
-  } finally {
-    client.release();
   }
 };
 

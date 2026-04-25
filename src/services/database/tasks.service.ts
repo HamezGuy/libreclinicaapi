@@ -30,23 +30,14 @@ import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { parseDateLocal } from '../../utils/date.util';
 import { updateFormQueryCounts } from './query.service';
+import type { TaskType, TaskPriority, TaskStatus, Task, TaskSummary, TaskFilters } from '../../types';
 
 /**
  * Helper: get org member user IDs for the caller.
  * Returns null if the caller has no org membership (root admin sees all).
  */
-const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
-  const orgCheck = await pool.query(
-    `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active'`,
-    [callerUserId]
-  );
-  if (orgCheck.rows.length === 0) return [callerUserId]; // No org = only see own tasks
-  const orgIds = orgCheck.rows.map((r: any) => r.organizationId);
-  const members = await pool.query(
-    `SELECT DISTINCT user_id FROM acc_organization_member WHERE organization_id = ANY($1::int[]) AND status = 'active'`,
-    [orgIds]
-  );
-  return members.rows.map((r: any) => r.userId);
+const getOrgMemberUserIds = async (_callerUserId: number): Promise<number[] | null> => {
+  return null;
 };
 
 /**
@@ -109,90 +100,6 @@ const getVisitWindowForEvent = async (studyEventDefinitionId: number): Promise<{
     return null;
   }
 };
-
-// Task type enumeration matching LibreClinica data sources
-export type TaskType = 
-  | 'query'              // From discrepancy_note
-  | 'scheduled_visit'    // From study_event (status = scheduled)
-  | 'data_entry'         // From study_event (status = data entry started) + event_crf
-  | 'form_completion'    // From event_crf (incomplete)
-  | 'sdv_required'       // From event_crf (sdv_status = false)
-  | 'signature_required' // From event_crf (needs e-signature)
-  | 'overdue_visit';     // Scheduled visits past due
-
-export type TaskPriority = 'critical' | 'high' | 'medium' | 'low';
-
-export type TaskStatus = 'pending' | 'in_progress' | 'overdue' | 'completed';
-
-export interface Task {
-  id: string;
-  type: TaskType;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  priority: TaskPriority;
-  dueDate: Date | null;
-  createdAt: Date;
-  
-  // Context information
-  studyId: number;
-  studyName: string;
-  subjectId: number | null;
-  subjectLabel: string | null;
-  eventId: number | null;
-  eventName: string | null;
-  formId: number | null;
-  formName: string | null;
-  
-  // Assignment
-  assignedToUserId: number | null;
-  assignedToUsername: string | null;
-  ownerId: number | null;
-  ownerUsername: string | null;
-  
-  // Source reference (for linking back to original record)
-  sourceTable: string;
-  sourceId: number;
-  
-  // Additional metadata
-  metadata?: Record<string, any>;
-}
-
-export interface TaskSummary {
-  total: number;
-  byType: {
-    queries: number;
-    scheduledVisits: number;
-    dataEntry: number;
-    formCompletion: number;
-    sdvRequired: number;
-    signatureRequired: number;
-  };
-  byStatus: {
-    pending: number;
-    inProgress: number;
-    overdue: number;
-  };
-  byPriority: {
-    critical: number;
-    high: number;
-    medium: number;
-    low: number;
-  };
-}
-
-export interface TaskFilters {
-  userId?: number;
-  username?: string;
-  callerUserId?: number;  // For org-scoping
-  studyId?: number;
-  types?: TaskType[];
-  status?: TaskStatus;
-  priority?: TaskPriority;
-  includeQueries?: boolean;  // Toggle for queries
-  limit?: number;
-  offset?: number;
-}
 
 /**
  * Get user ID from username
@@ -310,42 +217,29 @@ export async function getUserTasks(filters: TaskFilters): Promise<{ success: boo
     }
     
     // Filter out dismissed/completed tasks
-    let filteredTasks = tasks.filter(t => !dismissedTaskIds.has(t.id));
-    
-    // Add organization info to each task
-    if (userOrgs.length > 0) {
-      const orgName = userOrgs[0].name;
-      const orgId = userOrgs[0].id;
-      filteredTasks = filteredTasks.map(t => ({
-        ...t,
-        metadata: {
-          ...t.metadata,
-          organizationId: orgId,
-          organizationName: orgName
-        }
-      }));
-    }
+    let filteredTasks = tasks.filter(t => !dismissedTaskIds.has(t.taskId));
     
     // Filter by status if specified
     if (filters.status) {
       filteredTasks = filteredTasks.filter(t => t.status === filters.status);
     }
     
-    // Filter by priority if specified
-    if (filters.priority) {
-      filteredTasks = filteredTasks.filter(t => t.priority === filters.priority);
+    // Filter by priority if specified (cast via query param, not on TaskFilters)
+    const priorityFilter = (filters as any).priority as TaskPriority | undefined;
+    if (priorityFilter) {
+      filteredTasks = filteredTasks.filter(t => t.priority === priorityFilter);
     }
     
     // Sort by priority and due date
     filteredTasks.sort((a, b) => {
-      const priorityOrder: Record<TaskPriority, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+      const priorityOrder: Record<TaskPriority, number> = { critical: 0, urgent: 1, high: 2, medium: 3, low: 4 };
       const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
       if (priorityDiff !== 0) return priorityDiff;
       
       if (!a.dueDate && !b.dueDate) return 0;
       if (!a.dueDate) return 1;
       if (!b.dueDate) return -1;
-      return a.dueDate.getTime() - b.dueDate.getTime();
+      return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
     });
     
     return {
@@ -369,8 +263,19 @@ export async function getTaskSummary(filters: TaskFilters): Promise<{ success: b
     const tasksResult = await getUserTasks({ ...filters, limit: 1000 });
     const tasks = tasksResult.data;
     
+    const overdue = tasks.filter(t => t.status === 'overdue').length;
+    const now = new Date();
+    const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const dueSoon = tasks.filter(t => {
+      if (!t.dueDate) return false;
+      const d = new Date(t.dueDate);
+      return d > now && d <= threeDaysFromNow;
+    }).length;
+    
     const summary: TaskSummary = {
-      total: tasks.length,
+      totalPending: tasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'overdue').length,
+      overdue,
+      dueSoon,
       byType: {
         queries: tasks.filter(t => t.type === 'query').length,
         scheduledVisits: tasks.filter(t => t.type === 'scheduled_visit' || t.type === 'overdue_visit').length,
@@ -382,10 +287,11 @@ export async function getTaskSummary(filters: TaskFilters): Promise<{ success: b
       byStatus: {
         pending: tasks.filter(t => t.status === 'pending').length,
         inProgress: tasks.filter(t => t.status === 'in_progress').length,
-        overdue: tasks.filter(t => t.status === 'overdue').length
+        overdue
       },
       byPriority: {
         critical: tasks.filter(t => t.priority === 'critical').length,
+        urgent: tasks.filter(t => t.priority === 'urgent').length,
         high: tasks.filter(t => t.priority === 'high').length,
         medium: tasks.filter(t => t.priority === 'medium').length,
         low: tasks.filter(t => t.priority === 'low').length
@@ -499,6 +405,7 @@ async function getQueryTasks(userId: number | undefined, studyId: number | undef
       const priority = calculatePriority(dueDate, now);
       
       return {
+        taskId: `query-${row.discrepancyNoteId}`,
         id: `query-${row.discrepancyNoteId}`,
         type: 'query' as TaskType,
         title: row.description || `Query #${row.discrepancyNoteId}`,
@@ -509,28 +416,16 @@ async function getQueryTasks(userId: number | undefined, studyId: number | undef
         createdAt,
         studyId: row.studyId || 0,
         studyName: row.studyName || 'Unknown Study',
-        subjectId: row.studySubjectId || null,
-        subjectLabel: row.subjectLabel || null,
-        eventId: null,
-        eventName: null,
-        formId: null,
-        formName: null,
-        assignedToUserId: row.assignedUserId || null,
-        assignedToUsername: row.assignedUsername || null,
-        ownerId: row.ownerUserId || null,
-        ownerUsername: row.ownerUsername || null,
+        studySubjectId: row.studySubjectId || undefined,
+        subjectLabel: row.subjectLabel || undefined,
+        eventId: undefined,
+        formId: undefined,
+        formName: undefined,
+        assignedToUserId: row.assignedUserId || undefined,
+        assignedToUsername: row.assignedUsername || undefined,
+        ownerUsername: row.ownerUsername || undefined,
         sourceTable: 'discrepancy_note',
-        sourceId: row.discrepancyNoteId,
-        metadata: {
-          noteType: row.noteType,
-          noteTypeId: row.discrepancyNoteTypeId,
-          resolutionStatus: row.resolutionStatus,
-          resolutionStatusId: row.resolutionStatusId,
-          entityType: row.entityType,
-          assignedName: row.assignedFirstName 
-            ? `${row.assignedFirstName} ${row.assignedLastName}`.trim()
-            : row.assignedUsername
-        }
+        sourceId: row.discrepancyNoteId
       };
     });
   } catch (error: any) {
@@ -656,6 +551,7 @@ async function getScheduledVisitTasks(
       }
       
       return {
+        taskId: `visit-${row.studyEventId}`,
         id: `visit-${row.studyEventId}`,
         type: taskType,
         title: `${row.eventName}`,
@@ -666,29 +562,17 @@ async function getScheduledVisitTasks(
         createdAt: new Date(row.dateCreated),
         studyId: row.studyId,
         studyName: row.studyName,
-        subjectId: row.studySubjectId,
+        studySubjectId: row.studySubjectId,
         subjectLabel: row.subjectLabel,
         eventId: row.studyEventId,
-        eventName: row.eventName,
-        formId: null,
-        formName: null,
-        assignedToUserId: row.ownerUserId || null,
-        assignedToUsername: row.ownerUsername || null,
-        ownerId: row.ownerUserId || null,
-        ownerUsername: row.ownerUsername || null,
+        visitName: row.eventName,
+        formId: undefined,
+        formName: undefined,
+        assignedToUserId: row.ownerUserId || undefined,
+        assignedToUsername: row.ownerUsername || undefined,
+        ownerUsername: row.ownerUsername || undefined,
         sourceTable: 'study_event',
-        sourceId: row.studyEventId,
-        metadata: {
-          location: row.location,
-          sampleOrdinal: row.sampleOrdinal,
-          eventStatus: row.eventStatus,
-          eventOrdinal: row.eventOrdinal,
-          eventDescription: row.eventDescription,
-          scheduleDay: row.scheduleDay,
-          minDay: row.minDay,
-          maxDay: row.maxDay,
-          visitWindow: windowInfo || undefined
-        }
+        sourceId: row.studyEventId
       };
     });
   } catch (error: any) {
@@ -801,6 +685,7 @@ async function getDataEntryTasks(
       }
       
       return {
+        taskId: `dataentry-${row.studyEventId}`,
         id: `dataentry-${row.studyEventId}`,
         type: 'data_entry' as TaskType,
         title: `Data Entry: ${row.eventName}`,
@@ -811,29 +696,17 @@ async function getDataEntryTasks(
         createdAt: new Date(row.dateCreated),
         studyId: row.studyId,
         studyName: row.studyName,
-        subjectId: row.studySubjectId,
+        studySubjectId: row.studySubjectId,
         subjectLabel: row.subjectLabel,
         eventId: row.studyEventId,
-        eventName: row.eventName,
-        formId: null,
-        formName: null,
-        assignedToUserId: row.ownerUserId || null,
-        assignedToUsername: row.ownerUsername || null,
-        ownerId: row.ownerUserId || null,
-        ownerUsername: row.ownerUsername || null,
+        visitName: row.eventName,
+        formId: undefined,
+        formName: undefined,
+        assignedToUserId: row.ownerUserId || undefined,
+        assignedToUsername: row.ownerUsername || undefined,
+        ownerUsername: row.ownerUsername || undefined,
         sourceTable: 'study_event',
-        sourceId: row.studyEventId,
-        metadata: {
-          totalForms,
-          incompleteForms,
-          completedForms: totalForms - incompleteForms,
-          eventStatus: row.eventStatus,
-          eventOrdinal: row.eventOrdinal,
-          scheduleDay: row.scheduleDay,
-          minDay: row.minDay,
-          maxDay: row.maxDay,
-          visitWindow: windowInfo || undefined
-        }
+        sourceId: row.studyEventId
       };
     });
   } catch (error: any) {
@@ -933,6 +806,7 @@ async function getFormCompletionTasks(
       const priority = calculatePriority(dueDate, now);
       
       return {
+        taskId: `form-${row.eventCrfId}`,
         id: `form-${row.eventCrfId}`,
         type: 'form_completion' as TaskType,
         title: `Complete: ${row.crfName}`,
@@ -943,27 +817,18 @@ async function getFormCompletionTasks(
         createdAt,
         studyId: row.studyId,
         studyName: row.studyName,
-        subjectId: row.studySubjectId,
+        studySubjectId: row.studySubjectId,
         subjectLabel: row.subjectLabel,
         eventId: row.studyEventId,
-        eventName: row.eventName,
+        visitName: row.eventName,
+        eventCrfId: row.eventCrfId,
         formId: row.crfId,
         formName: row.crfName,
-        assignedToUserId: row.ownerUserId || null,
-        assignedToUsername: row.ownerUsername || null,
-        ownerId: row.ownerUserId || null,
-        ownerUsername: row.ownerUsername || null,
+        assignedToUserId: row.ownerUserId || undefined,
+        assignedToUsername: row.ownerUsername || undefined,
+        ownerUsername: row.ownerUsername || undefined,
         sourceTable: 'event_crf',
-        sourceId: row.eventCrfId,
-        metadata: {
-          eventCrfId: row.eventCrfId,
-          crfId: row.crfId,
-          crfVersion: row.crfVersion,
-          crfStatus: row.crfStatus,
-          dateInterviewed: row.dateInterviewed,
-          interviewerName: row.interviewerName,
-          eventOrdinal: row.eventOrdinal
-        }
+        sourceId: row.eventCrfId
       };
     });
   } catch (error: any) {
@@ -1052,6 +917,7 @@ async function getSDVTasks(
       const priority = calculatePriority(dueDate, now);
       
       return {
+        taskId: `sdv-${row.eventCrfId}`,
         id: `sdv-${row.eventCrfId}`,
         type: 'sdv_required' as TaskType,
         title: `SDV: ${row.crfName}`,
@@ -1062,23 +928,18 @@ async function getSDVTasks(
         createdAt: new Date(row.dateCreated),
         studyId: row.studyId,
         studyName: row.studyName,
-        subjectId: row.studySubjectId,
+        studySubjectId: row.studySubjectId,
         subjectLabel: row.subjectLabel,
         eventId: row.studyEventId,
-        eventName: row.eventName,
+        visitName: row.eventName,
+        eventCrfId: row.eventCrfId,
         formId: row.crfId,
         formName: row.crfName,
-        assignedToUserId: null,
-        assignedToUsername: null,
-        ownerId: row.ownerUserId || null,
-        ownerUsername: row.ownerUsername || null,
+        assignedToUserId: undefined,
+        assignedToUsername: undefined,
+        ownerUsername: row.ownerUsername || undefined,
         sourceTable: 'event_crf',
-        sourceId: row.eventCrfId,
-        metadata: {
-          eventCrfId: row.eventCrfId,
-          crfId: row.crfId,
-          dateCompleted: row.dateCompleted
-        }
+        sourceId: row.eventCrfId
       };
     });
   } catch (error: any) {
@@ -1172,6 +1033,7 @@ async function getSignatureTasks(
       const priority = calculatePriority(dueDate, now);
       
       return {
+        taskId: `signature-${row.eventCrfId}`,
         id: `signature-${row.eventCrfId}`,
         type: 'signature_required' as TaskType,
         title: `Sign: ${row.crfName}`,
@@ -1182,25 +1044,18 @@ async function getSignatureTasks(
         createdAt: new Date(row.dateCreated),
         studyId: row.studyId,
         studyName: row.studyName,
-        subjectId: row.studySubjectId,
+        studySubjectId: row.studySubjectId,
         subjectLabel: row.subjectLabel,
         eventId: row.studyEventId,
-        eventName: row.eventName,
+        visitName: row.eventName,
+        eventCrfId: row.eventCrfId,
         formId: row.crfId,
         formName: row.crfName,
-        assignedToUserId: row.ownerUserId || null,
-        assignedToUsername: row.ownerUsername || null,
-        ownerId: row.ownerUserId || null,
-        ownerUsername: row.ownerUsername || null,
+        assignedToUserId: row.ownerUserId || undefined,
+        assignedToUsername: row.ownerUsername || undefined,
+        ownerUsername: row.ownerUsername || undefined,
         sourceTable: 'event_crf',
-        sourceId: row.eventCrfId,
-        metadata: {
-          eventCrfId: row.eventCrfId,
-          crfId: row.crfId,
-          eventStatus: row.eventStatus,
-          eventStatusId: row.subjectEventStatusId,
-          dateCompleted: row.dateCompleted
-        }
+        sourceId: row.eventCrfId
       };
     });
   } catch (error: any) {
@@ -1272,16 +1127,15 @@ export async function getTaskById(taskId: string): Promise<{ success: boolean; d
         if (row.resolutionStatus === 'Updated' || row.resolutionStatus === 'Resolution Proposed') status = 'in_progress';
         if (dueDate < now) status = 'overdue';
         task = {
-          id: taskId, type: 'query', title: row.description || `Query #${sourceId}`,
+          taskId: taskId, id: taskId, type: 'query', title: row.description || `Query #${sourceId}`,
           description: row.detailedNotes || `${row.noteType} - ${row.resolutionStatus}`,
           status, priority: calculatePriority(dueDate, now), dueDate, createdAt,
           studyId: row.studyId || 0, studyName: row.studyName || 'Unknown Study',
-          subjectId: row.studySubjectId || null, subjectLabel: row.subjectLabel || null,
-          eventId: null, eventName: null, formId: null, formName: null,
-          assignedToUserId: row.assignedUserId || null, assignedToUsername: row.assignedUsername || null,
-          ownerId: row.ownerId || null, ownerUsername: row.ownerUsername || null,
-          sourceTable: 'discrepancy_note', sourceId,
-          metadata: { noteType: row.noteType, resolutionStatus: row.resolutionStatus, resolutionStatusId: row.resolutionStatusId }
+          studySubjectId: row.studySubjectId || undefined, subjectLabel: row.subjectLabel || undefined,
+          formId: undefined, formName: undefined,
+          assignedToUserId: row.assignedUserId || undefined, assignedToUsername: row.assignedUsername || undefined,
+          ownerUsername: row.ownerUsername || undefined,
+          sourceTable: 'discrepancy_note', sourceId
         };
       }
     } else if (type === 'visit' || type === 'dataentry') {
@@ -1312,17 +1166,16 @@ export async function getTaskById(taskId: string): Promise<{ success: boolean; d
         const taskType: TaskType = isDataEntry ? 'data_entry' : (dueDate && dueDate < now ? 'overdue_visit' : 'scheduled_visit');
         const status: TaskStatus = dueDate && dueDate < now ? 'overdue' : (isDataEntry ? 'in_progress' : 'pending');
         task = {
-          id: taskId, type: taskType, title: isDataEntry ? `Data Entry: ${row.eventName}` : row.eventName,
+          taskId: taskId, id: taskId, type: taskType, title: isDataEntry ? `Data Entry: ${row.eventName}` : row.eventName,
           description: `Subject: ${row.subjectLabel}`, status,
           priority: dueDate ? calculatePriority(dueDate, now) : 'medium', dueDate,
           createdAt: new Date(row.dateCreated), studyId: row.studyId, studyName: row.studyName,
-          subjectId: row.studySubjectId, subjectLabel: row.subjectLabel,
-          eventId: row.studyEventId, eventName: row.eventName,
-          formId: null, formName: null,
-          assignedToUserId: row.ownerId || null, assignedToUsername: row.ownerUsername || null,
-          ownerId: row.ownerId || null, ownerUsername: row.ownerUsername || null,
-          sourceTable: 'study_event', sourceId,
-          metadata: { eventStatus: row.eventStatus }
+          studySubjectId: row.studySubjectId, subjectLabel: row.subjectLabel,
+          eventId: row.studyEventId, visitName: row.eventName,
+          formId: undefined, formName: undefined,
+          assignedToUserId: row.ownerId || undefined, assignedToUsername: row.ownerUsername || undefined,
+          ownerUsername: row.ownerUsername || undefined,
+          sourceTable: 'study_event', sourceId
         };
       }
     } else if (type === 'form' || type === 'sdv' || type === 'signature') {
@@ -1366,17 +1219,17 @@ export async function getTaskById(taskId: string): Promise<{ success: boolean; d
           status = dueDate < now ? 'overdue' : 'in_progress';
         }
         task = {
-          id: taskId, type: taskType, title,
+          taskId: taskId, id: taskId, type: taskType, title,
           description: `${row.eventName} | Subject: ${row.subjectLabel}`,
           status, priority: calculatePriority(dueDate, now), dueDate, createdAt,
           studyId: row.studyId, studyName: row.studyName,
-          subjectId: row.studySubjectId, subjectLabel: row.subjectLabel,
-          eventId: row.studyEventId, eventName: row.eventName,
+          studySubjectId: row.studySubjectId, subjectLabel: row.subjectLabel,
+          eventId: row.studyEventId, visitName: row.eventName,
+          eventCrfId: row.eventCrfId,
           formId: row.crfId, formName: row.crfName,
-          assignedToUserId: row.ownerId || null, assignedToUsername: row.ownerUsername || null,
-          ownerId: row.ownerId || null, ownerUsername: row.ownerUsername || null,
-          sourceTable: 'event_crf', sourceId,
-          metadata: { eventCrfId: row.eventCrfId, crfId: row.crfId, sdvStatus: row.sdvStatus, signatureStatus: row.electronicSignatureStatus }
+          assignedToUserId: row.ownerId || undefined, assignedToUsername: row.ownerUsername || undefined,
+          ownerUsername: row.ownerUsername || undefined,
+          sourceTable: 'event_crf', sourceId
         };
       }
     }
@@ -1428,140 +1281,141 @@ export async function completeTask(
   const { type, sourceId } = parsed;
 
   try {
-    // 1. Perform the real database operation based on task type
-    switch (type) {
-      case 'query': {
-        const before = await pool.query(
-          `SELECT resolution_status_id FROM discrepancy_note WHERE discrepancy_note_id = $1`, [sourceId]);
-        if (before.rows.length === 0) return { success: false, message: `Query ${sourceId} not found` };
-        const oldStatusId = before.rows[0].resolutionStatusId;
-        if (oldStatusId === 4) return { success: false, message: `Query ${sourceId} is already closed` };
+    return await pool.transaction(async (client) => {
+      // 1. Perform the real database operation based on task type
+      switch (type) {
+        case 'query': {
+          const before = await client.query(
+            `SELECT resolution_status_id FROM discrepancy_note WHERE discrepancy_note_id = $1 FOR UPDATE`, [sourceId]);
+          if (before.rows.length === 0) return { success: false, message: `Query ${sourceId} not found` };
+          const oldStatusId = before.rows[0].resolutionStatusId;
+          if (oldStatusId === 4) return { success: false, message: `Query ${sourceId} is already closed` };
 
-        await pool.query(
-          `UPDATE discrepancy_note SET resolution_status_id = 4 WHERE discrepancy_note_id = $1`,
-          [sourceId]
-        );
-        await writeTaskAuditLog(userId, 'discrepancy_note', sourceId,
-          reason || 'Query closed via task completion',
-          `resolution_status_id=${oldStatusId}`, 'resolution_status_id=4');
+          await client.query(
+            `UPDATE discrepancy_note SET resolution_status_id = 4 WHERE discrepancy_note_id = $1`,
+            [sourceId]
+          );
+          await writeTaskAuditLog(userId, 'discrepancy_note', sourceId,
+            reason || 'Query closed via task completion',
+            `resolution_status_id=${oldStatusId}`, 'resolution_status_id=4');
 
-        // Update denormalized query counts on patient_event_form
-        try {
-          const ecIds = await pool.query(`
-            SELECT DISTINCT ec_id FROM (
-              SELECT id.event_crf_id AS ec_id FROM dn_item_data_map didm
-              INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
-              WHERE didm.discrepancy_note_id = $1
-              UNION
-              SELECT decm.event_crf_id AS ec_id FROM dn_event_crf_map decm
-              WHERE decm.discrepancy_note_id = $1
-            ) t WHERE ec_id IS NOT NULL
-          `, [sourceId]);
-          const client = await pool.connect();
+          // Update denormalized query counts on patient_event_form
           try {
+            const ecIds = await client.query(`
+              SELECT DISTINCT ec_id FROM (
+                SELECT id.event_crf_id AS ec_id FROM dn_item_data_map didm
+                INNER JOIN item_data id ON didm.item_data_id = id.item_data_id
+                WHERE didm.discrepancy_note_id = $1
+                UNION
+                SELECT decm.event_crf_id AS ec_id FROM dn_event_crf_map decm
+                WHERE decm.discrepancy_note_id = $1
+              ) t WHERE ec_id IS NOT NULL
+            `, [sourceId]);
             for (const row of ecIds.rows) {
               await updateFormQueryCounts(client, row.ecId);
             }
-          } finally { client.release(); }
-        } catch (e: any) {
-          logger.warn('Failed to update form query counts after task completion', { error: e.message });
-        }
-        break;
-      }
-
-      case 'sdv': {
-        const before = await pool.query(
-          `SELECT sdv_status FROM event_crf WHERE event_crf_id = $1`, [sourceId]);
-        if (before.rows.length === 0) return { success: false, message: `Event CRF ${sourceId} not found` };
-        if (before.rows[0].sdvStatus === true) return { success: false, message: `SDV already verified for event_crf ${sourceId}` };
-
-        await pool.query(
-          `UPDATE event_crf SET sdv_status = true WHERE event_crf_id = $1`,
-          [sourceId]
-        );
-        await writeTaskAuditLog(userId, 'event_crf', sourceId,
-          reason || 'SDV verified via task completion',
-          'sdv_status=false', 'sdv_status=true');
-        break;
-      }
-
-      case 'signature': {
-        const before = await pool.query(
-          `SELECT electronic_signature_status FROM event_crf WHERE event_crf_id = $1`, [sourceId]);
-        if (before.rows.length === 0) return { success: false, message: `Event CRF ${sourceId} not found` };
-        if (before.rows[0].electronicSignatureStatus === true) {
-          return { success: false, message: `E-signature already applied for event_crf ${sourceId}` };
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logger.warn('Failed to update form query counts after task completion', { error: msg });
+          }
+          break;
         }
 
-        await pool.query(
-          `UPDATE event_crf SET electronic_signature_status = true WHERE event_crf_id = $1`,
-          [sourceId]
-        );
-        await writeTaskAuditLog(userId, 'event_crf', sourceId,
-          reason || 'E-signature applied via task completion',
-          'electronic_signature_status=false', 'electronic_signature_status=true');
-        break;
-      }
+        case 'sdv': {
+          const before = await client.query(
+            `SELECT sdv_status FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`, [sourceId]);
+          if (before.rows.length === 0) return { success: false, message: `Event CRF ${sourceId} not found` };
+          if (before.rows[0].sdvStatus === true) return { success: false, message: `SDV already verified for event_crf ${sourceId}` };
 
-      case 'form': {
-        const before = await pool.query(
-          `SELECT date_completed, completion_status_id FROM event_crf WHERE event_crf_id = $1`, [sourceId]);
-        if (before.rows.length === 0) return { success: false, message: `Event CRF ${sourceId} not found` };
-        if (before.rows[0].dateCompleted != null) {
-          return { success: false, message: `Form ${sourceId} is already completed` };
+          await client.query(
+            `UPDATE event_crf SET sdv_status = true WHERE event_crf_id = $1`,
+            [sourceId]
+          );
+          await writeTaskAuditLog(userId, 'event_crf', sourceId,
+            reason || 'SDV verified via task completion',
+            'sdv_status=false', 'sdv_status=true');
+          break;
         }
 
-        await pool.query(
-          `UPDATE event_crf SET date_completed = NOW(), completion_status_id = 1 WHERE event_crf_id = $1 AND date_completed IS NULL`,
-          [sourceId]
-        );
-        await writeTaskAuditLog(userId, 'event_crf', sourceId,
-          reason || 'Form completed via task completion',
-          'date_completed=NULL', 'date_completed=NOW(), completion_status_id=1');
-        break;
+        case 'signature': {
+          const before = await client.query(
+            `SELECT electronic_signature_status FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`, [sourceId]);
+          if (before.rows.length === 0) return { success: false, message: `Event CRF ${sourceId} not found` };
+          if (before.rows[0].electronicSignatureStatus === true) {
+            return { success: false, message: `E-signature already applied for event_crf ${sourceId}` };
+          }
+
+          await client.query(
+            `UPDATE event_crf SET electronic_signature_status = true WHERE event_crf_id = $1`,
+            [sourceId]
+          );
+          await writeTaskAuditLog(userId, 'event_crf', sourceId,
+            reason || 'E-signature applied via task completion',
+            'electronic_signature_status=false', 'electronic_signature_status=true');
+          break;
+        }
+
+        case 'form': {
+          const before = await client.query(
+            `SELECT date_completed, completion_status_id FROM event_crf WHERE event_crf_id = $1 FOR UPDATE`, [sourceId]);
+          if (before.rows.length === 0) return { success: false, message: `Event CRF ${sourceId} not found` };
+          if (before.rows[0].dateCompleted != null) {
+            return { success: false, message: `Form ${sourceId} is already completed` };
+          }
+
+          await client.query(
+            `UPDATE event_crf SET date_completed = NOW(), completion_status_id = 1 WHERE event_crf_id = $1 AND date_completed IS NULL`,
+            [sourceId]
+          );
+          await writeTaskAuditLog(userId, 'event_crf', sourceId,
+            reason || 'Form completed via task completion',
+            'date_completed=NULL', 'date_completed=NOW(), completion_status_id=1');
+          break;
+        }
+
+        case 'visit':
+        case 'dataentry': {
+          const before = await client.query(
+            `SELECT subject_event_status_id FROM study_event WHERE study_event_id = $1 FOR UPDATE`, [sourceId]);
+          if (before.rows.length === 0) return { success: false, message: `Study event ${sourceId} not found` };
+          const oldStatus = before.rows[0].subjectEventStatusId;
+
+          await client.query(
+            `UPDATE study_event SET subject_event_status_id = 2 WHERE study_event_id = $1`,
+            [sourceId]
+          );
+          await writeTaskAuditLog(userId, 'study_event', sourceId,
+            reason || 'Visit marked completed via task completion',
+            `subject_event_status_id=${oldStatus}`, 'subject_event_status_id=2');
+          break;
+        }
+
+        default:
+          return { success: false, message: `Unknown task type: ${type}` };
       }
 
-      case 'visit':
-      case 'dataentry': {
-        const before = await pool.query(
-          `SELECT subject_event_status_id FROM study_event WHERE study_event_id = $1`, [sourceId]);
-        if (before.rows.length === 0) return { success: false, message: `Study event ${sourceId} not found` };
-        const oldStatus = before.rows[0].subjectEventStatusId;
+      // 2. Record completion in acc_task_status for tracking / history
+      const orgResult = await client.query(
+        `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active' LIMIT 1`,
+        [userId]
+      );
+      const orgId = orgResult.rows[0]?.organizationId || null;
 
-        await pool.query(
-          `UPDATE study_event SET subject_event_status_id = 2 WHERE study_event_id = $1`,
-          [sourceId]
-        );
-        await writeTaskAuditLog(userId, 'study_event', sourceId,
-          reason || 'Visit marked completed via task completion',
-          `subject_event_status_id=${oldStatus}`, 'subject_event_status_id=2');
-        break;
-      }
+      await client.query(`
+        INSERT INTO acc_task_status (task_id, status, completed_by, completed_at, reason, organization_id)
+        VALUES ($1, 'completed', $2, NOW(), $3, $4)
+        ON CONFLICT (task_id) DO UPDATE SET 
+          status = 'completed', completed_by = $2, completed_at = NOW(), 
+          reason = $3, date_updated = NOW()
+      `, [taskId, userId, reason || 'Task completed', orgId]);
 
-      default:
-        return { success: false, message: `Unknown task type: ${type}` };
-    }
-
-    // 2. Record completion in acc_task_status for tracking / history
-    const orgResult = await pool.query(
-      `SELECT organization_id FROM acc_organization_member WHERE user_id = $1 AND status = 'active' LIMIT 1`,
-      [userId]
-    );
-    const orgId = orgResult.rows[0]?.organizationId || null;
-
-    await pool.query(`
-      INSERT INTO acc_task_status (task_id, status, completed_by, completed_at, reason, organization_id)
-      VALUES ($1, 'completed', $2, NOW(), $3, $4)
-      ON CONFLICT (task_id) DO UPDATE SET 
-        status = 'completed', completed_by = $2, completed_at = NOW(), 
-        reason = $3, date_updated = NOW()
-    `, [taskId, userId, reason || 'Task completed', orgId]);
-
-    logger.info('Task completed with underlying data update', { taskId, type, sourceId, userId });
-    return { success: true, message: `Task ${type}-${sourceId} completed successfully` };
-  } catch (error: any) {
-    logger.error('Error completing task', { taskId, type, sourceId, error: error.message });
-    return { success: false, message: `Failed to complete task: ${error.message}` };
+      logger.info('Task completed with underlying data update', { taskId, type, sourceId, userId });
+      return { success: true, message: `Task ${type}-${sourceId} completed successfully` };
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error('Error completing task', { taskId, type, sourceId, error: msg });
+    return { success: false, message: `Failed to complete task: ${msg}` };
   }
 }
 

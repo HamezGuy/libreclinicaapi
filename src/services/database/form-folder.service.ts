@@ -8,29 +8,7 @@
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
 import { ForbiddenError } from '../../middleware/errorHandler.middleware';
-
-export interface FormFolder {
-  folderId: number;
-  name: string;
-  description?: string;
-  studyId?: number;
-  ownerId: number;
-  sortOrder: number;
-  parentFolderId?: number | null;
-  dateCreated: string;
-  dateUpdated: string;
-  formCount?: number;
-  crfIds?: number[];
-  childCount?: number;
-}
-
-export interface FormFolderItem {
-  folderItemId: number;
-  folderId: number;
-  crfId: number;
-  sortOrder: number;
-  dateAdded: string;
-}
+import type { FormFolder, FormFolderItem } from '../../types';
 
 export const getFolders = async (studyId?: number, userId?: number, parentFolderId?: number | null, organizationIds?: number[]): Promise<FormFolder[]> => {
   const conditions = ['($1::int IS NULL OR f.study_id = $1 OR f.study_id IS NULL)'];
@@ -253,35 +231,37 @@ export const moveFolder = async (
     throw new Error('A folder cannot be its own parent.');
   }
 
-  // Prevent circular reference: target parent must not be a descendant of this folder
-  if (parentFolderId) {
-    const descCheck = await pool.query(`
-      WITH RECURSIVE descendants AS (
-        SELECT folder_id FROM acc_form_folder WHERE parent_folder_id = $1
-        UNION ALL
-        SELECT f.folder_id FROM acc_form_folder f
-        JOIN descendants d ON f.parent_folder_id = d.folder_id
-      )
-      SELECT 1 FROM descendants WHERE folder_id = $2 LIMIT 1
-    `, [folderId, parentFolderId]);
-    if (descCheck.rows.length > 0) {
-      throw new Error('Cannot move a folder into one of its own descendants.');
+  return pool.transaction(async (client) => {
+    // Prevent circular reference: target parent must not be a descendant of this folder
+    if (parentFolderId) {
+      const descCheck = await client.query(`
+        WITH RECURSIVE descendants AS (
+          SELECT folder_id FROM acc_form_folder WHERE parent_folder_id = $1
+          UNION ALL
+          SELECT f.folder_id FROM acc_form_folder f
+          JOIN descendants d ON f.parent_folder_id = d.folder_id
+        )
+        SELECT 1 FROM descendants WHERE folder_id = $2 LIMIT 1
+      `, [folderId, parentFolderId]);
+      if (descCheck.rows.length > 0) {
+        throw new Error('Cannot move a folder into one of its own descendants.');
+      }
+
+      // Validate depth: target parent depth + this folder's subtree depth must be <= 4
+      const parentDepth = await getFolderDepth(parentFolderId);
+      const subtreeDepth = await getSubtreeDepth(folderId);
+      if (parentDepth + subtreeDepth > 4) {
+        throw new Error(`Move would exceed the maximum folder depth (4 levels). Parent is at level ${parentDepth}, subtree is ${subtreeDepth} levels deep.`);
+      }
     }
 
-    // Validate depth: target parent depth + this folder's subtree depth must be <= 4
-    const parentDepth = await getFolderDepth(parentFolderId);
-    const subtreeDepth = await getSubtreeDepth(folderId);
-    if (parentDepth + subtreeDepth > 4) {
-      throw new Error(`Move would exceed the maximum folder depth (4 levels). Parent is at level ${parentDepth}, subtree is ${subtreeDepth} levels deep.`);
-    }
-  }
+    await client.query(
+      `UPDATE acc_form_folder SET parent_folder_id = $1, date_updated = NOW() WHERE folder_id = $2`,
+      [parentFolderId, folderId]
+    );
 
-  await pool.query(
-    `UPDATE acc_form_folder SET parent_folder_id = $1, date_updated = NOW() WHERE folder_id = $2`,
-    [parentFolderId, folderId]
-  );
-
-  return getFolderById(folderId);
+    return getFolderById(folderId);
+  });
 };
 
 /**

@@ -31,6 +31,13 @@ router.use(authMiddleware);
 // GET /api/data-locks - List all locked records
 router.get('/', dataLocksController.list);
 
+// GET /api/data-locks/status/:eventCrfId - Get lock/freeze status for a single form
+router.get('/status/:eventCrfId',
+  validate({ params: dataLockSchemas.eventCrfIdParam }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
+  dataLocksController.getRecordLockStatus
+);
+
 // ═══════════════════════════════════════════════════════════════════
 // CASEBOOK READINESS ENDPOINTS (Read-only)
 // ═══════════════════════════════════════════════════════════════════
@@ -62,6 +69,7 @@ router.get('/history/subject/:id',
 router.get('/history/:eventCrfId',
   requireRole('monitor', 'data_manager', 'admin', 'investigator'),
   validate({ params: dataLockSchemas.eventCrfIdParam }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
   dataLocksController.getFormLockHistory
 );
 
@@ -73,6 +81,7 @@ router.get('/history/:eventCrfId',
 router.get('/eligibility/subject/:studySubjectId', 
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.studySubjectIdParam }),
+  requireEntityStudyAccess('studySubject', 'studySubjectId'),
   dataLocksController.checkSubjectEligibility
 );
 
@@ -80,6 +89,7 @@ router.get('/eligibility/subject/:studySubjectId',
 router.get('/eligibility/event/:studyEventId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.studyEventIdParam }),
+  requireEntityStudyAccess('studyEvent', 'studyEventId'),
   dataLocksController.checkEventEligibility
 );
 
@@ -192,6 +202,7 @@ router.get('/freeze',
 // POST /api/data-locks/freeze/subject/:id - Freeze all subject data
 router.post('/freeze/subject/:id',
   requireRole('monitor', 'data_manager', 'admin'),
+  requireEntityStudyAccess('studySubject', 'id'),
   requireSignatureFor('I confirm this subject data is ready to be frozen'),
   dataLocksController.freezeSubject
 );
@@ -200,6 +211,7 @@ router.post('/freeze/subject/:id',
 // Deprecated: prefer POST /freeze/subject/:id/unfreeze — DELETE with body is unreliable through proxies/CDNs
 router.delete('/freeze/subject/:id',
   requireRole('data_manager', 'admin'),
+  requireEntityStudyAccess('studySubject', 'id'),
   requireSignatureFor('I authorize unfreezing this subject data for editing'),
   dataLocksController.unfreezeSubject
 );
@@ -207,6 +219,7 @@ router.delete('/freeze/subject/:id',
 // POST /api/data-locks/freeze/subject/:id/unfreeze - Unfreeze all subject data (proxy-safe alternative)
 router.post('/freeze/subject/:id/unfreeze',
   requireRole('data_manager', 'admin'),
+  requireEntityStudyAccess('studySubject', 'id'),
   requireSignatureFor('I authorize unfreezing this subject data for editing'),
   dataLocksController.unfreezeSubject
 );
@@ -215,6 +228,7 @@ router.post('/freeze/subject/:id/unfreeze',
 router.post('/freeze/:eventCrfId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.freeze }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
   requireSignatureFor('I confirm this form data is ready to be frozen'),
   dataLocksController.freeze
 );
@@ -224,6 +238,7 @@ router.post('/freeze/:eventCrfId',
 router.delete('/freeze/:eventCrfId',
   requireRole('data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
   requireSignatureFor('I authorize unfreezing this form for editing'),
   dataLocksController.unfreeze
 );
@@ -232,6 +247,7 @@ router.delete('/freeze/:eventCrfId',
 router.post('/freeze/:eventCrfId/unfreeze',
   requireRole('data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
+  requireEntityStudyAccess('eventCrf', 'eventCrfId'),
   requireSignatureFor('I authorize unfreezing this form for editing'),
   dataLocksController.unfreeze
 );

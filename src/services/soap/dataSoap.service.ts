@@ -14,7 +14,7 @@
 import { getSoapClient } from './soapClient';
 import { logger } from '../../config/logger';
 import { FormDataRequest, ApiResponse, ValidationError } from '../../types';
-import xml2js from 'xml2js';
+import { safeXmlParse } from '../../utils/xml-safe-parse';
 
 /**
  * Data import response
@@ -223,8 +223,7 @@ export const parseImportResponse = async (
       result.odmResponse = responseData;
 
       // Parse for errors and warnings
-      const parser = new xml2js.Parser();
-      const parsed = await parser.parseStringPromise(responseData);
+      const parsed = await safeXmlParse(responseData) as Record<string, any>;
 
       // Check for validation errors in response
       if (parsed.ODM?.ClinicalData) {
@@ -368,7 +367,7 @@ export const buildItemDataOdm = (
 /**
  * Validate ODM XML structure
  */
-export const validateOdmStructure = (odmXml: string): { isValid: boolean; errors: string[] } => {
+export const validateOdmStructure = async (odmXml: string): Promise<{ isValid: boolean; errors: string[] }> => {
   const errors: string[] = [];
 
   // Check for required elements
@@ -386,14 +385,10 @@ export const validateOdmStructure = (odmXml: string): { isValid: boolean; errors
 
   // Check for well-formed XML
   try {
-    const parser = new xml2js.Parser();
-    parser.parseString(odmXml, (err) => {
-      if (err) {
-        errors.push(`XML parsing error: ${err.message}`);
-      }
-    });
-  } catch (error: any) {
-    errors.push(`Invalid XML structure: ${error.message}`);
+    await safeXmlParse(odmXml);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    errors.push(`XML parsing error: ${message}`);
   }
 
   return {

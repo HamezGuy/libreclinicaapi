@@ -18,7 +18,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
-import { ApiResponse } from '../types';
+import type { ApiResponse, WorkflowTask } from '@accura-trial/shared-types';
 import * as workflowService from '../services/database/workflow.service';
 
 export class WorkflowController {
@@ -40,7 +40,7 @@ export class WorkflowController {
         offset: offset ? parseInt(offset as string) : 0
       });
       
-      const response: ApiResponse = {
+      const response: ApiResponse<WorkflowTask[]> = {
         success: true,
         data: result.data
       };
@@ -62,7 +62,7 @@ export class WorkflowController {
       
       const result = await workflowService.getUserWorkflows(userId);
       
-      const response: ApiResponse = {
+      const response: ApiResponse<WorkflowTask[]> = {
         success: true,
         data: result.data
       };
@@ -113,7 +113,7 @@ export class WorkflowController {
         return;
       }
 
-      const result = await workflowService.createWorkflow({
+      const result: ApiResponse<WorkflowTask> = await workflowService.createWorkflow({
         title,
         description,
         type: type || 'custom',
@@ -151,7 +151,7 @@ export class WorkflowController {
         return;
       }
 
-      const result = await workflowService.updateWorkflowStatus(id, status, userId);
+      const result: ApiResponse = await workflowService.updateWorkflowStatus(id, status, userId);
       
       res.json(result);
     } catch (error) {
@@ -171,7 +171,7 @@ export class WorkflowController {
       const user = (req as any).user;
       const userId = user?.userId || user?.user_id;
       
-      const result = await workflowService.completeWorkflow(id, userId, signature);
+      const result: ApiResponse = await workflowService.completeWorkflow(id, userId, signature);
       
       res.json(result);
     } catch (error) {
@@ -196,7 +196,7 @@ export class WorkflowController {
         return;
       }
 
-      const result = await workflowService.approveWorkflow(id, userId, reason);
+      const result: ApiResponse = await workflowService.approveWorkflow(id, userId, reason);
       
       res.json(result);
     } catch (error) {
@@ -221,7 +221,7 @@ export class WorkflowController {
         return;
       }
 
-      const result = await workflowService.rejectWorkflow(id, userId, reason);
+      const result: ApiResponse = await workflowService.rejectWorkflow(id, userId, reason);
       
       res.json(result);
     } catch (error) {
@@ -246,11 +246,26 @@ export class WorkflowController {
         return;
       }
 
-      const result = await workflowService.handoffWorkflow(id, toUserId, reason || 'Reassigned', currentUserId);
+      const result: ApiResponse = await workflowService.handoffWorkflow(id, toUserId, reason || 'Reassigned', currentUserId);
       
       res.json(result);
     } catch (error) {
       logger.error('Error handing off workflow:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Get CRF lifecycle summary for all form instances in a study
+   * GET /api/workflows/crf-lifecycle-summary/:studyId
+   */
+  async getCrfLifecycleSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const studyId = parseInt(req.params.studyId);
+      const data = await workflowService.getCrfLifecycleSummary(studyId);
+      res.json({ success: true, data });
+    } catch (error) {
+      logger.error('Error fetching CRF lifecycle summary:', error);
       next(error);
     }
   }

@@ -11,6 +11,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as tasksService from '../services/database/tasks.service';
+import type { ApiResponse, Task, TaskSummary, TaskType, TaskStatus, TaskFilters } from '@accura-trial/shared-types';
 
 /**
  * Get tasks for current user
@@ -18,24 +19,23 @@ import * as tasksService from '../services/database/tasks.service';
  */
 export const getTasks = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { studyId, types, status, priority, includeQueries, limit, offset } = req.query;
+  const { studyId, types, status, includeQueries, limit, offset } = req.query;
   
-  const filters: tasksService.TaskFilters = {
+  const filters: TaskFilters = {
     userId: user?.userId,
     username: user?.username,
     callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
-    types: types ? (types as string).split(',') as tasksService.TaskType[] : undefined,
-    status: status as tasksService.TaskStatus | undefined,
-    priority: priority as tasksService.TaskPriority | undefined,
-    includeQueries: includeQueries !== 'false', // Default to true
+    types: types ? (types as string).split(',') as TaskType[] : undefined,
+    status: status as TaskStatus | undefined,
+    includeQueries: includeQueries !== 'false',
     limit: limit ? parseInt(limit as string) : 50,
     offset: offset ? parseInt(offset as string) : 0
   };
   
   const result = await tasksService.getUserTasks(filters);
   
-  res.json(result);
+  res.json(result as ApiResponse<Task[]>);
 });
 
 /**
@@ -45,21 +45,20 @@ export const getTasks = asyncHandler(async (req: Request, res: Response) => {
 export const getUserTasks = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const { username } = req.params;
-  const { studyId, types, status, priority, limit } = req.query;
+  const { studyId, types, status, limit } = req.query;
   
-  const filters: tasksService.TaskFilters = {
+  const filters: TaskFilters = {
     username,
     callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
-    types: types ? (types as string).split(',') as tasksService.TaskType[] : undefined,
-    status: status as tasksService.TaskStatus | undefined,
-    priority: priority as tasksService.TaskPriority | undefined,
+    types: types ? (types as string).split(',') as TaskType[] : undefined,
+    status: status as TaskStatus | undefined,
     limit: limit ? parseInt(limit as string) : 50
   };
   
   const result = await tasksService.getUserTasks(filters);
   
-  res.json(result);
+  res.json(result as ApiResponse<Task[]>);
 });
 
 /**
@@ -70,7 +69,7 @@ export const getTaskSummary = asyncHandler(async (req: Request, res: Response) =
   const user = (req as any).user;
   const { studyId, includeQueries } = req.query;
   
-  const filters: tasksService.TaskFilters = {
+  const filters: TaskFilters = {
     userId: user?.userId,
     username: user?.username,
     callerUserId: user?.userId,  // For org-scoping
@@ -80,7 +79,7 @@ export const getTaskSummary = asyncHandler(async (req: Request, res: Response) =
   
   const result = await tasksService.getTaskSummary(filters);
   
-  res.json(result);
+  res.json(result as ApiResponse<TaskSummary>);
 });
 
 /**
@@ -92,7 +91,7 @@ export const getUserTaskSummary = asyncHandler(async (req: Request, res: Respons
   const { username } = req.params;
   const { studyId } = req.query;
   
-  const filters: tasksService.TaskFilters = {
+  const filters: TaskFilters = {
     username,
     callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined
@@ -100,7 +99,7 @@ export const getUserTaskSummary = asyncHandler(async (req: Request, res: Respons
   
   const result = await tasksService.getTaskSummary(filters);
   
-  res.json(result);
+  res.json(result as ApiResponse<TaskSummary>);
 });
 
 /**
@@ -113,11 +112,11 @@ export const getTask = asyncHandler(async (req: Request, res: Response) => {
   const result = await tasksService.getTaskById(taskId);
   
   if (!result.data) {
-    res.status(404).json({ success: false, message: 'Task not found' });
+    res.status(404).json({ success: false, message: 'Task not found' } as ApiResponse);
     return;
   }
   
-  res.json(result);
+  res.json(result as ApiResponse<Task>);
 });
 
 /**
@@ -129,28 +128,28 @@ export const getTasksByType = asyncHandler(async (req: Request, res: Response) =
   const { type } = req.params;
   const { studyId, limit } = req.query;
   
-  const validTypes: tasksService.TaskType[] = [
+  const validTypes: TaskType[] = [
     'query', 'scheduled_visit', 'data_entry', 
     'form_completion', 'sdv_required', 'signature_required'
   ];
   
-  if (!validTypes.includes(type as tasksService.TaskType)) {
+  if (!validTypes.includes(type as TaskType)) {
     res.status(400).json({ success: false, message: 'Invalid task type' });
     return;
   }
   
-  const filters: tasksService.TaskFilters = {
+  const filters: TaskFilters = {
     userId: user?.userId,
     username: user?.username,
     callerUserId: user?.userId,  // For org-scoping
     studyId: studyId ? parseInt(studyId as string) : undefined,
-    types: [type as tasksService.TaskType],
+    types: [type as TaskType],
     limit: limit ? parseInt(limit as string) : 50
   };
   
   const result = await tasksService.getUserTasks(filters);
   
-  res.json(result);
+  res.json(result as ApiResponse<Task[]>);
 });
 
 /**
@@ -161,7 +160,7 @@ export const getOverdueTasks = asyncHandler(async (req: Request, res: Response) 
   const user = (req as any).user;
   const { studyId, limit } = req.query;
   
-  const filters: tasksService.TaskFilters = {
+  const filters: TaskFilters = {
     userId: user?.userId,
     username: user?.username,
     callerUserId: user?.userId,  // For org-scoping
@@ -176,7 +175,7 @@ export const getOverdueTasks = asyncHandler(async (req: Request, res: Response) 
   result.data = result.data.filter(t => t.status === 'overdue');
   result.total = result.data.length;
   
-  res.json(result);
+  res.json(result as ApiResponse<Task[]>);
 });
 
 /**
@@ -191,11 +190,11 @@ export const completeTask = asyncHandler(async (req: Request, res: Response) => 
   const result = await tasksService.completeTask(taskId, user?.userId, reason);
   
   if (!result.success) {
-    res.status(400).json(result);
+    res.status(400).json(result as ApiResponse);
     return;
   }
   
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -215,11 +214,11 @@ export const dismissTask = asyncHandler(async (req: Request, res: Response) => {
   const result = await tasksService.dismissTask(taskId, user?.userId, reason);
   
   if (!result.success) {
-    res.status(400).json(result);
+    res.status(400).json(result as ApiResponse);
     return;
   }
   
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -233,11 +232,11 @@ export const reopenTask = asyncHandler(async (req: Request, res: Response) => {
   const result = await tasksService.reopenTask(taskId, user?.userId);
   
   if (!result.success) {
-    res.status(400).json(result);
+    res.status(400).json(result as ApiResponse);
     return;
   }
   
-  res.json(result);
+  res.json(result as ApiResponse);
 });
 
 /**
@@ -255,7 +254,7 @@ export const getCompletedTasks = asyncHandler(async (req: Request, res: Response
     offset: parseInt(offset as string) || 0
   });
 
-  res.json(result);
+  res.json(result as ApiResponse<Task[]>);
 });
 
 export default {

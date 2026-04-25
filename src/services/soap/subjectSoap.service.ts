@@ -19,7 +19,7 @@ import axios from 'axios';
 import { config } from '../../config/environment';
 import { logger } from '../../config/logger';
 import { SubjectCreateRequest, ApiResponse } from '../../types';
-import { parseStringPromise } from 'xml2js';
+import { safeXmlParse } from '../../utils/xml-safe-parse';
 import { today as todayIso } from '../../utils/date.util';
 
 /**
@@ -82,11 +82,11 @@ async function executeSoapRequest(envelope: string): Promise<any> {
   });
   
   // Parse XML response
-  const result = await parseStringPromise(response.data, {
+  const result = await safeXmlParse(response.data, {
     explicitArray: false,
     ignoreAttrs: false,
-    tagNameProcessors: [(name) => name.replace(/^.*:/, '')]
-  });
+    tagNameProcessors: [(name: string) => name.replace(/^.*:/, '')]
+  }) as Record<string, any>;
   
   // Extract body content
   const envelope_response = result.Envelope || result['SOAP-ENV:Envelope'];
@@ -250,12 +250,13 @@ export const isSubjectExists = async (
     });
 
     return exists;
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
     logger.error('Subject existence check error', {
-      error: error.message,
+      error: message,
       subjectLabel
     });
-    return false;
+    throw new Error(`Cannot verify subject existence: ${message}`);
   }
 };
 

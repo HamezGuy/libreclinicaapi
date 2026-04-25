@@ -9,7 +9,7 @@ import { Request, Response, NextFunction } from 'express';
 import * as validationRulesService from '../services/database/validation-rules.service';
 import { trackUserAction } from '../services/database/audit.service';
 import { logger } from '../config/logger';
-import { ApiResponse } from '../types';
+import type { ApiResponse, ValidationRule } from '@accura-trial/shared-types';
 
 /**
  * Get validation rules for a CRF
@@ -26,7 +26,8 @@ export const getRulesForCrf = async (req: Request, res: Response, next: NextFunc
 
     const rules = await validationRulesService.getRulesForCrf(parsedCrfId, caller?.userId);
 
-    res.json({ success: true, data: rules, message: `${rules.length} rule(s) found` });
+    const response: ApiResponse<ValidationRule[]> = { success: true, data: rules, message: `${rules.length} rule(s) found` };
+    res.json(response);
   } catch (error) {
     logger.error('Get CRF validation rules error:', error);
     next(error);
@@ -48,7 +49,8 @@ export const getRulesForStudy = async (req: Request, res: Response, next: NextFu
 
     const rules = await validationRulesService.getRulesForStudy(parsedStudyId, caller?.userId);
 
-    res.json({ success: true, data: rules });
+    const response: ApiResponse = { success: true, data: rules };
+    res.json(response);
   } catch (error) {
     logger.error('Get study validation rules error:', error);
     next(error);
@@ -62,7 +64,8 @@ export const getAllCrfsWithRules = async (req: Request, res: Response, next: Nex
   try {
     const caller = (req as any).user;
     const results = await validationRulesService.getAllCrfsWithRuleCounts(caller?.userId);
-    res.json({ success: true, data: results });
+    const response: ApiResponse = { success: true, data: results };
+    res.json(response);
   } catch (error) {
     logger.error('Get all CRFs with rules error:', error);
     next(error);
@@ -84,7 +87,7 @@ export const getRule = async (req: Request, res: Response, next: NextFunction): 
       return;
     }
 
-    const response: ApiResponse = {
+    const response: ApiResponse<ValidationRule> = {
       success: true,
       data: rule
     };
@@ -287,8 +290,9 @@ export const testRule = async (req: Request, res: Response, next: NextFunction):
     // dropped them from the body, so a `range` rule on a BP cell with
     // bpSystolicMax=200 would actually evaluate against the clinical
     // default (sysMax=250), giving misleading test results to authors.
-    const mockRule: validationRulesService.ValidationRule = {
+    const mockRule: ValidationRule = {
       id: 0,
+      validationRuleId: 0,
       crfId: 0,
       name: rule.name || 'Test Rule',
       description: '',
@@ -353,7 +357,7 @@ export const getRulesForEventCrf = async (req: Request, res: Response, next: Nex
 
     const rules = await validationRulesService.getRulesForEventCrf(parseInt(eventCrfId), caller?.userId);
 
-    const response: ApiResponse = {
+    const response: ApiResponse<ValidationRule[]> = {
       success: true,
       data: rules
     };

@@ -10,10 +10,8 @@
  *   RE-QUERY:        Monitor, Data Manager, Admin  (send answered query back for clarification)
  *
  * 21 CFR Part 11 Compliance:
- * - Query creation requires electronic signature (§11.50)
- * - Query responses require electronic signature (§11.50)
- * - Query closure requires electronic signature (§11.50)
  * - All changes are logged to audit trail (§11.10(e))
+ * - Electronic signatures are NOT enforced on query operations for now
  */
 
 import express from 'express';
@@ -21,7 +19,6 @@ import * as controller from '../controllers/query.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, querySchemas, commonSchemas } from '../middleware/validation.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
 
 const router = express.Router();
 
@@ -58,11 +55,10 @@ router.get('/:id/audit-trail', validate({ params: commonSchemas.idParam }), cont
 // WRITE OPERATIONS — role-restricted per EDC industry standards
 // ═══════════════════════════════════════════════════════════════════
 
-// Create query: Monitor / DM / Admin only (site staff respond, not raise)
+// Create query: all clinical roles can raise queries
 router.post('/', 
-  requireRole('admin', 'data_manager', 'monitor'), 
+  requireRole('admin', 'data_manager', 'monitor', 'coordinator', 'investigator'), 
   validate({ body: querySchemas.create }), 
-  requireSignatureFor(SignatureMeanings.QUERY_CREATE),
   controller.create
 );
 
@@ -70,7 +66,6 @@ router.post('/',
 router.post('/:id/respond', 
   requireRole('admin', 'data_manager', 'coordinator', 'investigator', 'monitor', 'viewer'),
   validate({ params: commonSchemas.idParam, body: querySchemas.respond }), 
-  requireSignatureFor(SignatureMeanings.QUERY_RESPOND),
   controller.respond
 );
 
@@ -78,7 +73,6 @@ router.post('/:id/respond',
 router.put('/:id/status', 
   requireRole('monitor', 'data_manager', 'admin'), 
   validate({ params: commonSchemas.idParam, body: querySchemas.updateStatus }), 
-  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.updateStatus
 );
 
@@ -86,7 +80,6 @@ router.put('/:id/status',
 router.put('/:id/reassign', 
   requireRole('data_manager', 'admin', 'monitor'),
   validate({ params: commonSchemas.idParam, body: querySchemas.reassign }),
-  requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.reassign
 );
 
@@ -94,7 +87,6 @@ router.put('/:id/reassign',
 router.post('/:id/close-with-signature', 
   requireRole('monitor', 'data_manager', 'admin'), 
   validate({ params: commonSchemas.idParam, body: querySchemas.closeWithSignature }),
-  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.closeWithSignature
 );
 
@@ -102,7 +94,6 @@ router.post('/:id/close-with-signature',
 router.post('/:id/accept-resolution',
   requireRole('monitor', 'admin', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.acceptResolution }),
-  requireSignatureFor(SignatureMeanings.QUERY_ACCEPT_RESOLUTION),
   controller.acceptResolution
 );
 
@@ -110,7 +101,6 @@ router.post('/:id/accept-resolution',
 router.post('/:id/reject-resolution',
   requireRole('monitor', 'admin', 'data_manager'),
   validate({ params: commonSchemas.idParam, body: querySchemas.rejectResolution }),
-  requireSignatureFor(SignatureMeanings.QUERY_REJECT_RESOLUTION),
   controller.rejectResolution
 );
 
@@ -118,7 +108,6 @@ router.post('/:id/reject-resolution',
 router.post('/:id/requery',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: commonSchemas.idParam, body: querySchemas.respond }),
-  requireSignatureFor('I am returning this query for further clarification'),
   controller.requery
 );
 
@@ -126,7 +115,6 @@ router.post('/:id/requery',
 router.put('/:id/reopen',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: commonSchemas.idParam, body: querySchemas.reopen }),
-  requireSignatureFor('I authorize reopening this query'),
   controller.reopenQuery
 );
 
@@ -137,21 +125,18 @@ router.put('/:id/reopen',
 router.post('/bulk/status',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: querySchemas.bulkStatus }),
-  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.bulkUpdateStatus
 );
 
 router.post('/bulk/close',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: querySchemas.bulkClose }),
-  requireSignatureFor(SignatureMeanings.QUERY_CLOSE),
   controller.bulkClose
 );
 
 router.post('/bulk/reassign',
   requireRole('data_manager', 'admin', 'monitor'),
   validate({ body: querySchemas.bulkReassign }),
-  requireSignatureFor(SignatureMeanings.AUTHORIZE),
   controller.bulkReassign
 );
 

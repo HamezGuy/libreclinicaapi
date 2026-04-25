@@ -38,20 +38,100 @@ import {
 
 const router = Router();
 
-/**
- * Require admin or investigator role
- */
-const requireAdminOrInvestigator = async (req: Request, res: Response, next: Function) => {
-  const user = (req as any).user;
-  if (!user) {
-    return res.status(401).json({ success: false, message: 'Not authenticated' });
-  }
-  const allowedRoles = ['admin', 'investigator', 'study_director'];
-  if (!allowedRoles.includes(user.role)) {
-    return res.status(403).json({ success: false, message: 'Insufficient permissions' });
-  }
-  next();
+// ============================================================================
+// Validation Schemas
+// ============================================================================
+
+const consentSchemas = {
+  createDocument: Joi.object({
+    studyId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'studyId is required' }),
+    name: Joi.string().required().max(500)
+      .messages({ 'any.required': 'Document name is required' }),
+    description: Joi.string().optional().max(5000).allow(''),
+    documentType: Joi.string().optional().valid('main', 'assent', 'lar', 'optional', 'addendum'),
+    languageCode: Joi.string().optional().max(10),
+    requiresWitness: Joi.boolean().optional(),
+    requiresLAR: Joi.boolean().optional(),
+    ageOfMajority: Joi.number().integer().min(0).optional(),
+    minReadingTime: Joi.number().integer().min(0).optional(),
+  }),
+
+  createVersion: Joi.object({
+    versionNumber: Joi.string().required().max(50)
+      .messages({ 'any.required': 'versionNumber is required' }),
+    versionName: Joi.string().optional().max(255).allow(''),
+    content: Joi.object().required()
+      .messages({ 'any.required': 'content is required' }),
+    pdfTemplate: Joi.string().optional().allow(''),
+    effectiveDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().isoDate()).optional(),
+    expirationDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().isoDate()).optional().allow(null),
+    irbApprovalDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().isoDate()).optional().allow(null),
+    irbApprovalNumber: Joi.string().optional().max(255).allow(''),
+    changeSummary: Joi.string().optional().max(5000).allow(''),
+  }),
+
+  recordConsent: Joi.object({
+    versionId: Joi.number().integer().positive().optional(),
+    consentType: Joi.string().optional().valid('subject', 'witness', 'lar', 'reconsent'),
+    subjectName: Joi.string().required().max(500)
+      .messages({ 'any.required': 'subjectName is required' }),
+    subjectSignatureData: Joi.any().required()
+      .messages({ 'any.required': 'subjectSignatureData is required' }),
+    witnessName: Joi.string().optional().max(500).allow(''),
+    witnessRelationship: Joi.string().optional().max(255).allow(''),
+    witnessSignatureData: Joi.any().optional(),
+    larName: Joi.string().optional().max(500).allow(''),
+    larRelationship: Joi.string().optional().max(255).allow(''),
+    larSignatureData: Joi.any().optional(),
+    larReason: Joi.string().optional().max(2000).allow(''),
+    timeSpentReading: Joi.number().integer().min(0).required()
+      .messages({ 'any.required': 'timeSpentReading is required' }),
+    pagesViewed: Joi.any().required()
+      .messages({ 'any.required': 'pagesViewed is required' }),
+    acknowledgementsChecked: Joi.any().required()
+      .messages({ 'any.required': 'acknowledgementsChecked is required' }),
+    questionsAsked: Joi.string().optional().max(5000).allow(''),
+    scannedConsentFileIds: Joi.array().items(Joi.string()).optional(),
+    isScannedConsent: Joi.boolean().optional(),
+    subjectSignatureId: Joi.number().integer().positive().optional(),
+    witnessSignatureId: Joi.number().integer().positive().optional(),
+    larSignatureId: Joi.number().integer().positive().optional(),
+    investigatorSignatureId: Joi.number().integer().positive().optional(),
+    contentHash: Joi.string().optional().max(256).allow(''),
+    deviceInfo: Joi.any().optional(),
+    pageViewRecords: Joi.any().optional(),
+    formData: Joi.object().optional(),
+    templateId: Joi.string().optional().max(255).allow(''),
+    password: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional().max(500),
+  }),
+
+  requestReconsent: Joi.object({
+    versionId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'versionId is required' }),
+    studySubjectId: Joi.number().integer().positive().required()
+      .messages({ 'any.required': 'studySubjectId is required' }),
+    reason: Joi.string().required().max(2000)
+      .messages({ 'any.required': 'reason is required', 'string.empty': 'reason cannot be empty' }),
+    dueDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().isoDate()).optional().allow(null),
+  }),
+
+  updateDocument: Joi.object({
+    name: Joi.string().optional().max(500),
+    description: Joi.string().optional().max(5000).allow(''),
+    documentType: Joi.string().optional().valid('main', 'assent', 'lar', 'optional', 'addendum'),
+    languageCode: Joi.string().optional().max(10),
+    requiresWitness: Joi.boolean().optional(),
+    requiresLAR: Joi.boolean().optional(),
+    ageOfMajority: Joi.number().integer().min(0).optional(),
+    minReadingTime: Joi.number().integer().min(0).optional(),
+    status: Joi.string().optional().valid('draft', 'active', 'retired'),
+  }),
 };
+
+const requireConsentManagement = requireRole('admin', 'investigator', 'data_manager', 'coordinator');
 
 // ============================================================================
 // Document Management
@@ -61,7 +141,7 @@ const requireAdminOrInvestigator = async (req: Request, res: Response, next: Fun
  * POST /api/consent/documents
  * Create a consent document
  */
-router.post('/documents', authMiddleware, requireAdminOrInvestigator, async (req: Request, res: Response) => {
+router.post('/documents', authMiddleware, requireConsentManagement, validate({ body: consentSchemas.createDocument }), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId;
     const doc = await createConsentDocument({ ...req.body, createdBy: userId });
@@ -109,7 +189,7 @@ router.get('/documents/:id', authMiddleware, async (req: Request, res: Response)
  * PUT /api/consent/documents/:id
  * Update a consent document
  */
-router.put('/documents/:id', authMiddleware, requireAdminOrInvestigator, async (req: Request, res: Response) => {
+router.put('/documents/:id', authMiddleware, requireConsentManagement, validate({ body: consentSchemas.updateDocument }), async (req: Request, res: Response) => {
   try {
     const documentId = parseInt(req.params.id);
     const doc = await updateConsentDocument(documentId, req.body);
@@ -131,7 +211,7 @@ router.put('/documents/:id', authMiddleware, requireAdminOrInvestigator, async (
  * POST /api/consent/documents/:id/versions
  * Create a new version
  */
-router.post('/documents/:id/versions', authMiddleware, requireAdminOrInvestigator, async (req: Request, res: Response) => {
+router.post('/documents/:id/versions', authMiddleware, requireConsentManagement, validate({ body: consentSchemas.createVersion }), async (req: Request, res: Response) => {
   try {
     const documentId = parseInt(req.params.id);
     const userId = (req as any).user?.userId;
@@ -200,10 +280,16 @@ router.get('/documents/:id/active-version', authMiddleware, async (req: Request,
  */
 router.post('/versions/:id/activate', 
   authMiddleware, 
-  requireAdminOrInvestigator, 
+  requireConsentManagement, 
   requireSignatureFor('I authorize activation of this consent document version'),
   async (req: Request, res: Response) => {
     try {
+      const p11 = req as Part11Request;
+      if (!p11.signatureVerified) {
+        logger.warn('Consent version activation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+        res.status(403).json({ success: false, message: 'Electronic signature required to activate consent version (21 CFR Part 11 §11.50)' });
+        return;
+      }
       const versionId = parseInt(req.params.id);
       const userId = (req as any).user?.userId;
       const version = await activateConsentVersion(versionId, userId);
@@ -225,9 +311,16 @@ router.post('/versions/:id/activate',
  */
 router.post('/subjects/:studySubjectId/consent', 
   authMiddleware, 
+  validate({ body: consentSchemas.recordConsent }),
   requireSignatureFor('I confirm informed consent has been obtained from this subject'),
   async (req: Request, res: Response) => {
     try {
+      const p11 = req as Part11Request;
+      if (!p11.signatureVerified) {
+        logger.warn('Consent recording attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+        res.status(403).json({ success: false, message: 'Electronic signature required to record consent (21 CFR Part 11 §11.50)' });
+        return;
+      }
       const studySubjectId = parseInt(req.params.studySubjectId);
       const userId = (req as any).user?.userId;
       
@@ -327,6 +420,12 @@ router.post('/:consentId/withdraw',
   requireSignatureFor('I confirm withdrawal of consent for this subject'),
   async (req: Request, res: Response) => {
     try {
+      const p11 = req as Part11Request;
+      if (!p11.signatureVerified) {
+        logger.warn('Consent withdrawal attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+        res.status(403).json({ success: false, message: 'Electronic signature required to withdraw consent (21 CFR Part 11 §11.50)' });
+        return;
+      }
       const consentId = parseInt(req.params.consentId);
       const { reason } = req.body;
       const userId = (req as any).user?.userId;
@@ -352,7 +451,7 @@ router.post('/:consentId/withdraw',
  * GET /api/consent/:consentId/audit-trail
  * Get audit trail for a consent record
  */
-router.get('/:consentId/audit-trail', authMiddleware, requireRole('admin', 'monitor', 'investigator'), async (req: Request, res: Response) => {
+router.get('/:consentId/audit-trail', authMiddleware, requireRole('admin', 'monitor', 'investigator', 'data_manager', 'coordinator'), async (req: Request, res: Response) => {
   try {
     const consentId = parseInt(req.params.consentId);
     const trail = await getConsentAuditTrail(consentId);
@@ -371,7 +470,7 @@ router.get('/:consentId/audit-trail', authMiddleware, requireRole('admin', 'moni
  * POST /api/consent/reconsent/request
  * Request re-consent for a subject
  */
-router.post('/reconsent/request', authMiddleware, requireAdminOrInvestigator, async (req: Request, res: Response) => {
+router.post('/reconsent/request', authMiddleware, requireConsentManagement, validate({ body: consentSchemas.requestReconsent }), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId;
     const request = await requestReconsent({ ...req.body, requestedBy: userId });

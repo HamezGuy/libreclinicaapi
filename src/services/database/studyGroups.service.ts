@@ -12,39 +12,19 @@
 
 import { pool } from '../../config/database';
 import { logger } from '../../config/logger';
+import type {
+  GroupClassType,
+  SubjectGroupAssignment,
+  StudyGroupClass as SharedStudyGroupClass,
+  StudyGroup,
+} from '@accura-trial/shared-types';
 
-// Group class types from LibreClinica (predefined + custom)
-export type GroupClassType = 'Arm' | 'Family/Pedigree' | 'Demographic' | 'Other' | 'Custom' | 'Cohort' | 'Stratification Factor' | 'Dose Group';
+export type { GroupClassType, SubjectGroupAssignment, StudyGroup };
 
-export interface StudyGroupClass {
-  studyGroupClassId: number;
-  name: string;
-  studyId: number;
-  groupClassTypeId: number;
+export interface StudyGroupClass extends SharedStudyGroupClass {
   groupClassTypeName: string;
   customTypeName?: string;
-  subjectAssignment: 'Required' | 'Optional';
-  statusId: number;
   statusName: string;
-  groups: StudyGroup[];
-  dateCreated: Date;
-  ownerId: number;
-}
-
-export interface StudyGroup {
-  studyGroupId: number;
-  name: string;
-  description?: string;
-  studyGroupClassId: number;
-}
-
-export interface SubjectGroupAssignment {
-  subjectGroupMapId: number;
-  studySubjectId: number;
-  studyGroupClassId: number;
-  studyGroupId: number;
-  notes?: string;
-  dateCreated: Date;
 }
 
 /**
@@ -120,7 +100,10 @@ export const getStudyGroupClasses = async (studyId: number): Promise<StudyGroupC
           study_group_id,
           name,
           description,
-          study_group_class_id
+          study_group_class_id,
+          status_id,
+          owner_id,
+          date_created
         FROM study_group
         WHERE study_group_class_id = $1
         ORDER BY name
@@ -140,11 +123,14 @@ export const getStudyGroupClasses = async (studyId: number): Promise<StudyGroupC
         statusName: row.statusName,
         dateCreated: row.dateCreated,
         ownerId: row.ownerId,
-        groups: groupResult.rows.map(g => ({
+        groups: groupResult.rows.map((g: { studyGroupId: number; name: string; description?: string; studyGroupClassId: number; statusId?: number; ownerId?: number; dateCreated?: Date | string }) => ({
           studyGroupId: g.studyGroupId,
           name: g.name,
           description: g.description,
-          studyGroupClassId: g.studyGroupClassId
+          studyGroupClassId: g.studyGroupClassId,
+          statusId: g.statusId ?? 1,
+          ownerId: g.ownerId ?? 0,
+          dateCreated: g.dateCreated ?? new Date()
         }))
       });
     }

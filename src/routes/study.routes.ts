@@ -39,13 +39,13 @@ router.get('/:id/users', validate({ params: commonSchemas.idParam }), controller
 // Create/Update/Delete - require admin or coordinator role
 // Electronic signature is optional but verified if provided (21 CFR Part 11)
 router.post('/', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator'), 
   validate({ body: studySchemas.create }), 
   requireSignatureFor(SignatureMeanings.STUDY_CREATE),
   controller.create
 );
 router.put('/:id', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator'), 
   validate({ params: commonSchemas.idParam, body: studySchemas.update }), 
   requireSignatureFor(SignatureMeanings.STUDY_UPDATE),
   controller.update
@@ -59,7 +59,7 @@ router.delete('/:id',
 
 // Archive/Restore (separate from delete for clarity)
 router.post('/:id/archive', 
-  requireRole('admin', 'data_manager'), 
+  requireRole('admin', 'data_manager', 'investigator'), 
   validate({ params: commonSchemas.idParam }), 
   requireSignatureFor('I authorize archiving this study'),
   controller.archive

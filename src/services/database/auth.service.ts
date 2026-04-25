@@ -747,6 +747,403 @@ export const fetchCustomPermissions = async (userId: number): Promise<Record<str
   }
 };
 
+/**
+ * Get full user profile by userId, including role resolution.
+ * Returns a camelCase profile object ready for the controller to return.
+ */
+export const getProfile = async (userId: number): Promise<{
+  userId: number;
+  userName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  institutionalAffiliation: string;
+  role: string;
+  secondaryRole: string;
+  userType: string;
+  userTypeId: number;
+  timeZone: string;
+  isActive: boolean;
+  createdAt: Date | string | null;
+  updatedAt: Date | string | null;
+} | null> => {
+  const result = await pool.query(`
+    SELECT 
+      user_id, user_name, first_name, last_name, email, phone,
+      institutional_affiliation, status_id, user_type_id,
+      time_zone, date_created, date_updated
+    FROM user_account 
+    WHERE user_id = $1
+  `, [userId]);
+
+  if (result.rows.length === 0) return null;
+
+  const dbUser = result.rows[0];
+
+  const typeResult = await pool.query(
+    'SELECT user_type FROM user_type WHERE user_type_id = $1',
+    [dbUser.userTypeId]
+  );
+  const userTypeName = typeResult.rows.length > 0 ? typeResult.rows[0].userType : 'unknown';
+
+  let primaryRole: string;
+  const userTypeId = dbUser.userTypeId;
+
+  if (userTypeId === 1 || userTypeId === 0) {
+    primaryRole = 'admin';
+  } else {
+    try {
+      const platformResult = await pool.query(
+        `SELECT platform_role FROM user_account_extended WHERE user_id = $1`,
+        [userId]
+      );
+      if (platformResult.rows.length > 0 && platformResult.rows[0].platformRole) {
+        primaryRole = platformResult.rows[0].platformRole;
+      } else {
+        primaryRole = 'coordinator';
+      }
+    } catch (e: unknown) {
+      primaryRole = 'coordinator';
+    }
+  }
+
+  let secondaryRole = '';
+  try {
+    const secondaryRoleResult = await pool.query(
+      `SELECT secondary_role FROM user_account_extended WHERE user_id = $1`,
+      [userId]
+    );
+    if (secondaryRoleResult.rows.length > 0) {
+      secondaryRole = secondaryRoleResult.rows[0].secondaryRole || '';
+    }
+  } catch (e: unknown) {
+    // extended table may not exist yet
+  }
+
+  return {
+    userId: dbUser.userId,
+    userName: dbUser.userName,
+    firstName: dbUser.firstName,
+    lastName: dbUser.lastName,
+    email: dbUser.email,
+    phone: dbUser.phone || '',
+    institutionalAffiliation: dbUser.institutionalAffiliation || '',
+    role: primaryRole,
+    secondaryRole,
+    userType: userTypeName,
+    userTypeId,
+    timeZone: dbUser.timeZone || 'America/New_York',
+    isActive: dbUser.statusId === 1,
+    createdAt: dbUser.dateCreated,
+    updatedAt: dbUser.dateUpdated
+  };
+};
+
+/**
+ * Update user profile (self-service). Runs in a transaction.
+ * Returns the updated profile fields, or null if user not found.
+ * Throws on uniqueness violations (email/username taken) with a descriptive message.
+ */
+export const updateProfile = async (
+  userId: number,
+  profileData: {
+    firstName?: string;
+    lastName?: string;
+    username?: string;
+    email?: string;
+    phone?: string;
+    institutionalAffiliation?: string;
+    timeZone?: string;
+    secondaryRole?: string;
+  }
+): Promise<{
+  userId: number;
+  userName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  institutionalAffiliation: string;
+  timeZone: string;
+  secondaryRole?: string;
+} | null> => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const updates: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIndex = 1;
+
+    if (profileData.firstName !== undefined) {
+      updates.push(`first_name = $${paramIndex++}`);
+      params.push(profileData.firstName);
+    }
+    if (profileData.lastName !== undefined) {
+      updates.push(`last_name = $${paramIndex++}`);
+      params.push(profileData.lastName);
+    }
+    if (profileData.username !== undefined) {
+      const usernameCheck = await client.query(
+        'SELECT user_id FROM user_account WHERE user_name = $1 AND user_id != $2',
+        [profileData.username, userId]
+      );
+      if (usernameCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        throw new Error('Username is already taken');
+      }
+      updates.push(`user_name = $${paramIndex++}`);
+      params.push(profileData.username);
+    }
+    if (profileData.email !== undefined) {
+      const emailCheck = await client.query(
+        'SELECT user_id FROM user_account WHERE email = $1 AND user_id != $2',
+        [profileData.email, userId]
+      );
+      if (emailCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        throw new Error('Email is already in use by another user');
+      }
+      updates.push(`email = $${paramIndex++}`);
+      params.push(profileData.email);
+    }
+    if (profileData.phone !== undefined) {
+      updates.push(`phone = $${paramIndex++}`);
+      params.push(profileData.phone);
+    }
+    if (profileData.institutionalAffiliation !== undefined) {
+      updates.push(`institutional_affiliation = $${paramIndex++}`);
+      params.push(profileData.institutionalAffiliation);
+    }
+    if (profileData.timeZone !== undefined) {
+      updates.push(`time_zone = $${paramIndex++}`);
+      params.push(profileData.timeZone);
+    }
+
+    updates.push(`date_updated = NOW()`);
+    params.push(userId);
+
+    const updateQuery = `
+      UPDATE user_account 
+      SET ${updates.join(', ')}
+      WHERE user_id = $${paramIndex}
+      RETURNING user_id, user_name, first_name, last_name, email, phone, institutional_affiliation, time_zone
+    `;
+
+    const result = await client.query(updateQuery, params);
+
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    if (profileData.secondaryRole !== undefined) {
+      await client.query(`
+        INSERT INTO user_account_extended (user_id, secondary_role)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET secondary_role = EXCLUDED.secondary_role
+      `, [userId, profileData.secondaryRole || null]);
+    }
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_log_event_type_id, audit_date, entity_id, entity_name,
+        user_id, audit_table, reason_for_change, old_value, new_value
+      ) VALUES (
+        44, NOW(), $1, 'Profile Updated', $2, 'user_account', 
+        'User updated their profile', '', $3
+      )
+    `, [userId, userId, JSON.stringify(result.rows[0])]);
+
+    await client.query('COMMIT');
+
+    const row = result.rows[0];
+    return {
+      userId: row.userId,
+      userName: row.userName,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      email: row.email,
+      phone: row.phone || '',
+      institutionalAffiliation: row.institutionalAffiliation || '',
+      timeZone: row.timeZone || 'America/New_York',
+      secondaryRole: profileData.secondaryRole !== undefined
+        ? (profileData.secondaryRole || '')
+        : undefined
+    };
+  } catch (error: unknown) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Change user password (self-service). Verifies current password, then updates
+ * both MD5 (for SOAP compat) and bcrypt hashes inside a transaction.
+ * Returns { success, message }.
+ */
+export const changePassword = async (
+  userId: number,
+  currentPassword: string,
+  newPassword: string
+): Promise<{ success: boolean; message: string }> => {
+  const { verifyAndUpgrade: verifyPwd, hashPasswordMD5, hashPasswordBcrypt: hashBcrypt } = await import('../../utils/password.util');
+
+  const userResult = await pool.query(
+    `SELECT u.user_id, u.passwd, uae.bcrypt_passwd
+     FROM user_account u
+     LEFT JOIN user_account_extended uae ON u.user_id = uae.user_id
+     WHERE u.user_id = $1`,
+    [userId]
+  );
+
+  if (userResult.rows.length === 0) {
+    return { success: false, message: 'User not found' };
+  }
+
+  const dbUser = userResult.rows[0];
+
+  const verification = await verifyPwd(
+    currentPassword,
+    dbUser.passwd,
+    dbUser.bcryptPasswd
+  );
+
+  if (!verification.valid) {
+    return { success: false, message: 'Current password is incorrect' };
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const md5Hash = hashPasswordMD5(newPassword);
+    const bcryptHash = await hashBcrypt(newPassword);
+
+    await client.query(
+      `UPDATE user_account SET passwd = $1, passwd_timestamp = NOW(), date_updated = NOW() WHERE user_id = $2`,
+      [md5Hash, userId]
+    );
+
+    await client.query(
+      `INSERT INTO user_account_extended (user_id, bcrypt_passwd, passwd_upgraded_at, password_version)
+       VALUES ($1, $2, NOW(), 2)
+       ON CONFLICT (user_id) DO UPDATE SET
+         bcrypt_passwd = EXCLUDED.bcrypt_passwd,
+         passwd_upgraded_at = NOW(),
+         password_version = 2`,
+      [userId, bcryptHash]
+    );
+
+    await client.query(`
+      INSERT INTO audit_log_event (
+        audit_log_event_type_id, audit_date, entity_id, entity_name,
+        user_id, audit_table, reason_for_change, old_value, new_value
+      ) VALUES (
+        44, NOW(), $1, 'Password Changed', $2, 'user_account',
+        'User changed their password', '', ''
+      )
+    `, [userId, userId]);
+
+    await client.query('COMMIT');
+
+    logger.info('Password changed via service', { userId });
+    return { success: true, message: 'Password changed successfully' };
+  } catch (error: unknown) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Register or update a device record (WoundScanner).
+ * Silently swallows DB errors so token validation is not blocked.
+ */
+export const registerDevice = async (
+  deviceId: string,
+  deviceInfo: { model?: string; osVersion?: string; appVersion?: string },
+  userId: string | null
+): Promise<void> => {
+  try {
+    await pool.query(`
+      INSERT INTO devices (id, device_id, model, os_version, app_version, user_id, first_seen_at, last_seen_at, is_active, created_at, updated_at)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW(), true, NOW(), NOW())
+      ON CONFLICT (device_id) DO UPDATE SET
+        model = COALESCE($2, devices.model),
+        os_version = COALESCE($3, devices.os_version),
+        app_version = COALESCE($4, devices.app_version),
+        user_id = $5,
+        last_seen_at = NOW(),
+        updated_at = NOW()
+    `, [
+      deviceId,
+      deviceInfo.model || null,
+      deviceInfo.osVersion || null,
+      deviceInfo.appVersion || null,
+      userId
+    ]);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn('Failed to register device', { error: msg, deviceId });
+  }
+};
+
+/**
+ * Lookup patient initials from study_subject by ID.
+ */
+export const getPatientInitials = async (patientId: number): Promise<string> => {
+  try {
+    const result = await pool.query(
+      'SELECT label FROM study_subject WHERE study_subject_id = $1',
+      [patientId]
+    );
+    if (result.rows.length > 0) {
+      const label: string = result.rows[0].label || '';
+      return label.substring(0, 2).toUpperCase();
+    }
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn('Failed to get patient initials', { error: msg, patientId });
+  }
+  return '';
+};
+
+/**
+ * Lookup template/CRF name by OID or name fragment.
+ */
+export const getTemplateName = async (templateId: string): Promise<string> => {
+  try {
+    const result = await pool.query(
+      "SELECT name FROM crf WHERE oc_oid = $1 OR name LIKE $2 LIMIT 1",
+      [templateId, `%${templateId}%`]
+    );
+    if (result.rows.length > 0) {
+      return result.rows[0].name;
+    }
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn('Failed to get template name', { error: msg, templateId });
+  }
+  return templateId;
+};
+
+/**
+ * Get user_account row by userId. Used by the refresh-token flow.
+ */
+export const getUserById = async (userId: number): Promise<User | null> => {
+  const result = await pool.query(
+    `SELECT * FROM user_account WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows[0] || null;
+};
+
 export default {
   authenticateUser,
   authenticateWithGoogle,
@@ -757,6 +1154,13 @@ export default {
   userHasPermission,
   isUserAdmin,
   logUserLogout,
-  fetchCustomPermissions
+  fetchCustomPermissions,
+  getProfile,
+  updateProfile,
+  changePassword,
+  registerDevice,
+  getPatientInitials,
+  getTemplateName,
+  getUserById
 };
 
