@@ -232,6 +232,7 @@ export const subjectSchemas = {
 
     // === ELECTRONIC SIGNATURE (21 CFR Part 11, §11.50) ===
     password: Joi.string().optional(),
+    signatureUsername: Joi.string().optional().max(255),
     signaturePassword: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500)
   }),
@@ -265,6 +266,7 @@ export const subjectSchemas = {
     ).optional(),
     // Electronic signature
     password: Joi.string().optional(),
+    signatureUsername: Joi.string().optional().max(255),
     signaturePassword: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500)
   }),
@@ -275,16 +277,19 @@ export const subjectSchemas = {
     reason: Joi.string().optional().allow('').max(500),
     // Electronic signature
     password: Joi.string().optional(),
+    signatureUsername: Joi.string().optional().max(255),
     signaturePassword: Joi.string().optional(),
     signatureMeaning: Joi.string().optional().max(500)
   }),
 
   list: Joi.object({
     studyId: Joi.number().integer().positive().required(),
-    status: Joi.string().valid('available', 'enrolled', 'completed', 'withdrawn').optional(),
+    status: Joi.string().max(50).optional(),
+    siteId: Joi.number().integer().positive().optional(),
     page: Joi.number().integer().min(1).default(1),
     limit: Joi.number().integer().min(1).max(1000).default(20),
-    search: Joi.string().optional().allow('')
+    search: Joi.string().optional().allow(''),
+    includeArchived: Joi.string().valid('true', 'false').optional()
   }),
 
   getById: Joi.object({
@@ -369,7 +374,12 @@ export const formSchemas = {
     // Electronic signature
     signatureUsername: Joi.string().optional(),
     signaturePassword: Joi.string().optional(),
-    signatureMeaning: Joi.string().optional()
+    signatureMeaning: Joi.string().optional(),
+
+    // Optimistic concurrency control — per-field date_updated timestamps
+    // from the last load. Backend compares against current DB values to
+    // detect concurrent modifications (21 CFR Part 11 §11.10(e)).
+    fieldTimestamps: Joi.object().pattern(Joi.string(), Joi.string().isoDate()).optional()
   }),
 
   getData: Joi.object({
@@ -793,7 +803,8 @@ export const studySchemas = {
   list: Joi.object({
     page: Joi.number().integer().min(1).default(1),
     limit: Joi.number().integer().min(1).max(100).default(20),
-    status: Joi.string().valid('available', 'pending', 'frozen', 'locked').optional()
+    status: Joi.string().valid('available', 'pending', 'frozen', 'locked').optional(),
+    search: Joi.string().optional().allow('').max(255)
   }),
 
   getById: Joi.object({
@@ -1090,7 +1101,11 @@ export const querySchemas = {
     assignedUserId: Joi.number().integer().positive().optional(),
     severity: Joi.string().optional().valid('minor', 'major', 'critical').default('minor'),
     dueDate: Joi.string().optional().allow('', null).isoDate()
-      .messages({ 'string.isoDate': 'dueDate must be a valid ISO date string (YYYY-MM-DD)' })
+      .messages({ 'string.isoDate': 'dueDate must be a valid ISO date string (YYYY-MM-DD)' }),
+    password: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
   }),
 
   respond: Joi.object({
@@ -1110,14 +1125,22 @@ export const querySchemas = {
     newStatusId: Joi.number().integer().valid(2, 3, 4).optional()
       .messages({ 'any.only': 'newStatusId for a response must be 2 (Updated), 3 (Resolution Proposed), or 4 (Closed)' }),
     correctedValue: Joi.any().optional(),
-    correctionReason: Joi.string().optional().allow('').max(5000)
+    correctionReason: Joi.string().optional().allow('').max(5000),
+    password: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
   }).or('description', 'response'),
 
   updateStatus: Joi.object({
     // Only valid resolution_status_id values: 1=New, 2=Updated, 3=Resolution Proposed, 4=Closed, 5=Not Applicable
     statusId: Joi.number().integer().valid(1, 2, 3, 4, 5).required()
       .messages({ 'any.only': 'statusId must be one of: 1 (New), 2 (Updated), 3 (Resolution Proposed), 4 (Closed), 5 (Not Applicable)' }),
-    reason: Joi.string().optional().allow('').max(500)
+    reason: Joi.string().optional().allow('').max(500),
+    password: Joi.string().optional(),
+    signatureUsername: Joi.string().optional(),
+    signaturePassword: Joi.string().optional(),
+    signatureMeaning: Joi.string().optional()
   }),
 
   acceptResolution: Joi.object({
@@ -1484,22 +1507,25 @@ export const dataLockSchemas = {
   lock: Joi.object({
     eventCrfId: Joi.number().integer().positive().required()
       .messages({ 'any.required': 'eventCrfId is required' }),
-    reason: Joi.string().optional(),
+    reason: Joi.string().required().min(10).messages({
+      'any.required': 'Reason is required for data locking',
+      'string.min': 'Reason must be at least 10 characters'
+    }),
     ...signatureFields
   }),
 
   // POST /api/data-locks/subject/:studySubjectId
   lockSubject: Joi.object({
-    reason: Joi.string().trim().min(1).required()
-      .messages({ 'any.required': 'reason is required', 'string.empty': 'reason cannot be empty' }),
+    reason: Joi.string().trim().min(10).required()
+      .messages({ 'any.required': 'Reason is required for data locking', 'string.empty': 'reason cannot be empty', 'string.min': 'Reason must be at least 10 characters' }),
     skipValidation: Joi.boolean().default(false),
     ...signatureFields
   }),
 
   // POST /api/data-locks/event/:studyEventId
   lockEvent: Joi.object({
-    reason: Joi.string().trim().min(1).required()
-      .messages({ 'any.required': 'reason is required' }),
+    reason: Joi.string().trim().min(10).required()
+      .messages({ 'any.required': 'Reason is required for data locking', 'string.min': 'Reason must be at least 10 characters' }),
     skipValidation: Joi.boolean().default(false),
     ...signatureFields
   }),
@@ -1513,6 +1539,10 @@ export const dataLockSchemas = {
 
   // POST /api/data-locks/freeze/:eventCrfId
   freeze: Joi.object({
+    reason: Joi.string().required().min(10).messages({
+      'any.required': 'Reason is required for data freezing',
+      'string.min': 'Reason must be at least 10 characters'
+    }),
     ...signatureFields
   }),
 
@@ -1525,14 +1555,14 @@ export const dataLockSchemas = {
 
   // POST /api/data-locks/unlock-requests
   createUnlockRequest: Joi.object({
-    eventCrfId: Joi.number().integer().positive().required()
-      .messages({ 'any.required': 'eventCrfId is required' }),
+    eventCrfId: Joi.number().integer().positive().optional(),
     studySubjectId: Joi.number().integer().positive().optional(),
     studyId: Joi.number().integer().positive().optional(),
     reason: Joi.string().trim().min(1).required()
       .messages({ 'any.required': 'reason is required' }),
     priority: Joi.string().valid('low', 'medium', 'high', 'urgent').default('medium')
-  }),
+  }).or('eventCrfId', 'studySubjectId', 'studyId')
+    .messages({ 'object.missing': 'At least one of eventCrfId, studySubjectId, or studyId is required' }),
 
   // PUT /api/data-locks/unlock-requests/:requestId/review
   reviewUnlockRequest: Joi.object({
@@ -1551,8 +1581,8 @@ export const dataLockSchemas = {
 
   // POST /api/data-locks/study/:studyId — lock study dataset
   lockStudy: Joi.object({
-    reason: Joi.string().trim().min(1).required()
-      .messages({ 'any.required': 'reason is required' }),
+    reason: Joi.string().trim().min(10).required()
+      .messages({ 'any.required': 'Reason is required for data locking', 'string.min': 'Reason must be at least 10 characters' }),
     ...signatureFields
   }),
 
@@ -1580,6 +1610,7 @@ export const dataLockSchemas = {
 
 export const esignatureSchemas = {
   verifyPassword: Joi.object({
+    username: Joi.string().optional().max(255),
     password: Joi.string().required().min(1)
       .messages({ 'string.empty': 'Password is required for verification' })
   }),
@@ -1592,6 +1623,8 @@ export const esignatureSchemas = {
     meaning: Joi.string().optional().max(500).allow(''),
     reason: Joi.string().optional().max(500).allow(''),
     reasonForSigning: Joi.string().optional().max(500).allow(''),
+    signatureUsername: Joi.string().optional().max(255),
+    signaturePassword: Joi.string().optional().max(255),
     deviceFingerprint: Joi.string().optional().max(255),
     ipAddress: Joi.string().optional().max(100),
     userAgent: Joi.string().optional().max(500)
@@ -1606,13 +1639,18 @@ export const esignatureSchemas = {
   invalidate: Joi.object({
     entityType: Joi.string().required().max(100),
     entityId: Joi.number().integer().positive().required(),
-    reason: Joi.string().optional().max(500).allow('')
+    reason: Joi.string().optional().max(500).allow(''),
+    invalidatedBy: Joi.string().optional().max(255),
+    timestamp: Joi.string().optional()
   }),
 
   logFailedAttempt: Joi.object({
     entityType: Joi.string().optional().max(100).allow(''),
     entityId: Joi.number().integer().positive().optional(),
-    reason: Joi.string().optional().max(500).allow('')
+    username: Joi.string().optional().max(255),
+    reason: Joi.string().optional().max(500).allow(''),
+    timestamp: Joi.string().optional(),
+    userAgent: Joi.string().optional().max(500)
   })
 };
 

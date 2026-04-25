@@ -24,7 +24,6 @@ import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.mid
 import * as studyParamsService from '../services/database/studyParameters.service';
 import * as studyGroupsService from '../services/database/studyGroups.service';
 import { logger } from '../config/logger';
-import { pool } from '../config/database';
 
 const router = express.Router();
 
@@ -63,15 +62,15 @@ router.get('/enrollment-config/:studyId', validate({ params: Joi.object({ studyI
           showDateOfBirth: parameters.collectDob !== 'not_used',
           dateOfBirthRequired: parameters.collectDob === 'required',
           yearOfBirthOnly: parameters.collectDob === 'year_only',
-          showGender: parameters.genderRequired,
-          genderRequired: parameters.genderRequired,
+          showGender: parameters.genderRequired === true || parameters.genderRequired === 'required',
+          genderRequired: parameters.genderRequired === true || parameters.genderRequired === 'required',
           showPersonId: parameters.subjectPersonIdRequired !== 'not_used',
           personIdRequired: parameters.subjectPersonIdRequired === 'required',
-          showSecondaryLabel: parameters.secondaryLabelViewable,
+          showSecondaryLabel: parameters.secondaryLabelViewable === true,
           subjectIdAutoGenerate: parameters.subjectIdGeneration !== 'manual',
           subjectIdEditable: parameters.subjectIdGeneration !== 'auto_non_editable',
-          showEventLocation: parameters.eventLocationRequired !== 'not_used',
-          eventLocationRequired: parameters.eventLocationRequired === 'required',
+          showEventLocation: parameters.eventLocationRequired !== 'not_used' && parameters.eventLocationRequired !== false,
+          eventLocationRequired: parameters.eventLocationRequired === 'required' || parameters.eventLocationRequired === true,
           randomizationEnabled: parameters.randomization === 'enabled',
           requiredGroupClasses: groupClasses.filter(gc => gc.subjectAssignment === 'Required'),
           optionalGroupClasses: groupClasses.filter(gc => gc.subjectAssignment === 'Optional')
@@ -92,42 +91,7 @@ router.get('/enrollment-config/:studyId', validate({ params: Joi.object({ studyI
  * Check if a subject label already exists in a study (for real-time validation)
  * Returns { exists: boolean } so the frontend can warn before submission
  */
-router.get('/check-label/:studyId/:label', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required(), label: Joi.string().trim().min(1).max(30).required() }) }), async (req: Request, res: Response) => {
-  try {
-    const studyId = parseInt(req.params.studyId);
-    const label = decodeURIComponent(req.params.label).trim();
-
-    if (isNaN(studyId) || !label) {
-      res.status(400).json({ success: false, message: 'Invalid study ID or label' });
-      return;
-    }
-
-    const query = `
-      SELECT study_subject_id FROM study_subject 
-      WHERE (study_id = $1 OR study_id IN (
-        SELECT study_id FROM study WHERE parent_study_id = $1
-      ))
-      AND label = $2 AND status_id NOT IN (5, 6, 7)
-      LIMIT 1
-    `;
-    const result = await pool.query(query, [studyId, label]);
-
-    res.json({
-      success: true,
-      data: {
-        exists: result.rows.length > 0,
-        label
-      }
-    });
-  } catch (error: any) {
-    logger.error('Failed to check subject label', {
-      studyId: req.params.studyId,
-      label: req.params.label,
-      error: error.message
-    });
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
+router.get('/check-label/:studyId/:label', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required(), label: Joi.string().trim().min(1).max(30).required() }) }), controller.checkLabel);
 
 // Read operations (no signature required)
 router.get('/', validate({ query: subjectSchemas.list }), controller.list);
@@ -149,16 +113,16 @@ router.get('/:id/progress', validate({ params: commonSchemas.idParam }), control
 router.get('/:id/events', validate({ params: commonSchemas.idParam }), controller.getEvents);
 router.get('/:id/forms', validate({ params: commonSchemas.idParam }), controller.getForms);
 
-// Create/Update operations - require coordinator or investigator role + signature
+// Create/Update operations - any authenticated role can create patients
 router.post('/', 
-  requireRole('data_manager', 'coordinator', 'investigator'), 
+  requireRole('data_manager', 'coordinator', 'investigator', 'monitor', 'viewer'), 
   soapRateLimiter, 
   validate({ body: subjectSchemas.create }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_ENROLL),
   controller.create
 );
 router.put('/:id', 
-  requireRole('data_manager', 'coordinator', 'investigator'), 
+  requireRole('data_manager', 'coordinator', 'investigator', 'monitor', 'viewer'), 
   validate({ params: commonSchemas.idParam, body: subjectSchemas.update }), 
   requireSignatureFor(SignatureMeanings.SUBJECT_UPDATE),
   controller.update
