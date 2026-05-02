@@ -16,7 +16,8 @@ import * as controller from '../controllers/study.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, studySchemas, commonSchemas } from '../middleware/validation.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 
 const router = express.Router();
 
@@ -41,19 +42,19 @@ router.get('/:id/users', validate({ params: commonSchemas.idParam }), controller
 router.post('/', 
   requireRole('admin', 'data_manager', 'investigator'), 
   validate({ body: studySchemas.create }), 
-  requireSignatureFor(SignatureMeanings.STUDY_CREATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.STUDY_CREATE }),
   controller.create
 );
 router.put('/:id', 
   requireRole('admin', 'data_manager', 'investigator'), 
   validate({ params: commonSchemas.idParam, body: studySchemas.update }), 
-  requireSignatureFor(SignatureMeanings.STUDY_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.STUDY_UPDATE }),
   controller.update
 );
 router.delete('/:id', 
   requireRole('admin'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.STUDY_DELETE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.STUDY_DELETE }),
   controller.remove
 );
 
@@ -61,13 +62,13 @@ router.delete('/:id',
 router.post('/:id/archive', 
   requireRole('admin', 'data_manager', 'investigator'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor('I authorize archiving this study'),
+  requirePart11({ meaning: 'I authorize archiving this study' }),
   controller.archive
 );
 router.post('/:id/restore', 
   requireRole('admin'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor('I authorize restoring this archived study'),
+  requirePart11({ meaning: 'I authorize restoring this archived study' }),
   controller.restore
 );
 

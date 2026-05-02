@@ -598,6 +598,72 @@ export const toggleFieldRequired = async (req: Request, res: Response, next: Nex
   }
 };
 
+/**
+ * Repair stale column references in validation rules for a CRF.
+ * POST /validation-rules/crf/:crfId/repair-columns?dryRun=true
+ */
+export const repairStaleColumns = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { crfId } = req.params;
+    const parsedCrfId = parseInt(crfId, 10);
+    if (isNaN(parsedCrfId) || parsedCrfId <= 0) {
+      res.status(400).json({ success: false, message: 'crfId must be a positive integer' });
+      return;
+    }
+    const caller = (req as any).user;
+    const dryRun = req.query.dryRun === 'true';
+
+    const result = await validationRulesService.repairStaleColumnRefs(parsedCrfId, dryRun, caller?.userId);
+
+    if (!dryRun && result.repaired > 0) {
+      try {
+        await trackUserAction({
+          userId: caller?.userId || 0,
+          username: caller?.username || '',
+          action: 'VALIDATION_RULES_COLUMN_REPAIR',
+          entityType: 'crf',
+          entityId: parsedCrfId,
+          details: `Repaired ${result.repaired} stale column reference(s) in validation rules`,
+        });
+      } catch (auditErr: unknown) {
+        logger.warn('Failed to audit column repair', { error: (auditErr as Error).message });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: result,
+      message: dryRun
+        ? `Dry run: ${result.repaired} rule(s) would be repaired, ${result.skipped} skipped`
+        : `Repaired ${result.repaired} rule(s), ${result.skipped} skipped`,
+    });
+  } catch (error) {
+    logger.error('Repair stale columns error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Bulk health check: scan all CRFs for broken validation rules.
+ */
+export const getHealthCheck = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const caller = (req as any).user;
+    const results = await validationRulesService.scanBrokenRules(caller?.userId);
+    const response: ApiResponse = {
+      success: true,
+      data: results,
+      message: results.length === 0
+        ? 'All validation rules are healthy'
+        : `${results.length} form(s) have broken validation rules`,
+    };
+    res.json(response);
+  } catch (error) {
+    logger.error('Validation rules health check error:', error);
+    next(error);
+  }
+};
+
 export default {
   getRulesForCrf,
   getRulesForStudy,
@@ -613,6 +679,8 @@ export default {
   validateFieldChange,
   testRule,
   toggleFieldRequired,
-  compileRulesFromText
+  compileRulesFromText,
+  repairStaleColumns,
+  getHealthCheck
 };
 

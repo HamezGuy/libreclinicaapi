@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler, BadRequestError, NotFoundError } from '../middleware/errorHandler.middleware';
 import * as rtsmService from '../services/database/rtsm.service';
-import type { Part11Request } from '../middleware/part11.middleware';
+import type { SignedRequest } from '../middleware/part11.middleware';
 import { Part11EventTypes, recordPart11Audit, formatPart11Timestamp } from '../middleware/part11.middleware';
 import type { ApiResponse } from '@accura-trial/shared-types';
 
@@ -42,7 +42,7 @@ export const listKits = asyncHandler(async (req: Request, res: Response) => {
   res.json(response);
 });
 
-export const registerKits = asyncHandler(async (req: Part11Request, res: Response) => {
+export const registerKits = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { studyId, kitTypeId, kits } = req.body;
   const userId = uid(req); const userName = uname(req);
   const result = await rtsmService.registerKits(kitTypeId, kits, userId);
@@ -87,7 +87,7 @@ export const listShipments = asyncHandler(async (req: Request, res: Response) =>
   res.json(response);
 });
 
-export const createShipment = asyncHandler(async (req: Part11Request, res: Response) => {
+export const createShipment = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { studyId, destinationSiteId, kitIds, expectedDeliveryDate, trackingNumber } = req.body;
   const userId = uid(req); const userName = uname(req);
   const shipment = await rtsmService.createShipment(
@@ -103,7 +103,7 @@ export const createShipment = asyncHandler(async (req: Part11Request, res: Respo
   res.json(response);
 });
 
-export const markShipmentShipped = asyncHandler(async (req: Part11Request, res: Response) => {
+export const markShipmentShipped = asyncHandler(async (req: SignedRequest, res: Response) => {
   const shipmentId = parseInt(req.params.id);
   const { trackingNumber } = req.body;
   const userId = uid(req); const userName = uname(req);
@@ -126,7 +126,7 @@ export const markShipmentShipped = asyncHandler(async (req: Part11Request, res: 
   res.json(response);
 });
 
-export const confirmShipmentReceipt = asyncHandler(async (req: Part11Request, res: Response) => {
+export const confirmShipmentReceipt = asyncHandler(async (req: SignedRequest, res: Response) => {
   const shipmentId = parseInt(req.params.id);
   const { receivedKitIds, notes } = req.body;
   const userId = uid(req); const userName = uname(req);
@@ -147,7 +147,7 @@ export const confirmShipmentReceipt = asyncHandler(async (req: Part11Request, re
 
 // ── Dispensing ───────────────────────────────────────────────────────────────
 
-export const dispenseKit = asyncHandler(async (req: Part11Request, res: Response) => {
+export const dispenseKit = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { kitId, subjectId, visitId, notes } = req.body;
   const userId = uid(req); const userName = uname(req);
   const result = await rtsmService.dispenseKit(kitId, subjectId, visitId, notes, userId);
@@ -234,7 +234,7 @@ export const getAlertById = asyncHandler(async (req: Request, res: Response) => 
   res.json(response);
 });
 
-export const createAlert = asyncHandler(async (req: Part11Request, res: Response) => {
+export const createAlert = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { studyId, siteId, kitTypeId, alertType, severity, message, thresholdValue, currentValue } = req.body;
   if (!studyId || !alertType || !message) throw new BadRequestError('studyId, alertType, and message are required');
   const userId = uid(req); const userName = uname(req);
@@ -250,7 +250,7 @@ export const createAlert = asyncHandler(async (req: Part11Request, res: Response
   res.json(response);
 });
 
-export const acknowledgeAlert = asyncHandler(async (req: Part11Request, res: Response) => {
+export const acknowledgeAlert = asyncHandler(async (req: SignedRequest, res: Response) => {
   const alertId = parseInt(req.params.id);
   const userId = uid(req); const userName = uname(req);
   const current = await rtsmService.getAlertStatus(alertId);
@@ -269,7 +269,7 @@ export const acknowledgeAlert = asyncHandler(async (req: Part11Request, res: Res
   res.json(response);
 });
 
-export const resolveAlert = asyncHandler(async (req: Part11Request, res: Response) => {
+export const resolveAlert = asyncHandler(async (req: SignedRequest, res: Response) => {
   const alertId = parseInt(req.params.id);
   const { notes } = req.body;
   const userId = uid(req); const userName = uname(req);
@@ -291,7 +291,7 @@ export const resolveAlert = asyncHandler(async (req: Part11Request, res: Respons
 
 // ── Inventory Checks ─────────────────────────────────────────────────────────
 
-export const checkInventory = asyncHandler(async (req: Part11Request, res: Response) => {
+export const checkInventory = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { studyId } = req.body;
   if (!studyId) throw new BadRequestError('studyId is required');
   const userId = uid(req); const userName = uname(req);
@@ -311,7 +311,7 @@ export const checkInventory = asyncHandler(async (req: Part11Request, res: Respo
   res.json(response);
 });
 
-export const checkExpiry = asyncHandler(async (req: Part11Request, res: Response) => {
+export const checkExpiry = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { studyId, daysAhead = 30 } = req.body;
   if (!studyId) throw new BadRequestError('studyId is required');
   const userId = uid(req); const userName = uname(req);

@@ -400,6 +400,7 @@ export const formSchemas = {
     version: Joi.string().optional().max(255).allow(''),
     status: Joi.string().optional().valid('draft', 'published', 'archived'),
     fields: Joi.array().items(Joi.object().unknown(true)).optional(),
+    partialFieldUpdate: Joi.boolean().optional(),
     sections: Joi.array().items(Joi.object({
       id: Joi.string().optional(),
       name: Joi.string().required().max(2000),
@@ -555,6 +556,7 @@ export const validationRuleSchemas = {
     ruleType: Joi.string().valid(...ALLOWED_RULE_TYPES).optional(),
     severity: Joi.string().valid('error', 'warning').optional(),
     errorMessage: Joi.string().optional().max(1000),
+    warningMessage: Joi.string().optional().max(1000).allow('', null),
     name: Joi.string().optional().max(255).allow(''),
     description: Joi.string().optional().max(2000).allow(''),
     active: Joi.boolean().optional(),
@@ -776,9 +778,11 @@ const studyParametersSchema = Joi.object({
   subjectIdGeneration: Joi.string().optional().valid('manual', 'auto_editable', 'auto_non_editable', 'auto'),
   subjectIdPrefix: Joi.string().optional().allow(''),
   subjectIdSuffix: Joi.string().optional().allow(''),
+  subjectIdPrefixSuffix: Joi.string().optional().allow(''),
   studySubjectIdLabel: Joi.string().optional().allow(''),
   secondaryIdLabel: Joi.string().optional().allow(''),
   personIdShownOnCrf: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
+  personIdShownOnCRF: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
   secondaryLabelViewable: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
   eventLocationRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
   dateOfEnrollmentForStudyRequired: Joi.alternatives().try(Joi.boolean(), Joi.string()).optional(),
@@ -944,6 +948,7 @@ export const studySchemas = {
   update: Joi.object({
     // Basic fields
     name: Joi.string().optional().min(3).max(500),
+    uniqueIdentifier: Joi.string().optional().min(3).max(100),
     description: Joi.string().optional().max(100000).allow(''),
     summary: Joi.string().optional().max(100000).allow(''),
     officialTitle: Joi.string().optional().max(1000).allow(''),
@@ -954,7 +959,8 @@ export const studySchemas = {
     collaborators: Joi.string().optional().max(100000).allow(''),
     phase: Joi.string().optional().allow(''),
     protocolType: Joi.string().optional().valid('interventional', 'observational').allow(''),
-    expectedTotalEnrollment: Joi.number().integer().min(0).optional(),
+    expectedTotalEnrollment: Joi.number().integer().min(0).optional().allow(null),
+    targetEnrollment: Joi.number().integer().min(0).optional(),
     datePlannedStart: Joi.alternatives().try(
       Joi.date().iso(),
       Joi.string().allow('')
@@ -963,6 +969,7 @@ export const studySchemas = {
       Joi.date().iso(),
       Joi.string().allow('')
     ).optional(),
+    parentStudyId: Joi.number().integer().positive().optional(),
 
     // Timeline milestones
     fpfvDate: Joi.alternatives().try(Joi.date().iso(), Joi.string().allow('')).optional(),
@@ -1029,6 +1036,23 @@ export const studySchemas = {
 
     // Study parameters (settings) - nested object
     studyParameters: studyParametersSchema,
+    // Flat parameter fields (legacy compatibility)
+    collectDob: Joi.string().optional().valid('1', '2', '3'),
+    genderRequired: Joi.string().optional(),
+    subjectPersonIdRequired: Joi.string().optional(),
+    subjectIdGeneration: Joi.string().optional().valid('manual', 'auto_editable', 'auto_non_editable'),
+    subjectIdPrefix: Joi.string().optional().allow(''),
+    subjectIdSuffix: Joi.string().optional().allow(''),
+    studySubjectIdLabel: Joi.string().optional().allow(''),
+    secondaryIdLabel: Joi.string().optional().allow(''),
+    personIdShownOnCrf: Joi.string().optional(),
+    secondaryLabelViewable: Joi.boolean().optional(),
+    eventLocationRequired: Joi.boolean().optional(),
+    dateOfEnrollmentForStudyRequired: Joi.string().optional(),
+    discrepancyManagement: Joi.boolean().optional(),
+    allowAdministrativeEditing: Joi.boolean().optional(),
+    mailNotification: Joi.string().optional().allow(''),
+    contactEmail: Joi.string().optional().email({ tlds: { allow: false } }).allow(''),
 
     // === ELECTRONIC SIGNATURE (21 CFR Part 11, §11.50) ===
     password: Joi.string().optional(),
@@ -1495,6 +1519,12 @@ export const commonSchemas = {
 // Signature fields used by requireSignatureFor / requireSignature middleware.
 // Must be included in every body schema that precedes those middleware handlers,
 // otherwise Joi's stripUnknown will remove them before the middleware reads them.
+/**
+ * Signature credential fields accepted in request bodies.
+ * Matches Part11CredentialFields from @accura-trial/shared-types.
+ * The Part 11 middleware normalizes these into a Part11Signature DTO
+ * and strips them from req.body before controllers see it.
+ */
 const signatureFields = {
   password: Joi.string().optional(),
   signatureUsername: Joi.string().optional(),

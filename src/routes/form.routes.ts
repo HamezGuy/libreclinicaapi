@@ -15,7 +15,8 @@ import { requireRole } from '../middleware/authorization.middleware';
 import Joi from 'joi';
 import { validate, formSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 
 const router = express.Router();
 
@@ -79,19 +80,19 @@ router.get('/:id', validate({ params: commonSchemas.idParam }), controller.get);
 router.post('/', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ body: formSchemas.create }),
-  requireSignatureFor(SignatureMeanings.CRF_CREATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_CREATE }),
   controller.create
 );
 router.put('/:id', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: formSchemas.update }), 
-  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_UPDATE }),
   controller.update
 );
 router.delete('/:id', 
   requireRole('admin'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.CRF_DELETE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_DELETE }),
   controller.remove
 );
 
@@ -99,7 +100,7 @@ router.delete('/:id',
 router.post('/:id/archive', 
   requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.CRF_DELETE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_DELETE }),
   controller.archive
 );
 
@@ -107,7 +108,7 @@ router.post('/:id/archive',
 router.post('/:id/restore', 
   requireRole('admin', 'data_manager'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_UPDATE }),
   controller.restore
 );
 
@@ -116,7 +117,7 @@ router.post('/:id/restore',
 router.post('/:id/versions', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.CRF_CREATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_CREATE }),
   controller.createVersion
 );
 
@@ -127,7 +128,7 @@ router.post('/:id/versions',
 router.post('/:id/fork', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: formSchemas.fork }),
-  requireSignatureFor(SignatureMeanings.CRF_FORK),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_FORK }),
   controller.fork
 );
 
@@ -150,7 +151,7 @@ router.patch('/:id/relink',
       signatureMeaning: Joi.string().optional().max(500),
     }),
   }),
-  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_UPDATE }),
   controller.relinkFormLinks
 );
 
@@ -169,7 +170,7 @@ router.post('/batch-fork',
       signatureMeaning: Joi.string().optional().max(500),
     }),
   }),
-  requireSignatureFor(SignatureMeanings.CRF_FORK),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_FORK }),
   controller.batchFork
 );
 
@@ -192,7 +193,6 @@ router.get('/status/:eventCrfId', controller.getStatus);
 router.patch('/field/:eventCrfId', 
   requireRole('data_manager', 'coordinator', 'investigator'),
   validate({ body: formSchemas.fieldPatch }),
-  requireSignatureFor(SignatureMeanings.FORM_DATA_SAVE),
   controller.updateField
 );
 
@@ -218,7 +218,7 @@ router.post('/:eventCrfId/complete',
       hiddenFields: Joi.array().items(Joi.string()).optional()
     })
   }),
-  requireSignatureFor('I confirm this form\'s data entry is complete and accurate'),
+  requirePart11({ meaning: 'I confirm this form\'s data entry is complete and accurate' }),
   controller.markComplete
 );
 

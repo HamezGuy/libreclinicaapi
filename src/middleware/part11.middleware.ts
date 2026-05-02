@@ -1,96 +1,253 @@
 /**
  * 21 CFR Part 11 Compliance Middleware
- * 
- * Implements electronic signature requirements and audit trail logging
- * per 21 CFR Part 11:
- * - §11.50: Electronic signature manifestations
- * - §11.10(e): Audit trail for record changes
- * - §11.10(d): Access controls
- * - §11.300: Controls for identification codes/passwords
+ *
+ * ONE middleware, ONE DTO, ONE request interface.
+ *
+ * §11.50  — Electronic signature manifestations
+ * §11.10(e) — Audit trail for record changes
+ * §11.10(d) — Access controls
+ * §11.300  — Controls for identification codes/passwords
  */
 
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
 import { pool } from '../config/database';
-import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { verifyAndUpgrade } from '../utils/password.util';
+import type { Part11Signature } from '@accura-trial/shared-types';
 
-/**
- * Extended Express Request with Part 11 audit information
- */
-export interface Part11Request extends Request {
-  user?: {
+// ─────────────────────────────────────────────────────────────────────
+// TYPED REQUEST — the only request type controllers should ever use
+// ─────────────────────────────────────────────────────────────────────
+
+export interface SignedRequest extends Request {
+  user: {
     userId: number;
     userName: string;
+    username?: string;
     email: string;
     userType: string;
     role: string;
     studyIds?: number[];
+    organizationIds?: number[];
   };
+  signature: Part11Signature;
   auditId?: string;
-  signatureVerified?: boolean;
-  signatureMeaning?: string;
 }
 
 /**
- * Signature meanings for electronic signatures per §11.50
- * Each meaning describes the intent of the signer
+ * @deprecated Use `SignedRequest` instead.  Kept as an alias so existing
+ * `import type { Part11Request }` statements don't break during migration.
  */
-export const SignatureMeanings = {
-  // Study management
-  STUDY_CREATE: 'I have reviewed and authorize the creation of this study',
-  STUDY_UPDATE: 'I have reviewed and authorize the modification of this study',
-  STUDY_DELETE: 'I authorize the deletion of this study and all associated data',
+export type Part11Request = SignedRequest;
 
-  // Subject/Patient management
-  SUBJECT_ENROLL: 'I authorize the enrollment of this subject into the study',
-  SUBJECT_UPDATE: 'I have reviewed and authorize the modification of this subject record',
-  SUBJECT_WITHDRAW: 'I authorize the withdrawal of this subject from the study',
-  SUBJECT_DELETE: 'I authorize the deletion of this subject record',
-
-  // Event management
-  EVENT_CREATE: 'I authorize the creation of this study event definition',
-  EVENT_UPDATE: 'I authorize the modification of this study event definition',
-  EVENT_DELETE: 'I authorize the deletion of this study event definition',
-  EVENT_SCHEDULE: 'I authorize the scheduling of this event for the subject',
-
-  // CRF/Form management
-  CRF_CREATE: 'I authorize the creation of this case report form',
-  CRF_UPDATE: 'I authorize the modification of this case report form',
-  CRF_DELETE: 'I authorize the deletion of this case report form',
-  CRF_ASSIGN: 'I authorize the assignment of this CRF to the study event',
-  CRF_FORK: 'I authorize copying this case report form to another study or organization',
-
-  // Form data
-  FORM_DATA_SAVE: 'I confirm the accuracy of the data entered in this form',
-  FORM_LOCK: 'I authorize locking this form to prevent further modifications',
-
-  // Query management
-  QUERY_CREATE: 'I authorize the creation of this data query',
-  QUERY_RESPOND: 'I confirm my response to this data query',
-  QUERY_CLOSE: 'I authorize the closure of this data query',
-  QUERY_ACCEPT_RESOLUTION: 'I have reviewed and approve the proposed resolution for this query',
-  QUERY_REJECT_RESOLUTION: 'I have reviewed and reject the proposed resolution for this query',
-
-  // SDV/Verification
-  VERIFY: 'I have verified the source data for this record',
-
-  // General authorization
-  AUTHORIZE: 'I authorize this action',
-} as const;
+// ─────────────────────────────────────────────────────────────────────
+// HELPERS — reusable by controllers
+// ─────────────────────────────────────────────────────────────────────
 
 /**
- * Part 11 audit event types
+ * Throw inside any controller that REQUIRES a verified signature.
+ * Returns the signature DTO so you can destructure it directly:
+ *
+ *   const { signerId, meaning } = demandSignature(req);
  */
+export function demandSignature(req: SignedRequest): Part11Signature {
+  if (!req.signature || !req.signature.verified) {
+    const err: any = new Error('Electronic signature required (21 CFR Part 11 §11.50)');
+    err.status = 403;
+    err.code = 'SIGNATURE_REQUIRED';
+    throw err;
+  }
+  return req.signature;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PASSWORD FIELD SCRUBBING
+// ─────────────────────────────────────────────────────────────────────
+
+const CREDENTIAL_KEYS = ['password', 'signaturePassword', 'signatureUsername'] as const;
+
+function stripCredentials(body: Record<string, unknown>): void {
+  for (const key of CREDENTIAL_KEYS) {
+    delete body[key];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CREDENTIAL VERIFICATION (single implementation)
+// ─────────────────────────────────────────────────────────────────────
+
+async function verifyCredentials(
+  username: string,
+  password: string
+): Promise<{ valid: boolean; userId: number | null }> {
+  const result = await pool.query(
+    `SELECT u.user_id, u.passwd, uae.bcrypt_passwd
+     FROM user_account u
+     LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id
+     WHERE u.user_name = $1 AND u.status_id = 1`,
+    [username]
+  );
+
+  if (result.rows.length === 0) {
+    return { valid: false, userId: null };
+  }
+
+  const row = result.rows[0];
+  const verification = await verifyAndUpgrade(password, row.passwd, row.bcryptPasswd || null);
+
+  if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
+    pool.query(
+      `INSERT INTO user_account_extended (user_id, bcrypt_passwd)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()`,
+      [row.userId, verification.upgradedBcryptHash]
+    ).catch(() => {});
+  }
+
+  return { valid: verification.valid, userId: verification.valid ? row.userId : null };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// THE MIDDLEWARE — one function, two modes
+// ─────────────────────────────────────────────────────────────────────
+
+export interface Part11Options {
+  meaning: string;
+  required?: boolean;   // default false (soft gate).  true = 403 if no creds.
+}
+
+/**
+ * Single Part 11 e-signature middleware.
+ *
+ * Accepts ANY of these body patterns:
+ *   { password }                          — current user signs (JWT identity)
+ *   { signaturePassword }                 — current user signs (JWT identity)
+ *   { signatureUsername, signaturePassword } — explicit signer
+ *
+ * After running:
+ *   - `req.signature` is a fully typed `Part11Signature`
+ *   - all credential fields are stripped from `req.body`
+ *
+ * @example
+ *   // soft gate — controllers that want signatures but tolerate unsigned
+ *   router.put('/:id', requirePart11({ meaning: SIGNATURE_MEANINGS.STUDY_UPDATE }), ctrl.update);
+ *
+ *   // hard gate — blocks without valid credentials
+ *   router.post('/dispense', requirePart11({ meaning: 'Kit dispensed', required: true }), ctrl.dispense);
+ */
+export function requirePart11(opts: Part11Options) {
+  const { meaning, required = false } = opts;
+
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const signed = req as SignedRequest;
+    const body = req.body || {};
+
+    const effectivePassword: string | undefined =
+      body.signaturePassword || body.password || undefined;
+    const effectiveUsername: string | undefined =
+      body.signatureUsername || signed.user?.userName || signed.user?.username || undefined;
+    const customMeaning: string | undefined = body.signatureMeaning;
+
+    // Scrub credentials from body BEFORE anything else — services must never
+    // see raw passwords regardless of whether verification succeeds.
+    stripCredentials(body);
+
+    // ── No credentials supplied ──────────────────────────────────────
+    if (!effectivePassword) {
+      if (required) {
+        res.status(403).json({
+          success: false,
+          code: 'SIGNATURE_REQUIRED',
+          message: `Electronic signature required for this action (21 CFR Part 11 §11.50). Submit with a password field.`,
+        });
+        return;
+      }
+      signed.signature = { verified: false, signerId: null, signerUsername: null, meaning };
+      next();
+      return;
+    }
+
+    // ── Have password but no username ────────────────────────────────
+    if (!effectiveUsername) {
+      res.status(400).json({
+        success: false,
+        message: 'Cannot verify signature: no username in body or JWT.',
+      });
+      return;
+    }
+
+    // ── Verify ───────────────────────────────────────────────────────
+    try {
+      const { valid, userId } = await verifyCredentials(effectiveUsername, effectivePassword);
+
+      if (!valid) {
+        logger.warn('Electronic signature failed', {
+          username: effectiveUsername,
+          path: req.path,
+        });
+        res.status(401).json({ success: false, message: 'Invalid electronic signature credentials' });
+        return;
+      }
+
+      signed.signature = {
+        verified: true,
+        signerId: userId,
+        signerUsername: effectiveUsername,
+        meaning: customMeaning || meaning,
+      };
+
+      logger.info('Electronic signature verified', {
+        signerId: userId,
+        username: effectiveUsername,
+        meaning: signed.signature.meaning,
+        path: req.path,
+      });
+
+      next();
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error('Signature verification error', { error: msg, path: req.path });
+      res.status(500).json({ success: false, message: 'Signature verification failed' });
+    }
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// STANDALONE VERIFICATION — for code paths outside Express middleware
+// (used by consent.routes.ts inline handlers)
+// ─────────────────────────────────────────────────────────────────────
+
+export async function verifyElectronicSignature(
+  username: string,
+  password: string
+): Promise<{ valid: boolean; userId?: number; message?: string }> {
+  try {
+    const { valid, userId } = await verifyCredentials(username, password);
+    if (!valid) return { valid: false, message: 'Invalid password' };
+    return { valid: true, userId: userId ?? undefined };
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error('verifyElectronicSignature error', { error: msg });
+    return { valid: false, message: 'Verification failed' };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SIGNATURE MEANINGS — re-export from shared-types for convenience
+// ─────────────────────────────────────────────────────────────────────
+
+export { SIGNATURE_MEANINGS as SignatureMeanings } from '@accura-trial/shared-types';
+
+// ─────────────────────────────────────────────────────────────────────
+// AUDIT TRAIL — unchanged, kept in this file for co-location
+// ─────────────────────────────────────────────────────────────────────
+
 export const Part11EventTypes = {
-  // Transfer events
   TRANSFER_INITIATED: 'TRANSFER_INITIATED',
   TRANSFER_APPROVED: 'TRANSFER_APPROVED',
   TRANSFER_COMPLETED: 'TRANSFER_COMPLETED',
   TRANSFER_CANCELLED: 'TRANSFER_CANCELLED',
-
-  // RTSM/Kit events
   KIT_REGISTERED: 'KIT_REGISTERED',
   KIT_DISPENSED: 'KIT_DISPENSED',
   SHIPMENT_CREATED: 'SHIPMENT_CREATED',
@@ -98,34 +255,21 @@ export const Part11EventTypes = {
   INVENTORY_ALERT_CREATED: 'INVENTORY_ALERT_CREATED',
   INVENTORY_ALERT_ACKNOWLEDGED: 'INVENTORY_ALERT_ACKNOWLEDGED',
   INVENTORY_ALERT_RESOLVED: 'INVENTORY_ALERT_RESOLVED',
-
-  // ePRO events
   PRO_INSTRUMENT_CREATED: 'PRO_INSTRUMENT_CREATED',
   PRO_ASSIGNMENT_CREATED: 'PRO_ASSIGNMENT_CREATED',
   PRO_REMINDER_SENT: 'PRO_REMINDER_SENT',
   PRO_RESPONSE_SUBMITTED: 'PRO_RESPONSE_SUBMITTED',
   PRO_REMINDER_CREATED: 'PRO_REMINDER_CREATED',
   PRO_REMINDER_CANCELLED: 'PRO_REMINDER_CANCELLED',
-
-  // Email events
   EMAIL_TEMPLATE_UPDATED: 'EMAIL_TEMPLATE_UPDATED',
-
-  // Consent events
   CONSENT_DOCUMENT_CREATED: 'CONSENT_DOCUMENT_CREATED',
   CONSENT_SIGNED: 'CONSENT_SIGNED',
 } as const;
 
-/**
- * Format a Part 11 compliant timestamp (ISO 8601)
- */
 export function formatPart11Timestamp(date?: Date): string {
   return (date || new Date()).toISOString();
 }
 
-/**
- * Record a Part 11 audit event to the database
- * §11.10(e) - Use of secure, computer-generated, time-stamped audit trails
- */
 export async function recordPart11Audit(
   userId: number,
   username: string,
@@ -133,420 +277,62 @@ export async function recordPart11Audit(
   tableName: string,
   entityId: number | string,
   entityName: string,
-  oldValue: any,
-  newValue: any,
+  oldValue: unknown,
+  newValue: unknown,
   reasonForChange?: string,
-  metadata?: { ipAddress?: string; [key: string]: any }
+  metadata?: { ipAddress?: string; [key: string]: unknown }
 ): Promise<void> {
   try {
-    const oldStr = typeof oldValue === 'object' ? JSON.stringify(oldValue) : (oldValue || '');
-    const newStr = typeof newValue === 'object' ? JSON.stringify(newValue) : (newValue || '');
+    const oldStr = typeof oldValue === 'object' ? JSON.stringify(oldValue) : String(oldValue || '');
+    const newStr = typeof newValue === 'object' ? JSON.stringify(newValue) : String(newValue || '');
     const eventTypeKey = eventType.split('_')[0] || 'data';
 
-    // Compute SHA-256 hash of this audit record for tamper detection
     const hashInput = [
-      new Date().toISOString(),
-      userId,
-      tableName,
-      entityId,
-      oldStr,
-      newStr,
-      reasonForChange || ''
+      new Date().toISOString(), userId, tableName, entityId, oldStr, newStr, reasonForChange || ''
     ].join('|');
     const recordHash = crypto.createHash('sha256').update(hashInput).digest('hex');
 
-    // Fetch the hash of the most recent audit entry to form the chain
     let previousHash: string | null = null;
     let hashColumnsExist = true;
     try {
       const prev = await pool.query(
         'SELECT record_hash FROM audit_log_event WHERE record_hash IS NOT NULL ORDER BY audit_id DESC LIMIT 1'
       );
-      if (prev.rows.length > 0) {
-        previousHash = prev.rows[0].record_hash;
-      }
+      if (prev.rows.length > 0) previousHash = prev.rows[0].recordHash;
     } catch {
       hashColumnsExist = false;
     }
 
+    const baseColumns = `audit_date, audit_table, user_id, entity_id, entity_name,
+                         old_value, new_value, audit_log_event_type_id, reason_for_change`;
+    const typeSubquery = `(SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $7 LIMIT 1)`;
+    const entityIdVal = typeof entityId === 'string' ? null : entityId;
+
     if (hashColumnsExist) {
-      await pool.query(`
-        INSERT INTO audit_log_event (
-          audit_date,
-          audit_table,
-          user_id,
-          entity_id,
-          entity_name,
-          old_value,
-          new_value,
-          audit_log_event_type_id,
-          reason_for_change,
-          record_hash,
-          previous_hash
-        ) VALUES (
-          NOW(), $1, $2, $3, $4, $5, $6, 
-          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $7 LIMIT 1),
-          $8, $9, $10
-        )
-      `, [
-        tableName,
-        userId,
-        typeof entityId === 'string' ? null : entityId,
-        entityName,
-        oldStr,
-        newStr,
-        eventTypeKey,
-        reasonForChange || '',
-        recordHash,
-        previousHash
-      ]);
+      await pool.query(
+        `INSERT INTO audit_log_event (${baseColumns}, record_hash, previous_hash)
+         VALUES (NOW(), $1, $2, $3, $4, $5, $6, ${typeSubquery}, $8, $9, $10)`,
+        [tableName, userId, entityIdVal, entityName, oldStr, newStr, eventTypeKey,
+         reasonForChange || '', recordHash, previousHash]
+      );
     } else {
-      await pool.query(`
-        INSERT INTO audit_log_event (
-          audit_date,
-          audit_table,
-          user_id,
-          entity_id,
-          entity_name,
-          old_value,
-          new_value,
-          audit_log_event_type_id,
-          reason_for_change
-        ) VALUES (
-          NOW(), $1, $2, $3, $4, $5, $6, 
-          (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name ILIKE $7 LIMIT 1),
-          $8
-        )
-      `, [
-        tableName,
-        userId,
-        typeof entityId === 'string' ? null : entityId,
-        entityName,
-        oldStr,
-        newStr,
-        eventTypeKey,
-        reasonForChange || ''
-      ]);
+      await pool.query(
+        `INSERT INTO audit_log_event (${baseColumns})
+         VALUES (NOW(), $1, $2, $3, $4, $5, $6, ${typeSubquery}, $8)`,
+        [tableName, userId, entityIdVal, entityName, oldStr, newStr, eventTypeKey,
+         reasonForChange || '']
+      );
     }
 
-    logger.info('Part 11 audit event recorded', {
-      eventType,
-      userId,
-      username,
-      tableName,
-      entityId,
-      entityName,
-      ipAddress: metadata?.ipAddress
-    });
-  } catch (error: any) {
-    // Fall back to logging if database insert fails
-    logger.error('Failed to record Part 11 audit event to database', {
-      error: error.message,
-      eventType,
-      userId,
-      username,
-      tableName,
-      entityId
-    });
-
-    // Always log to file as backup (Part 11 requires audit trail integrity)
+    logger.info('Part 11 audit event recorded', { eventType, userId, username, tableName, entityId });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error('Failed to record Part 11 audit event', { error: msg, eventType, userId });
     logger.info('Part 11 audit event (file fallback)', {
-      eventType,
-      userId,
-      username,
-      tableName,
-      entityId,
-      entityName,
+      eventType, userId, username, tableName, entityId, entityName,
       oldValue: typeof oldValue === 'object' ? JSON.stringify(oldValue) : oldValue,
       newValue: typeof newValue === 'object' ? JSON.stringify(newValue) : newValue,
-      reasonForChange,
-      timestamp: formatPart11Timestamp(),
-      ipAddress: metadata?.ipAddress
+      reasonForChange, timestamp: formatPart11Timestamp(), ipAddress: metadata?.ipAddress
     });
-  }
-}
-
-/**
- * Middleware: Require electronic signature for an action
- * §11.50 - Signature manifestations
- * 
- * If the request includes signature fields (signatureUsername, signaturePassword),
- * they are verified. If not present, the action proceeds without signature
- * (signature is optional but logged when provided).
- */
-export function requireSignatureFor(meaning: string) {
-  return async (req: Part11Request, res: Response, next: NextFunction): Promise<void> => {
-    const { signatureUsername, signaturePassword, signatureMeaning } = req.body;
-
-    // If no signature fields provided, proceed without signature
-    // The route handler can check req.signatureVerified if it needs to enforce
-    if (!signatureUsername && !signaturePassword) {
-      req.signatureVerified = false;
-      req.signatureMeaning = meaning;
-      next();
-      return;
-    }
-
-    // If partial signature provided, reject
-    if (!signatureUsername || !signaturePassword) {
-      res.status(400).json({
-        success: false,
-        message: 'Electronic signature requires both username and password (21 CFR Part 11 §11.50)'
-      });
-      return;
-    }
-
-    try {
-      // Verify the signer's credentials against the database
-      const result = await pool.query(
-        'SELECT u.user_id, u.user_name, u.passwd, uae.bcrypt_passwd FROM user_account u LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id WHERE u.user_name = $1 AND u.status_id = 1',
-        [signatureUsername]
-      );
-
-      if (result.rows.length === 0) {
-        logger.warn('Electronic signature failed - user not found', {
-          signatureUsername,
-          requestedBy: req.user?.userName,
-          path: req.path
-        });
-        res.status(401).json({
-          success: false,
-          message: 'Invalid electronic signature credentials'
-        });
-        return;
-      }
-
-      const signer = result.rows[0];
-
-      const verification = await verifyAndUpgrade(signaturePassword, signer.passwd, signer.bcrypt_passwd || null);
-      let passwordValid = verification.valid;
-      if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
-        pool.query(
-          'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
-          [signer.user_id, verification.upgradedBcryptHash]
-        ).catch(() => {});
-      }
-
-      if (!passwordValid) {
-        logger.warn('Electronic signature failed - invalid password', {
-          signatureUsername,
-          requestedBy: req.user?.userName,
-          path: req.path
-        });
-        res.status(401).json({
-          success: false,
-          message: 'Invalid electronic signature credentials'
-        });
-        return;
-      }
-
-      // Signature verified
-      req.signatureVerified = true;
-      req.signatureMeaning = signatureMeaning || meaning;
-
-      logger.info('Electronic signature verified', {
-        signerId: signer.user_id,
-        signerUsername: signatureUsername,
-        meaning: req.signatureMeaning,
-        path: req.path,
-        requestedBy: req.user?.userName
-      });
-
-      next();
-    } catch (error: any) {
-      logger.error('Electronic signature verification error', {
-        error: error.message,
-        signatureUsername,
-        path: req.path
-      });
-      res.status(500).json({
-        success: false,
-        message: 'Electronic signature verification failed'
-      });
-    }
-  };
-}
-
-/**
- * ISSUE-002 fix: STRICT variant of requireSignatureFor that returns 403
- * when no valid signature was provided. The legacy `requireSignatureFor`
- * is a soft middleware (sets req.signatureVerified = false and proceeds);
- * many controllers don't check the flag, so signatures are decorative.
- *
- * Behaviour:
- *   - No credentials in body          -> 403 with clear "signature required" message
- *   - Partial credentials             -> 400 (delegated to soft middleware which already returns 400)
- *   - Wrong credentials               -> 401 (delegated to soft middleware)
- *   - Valid credentials               -> req.signatureVerified = true; proceeds
- *
- * We layer this on top of `requireSignatureFor` to reuse its credential
- * verification logic. Use this on any route that 21 CFR Part 11 §11.50
- * requires a signed action -- including all validation-rule write routes.
- */
-export function requireSignatureForStrict(meaning: string) {
-  const softGate = requireSignatureFor(meaning);
-  return async (req: Part11Request, res: Response, next: NextFunction): Promise<void> => {
-    const { signatureUsername, signaturePassword } = req.body || {};
-
-    if (!signatureUsername && !signaturePassword) {
-      res.status(403).json({
-        success: false,
-        code: 'SIGNATURE_REQUIRED',
-        message: 'Electronic signature required for this action (21 CFR Part 11 §11.50). ' +
-                 'Re-submit with signatureUsername and signaturePassword.',
-        meaning
-      });
-      return;
-    }
-
-    // Delegate to the soft gate; it handles credential verification AND
-    // sets req.signatureVerified=true on success. We then double-check the
-    // flag is true before proceeding (defence in depth).
-    softGate(req, res, () => {
-      if (req.signatureVerified !== true) {
-        res.status(403).json({
-          success: false,
-          code: 'SIGNATURE_INVALID',
-          message: 'Electronic signature could not be verified.'
-        });
-        return;
-      }
-      next();
-    });
-  };
-}
-
-/**
- * Middleware: Require electronic signature (strict - blocks if not provided)
- * Used for high-risk operations like dispensing, approvals
- * §11.50 - Signature manifestations
- */
-export async function requireSignature(
-  req: Part11Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  const { password, signaturePassword, signatureMeaning } = req.body;
-  const sigPassword = password || signaturePassword;
-
-  if (!sigPassword) {
-    res.status(400).json({
-      success: false,
-      message: 'Electronic signature (password) is required for this action (21 CFR Part 11 §11.50)'
-    });
-    return;
-  }
-
-  // Verify the current user's password
-  const userId = req.user?.userId;
-  const userName = req.user?.userName;
-
-  if (!userId || !userName) {
-    res.status(401).json({
-      success: false,
-      message: 'Authentication required for electronic signature'
-    });
-    return;
-  }
-
-  try {
-    const result = await pool.query(
-      'SELECT u.user_id, u.user_name, u.passwd, uae.bcrypt_passwd FROM user_account u LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id WHERE u.user_id = $1 AND u.status_id = 1',
-      [userId]
-    );
-
-    if (result.rows.length === 0) {
-      res.status(401).json({
-        success: false,
-        message: 'User account not found or inactive'
-      });
-      return;
-    }
-
-    const signer = result.rows[0];
-
-    const verification = await verifyAndUpgrade(sigPassword, signer.passwd, signer.bcrypt_passwd || null);
-    let passwordValid = verification.valid;
-    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
-      pool.query(
-        'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
-        [signer.user_id, verification.upgradedBcryptHash]
-      ).catch(() => {});
-    }
-
-    if (!passwordValid) {
-      logger.warn('Electronic signature failed - invalid password (strict)', {
-        userId,
-        userName,
-        path: req.path
-      });
-      res.status(401).json({
-        success: false,
-        message: 'Invalid password for electronic signature'
-      });
-      return;
-    }
-
-    req.signatureVerified = true;
-    req.signatureMeaning = signatureMeaning || 'Authorized action';
-
-    logger.info('Electronic signature verified (strict)', {
-      userId,
-      userName,
-      meaning: req.signatureMeaning,
-      path: req.path
-    });
-
-    next();
-  } catch (error: any) {
-    logger.error('Electronic signature verification error (strict)', {
-      error: error.message,
-      userId,
-      path: req.path
-    });
-    res.status(500).json({
-      success: false,
-      message: 'Electronic signature verification failed'
-    });
-  }
-}
-
-/**
- * Verify electronic signature credentials (standalone function)
- * Can be called from route handlers directly
- */
-export async function verifyElectronicSignature(
-  username: string,
-  password: string
-): Promise<{ valid: boolean; userId?: number; message?: string }> {
-  try {
-    const result = await pool.query(
-      'SELECT u.user_id, u.user_name, u.passwd, uae.bcrypt_passwd FROM user_account u LEFT JOIN user_account_extended uae ON uae.user_id = u.user_id WHERE u.user_name = $1 AND u.status_id = 1',
-      [username]
-    );
-
-    if (result.rows.length === 0) {
-      return { valid: false, message: 'User not found or inactive' };
-    }
-
-    const signer = result.rows[0];
-
-    const verification = await verifyAndUpgrade(password, signer.passwd, signer.bcrypt_passwd || null);
-    let passwordValid = verification.valid;
-    if (verification.shouldUpdateDatabase && verification.upgradedBcryptHash) {
-      pool.query(
-        'INSERT INTO user_account_extended (user_id, bcrypt_passwd) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET bcrypt_passwd = $2, passwd_upgraded_at = NOW()',
-        [signer.user_id, verification.upgradedBcryptHash]
-      ).catch(() => {});
-    }
-
-    if (!passwordValid) {
-      return { valid: false, message: 'Invalid password' };
-    }
-
-    return { valid: true, userId: signer.user_id };
-  } catch (error: any) {
-    logger.error('Electronic signature verification error', { error: error.message });
-    return { valid: false, message: 'Verification failed' };
   }
 }

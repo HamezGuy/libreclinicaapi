@@ -10,9 +10,9 @@ import { asyncHandler } from '../middleware/errorHandler.middleware';
 import {
   Part11EventTypes,
   recordPart11Audit,
-  Part11Request,
   formatPart11Timestamp,
 } from '../middleware/part11.middleware';
+import type { SignedRequest } from '../middleware/part11.middleware';
 import { logger } from '../config/logger';
 import * as eproService from '../services/database/epro.service';
 import type { ApiResponse } from '@accura-trial/shared-types';
@@ -45,7 +45,7 @@ export const listInstruments = asyncHandler(async (req: Request, res: Response) 
   res.json({ success: true, data: instruments } as ApiResponse);
 });
 
-export const createInstrument = asyncHandler(async (req: Part11Request, res: Response) => {
+export const createInstrument = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { name, shortName, description, content, category, estimatedMinutes, languageCode } = req.body;
   const userId = req.user?.userId;
   const userName = req.user?.userName;
@@ -110,7 +110,7 @@ export const listAssignments = asyncHandler(async (req: Request, res: Response) 
   res.json({ success: true, data } as ApiResponse);
 });
 
-export const createAssignment = asyncHandler(async (req: Part11Request, res: Response) => {
+export const createAssignment = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { subjectId, instrumentId, dueDate } = req.body;
   const userId = req.user?.userId;
   const userName = req.user?.userName;
@@ -135,7 +135,7 @@ export const createAssignment = asyncHandler(async (req: Part11Request, res: Res
   res.json({ success: true, data: assignment } as ApiResponse);
 });
 
-export const sendAssignmentReminder = asyncHandler(async (req: Part11Request, res: Response) => {
+export const sendAssignmentReminder = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { id } = req.params;
   const userId = req.user?.userId;
   const userName = req.user?.userName;
@@ -183,7 +183,7 @@ export const sendAssignmentReminder = asyncHandler(async (req: Part11Request, re
 // Responses
 // ============================================================================
 
-export const submitResponse = asyncHandler(async (req: Part11Request, res: Response) => {
+export const submitResponse = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { id } = req.params;
   const { responses, startedAt, completedAt } = req.body;
   const userId = req.user?.userId;
@@ -284,7 +284,7 @@ export const getReminder = asyncHandler(async (req: Request, res: Response) => {
   res.json({ success: true, data: reminder } as ApiResponse);
 });
 
-export const createReminder = asyncHandler(async (req: Part11Request, res: Response) => {
+export const createReminder = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { assignmentId, patientAccountId, reminderType, scheduledFor, messageSubject, messageBody } = req.body;
   const userId = req.user?.userId;
   const userName = req.user?.userName;
@@ -316,7 +316,7 @@ export const createReminder = asyncHandler(async (req: Part11Request, res: Respo
   res.json({ success: true, data: reminder } as ApiResponse);
 });
 
-export const sendReminder = asyncHandler(async (req: Part11Request, res: Response) => {
+export const sendReminder = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { id } = req.params;
   const userId = req.user?.userId;
   const userName = req.user?.userName;
@@ -373,7 +373,7 @@ export const sendReminder = asyncHandler(async (req: Part11Request, res: Respons
   });
 });
 
-export const cancelReminder = asyncHandler(async (req: Part11Request, res: Response) => {
+export const cancelReminder = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { id } = req.params;
   const userId = req.user?.userId;
   const userName = req.user?.userName;
@@ -431,7 +431,7 @@ export const listPendingDueReminders = asyncHandler(async (_req: Request, res: R
 // Schedule Reminders
 // ============================================================================
 
-export const scheduleReminders = asyncHandler(async (req: Part11Request, res: Response) => {
+export const scheduleReminders = asyncHandler(async (req: SignedRequest, res: Response) => {
   const { id } = req.params;
   const { reminderSchedule } = req.body;
 

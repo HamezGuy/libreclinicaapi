@@ -41,7 +41,7 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireEntityStudyAccess } from '../middleware/study-scope.middleware';
-import { requireSignatureFor } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
 import { validate, randomizationSchemas } from '../middleware/validation.middleware';
 import * as randomizationController from '../controllers/randomization.controller';
 
@@ -79,14 +79,14 @@ router.delete('/config/:configId',
 // Generate the sealed randomization list
 router.post('/config/:configId/generate',
   requireRole('admin'),
-  requireSignatureFor('I authorize generation of the sealed randomization list'),
+  requirePart11({ meaning: 'I authorize generation of the sealed randomization list' }),
   randomizationController.generateList
 );
 
 // Activate the scheme (locks it permanently)
 router.post('/config/:configId/activate',
   requireRole('admin'),
-  requireSignatureFor('I confirm this randomization scheme is correct and authorize its activation'),
+  requirePart11({ meaning: 'I confirm this randomization scheme is correct and authorize its activation' }),
   randomizationController.activateConfig
 );
 
@@ -119,7 +119,7 @@ router.post('/randomize',
   requireRole('investigator', 'coordinator', 'admin'),
   validate({ body: randomizationSchemas.randomize }),
   requireEntityStudyAccess('studySubject', 'studySubjectId'),
-  requireSignatureFor('I confirm this subject meets all eligibility criteria for randomization'),
+  requirePart11({ meaning: 'I confirm this subject meets all eligibility criteria for randomization' }),
   randomizationController.randomize
 );
 
@@ -127,7 +127,7 @@ router.post('/randomize',
 router.post('/',
   requireRole('investigator', 'coordinator', 'admin'),
   requireEntityStudyAccess('studySubject', 'studySubjectId'),
-  requireSignatureFor('I confirm this subject meets randomization criteria'),
+  requirePart11({ meaning: 'I confirm this subject meets randomization criteria' }),
   randomizationController.create
 );
 
@@ -141,7 +141,7 @@ router.get('/subject/:subjectId/can-randomize', randomizationController.canRando
 router.delete('/subject/:subjectId',
   requireRole('admin'),
   requireEntityStudyAccess('studySubject', 'subjectId'),
-  requireSignatureFor('I authorize removal of this randomization assignment'),
+  requirePart11({ meaning: 'I authorize removal of this randomization assignment' }),
   randomizationController.remove
 );
 
@@ -149,7 +149,7 @@ router.post('/subject/:subjectId/unblind',
   requireRole('investigator', 'admin'),
   validate({ body: randomizationSchemas.unblind }),
   requireEntityStudyAccess('studySubject', 'subjectId'),
-  requireSignatureFor('I authorize unblinding of treatment assignment for this subject'),
+  requirePart11({ meaning: 'I authorize unblinding of treatment assignment for this subject' }),
   randomizationController.unblind
 );
 

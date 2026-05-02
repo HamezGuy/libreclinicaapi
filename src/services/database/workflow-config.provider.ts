@@ -279,7 +279,7 @@ export async function resolveDefaultAssignee(
       ) ranked
     `, [studyId]);
 
-    if (result.rows.length > 0) return result.rows[0].user_id;
+    if (result.rows.length > 0) return result.rows[0].userId;
 
     const fallbackResult = await pool.query(`
       SELECT ua.user_id
@@ -290,7 +290,7 @@ export async function resolveDefaultAssignee(
       LIMIT 1
     `, [studyId]);
 
-    return fallbackResult.rows.length > 0 ? fallbackResult.rows[0].user_id : null;
+    return fallbackResult.rows.length > 0 ? fallbackResult.rows[0].userId : null;
   } catch (e: any) {
     logger.warn('resolveDefaultAssignee failed', { error: e.message, studyId });
     return null;

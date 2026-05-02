@@ -9,6 +9,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../middleware/errorHandler.middleware';
+import { demandSignature, type SignedRequest } from '../middleware/part11.middleware';
 import * as queryService from '../services/database/query.service';
 import type { CreateQueryRequest, RespondToQueryRequest, CloseQueryRequest, QueryListRequest, ApiResponse, QueryWithDetails } from '@accura-trial/shared-types';
 
@@ -183,26 +184,20 @@ export const reassign = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Close with electronic signature — 21 CFR Part 11 compliant.
- * Password verification done by requireSignatureFor middleware; the middleware
- * sets req.signatureVerified = true and removes the raw password from req.body.
+ * The requirePart11 middleware verifies credentials and strips them from body.
  */
 export const closeWithSignature = asyncHandler(async (req: Request, res: Response) => {
-  const signatureVerified = (req as any).signatureVerified as boolean;
+  demandSignature(req as SignedRequest);
   const qId = intParam(req, 'id');
-  const { password, reason, meaning } = req.body;
+  const { reason, meaning } = req.body;
 
-  if (!signatureVerified && !password) {
-    throw new BadRequestError('Password is required for electronic signature');
-  }
   if (!reason?.trim()) {
     throw new BadRequestError('Reason is required for closing a query');
   }
 
   await assertCanEdit(req, qId);
 
-  const result = signatureVerified
-    ? await queryService.closeQueryWithSignatureVerified(qId, userId(req), { reason, meaning })
-    : await queryService.closeQueryWithSignature(qId, userId(req), { password, reason, meaning });
+  const result = await queryService.closeQueryWithSignatureVerified(qId, userId(req), { reason, meaning });
 
   res.json({ success: true, message: result.message });
 });

@@ -19,6 +19,8 @@ import * as controller from '../controllers/query.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, querySchemas, commonSchemas } from '../middleware/validation.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 
 const router = express.Router();
 
@@ -87,6 +89,7 @@ router.put('/:id/reassign',
 router.post('/:id/close-with-signature', 
   requireRole('monitor', 'data_manager', 'admin'), 
   validate({ params: commonSchemas.idParam, body: querySchemas.closeWithSignature }),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.QUERY_CLOSE, required: true }),
   controller.closeWithSignature
 );
 

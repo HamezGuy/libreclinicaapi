@@ -177,11 +177,11 @@ export const getRecentAlerts = async (
   );
 
   return result.rows.map((row: any) => ({
-    auditId: row.audit_id,
-    auditDate: row.audit_date,
-    auditTable: row.audit_table,
-    entityName: row.entity_name,
-    userId: row.user_id,
+    auditId: row.auditId,
+    auditDate: row.auditDate,
+    auditTable: row.auditTable,
+    entityName: row.entityName,
+    userId: row.userId,
   }));
 };
 

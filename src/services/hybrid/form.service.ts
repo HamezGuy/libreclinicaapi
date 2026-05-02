@@ -38,13 +38,17 @@ function tryParseJson(str: string, fallback: any): any {
  * Extended props may store a single condition object; the frontend expects arrays.
  * Filters out malformed conditions (missing fieldId or operator) so the frontend
  * skip-logic evaluator never encounters empty operators.
+ *
+ * An explicit empty array [] means "conditions were intentionally cleared" and
+ * must NOT fall back to SCD — it returns [] directly.
  */
 function normalizeToArray(value: any, fallback: any[] = []): any[] {
-  if (!value) return fallback;
+  if (value === null || value === undefined) return fallback;
 
   let arr: any[];
   if (Array.isArray(value)) {
-    arr = value.length > 0 ? value : fallback;
+    if (value.length === 0) return [];
+    arr = value;
   } else if (typeof value === 'object' && value.fieldId) {
     arr = [value];
   } else {
@@ -678,15 +682,22 @@ const saveFormDataDirect = async (
     let skippedCount = 0;
     const formData = request.formData || {};
 
+    // Repair item_data sequence before inserts to prevent PK collisions
+    await repairSequence(client, 'item_data_item_data_id_seq', 'item_data', 'item_data_id');
+
     // Pre-fetch all existing item_data rows for this event_crf in a single query
     // to avoid one SELECT per field inside the loop (N+1 problem).
+    // Include ALL rows (even deleted ones) so the ON CONFLICT upsert can update
+    // soft-deleted rows that still hold the unique constraint slot.
     const existingItemDataResult = await client.query(`
-      SELECT item_id, item_data_id, value, date_updated FROM item_data
-      WHERE event_crf_id = $1 AND deleted = false
+      SELECT item_id, item_data_id, value, date_updated, ordinal FROM item_data
+      WHERE event_crf_id = $1
     `, [eventCrfId]);
     const existingByItemId = new Map<number, { itemDataId: number; value: string; dateUpdated: string | null }>();
     for (const row of existingItemDataResult.rows) {
-      existingByItemId.set(row.itemId, { itemDataId: row.itemDataId, value: row.value, dateUpdated: row.dateUpdated ?? null });
+      if (row.ordinal === 1 || !existingByItemId.has(row.itemId)) {
+        existingByItemId.set(row.itemId, { itemDataId: row.itemDataId, value: row.value, dateUpdated: row.dateUpdated ?? null });
+      }
     }
 
     // Track itemIds already processed in this save loop to prevent duplicate
@@ -797,6 +808,14 @@ const saveFormDataDirect = async (
       }
 
       // ── SCALAR FIELDS: item_data.value is the source of truth ──
+
+      // Skip if this itemId was already written to in this save loop
+      // (prevents duplicate INSERT when multiple formData keys resolve to the same item_id)
+      if (processedItemIds.has(itemId)) {
+        savedCount++;
+        continue;
+      }
+      processedItemIds.add(itemId);
 
       // Use the pre-fetched map instead of a per-field query
       const existingRow = existingByItemId.get(itemId);
@@ -1703,11 +1722,15 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
       // Parse operator from message field (stored as JSON by our API)
       let operator = 'equals';
       let message = scd.message || '';
+      let logicalOperator = 'OR';
+      let tableCellTarget = undefined;
       try {
         const parsed = JSON.parse(scd.message);
         if (parsed && parsed.operator) {
           operator = parsed.operator;
           message = parsed.message || '';
+          logicalOperator = parsed.logicalOperator || 'OR';
+          tableCellTarget = parsed.tableCellTarget || undefined;
         }
       } catch {
         // Not JSON - legacy plain text message, default to equals
@@ -1724,7 +1747,8 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         operator,
         value: scd.optionValue,
         message,
-        logicalOperator: 'OR'
+        logicalOperator,
+        tableCellTarget
       });
       scdByItemId.set(scd.targetItemId, conditions);
     }
@@ -1968,26 +1992,84 @@ export const getFormMetadata = async (crfId: number, options?: { includeHidden?:
         criteriaItems: extendedProps.criteriaItems,
         criteriaListSettings: extendedProps.criteriaListSettings,
         
-        // Question table field properties — normalize row and column IDs so
-        // every row has a stable `id` and every answerColumn has a stable `id`.
-        // Missing IDs cause value collisions in the frontend data model.
-        questionRows: Array.isArray(extendedProps.questionRows)
-          ? extendedProps.questionRows.map((row: any, rIdx: number) => {
+        // Question table field properties — STRUCTURAL FIX:
+        // New forms store column definitions once at the table level (`answerColumns`).
+        // Legacy forms store per-row `answerColumns` with potentially different IDs per row.
+        // We detect which model is in use and handle accordingly:
+        // - New model (top-level answerColumns exists): rows are lightweight {id, question}
+        // - Legacy model (no top-level, per-row columns): KEEP per-row columns intact
+        //   because patient data is keyed by those per-row column IDs
+        ...(() => {
+          const rawRows = extendedProps.questionRows;
+          if (!Array.isArray(rawRows) || rawRows.length === 0) {
+            return { answerColumns: extendedProps.answerColumns || [], questionRows: rawRows };
+          }
+
+          // If top-level answerColumns already exists (new model), use it
+          if (Array.isArray(extendedProps.answerColumns) && extendedProps.answerColumns.length > 0) {
+            const usedColIds = new Set<string>();
+            const canonicalCols = extendedProps.answerColumns.map((col: any, cIdx: number) => {
+              let colId = col.id || (col.header ? col.header.replace(/\s+/g, '_').toLowerCase() : `ans_${cIdx}`);
+              if (usedColIds.has(colId)) colId = `${colId}_${cIdx}`;
+              usedColIds.add(colId);
+              return { ...col, id: colId };
+            });
+            // Strip per-row answerColumns — new model rows are lightweight
+            const normalizedRows = rawRows.map((row: any, rIdx: number) => ({
+              id: row.id || `qrow_${rIdx}`,
+              question: row.question || '',
+            }));
+            return { answerColumns: canonicalCols, questionRows: normalizedRows };
+          }
+
+          // Legacy model: per-row answerColumns with potentially different IDs.
+          // Check if all rows share the same column IDs (safe to promote)
+          // or have divergent IDs (must keep per-row to preserve data references).
+          const rowsWithCols = rawRows.filter((r: any) => Array.isArray(r.answerColumns) && r.answerColumns.length > 0);
+          if (rowsWithCols.length === 0) {
+            return { answerColumns: [], questionRows: rawRows };
+          }
+
+          const firstRowColIds = (rowsWithCols[0].answerColumns || []).map((c: any) => c.id).join(',');
+          const allSame = rowsWithCols.every((r: any) =>
+            (r.answerColumns || []).map((c: any) => c.id).join(',') === firstRowColIds
+          );
+
+          if (allSame) {
+            // All rows share identical column IDs — safe to promote
+            const canonicalCols = rowsWithCols[0].answerColumns.map((col: any, cIdx: number) => {
               const usedColIds = new Set<string>();
-              return {
-                ...row,
-                id: row.id || `qrow_${rIdx}`,
-                answerColumns: Array.isArray(row.answerColumns)
-                  ? row.answerColumns.map((col: any, cIdx: number) => {
-                      let colId = col.id || (col.header ? col.header.replace(/\s+/g, '_').toLowerCase() : `ans_${cIdx}`);
-                      if (usedColIds.has(colId)) colId = `${colId}_${cIdx}`;
-                      usedColIds.add(colId);
-                      return { ...col, id: colId };
-                    })
-                  : row.answerColumns
-              };
-            })
-          : extendedProps.questionRows,
+              let colId = col.id || `ans_${cIdx}`;
+              if (usedColIds.has(colId)) colId = `${colId}_${cIdx}`;
+              usedColIds.add(colId);
+              return { ...col, id: colId };
+            });
+            const normalizedRows = rawRows.map((row: any, rIdx: number) => ({
+              id: row.id || `qrow_${rIdx}`,
+              question: row.question || '',
+            }));
+            return { answerColumns: canonicalCols, questionRows: normalizedRows };
+          }
+
+          // Divergent column IDs across rows — KEEP per-row columns intact.
+          // Normalize row IDs but preserve answerColumns on each row.
+          const normalizedRows = rawRows.map((row: any, rIdx: number) => {
+            const usedColIds = new Set<string>();
+            return {
+              ...row,
+              id: row.id || `qrow_${rIdx}`,
+              answerColumns: Array.isArray(row.answerColumns)
+                ? row.answerColumns.map((col: any, cIdx: number) => {
+                    let colId = col.id || (col.header ? col.header.replace(/\s+/g, '_').toLowerCase() : `ans_${cIdx}`);
+                    if (usedColIds.has(colId)) colId = `${colId}_${cIdx}`;
+                    usedColIds.add(colId);
+                    return { ...col, id: colId };
+                  })
+                : row.answerColumns,
+            };
+          });
+          return { answerColumns: undefined, questionRows: normalizedRows };
+        })(),
         questionTableSettings: extendedProps.questionTableSettings,
         
         // Static content / Section header
@@ -2611,6 +2693,7 @@ interface FormField {
   criteriaListSettings?: CriteriaListSettings;
   
   // Question table field properties (uses shared DTOs)
+  answerColumns?: any[];
   questionRows?: QuestionRow[];
   questionTableSettings?: QuestionTableSettings;
   
@@ -2752,8 +2835,15 @@ const serializeExtendedProperties = (field: FormField): string => {
     criteriaItems: field.criteriaItems,
     criteriaListSettings: field.criteriaListSettings,
     
-    // Question table field properties
-    questionRows: field.questionRows,
+    // Question table field properties — answerColumns at table level (canonical),
+    // questionRows as lightweight {id, question} objects only
+    answerColumns: field.answerColumns,
+    questionRows: Array.isArray(field.questionRows)
+      ? field.questionRows.map((row: any) => ({
+          id: row.id,
+          question: row.question || '',
+        }))
+      : field.questionRows,
     questionTableSettings: field.questionTableSettings,
     
     // Static content / Section header
@@ -3092,8 +3182,8 @@ export const createForm = async (
               `Question table field "${field.label || field.name || `field #${i + 1}`}" must have at least one question row defined.`
             );
           }
-          const firstRow = field.questionRows[0];
-          if (!Array.isArray(firstRow.answerColumns) || firstRow.answerColumns.length === 0) {
+          const ansCols = field.answerColumns || field.questionRows[0]?.answerColumns;
+          if (!Array.isArray(ansCols) || ansCols.length === 0) {
             throw new Error(
               `Question table field "${field.label || field.name || `field #${i + 1}`}" must have at least one answer column defined.`
             );
@@ -3344,7 +3434,9 @@ export const createForm = async (
               // SCD natively only supports equality, so we encode the operator in the message
               const scdMessage = JSON.stringify({
                 operator: condition.operator || 'equals',
-                message: (condition as any).message || ''
+                message: (condition as any).message || '',
+                logicalOperator: condition.logicalOperator || 'OR',
+                tableCellTarget: condition.tableCellTarget || undefined
               });
               
               // Insert into scd_item_metadata (LibreClinica skip logic table)
@@ -3458,6 +3550,7 @@ export const updateForm = async (
     fields?: FormField[];
     category?: string;
     version?: string;
+    partialFieldUpdate?: boolean;
   },
   userId: number
 ): Promise<{ success: boolean; message?: string }> => {
@@ -3705,6 +3798,28 @@ export const updateForm = async (
       // Primary lookup by item_id (stable). No name-based fallback — fields with
       // the same label must not collide. If a field has no valid item_id it is new.
       const existingItemsById = new Map(existingItemsResult.rows.map(row => [row.itemId, row]));
+
+      // ──────────────────────────────────────────────────────────────────────
+      // COLUMN ID / ROW SNAPSHOT — capture current structure for table fields
+      // BEFORE saving so we can detect column/row deletions and cascade to
+      // validation rules (auto-delete rules targeting removed columns/rows).
+      // ──────────────────────────────────────────────────────────────────────
+      const preUpdateStructure = new Map<number, { answerColumns?: any[]; questionRows?: any[]; tableColumns?: any[] }>();
+      for (const [itemId, item] of existingItemsById) {
+        if (!item.description) continue;
+        const ext = parseExtendedProps(item.description);
+        if (ext.answerColumns || ext.questionRows || ext.tableColumns) {
+          // For legacy data without top-level answerColumns, extract from row 0
+          const answerCols = ext.answerColumns
+            || (ext.questionRows?.[0]?.answerColumns)
+            || undefined;
+          preUpdateStructure.set(itemId, {
+            answerColumns: answerCols,
+            questionRows: ext.questionRows,
+            tableColumns: ext.tableColumns,
+          });
+        }
+      }
 
       // Get CRF OID for generating item OIDs
       const crfOidResult = await client.query(`SELECT oc_oid FROM crf WHERE crf_id = $1`, [crfId]);
@@ -4056,13 +4171,16 @@ export const updateForm = async (
 
       // Soft-delete items that were NOT in the incoming field list.
       // Any existing item whose item_id is not in matchedItemIds was removed by the user.
-      for (const [itemIdKey, item] of existingItemsById) {
-        if (!matchedItemIds.has(itemIdKey)) {
-          logger.info('Hiding removed field', { itemId: item.itemId, name: item.name });
-          await client.query(`
-            UPDATE item_form_metadata SET show_item = false
-            WHERE item_id = $1 AND crf_version_id = $2
-          `, [item.itemId, crfVersionId]);
+      // SKIP for partial updates (e.g. branching-config) that only send a subset of fields.
+      if (!data.partialFieldUpdate) {
+        for (const [itemIdKey, item] of existingItemsById) {
+          if (!matchedItemIds.has(itemIdKey)) {
+            logger.info('Hiding removed field', { itemId: item.itemId, name: item.name });
+            await client.query(`
+              UPDATE item_form_metadata SET show_item = false
+              WHERE item_id = $1 AND crf_version_id = $2
+            `, [item.itemId, crfVersionId]);
+          }
         }
       }
 
@@ -4096,16 +4214,22 @@ export const updateForm = async (
         const conditions = existingScdMap.get(row.targetItemId) || [];
         let operator = 'equals';
         let message = '';
+        let logicalOperator = 'OR';
+        let tableCellTarget = undefined;
         try {
           const parsed = JSON.parse(row.message || '{}');
           operator = parsed.operator || 'equals';
           message = parsed.message || '';
+          logicalOperator = parsed.logicalOperator || 'OR';
+          tableCellTarget = parsed.tableCellTarget || undefined;
         } catch { /* not JSON, ignore */ }
         conditions.push({
           fieldId: row.controlItemName,
           value: row.optionValue || '',
           operator,
-          message
+          message,
+          logicalOperator,
+          tableCellTarget
         });
         existingScdMap.set(row.targetItemId, conditions);
       }
@@ -4132,13 +4256,43 @@ export const updateForm = async (
         }
       }
 
-      // Delete all existing SCD records for this CRF version
-      await client.query(`
-        DELETE FROM scd_item_metadata 
-        WHERE scd_item_form_metadata_id IN (
-          SELECT item_form_metadata_id FROM item_form_metadata WHERE crf_version_id = $1
-        )
-      `, [crfVersionId]);
+      // Collect the item_form_metadata_ids of fields that ARE in the incoming payload
+      // so we only delete/recreate SCD records for those fields — preserving rules
+      // for fields NOT in the payload (critical for partial updates like branching-config).
+      const incomingIfmIds: number[] = [];
+      for (const field of data.fields) {
+        const fieldItemId = field.itemId || (field.id ? parseInt(String(field.id), 10) : NaN);
+        let ifmResult;
+        if (!isNaN(fieldItemId)) {
+          ifmResult = await client.query(`
+            SELECT ifm.item_form_metadata_id
+            FROM item_form_metadata ifm
+            WHERE ifm.crf_version_id = $1 AND ifm.item_id = $2
+            LIMIT 1
+          `, [crfVersionId, fieldItemId]);
+        }
+        if (!ifmResult?.rows?.length) {
+          ifmResult = await client.query(`
+            SELECT ifm.item_form_metadata_id
+            FROM item_form_metadata ifm
+            INNER JOIN item i ON ifm.item_id = i.item_id
+            WHERE ifm.crf_version_id = $1 AND (i.name = $2 OR LOWER(REPLACE(i.name, ' ', '_')) = LOWER($2))
+            LIMIT 1
+          `, [crfVersionId, field.label || field.name]);
+        }
+        if (ifmResult?.rows?.length) {
+          incomingIfmIds.push(ifmResult.rows[0].itemFormMetadataId);
+        }
+      }
+
+      // Delete SCD records ONLY for fields in the incoming payload.
+      // Fields not in the payload keep their existing rules intact.
+      if (incomingIfmIds.length > 0) {
+        await client.query(`
+          DELETE FROM scd_item_metadata 
+          WHERE scd_item_form_metadata_id = ANY($1::int[])
+        `, [incomingIfmIds]);
+      }
       
       // Recreate SCD records from updated showWhen conditions
       for (let i = 0; i < data.fields.length; i++) {
@@ -4173,7 +4327,7 @@ export const updateForm = async (
             for (const condition of field.showWhen) {
               // Find the control item's item_form_metadata_id.
               // condition.fieldId may be an itemId (numeric), a label, or a snake_case name.
-              // Try by itemId of the matching template field first.
+              // Try by itemId of the matching template field first, then search DB directly.
               const controlField = data.fields?.find((f: any) =>
                 f.name === condition.fieldId ||
                 f.label === condition.fieldId ||
@@ -4206,10 +4360,13 @@ export const updateForm = async (
               const controlIfmId = controlIfmResult?.rows[0]?.itemFormMetadataId || null;
               const controlItemName = controlIfmResult?.rows[0]?.name || condition.fieldId || '';
               
-              // Store operator in message as JSON for non-equals operators
+              // Store full condition metadata in message as JSON so SCD fallback
+              // preserves logicalOperator, tableCellTarget, and other fields.
               const scdMessage = JSON.stringify({
                 operator: condition.operator || 'equals',
-                message: (condition as any).message || ''
+                message: (condition as any).message || '',
+                logicalOperator: condition.logicalOperator || 'OR',
+                tableCellTarget: condition.tableCellTarget || undefined
               });
               
               await client.query(`
@@ -4234,6 +4391,113 @@ export const updateForm = async (
       }
 
       logger.info('Form fields updated', { crfId, fieldCount: data.fields.length });
+
+      // ──────────────────────────────────────────────────────────────────────
+      // CASCADE: DELETE RULES FOR REMOVED COLUMNS/ROWS, REMAP CHANGED IDS
+      // ──────────────────────────────────────────────────────────────────────
+      if (preUpdateStructure.size > 0) {
+        try {
+          await client.query('SAVEPOINT cascade_column_ids');
+
+          for (const [itemId, oldData] of preUpdateStructure) {
+            const updatedItemResult = await client.query(
+              `SELECT description FROM item WHERE item_id = $1`, [itemId]
+            );
+            if (updatedItemResult.rows.length === 0) continue;
+            const newExt = parseExtendedProps(updatedItemResult.rows[0].description);
+
+            // Build sets of current column IDs and row IDs
+            const newColIds = new Set<string>();
+            const newRowIds = new Set<string>();
+
+            // Question table: answerColumns at top level (new structure)
+            const newAnsCols = newExt.answerColumns || [];
+            if (Array.isArray(newAnsCols)) {
+              for (const col of newAnsCols) if (col.id) newColIds.add(col.id);
+            }
+            if (Array.isArray(newExt.questionRows)) {
+              for (const row of newExt.questionRows) if (row.id) newRowIds.add(row.id);
+            }
+
+            // Data table: tableColumns
+            if (Array.isArray(newExt.tableColumns)) {
+              for (const col of newExt.tableColumns) {
+                const key = col.key || col.name || col.id;
+                if (key) newColIds.add(key);
+              }
+            }
+
+            // Build sets of old column IDs and row IDs
+            const oldColIds = new Set<string>();
+            const oldRowIds = new Set<string>();
+            if (Array.isArray(oldData.answerColumns)) {
+              for (const col of oldData.answerColumns) if (col.id) oldColIds.add(col.id);
+            }
+            if (Array.isArray(oldData.questionRows)) {
+              for (const row of oldData.questionRows) if (row.id) oldRowIds.add(row.id);
+            }
+            if (Array.isArray(oldData.tableColumns)) {
+              for (const col of oldData.tableColumns) {
+                const key = col.key || col.name || col.id;
+                if (key) oldColIds.add(key);
+              }
+            }
+
+            // Find removed columns and rows
+            const removedColIds = [...oldColIds].filter(id => !newColIds.has(id));
+            const removedRowIds = [...oldRowIds].filter(id => !newRowIds.has(id));
+
+            if (removedColIds.length === 0 && removedRowIds.length === 0) continue;
+
+            // Fetch all validation rules targeting this item
+            const rulesResult = await client.query(`
+              SELECT validation_rule_id, table_cell_target
+              FROM validation_rules
+              WHERE table_cell_target IS NOT NULL
+                AND (
+                  table_cell_target->>'tableItemId' = $1::text
+                  OR (item_id = $2 AND table_cell_target->>'tableItemId' IS NULL)
+                )
+            `, [String(itemId), itemId]);
+
+            const rulesToDelete: number[] = [];
+            for (const rule of rulesResult.rows) {
+              const target = rule.tableCellTarget || rule.table_cell_target;
+              if (!target) continue;
+              const ruleId = rule.validationRuleId || rule.validation_rule_id;
+
+              // Delete rules targeting removed columns
+              if (target.columnId && removedColIds.includes(target.columnId)) {
+                rulesToDelete.push(ruleId);
+                continue;
+              }
+
+              // Delete rules targeting specific removed rows (not allRows rules)
+              if (target.rowId && target.rowId !== '*' && !target.allRows && removedRowIds.includes(target.rowId)) {
+                rulesToDelete.push(ruleId);
+              }
+            }
+
+            if (rulesToDelete.length > 0) {
+              await client.query(
+                `DELETE FROM validation_rules WHERE validation_rule_id = ANY($1::int[])`,
+                [rulesToDelete]
+              );
+              logger.info('Deleted validation rules for removed table columns/rows', {
+                itemId, removedColumns: removedColIds, removedRows: removedRowIds,
+                rulesDeleted: rulesToDelete.length,
+              });
+            }
+          }
+
+          await client.query('RELEASE SAVEPOINT cascade_column_ids');
+        } catch (cascadeErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT cascade_column_ids').catch(() => {});
+          logger.warn('Failed to cascade column/row deletions to validation rules (non-fatal)', {
+            error: cascadeErr.message,
+          });
+        }
+      }
     }
 
     await client.query('COMMIT');

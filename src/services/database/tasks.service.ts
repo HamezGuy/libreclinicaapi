@@ -36,8 +36,9 @@ import type { TaskType, TaskPriority, TaskStatus, Task, TaskSummary, TaskFilters
  * Helper: get org member user IDs for the caller.
  * Returns null if the caller has no org membership (root admin sees all).
  */
-const getOrgMemberUserIds = async (_callerUserId: number): Promise<number[] | null> => {
-  return null;
+const getOrgMemberUserIds = async (callerUserId: number): Promise<number[] | null> => {
+  const { getOrgMemberUserIds: shared } = await import('../../utils/org.util');
+  return shared(pool, callerUserId);
 };
 
 /**

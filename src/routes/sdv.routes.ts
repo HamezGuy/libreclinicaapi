@@ -23,7 +23,8 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireEntityStudyAccess } from '../middleware/study-scope.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 import { validate, sdvSchemas } from '../middleware/validation.middleware';
 import * as sdvController from '../controllers/sdv.controller';
 
@@ -48,19 +49,19 @@ router.get('/:id/form-data',
 router.put('/:id/verify', 
   requireRole('monitor', 'admin'), 
   requireEntityStudyAccess('eventCrf', 'id'),
-  requireSignatureFor(SignatureMeanings.VERIFY),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.VERIFY }),
   sdvController.verify
 );
 router.put('/:id/unverify', 
   requireRole('monitor', 'admin'), 
   requireEntityStudyAccess('eventCrf', 'id'),
-  requireSignatureFor('I authorize removal of SDV verification'),
+  requirePart11({ meaning: 'I authorize removal of SDV verification' }),
   sdvController.unverify
 );
 router.post('/bulk-verify', 
   requireRole('monitor', 'admin'), 
   validate({ body: sdvSchemas.bulkVerify }),
-  requireSignatureFor(SignatureMeanings.VERIFY),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.VERIFY }),
   sdvController.bulkVerify
 );
 

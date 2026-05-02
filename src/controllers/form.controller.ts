@@ -11,7 +11,7 @@ import * as templateBundleService from '../services/hybrid/template-bundle.servi
 import * as workflowConfigProvider from '../services/database/workflow-config.provider';
 import { trackDocumentAccess, trackUserAction } from '../services/database/audit.service';
 import { logger } from '../config/logger';
-import type { Part11Request } from '../middleware/part11.middleware';
+import { demandSignature, type SignedRequest } from '../middleware/part11.middleware';
 import type { ApiResponse, CRF, CRFVersion } from '@accura-trial/shared-types';
 
 export const saveData = asyncHandler(async (req: Request, res: Response) => {
@@ -160,12 +160,7 @@ export const getByStudy = asyncHandler(async (req: Request, res: Response) => {
  * Create a new form template (CRF)
  */
 export const create = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form creation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to create a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   console.log(`[form.controller.create] Starting form creation for user=${user.userId}, name="${req.body.name}"`);
 
@@ -191,12 +186,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
  * Update a form template
  */
 export const update = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form update attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to update a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -221,12 +211,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
  * NOTE: For 21 CFR Part 11 compliance, this now archives instead of deletes
  */
 export const remove = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form deletion attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to delete a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -256,12 +241,7 @@ export const remove = asyncHandler(async (req: Request, res: Response) => {
  * Archived forms are hidden from regular users but can be viewed/restored by admins
  */
 export const archive = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form archive attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to archive a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
   const { reason } = req.body;
@@ -287,12 +267,7 @@ export const archive = asyncHandler(async (req: Request, res: Response) => {
  * 21 CFR Part 11 compliant - maintains full audit trail
  */
 export const restore = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form restore attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to restore a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
   const { reason } = req.body;
@@ -371,12 +346,7 @@ export const getVersions = asyncHandler(async (req: Request, res: Response) => {
  * This is "forking" at the version level - same CRF, new version
  */
 export const createVersion = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form version creation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to create a form version (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -417,12 +387,7 @@ export const createVersion = asyncHandler(async (req: Request, res: Response) =>
  * controller-level audit call (would have produced duplicate rows).
  */
 export const fork = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form fork attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to fork a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
 
@@ -472,12 +437,7 @@ export const fork = asyncHandler(async (req: Request, res: Response) => {
  * those linked forms, they call this endpoint to reconnect the references.
  */
 export const relinkFormLinks = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form relink attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to relink form references (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
   const { relinks } = req.body;
@@ -510,12 +470,7 @@ export const relinkFormLinks = asyncHandler(async (req: Request, res: Response) 
  * recommendations.
  */
 export const batchFork = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Batch fork attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required for batch fork (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { sourceCrfIds, targetStudyId, nameMap } = req.body;
 
@@ -545,12 +500,6 @@ export const batchFork = asyncHandler(async (req: Request, res: Response) => {
  * 4. Logs to audit trail
  */
 export const updateField = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Field update attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to update form fields (21 CFR Part 11 §11.50)' });
-    return;
-  }
   const { eventCrfId } = req.params;
   const parsedId = parseInt(eventCrfId, 10);
   if (isNaN(parsedId) || parsedId <= 0) {
@@ -655,12 +604,7 @@ export const getMeasurementUnits = asyncHandler(async (req: Request, res: Respon
  * This is a prerequisite for freezing and locking the form.
  */
 export const markComplete = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Form completion attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to mark form as complete (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const eventCrfId = parseInt(req.params.eventCrfId, 10);
 

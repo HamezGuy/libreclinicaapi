@@ -111,6 +111,107 @@ function invalidateRulesCache(crfId?: number): void {
   if (crfId != null) { _rulesCache.delete(crfId); } else { _rulesCache.clear(); }
 }
 
+/**
+ * Self-healing: fix stale `fieldPath` and `tableCellTarget.tableFieldPath`
+ * on rules whose `tableItemId` no longer matches the deduplicated form-control
+ * key the frontend generates.
+ *
+ * When a CRF has multiple tables sharing the same base name (e.g., three
+ * fields all named "question_table"), the frontend deduplicates them:
+ *   1st → "question_table"
+ *   2nd → "question_table_<itemId>"
+ *   3rd → "question_table_<itemId>"
+ *
+ * If a rule was authored before dedup was added, or by a code path that
+ * didn't apply dedup, its fieldPath/tableFieldPath may hold the bare name
+ * while the frontend expects the suffixed form. This function detects that
+ * mismatch by loading the CRF's items and replicating the dedup algorithm,
+ * then patches the in-memory rule objects. A background fire-and-forget DB
+ * UPDATE persists the fix so it only runs once per stale rule.
+ */
+function healStaleTableFieldPaths(rules: ValidationRule[], crfId: number): void {
+  const cellRules = rules.filter(r => r.tableCellTarget?.tableItemId != null);
+  if (cellRules.length === 0) return;
+
+  // Async self-heal: load form items and patch. Don't await — the in-memory
+  // fix is done synchronously after the async lookup, and the DB persist is
+  // fire-and-forget. The next request sees cached (already-healed) rules.
+  (async () => {
+    try {
+      const itemsResult = await pool.query(
+        `SELECT i.item_id, i.name
+         FROM item i
+         INNER JOIN item_form_metadata ifm ON i.item_id = ifm.item_id
+         INNER JOIN crf_version cv ON ifm.crf_version_id = cv.crf_version_id
+         WHERE cv.crf_id = $1
+         ORDER BY ifm.ordinal, i.item_id`,
+        [crfId]
+      );
+      if (itemsResult.rows.length === 0) return;
+
+      // Replicate the frontend's dedup algorithm
+      const usedKeys = new Set<string>();
+      const itemIdToKey = new Map<number, string>();
+      for (const row of itemsResult.rows) {
+        const itemId: number = row.itemId ?? row.item_id;
+        const baseName: string = row.name || row.itemName || `item_${itemId}`;
+        let key = baseName;
+        if (usedKeys.has(key)) {
+          key = `${baseName}_${itemId}`;
+          let extra = 0;
+          while (usedKeys.has(key)) { key = `${baseName}_${itemId}_${++extra}`; }
+        }
+        usedKeys.add(key);
+        itemIdToKey.set(itemId, key);
+      }
+
+      const staleRuleUpdates: Array<{ id: number; correctPath: string }> = [];
+
+      for (const rule of cellRules) {
+        const tableItemId = rule.tableCellTarget!.tableItemId!;
+        const correctKey = itemIdToKey.get(tableItemId);
+        if (!correctKey) continue;
+
+        const currentFieldPath = rule.fieldPath;
+        const currentTableFieldPath = rule.tableCellTarget!.tableFieldPath;
+
+        if (currentFieldPath !== correctKey || currentTableFieldPath !== correctKey) {
+          rule.fieldPath = correctKey;
+          rule.tableCellTarget!.tableFieldPath = correctKey;
+          staleRuleUpdates.push({ id: rule.id, correctPath: correctKey });
+        }
+      }
+
+      if (staleRuleUpdates.length > 0) {
+        logger.warn('Self-healed stale table field paths', {
+          crfId,
+          count: staleRuleUpdates.length,
+          rules: staleRuleUpdates.map(u => ({ id: u.id, correctedTo: u.correctPath })),
+        });
+
+        // Persist fixes to DB (fire-and-forget, don't block the response)
+        for (const update of staleRuleUpdates) {
+          pool.query(
+            `UPDATE validation_rules
+             SET field_path = $1,
+                 table_cell_target = jsonb_set(
+                   COALESCE(table_cell_target, '{}'::jsonb),
+                   '{tableFieldPath}',
+                   to_jsonb($1::text)
+                 )
+             WHERE validation_rule_id = $2`,
+            [update.correctPath, update.id]
+          ).catch((e: unknown) => {
+            logger.warn('Failed to persist healed fieldPath', { ruleId: update.id, error: (e as Error).message });
+          });
+        }
+      }
+    } catch (e: unknown) {
+      logger.debug('healStaleTableFieldPaths skipped', { crfId, error: (e as Error).message });
+    }
+  })();
+}
+
 export const getRulesForCrf = async (crfId: number, callerUserId?: number): Promise<ValidationRule[]> => {
   logger.info('Getting validation rules for CRF', { crfId, callerUserId });
 
@@ -231,6 +332,14 @@ export const getRulesForCrf = async (crfId: number, callerUserId?: number): Prom
         allRules.push(nativeRule);
       }
     }
+
+    // Self-healing: ensure tableCellTarget.tableFieldPath stays in sync with
+    // the deduplicated form-control key the frontend generates. Two tables
+    // sharing the same name get keys "name" and "name_<itemId>". When a rule
+    // was created before dedup logic existed, tableFieldPath may hold the bare
+    // name while the frontend uses the suffixed key — causing silent match
+    // failures. Fix it here at read time so every consumer sees correct paths.
+    healStaleTableFieldPaths(allRules, crfId);
 
     // Store in cache
     _rulesCache.set(cacheKey, { rules: allRules, expiresAt: Date.now() + RULES_CACHE_TTL_MS });
@@ -612,6 +721,14 @@ export const updateRule = async (
   try {
     await client.query('BEGIN');
 
+    // COALESCE preserves the existing DB value when the caller omits a field
+    // (undefined → SQL NULL → COALESCE falls through to the column's current
+    // value). For warning_message and table_cell_target, which the caller may
+    // legitimately want to clear, we use a "was the key present in the
+    // updates object?" check: only overwrite the DB column when the caller
+    // explicitly included the field — even if its value is null.
+    const hasKey = (key: string) => Object.prototype.hasOwnProperty.call(updates, key);
+
     const updateQuery = `
       UPDATE validation_rules SET
         name = COALESCE($1, name),
@@ -620,20 +737,20 @@ export const updateRule = async (
         field_path = COALESCE($4, field_path),
         severity = COALESCE($5, severity),
         error_message = COALESCE($6, error_message),
-        warning_message = $7,
-        min_value = $8,
-        max_value = $9,
-        pattern = $10,
-        format_type = $11,
-        operator = $12,
-        compare_field_path = $13,
-        compare_value = $14,
-        custom_expression = $15,
-        bp_systolic_min = $16,
-        bp_systolic_max = $17,
-        bp_diastolic_min = $18,
-        bp_diastolic_max = $19,
-        table_cell_target = $20,
+        warning_message = CASE WHEN $23 THEN $7 ELSE warning_message END,
+        min_value = COALESCE($8, min_value),
+        max_value = COALESCE($9, max_value),
+        pattern = COALESCE($10, pattern),
+        format_type = COALESCE($11, format_type),
+        operator = COALESCE($12, operator),
+        compare_field_path = COALESCE($13, compare_field_path),
+        compare_value = COALESCE($14, compare_value),
+        custom_expression = COALESCE($15, custom_expression),
+        bp_systolic_min = COALESCE($16, bp_systolic_min),
+        bp_systolic_max = COALESCE($17, bp_systolic_max),
+        bp_diastolic_min = COALESCE($18, bp_diastolic_min),
+        bp_diastolic_max = COALESCE($19, bp_diastolic_max),
+        table_cell_target = CASE WHEN $24 THEN $20 ELSE table_cell_target END,
         date_updated = CURRENT_TIMESTAMP,
         update_id = $21
       WHERE validation_rule_id = $22
@@ -646,7 +763,7 @@ export const updateRule = async (
       updates.fieldPath,
       updates.severity,
       updates.errorMessage,
-      updates.warningMessage,
+      updates.warningMessage ?? null,
       updates.minValue ?? null,
       updates.maxValue ?? null,
       updates.pattern ?? null,
@@ -659,9 +776,11 @@ export const updateRule = async (
       updates.bpSystolicMax ?? null,
       updates.bpDiastolicMin ?? null,
       updates.bpDiastolicMax ?? null,
-      updates.tableCellTarget ? JSON.stringify(updates.tableCellTarget) : null,
+      hasKey('tableCellTarget') ? (updates.tableCellTarget ? JSON.stringify(updates.tableCellTarget) : null) : null,
       userId,
-      ruleId
+      ruleId,
+      hasKey('warningMessage'),
+      hasKey('tableCellTarget'),
     ]);
 
     await client.query('COMMIT');
@@ -1347,8 +1466,26 @@ async function buildTableColumnMetadataMap(crfId: number): Promise<Map<number, T
           for (const id of candidates) columnsByAnyId.set(id, meta);
         });
       } else {
-        const firstRow = ext.questionRows[0] || {};
-        const ansCols = Array.isArray(firstRow.answerColumns) ? firstRow.answerColumns : [];
+        // Question table: prefer top-level answerColumns (new structure).
+        // For legacy forms with divergent per-row columns, collect from ALL rows
+        // so every column ID referenced by any rule can be resolved.
+        let ansCols: any[] = [];
+        if (Array.isArray(ext.answerColumns) && ext.answerColumns.length > 0) {
+          ansCols = ext.answerColumns;
+        } else if (Array.isArray(ext.questionRows)) {
+          // Legacy: collect unique columns from all rows
+          const seenIds = new Set<string>();
+          for (const qr of ext.questionRows) {
+            if (!Array.isArray(qr.answerColumns)) continue;
+            for (const col of qr.answerColumns) {
+              const colId = col.id || col.name || col.key;
+              if (colId && !seenIds.has(colId)) {
+                seenIds.add(colId);
+                ansCols.push(col);
+              }
+            }
+          }
+        }
         ansCols.forEach((col: any, idx: number) => {
           const dataKey = col.id || col.name || col.key || `ans_${idx}`;
           const candidates: string[] = [];
@@ -3502,6 +3639,318 @@ export const toggleFieldRequired = async (
   }
 };
 
+/**
+ * Repair stale column references in validation rules for a given CRF.
+ *
+ * When table columns are regenerated (new ans_ IDs), existing rules still
+ * reference the old IDs. This function matches rules to the current table
+ * structure using row ID + column index position, then patches columnId.
+ *
+ * Returns { repaired, skipped, total } counts.
+ */
+export const repairStaleColumnRefs = async (
+  crfId: number,
+  dryRun: boolean = false,
+  callerUserId?: number,
+): Promise<{ total: number; repaired: number; skipped: number; details: Array<{ ruleId: number; ruleName: string; oldColumnId: string; newColumnId: string | null; status: string }> }> => {
+  const client = await pool.connect();
+  try {
+    if (!dryRun) await client.query('BEGIN');
+
+    // 1. Get all rules with table_cell_target for this CRF
+    const rulesResult = await client.query(`
+      SELECT vr.validation_rule_id, vr.name, vr.table_cell_target, vr.item_id,
+             vr.compare_field_path
+      FROM validation_rules vr
+      WHERE vr.crf_id = $1
+        AND vr.table_cell_target IS NOT NULL
+      ORDER BY vr.validation_rule_id
+    `, [crfId]);
+
+    if (rulesResult.rows.length === 0) {
+      return { total: 0, repaired: 0, skipped: 0, details: [] };
+    }
+
+    // 2. For each unique item_id referenced, load the current table structure
+    const itemIds = new Set<number>();
+    for (const rule of rulesResult.rows) {
+      const target = rule.tableCellTarget || rule.table_cell_target;
+      if (target?.tableItemId) itemIds.add(target.tableItemId);
+      else if (rule.itemId || rule.item_id) itemIds.add(rule.itemId || rule.item_id);
+    }
+
+    const itemStructures = new Map<number, { answerColumns?: any[]; questionRows?: any[]; tableColumns?: any[] }>();
+    for (const itemId of itemIds) {
+      const itemResult = await client.query(
+        `SELECT description FROM item WHERE item_id = $1`, [itemId]
+      );
+      if (itemResult.rows.length === 0) continue;
+      const ext = parseExtendedProps(itemResult.rows[0].description);
+      if (ext.answerColumns || ext.questionRows || ext.tableColumns) {
+        itemStructures.set(itemId, ext);
+      }
+    }
+
+    // 3. For each rule, check if columnId is stale and try to repair
+    const details: Array<{ ruleId: number; ruleName: string; oldColumnId: string; newColumnId: string | null; status: string }> = [];
+    let repaired = 0;
+    let skipped = 0;
+
+    for (const rule of rulesResult.rows) {
+      const ruleId = rule.validationRuleId || rule.validation_rule_id;
+      const ruleName = rule.name || `Rule #${ruleId}`;
+      const target = rule.tableCellTarget || rule.table_cell_target;
+      if (!target?.columnId) {
+        details.push({ ruleId, ruleName, oldColumnId: '', newColumnId: null, status: 'no_column_id' });
+        skipped++;
+        continue;
+      }
+
+      const targetItemId = target.tableItemId || rule.itemId || rule.item_id;
+      const structure = itemStructures.get(targetItemId);
+      if (!structure) {
+        details.push({ ruleId, ruleName, oldColumnId: target.columnId, newColumnId: null, status: 'item_not_found' });
+        skipped++;
+        continue;
+      }
+
+      // Check if the current columnId still exists in the structure
+      let columnExists = false;
+      let matchedNewColId: string | null = null;
+
+      if (structure.answerColumns || structure.questionRows) {
+        // Search top-level answerColumns first (new model)
+        const topCols = structure.answerColumns || [];
+        if (Array.isArray(topCols)) {
+          for (const col of topCols) {
+            if (col.id === target.columnId) { columnExists = true; break; }
+          }
+        }
+
+        // Legacy model: search ALL rows' answerColumns (per-row column IDs)
+        if (!columnExists && Array.isArray(structure.questionRows)) {
+          for (const qr of structure.questionRows) {
+            if (!Array.isArray(qr.answerColumns)) continue;
+            for (const col of qr.answerColumns) {
+              if (col.id === target.columnId) { columnExists = true; break; }
+            }
+            if (columnExists) break;
+          }
+        }
+
+        if (!columnExists && target.columnType) {
+          // Only try to auto-repair if we can't find the column at all
+          // For legacy per-row data, match within the specific target row
+          let searchCols = topCols;
+          if (Array.isArray(structure.questionRows) && target.rowId) {
+            const targetRow = structure.questionRows.find((r: any) => r.id === target.rowId);
+            if (targetRow?.answerColumns) searchCols = targetRow.answerColumns;
+          }
+          const typeMatch = (searchCols || []).find((c: any) => c.type === target.columnType);
+          if (typeMatch) matchedNewColId = typeMatch.id;
+          if (!matchedNewColId && searchCols.length > 0) {
+            matchedNewColId = searchCols[0].id;
+          }
+        }
+      }
+
+      if (structure.tableColumns && !columnExists) {
+        // For data table: look for matching column by key/name/id
+        for (const col of structure.tableColumns) {
+          if ((col.key || col.name || col.id) === target.columnId) {
+            columnExists = true;
+            break;
+          }
+        }
+        if (!columnExists && target.columnType) {
+          const typeMatch = structure.tableColumns.find((c: any) => c.type === target.columnType);
+          if (typeMatch) matchedNewColId = typeMatch.key || typeMatch.name || typeMatch.id;
+        }
+      }
+
+      if (columnExists) {
+        details.push({ ruleId, ruleName, oldColumnId: target.columnId, newColumnId: null, status: 'ok' });
+        continue;
+      }
+
+      if (!matchedNewColId) {
+        details.push({ ruleId, ruleName, oldColumnId: target.columnId, newColumnId: null, status: 'cannot_resolve' });
+        skipped++;
+        continue;
+      }
+
+      if (dryRun) {
+        details.push({ ruleId, ruleName, oldColumnId: target.columnId, newColumnId: matchedNewColId, status: 'would_repair' });
+        repaired++;
+        continue;
+      }
+
+      // Apply the repair
+      const updatedTarget = { ...target, columnId: matchedNewColId };
+      if (updatedTarget.displayPath && typeof updatedTarget.displayPath === 'string') {
+        updatedTarget.displayPath = updatedTarget.displayPath.replace(target.columnId, matchedNewColId);
+      }
+
+      await client.query(`
+        UPDATE validation_rules
+        SET table_cell_target = $1, date_updated = CURRENT_TIMESTAMP
+        WHERE validation_rule_id = $2
+      `, [JSON.stringify(updatedTarget), ruleId]);
+
+      details.push({ ruleId, ruleName, oldColumnId: target.columnId, newColumnId: matchedNewColId, status: 'repaired' });
+      repaired++;
+    }
+
+    if (!dryRun) await client.query('COMMIT');
+
+    logger.info('Repaired stale column references', { crfId, total: rulesResult.rows.length, repaired, skipped, dryRun });
+    return { total: rulesResult.rows.length, repaired, skipped, details };
+  } catch (error: any) {
+    if (!dryRun) await client.query('ROLLBACK').catch(() => {});
+    logger.error('Repair stale column refs error', { error: error.message, crfId });
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Bulk-scan all CRFs for broken validation rules (stale column references).
+ * Returns only CRFs that have at least one broken rule.
+ */
+export const scanBrokenRules = async (
+  callerUserId?: number,
+): Promise<Array<{
+  crfId: number;
+  crfName: string;
+  totalRules: number;
+  brokenCount: number;
+  brokenDetails: Array<{ ruleId: number; ruleName: string; columnId: string; status: string }>;
+}>> => {
+  try {
+    let orgFilter = '';
+    const queryParams: any[] = [];
+
+    if (callerUserId) {
+      const orgUserIds = await getOrgMemberUserIds(callerUserId);
+      if (orgUserIds) {
+        orgFilter = ` AND vr.crf_id IN (SELECT cv2.crf_id FROM crf_version cv2 WHERE cv2.owner_id = ANY($1::int[]))`;
+        queryParams.push(orgUserIds);
+      }
+    }
+
+    const rulesQuery = `
+      SELECT vr.validation_rule_id, vr.name, vr.table_cell_target,
+             vr.item_id, vr.crf_id, c.name AS crf_name
+      FROM validation_rules vr
+      JOIN crf c ON c.crf_id = vr.crf_id
+      WHERE vr.active = true
+        AND vr.table_cell_target IS NOT NULL
+        ${orgFilter}
+      ORDER BY vr.crf_id, vr.validation_rule_id
+    `;
+    const rulesResult = await pool.query(rulesQuery, queryParams);
+    if (rulesResult.rows.length === 0) return [];
+
+    const itemIds = new Set<number>();
+    for (const rule of rulesResult.rows) {
+      const target = rule.tableCellTarget;
+      if (target?.tableItemId) itemIds.add(target.tableItemId);
+      else if (rule.itemId) itemIds.add(rule.itemId);
+    }
+
+    const itemStructures = new Map<number, { answerColumns?: any[]; questionRows?: any[]; tableColumns?: any[] }>();
+    if (itemIds.size > 0) {
+      const itemResult = await pool.query(
+        `SELECT item_id, description FROM item WHERE item_id = ANY($1::int[])`,
+        [Array.from(itemIds)]
+      );
+      for (const row of itemResult.rows) {
+        const ext = parseExtendedProps(row.description);
+        if (ext.answerColumns || ext.questionRows || ext.tableColumns) {
+          itemStructures.set(row.itemId, ext);
+        }
+      }
+    }
+
+    const crfMap = new Map<number, {
+      crfId: number; crfName: string; totalRules: number; brokenCount: number;
+      brokenDetails: Array<{ ruleId: number; ruleName: string; columnId: string; status: string }>;
+    }>();
+
+    for (const rule of rulesResult.rows) {
+      const crfId = rule.crfId;
+      if (!crfMap.has(crfId)) {
+        crfMap.set(crfId, { crfId, crfName: rule.crfName, totalRules: 0, brokenCount: 0, brokenDetails: [] });
+      }
+      const entry = crfMap.get(crfId)!;
+      entry.totalRules++;
+
+      const target = rule.tableCellTarget;
+      if (!target?.columnId) continue;
+
+      const targetItemId = target.tableItemId || rule.itemId;
+      const structure = itemStructures.get(targetItemId);
+      if (!structure) {
+        entry.brokenCount++;
+        entry.brokenDetails.push({
+          ruleId: rule.validationRuleId,
+          ruleName: rule.name || `Rule #${rule.validationRuleId}`,
+          columnId: target.columnId,
+          status: 'item_not_found',
+        });
+        continue;
+      }
+
+      let columnExists = false;
+
+      if (structure.answerColumns || structure.questionRows) {
+        const topCols = structure.answerColumns || [];
+        if (Array.isArray(topCols)) {
+          for (const col of topCols) {
+            if (col.id === target.columnId) { columnExists = true; break; }
+          }
+        }
+        if (!columnExists && Array.isArray(structure.questionRows)) {
+          for (const qr of structure.questionRows) {
+            if (!Array.isArray(qr.answerColumns)) continue;
+            for (const col of qr.answerColumns) {
+              if (col.id === target.columnId) { columnExists = true; break; }
+            }
+            if (columnExists) break;
+          }
+        }
+      }
+
+      if (!columnExists && structure.tableColumns) {
+        for (const col of structure.tableColumns) {
+          if ((col.key || col.name || col.id) === target.columnId) {
+            columnExists = true;
+            break;
+          }
+        }
+      }
+
+      if (!columnExists) {
+        entry.brokenCount++;
+        entry.brokenDetails.push({
+          ruleId: rule.validationRuleId,
+          ruleName: rule.name || `Rule #${rule.validationRuleId}`,
+          columnId: target.columnId,
+          status: 'column_missing',
+        });
+      }
+    }
+
+    const results = Array.from(crfMap.values()).filter(e => e.brokenCount > 0);
+    logger.info('Scanned broken rules', { totalCrfs: crfMap.size, brokenCrfs: results.length });
+    return results;
+  } catch (error: any) {
+    logger.error('Scan broken rules error', { error: error.message });
+    throw error;
+  }
+};
+
 export default {
   initializeValidationRulesTable,
   getRulesForCrf,
@@ -3517,6 +3966,8 @@ export default {
   validateFieldChange,
   validateEventCrf,
   testRuleDirectly,
-  toggleFieldRequired
+  toggleFieldRequired,
+  repairStaleColumnRefs,
+  scanBrokenRules
 };
 

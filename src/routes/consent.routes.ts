@@ -13,9 +13,10 @@ import { Router, Request, Response, NextFunction } from 'express';
 import Joi from 'joi';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validation.middleware';
-import { requireSignatureFor, verifyElectronicSignature, Part11Request } from '../middleware/part11.middleware';
+import { requirePart11, verifyElectronicSignature, type SignedRequest } from '../middleware/part11.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { logger } from '../config/logger';
+import { pool } from '../config/database';
 import {
   createConsentDocument,
   getConsentDocument,
@@ -281,12 +282,11 @@ router.get('/documents/:id/active-version', authMiddleware, async (req: Request,
 router.post('/versions/:id/activate', 
   authMiddleware, 
   requireConsentManagement, 
-  requireSignatureFor('I authorize activation of this consent document version'),
+  requirePart11({ meaning: 'I authorize activation of this consent document version' }),
   async (req: Request, res: Response) => {
     try {
-      const p11 = req as Part11Request;
-      if (!p11.signatureVerified) {
-        logger.warn('Consent version activation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+      const signed = req as SignedRequest;
+      if (!signed.signature?.verified) {
         res.status(403).json({ success: false, message: 'Electronic signature required to activate consent version (21 CFR Part 11 §11.50)' });
         return;
       }
@@ -308,19 +308,42 @@ router.post('/versions/:id/activate',
 /**
  * POST /api/consent/subjects/:studySubjectId/consent
  * Record subject consent (requires electronic signature per §11.50)
+ *
+ * Signature verification accepts TWO modes:
+ *   1. Inline password via requirePart11 middleware (sets req.signature.verified)
+ *   2. Pre-authenticated signature IDs (investigatorSignatureId, subjectSignatureId)
+ *      — these were already password-verified when created via the e-signature service
  */
 router.post('/subjects/:studySubjectId/consent', 
   authMiddleware, 
   validate({ body: consentSchemas.recordConsent }),
-  requireSignatureFor('I confirm informed consent has been obtained from this subject'),
+  requirePart11({ meaning: 'I confirm informed consent has been obtained from this subject' }),
   async (req: Request, res: Response) => {
     try {
-      const p11 = req as Part11Request;
-      if (!p11.signatureVerified) {
-        logger.warn('Consent recording attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+      const signed = req as SignedRequest;
+      const hasInlineSignature = signed.signature?.verified === true;
+      const hasPreAuthSignature = !!(req.body.investigatorSignatureId || req.body.subjectSignatureId);
+
+      if (!hasInlineSignature && !hasPreAuthSignature) {
         res.status(403).json({ success: false, message: 'Electronic signature required to record consent (21 CFR Part 11 §11.50)' });
         return;
       }
+
+      if (hasPreAuthSignature && !hasInlineSignature) {
+        const sigId = req.body.investigatorSignatureId || req.body.subjectSignatureId;
+        const sigCheck = await pool.query(
+          `SELECT audit_id FROM audit_log_event
+           WHERE audit_id = $1
+             AND entity_name = 'Electronic Signature Applied'
+           LIMIT 1`,
+          [sigId]
+        );
+        if (sigCheck.rows.length === 0) {
+          res.status(403).json({ success: false, message: 'Invalid electronic signature: signature record not found' });
+          return;
+        }
+      }
+
       const studySubjectId = parseInt(req.params.studySubjectId);
       const userId = (req as any).user?.userId;
       
@@ -417,12 +440,11 @@ router.get('/subjects/:studySubjectId/consent-gate', authMiddleware, async (req:
  */
 router.post('/:consentId/withdraw', 
   authMiddleware, 
-  requireSignatureFor('I confirm withdrawal of consent for this subject'),
+  requirePart11({ meaning: 'I confirm withdrawal of consent for this subject' }),
   async (req: Request, res: Response) => {
     try {
-      const p11 = req as Part11Request;
-      if (!p11.signatureVerified) {
-        logger.warn('Consent withdrawal attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
+      const signed = req as SignedRequest;
+      if (!signed.signature?.verified) {
         res.status(403).json({ success: false, message: 'Electronic signature required to withdraw consent (21 CFR Part 11 §11.50)' });
         return;
       }

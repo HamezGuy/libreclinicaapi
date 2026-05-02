@@ -20,7 +20,7 @@ import * as controller from '../controllers/validation-rules.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { FORMAT_TYPE_REGISTRY } from '../services/database/validation-rules.service';
 import { requireRole } from '../middleware/authorization.middleware';
-import { requireSignatureFor, requireSignatureForStrict } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
 import { validate, validationRuleSchemas } from '../middleware/validation.middleware';
 import { aiCompileRateLimiter } from '../middleware/rateLimiter.middleware';
 
@@ -35,8 +35,8 @@ const router = Router();
  * flag only after the frontend has been updated to surface the
  * ESignatureModal before submitting rule mutations.
  */
-const SIG_STRICT = process.env.STRICT_VALIDATION_RULE_SIGNATURES === 'true';
-const ruleSignature = SIG_STRICT ? requireSignatureForStrict : requireSignatureFor;
+const RULE_SIG_REQUIRED = process.env.STRICT_VALIDATION_RULE_SIGNATURES === 'true';
+const ruleSignature = (meaning: string) => requirePart11({ meaning, required: RULE_SIG_REQUIRED });
 
 // All routes require authentication
 router.use(authMiddleware);
@@ -73,6 +73,9 @@ router.get('/crf/:crfId', validate({ params: crfIdParam }), controller.getRulesF
 router.get('/study/:studyId', validate({ params: Joi.object({ studyId: Joi.number().integer().positive().required() }) }), controller.getRulesForStudy);
 router.get('/all-crfs', controller.getAllCrfsWithRules);
 
+// Bulk health check: scan all CRFs for broken validation rules (read-only)
+router.get('/health', controller.getHealthCheck);
+
 // Toggle field required status (direct field property, not a validation rule)
 router.put('/field-required',
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
@@ -89,6 +92,14 @@ router.get('/format-types', (_req, res) => {
     res.status(500).json({ success: false, message: 'Failed to load format types' });
   }
 });
+
+// Repair stale column references in validation rules for a CRF.
+// POST (not GET) because it mutates data. ?dryRun=true for preview.
+router.post('/crf/:crfId/repair-columns',
+  requireRole('admin', 'data_manager', 'investigator', 'coordinator'),
+  validate({ params: crfIdParam }),
+  controller.repairStaleColumns
+);
 
 router.get('/:ruleId', validate({ params: ruleIdParam }), controller.getRule);
 

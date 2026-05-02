@@ -268,24 +268,21 @@ export function resolveCellTypeInfo(
     }
   }
 
-  // Check question table answer columns across ALL rows (rows can have
-  // varying answer column definitions in some templates — inspecting only
-  // the first row would return the wrong type for every other row).
-  if (parentFieldTypeInfo.questionRows?.length) {
-    for (const row of parentFieldTypeInfo.questionRows) {
-      const cols = (row as any).answerColumns;
-      if (!Array.isArray(cols)) continue;
-      const ansCol = cols.find(
-        (c: any) => c.id === colKey || c.name === colKey || (c as any).key === colKey
-      );
-      if (ansCol) {
-        return {
-          cellType: ansCol.type || 'text',
-          cellOptions: ansCol.options,
-          cellMin: ansCol.min,
-          cellMax: ansCol.max,
-        };
-      }
+  // Check question table answer columns — prefer top-level answerColumns,
+  // fall back to per-row answerColumns for legacy data.
+  const ansCols = (parentFieldTypeInfo as any).answerColumns
+    || parentFieldTypeInfo.questionRows?.[0]?.answerColumns;
+  if (Array.isArray(ansCols)) {
+    const ansCol = ansCols.find(
+      (c: any) => c.id === colKey || c.name === colKey || (c as any).key === colKey
+    );
+    if (ansCol) {
+      return {
+        cellType: ansCol.type || 'text',
+        cellOptions: ansCol.options,
+        cellMin: ansCol.min,
+        cellMax: ansCol.max,
+      };
     }
   }
 

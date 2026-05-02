@@ -284,15 +284,13 @@ export const applyCorrectionToItemData = async (
         );
         if (col) canonicalCellColumnKey = col.key || col.name || col.id || cellColumnId;
       } else if (isQuestionTable) {
-        for (const row of ext.questionRows) {
-          const cols = Array.isArray(row?.answerColumns) ? row.answerColumns : [];
-          const col = cols.find((c: any) =>
-            c && (c.id === cellColumnId || c.name === cellColumnId || (c as any).key === cellColumnId)
-          );
-          if (col) {
-            canonicalCellColumnKey = (col as any).key || col.name || col.id || cellColumnId;
-            break;
-          }
+        const ansCols = Array.isArray(ext.answerColumns) ? ext.answerColumns
+          : (Array.isArray(ext.questionRows[0]?.answerColumns) ? ext.questionRows[0].answerColumns : []);
+        const col = ansCols.find((c: any) =>
+          c && (c.id === cellColumnId || c.name === cellColumnId || (c as any).key === cellColumnId)
+        );
+        if (col) {
+          canonicalCellColumnKey = (col as any).key || col.name || col.id || cellColumnId;
         }
       }
     } catch (e: any) {

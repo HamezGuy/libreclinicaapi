@@ -9,8 +9,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as dataLocksService from '../services/database/data-locks.service';
 import * as unlockRequestsService from '../services/database/unlock-requests.service';
-import { logger } from '../config/logger';
-import type { Part11Request } from '../middleware/part11.middleware';
+import { demandSignature, type SignedRequest } from '../middleware/part11.middleware';
 import type { ApiResponse, LockEligibility, CasebookReadiness, SanitationReport, StudyLockStatus, LockHistory } from '@accura-trial/shared-types';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -82,12 +81,7 @@ export const checkEventEligibility = asyncHandler(async (req: Request, res: Resp
  * POST /api/data-locks
  */
 export const lock = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Data lock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to lock a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfId, reason } = req.body;
 
@@ -101,12 +95,7 @@ export const lock = asyncHandler(async (req: Request, res: Response) => {
  * DELETE /api/data-locks/:eventCrfId
  */
 export const unlock = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Data unlock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to unlock a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfId } = req.params;
   const { reason } = req.body;
@@ -126,12 +115,7 @@ export const unlock = asyncHandler(async (req: Request, res: Response) => {
  * Body: { reason: string, skipValidation?: boolean }
  */
 export const lockSubject = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject lock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to lock subject data (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { studySubjectId } = req.params;
   const { reason, skipValidation } = req.body;
@@ -149,12 +133,7 @@ export const lockSubject = asyncHandler(async (req: Request, res: Response) => {
  * Body: { reason: string }
  */
 export const unlockSubject = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject unlock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to unlock subject data (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { studySubjectId } = req.params;
   const { reason } = req.body;
@@ -175,12 +154,7 @@ export const unlockSubject = asyncHandler(async (req: Request, res: Response) =>
  * Body: { reason: string, skipValidation?: boolean }
  */
 export const lockEvent = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Event lock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to lock event data (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { studyEventId } = req.params;
   const { reason, skipValidation } = req.body;
@@ -198,12 +172,7 @@ export const lockEvent = asyncHandler(async (req: Request, res: Response) => {
  * Body: { reason: string }
  */
 export const unlockEvent = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Event unlock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to unlock event data (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { studyEventId } = req.params;
   const { reason } = req.body;
@@ -223,12 +192,7 @@ export const unlockEvent = asyncHandler(async (req: Request, res: Response) => {
  * POST /api/data-locks/freeze/:eventCrfId
  */
 export const freeze = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Freeze attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to freeze a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const eventCrfId = parseInt(req.params.eventCrfId);
 
@@ -245,12 +209,7 @@ export const freeze = asyncHandler(async (req: Request, res: Response) => {
  * DELETE /api/data-locks/freeze/:eventCrfId
  */
 export const unfreeze = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Unfreeze attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to unfreeze a form (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const eventCrfId = parseInt(req.params.eventCrfId);
   const { reason } = req.body;
@@ -273,12 +232,7 @@ export const unfreeze = asyncHandler(async (req: Request, res: Response) => {
  * POST /api/data-locks/batch/freeze
  */
 export const batchFreeze = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Batch freeze attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to batch freeze forms (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfIds } = req.body;
 
@@ -301,12 +255,7 @@ export const batchFreeze = asyncHandler(async (req: Request, res: Response) => {
  * Body: { eventCrfIds: number[] }
  */
 export const batchLock = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Batch lock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to batch lock forms (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfIds, reason } = req.body;
 
@@ -325,12 +274,7 @@ export const batchLock = asyncHandler(async (req: Request, res: Response) => {
  * Body: { eventCrfIds: number[] }
  */
 export const batchUnlock = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Batch unlock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to batch unlock forms (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfIds, reason } = req.body;
 
@@ -349,12 +293,7 @@ export const batchUnlock = asyncHandler(async (req: Request, res: Response) => {
  * Body: { eventCrfIds: number[] }
  */
 export const batchSDV = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Batch SDV attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required for batch SDV (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfIds } = req.body;
 
@@ -416,12 +355,7 @@ export const createUnlockRequest = asyncHandler(async (req: Request, res: Respon
  * PUT /api/data-locks/unlock-requests/:requestId/review
  */
 export const reviewUnlockRequest = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Unlock request review attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to review unlock requests (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const requestId = parseInt(req.params.requestId);
   const { action, reviewNotes } = req.body;
@@ -503,12 +437,7 @@ export const getStudyLockStatus = asyncHandler(async (req: Request, res: Respons
  * Lock the entire study dataset (admin + investigator dual e-sig enforced at route level).
  */
 export const lockStudy = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Study lock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to lock study dataset (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const studyId = parseInt(req.params.studyId);
   const { reason } = req.body;
@@ -522,12 +451,7 @@ export const lockStudy = asyncHandler(async (req: Request, res: Response) => {
  * Unlock the study dataset (admin only).
  */
 export const unlockStudy = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Study unlock attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to unlock study dataset (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const studyId = parseInt(req.params.studyId);
   const { reason } = req.body;
@@ -612,12 +536,7 @@ export const getSubjectLockHistory = asyncHandler(async (req: Request, res: Resp
  * POST /api/data-locks/freeze/subject/:id
  */
 export const freezeSubject = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject freeze attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to freeze subject data (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const studySubjectId = parseInt(req.params.id);
   const { reason } = req.body;
@@ -630,12 +549,7 @@ export const freezeSubject = asyncHandler(async (req: Request, res: Response) =>
  * DELETE /api/data-locks/freeze/subject/:id
  */
 export const unfreezeSubject = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject unfreeze attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to unfreeze subject data (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const studySubjectId = parseInt(req.params.id);
   const { reason } = req.body;

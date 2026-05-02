@@ -28,7 +28,7 @@ import {
   Part11EventTypes,
   recordPart11Audit,
   Part11Request,
-  requireSignature,
+  requirePart11,
   formatPart11Timestamp
 } from '../middleware/part11.middleware';
 
@@ -123,7 +123,7 @@ router.post('/initiate', authMiddleware, requireTransferRole, async (req: Part11
  * - §11.50: REQUIRES electronic signature (password verification)
  * - §11.10(e): Records approval with signature details
  */
-router.post('/:transferId/approve', authMiddleware, requireSignature, async (req: Part11Request, res: Response) => {
+router.post('/:transferId/approve', authMiddleware, requirePart11({ meaning: 'Authorized action', required: true }), async (req: Part11Request, res: Response) => {
   try {
     const transferId = parseInt(req.params.transferId);
     const { approvalType } = req.body;

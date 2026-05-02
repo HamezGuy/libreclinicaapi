@@ -15,7 +15,7 @@ import * as subjectService from '../services/hybrid/subject.service';
 import { logger } from '../config/logger';
 import { trackUserAction } from '../services/database/audit.service';
 import type { SubjectCreateRequest, SubjectUpdateRequest, ApiResponse, StudySubject } from '@accura-trial/shared-types';
-import type { Part11Request } from '../middleware/part11.middleware';
+import { demandSignature, type SignedRequest } from '../middleware/part11.middleware';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
   const { studyId, status, page, limit, search, siteId, includeArchived } = req.query;
@@ -166,12 +166,7 @@ export const update = asyncHandler(async (req: Request, res: Response) => {
  * Update subject status
  */
 export const updateStatus = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject status update attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to update subject status (21 CFR Part 11 §11.50)' } satisfies ApiResponse);
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
   const { statusId, reason } = req.body;
@@ -195,12 +190,7 @@ export const updateStatus = asyncHandler(async (req: Request, res: Response) => 
  * Soft delete subject (set status to removed)
  */
 export const remove = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject removal attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to remove a subject (21 CFR Part 11 §11.50)' } satisfies ApiResponse);
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const { id } = req.params;
   const user = (req as any).user;
 

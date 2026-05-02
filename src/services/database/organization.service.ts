@@ -508,7 +508,7 @@ export const reviewAccessRequest = async (requestId: number, decision: string, r
           INSERT INTO user_account (user_name, passwd, first_name, last_name, email, phone, user_type_id, status_id, owner_id, date_created, enabled, account_non_locked)
           VALUES ($1, $2, $3, $4, $5, $6, 2, 1, $7, NOW(), true, true) RETURNING user_id
         `, [username, passwordHash, r.firstName, r.lastName, r.email, r.phone, reviewerId]);
-        userId = userResult.rows[0].user_id;
+        userId = userResult.rows[0].userId;
         await client.query(`UPDATE acc_access_request SET user_id = $1 WHERE request_id = $2`, [userId, requestId]);
 
         if (r.organizationId) {

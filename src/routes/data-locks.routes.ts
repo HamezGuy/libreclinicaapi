@@ -16,7 +16,8 @@ import express from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { requireEntityStudyAccess } from '../middleware/study-scope.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 import { validate, dataLockSchemas, commonSchemas } from '../middleware/validation.middleware';
 import * as dataLocksController from '../controllers/data-locks.controller';
 
@@ -102,7 +103,7 @@ router.post('/',
   requireRole('monitor', 'data_manager', 'admin'), 
   validate({ body: dataLockSchemas.lock }),
   requireEntityStudyAccess('eventCrf', 'eventCrfId'),
-  requireSignatureFor(SignatureMeanings.FORM_LOCK),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.FORM_LOCK }),
   dataLocksController.lock
 );
 
@@ -112,7 +113,7 @@ router.delete('/:eventCrfId',
   requireRole('admin'), 
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unlockBody }),
   requireEntityStudyAccess('eventCrf', 'eventCrfId'),
-  requireSignatureFor('I authorize unlocking this form for editing'),
+  requirePart11({ meaning: 'I authorize unlocking this form for editing' }),
   dataLocksController.unlock
 );
 
@@ -121,7 +122,7 @@ router.post('/:eventCrfId/unlock',
   requireRole('admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unlockBody }),
   requireEntityStudyAccess('eventCrf', 'eventCrfId'),
-  requireSignatureFor('I authorize unlocking this form for editing'),
+  requirePart11({ meaning: 'I authorize unlocking this form for editing' }),
   dataLocksController.unlock
 );
 
@@ -134,7 +135,7 @@ router.post('/subject/:studySubjectId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.lockSubject }),
   requireEntityStudyAccess('studySubject', 'studySubjectId'),
-  requireSignatureFor('I confirm that all data has been reviewed and is ready for locking'),
+  requirePart11({ meaning: 'I confirm that all data has been reviewed and is ready for locking' }),
   dataLocksController.lockSubject
 );
 
@@ -144,7 +145,7 @@ router.delete('/subject/:studySubjectId',
   requireRole('admin'),
   validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.unlockBody }),
   requireEntityStudyAccess('studySubject', 'studySubjectId'),
-  requireSignatureFor('I authorize unlocking this subject data for editing'),
+  requirePart11({ meaning: 'I authorize unlocking this subject data for editing' }),
   dataLocksController.unlockSubject
 );
 
@@ -153,7 +154,7 @@ router.post('/subject/:studySubjectId/unlock',
   requireRole('admin'),
   validate({ params: dataLockSchemas.studySubjectIdParam, body: dataLockSchemas.unlockBody }),
   requireEntityStudyAccess('studySubject', 'studySubjectId'),
-  requireSignatureFor('I authorize unlocking this subject data for editing'),
+  requirePart11({ meaning: 'I authorize unlocking this subject data for editing' }),
   dataLocksController.unlockSubject
 );
 
@@ -166,7 +167,7 @@ router.post('/event/:studyEventId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.lockEvent }),
   requireEntityStudyAccess('studyEvent', 'studyEventId'),
-  requireSignatureFor('I confirm that all data for this visit has been reviewed and is ready for locking'),
+  requirePart11({ meaning: 'I confirm that all data for this visit has been reviewed and is ready for locking' }),
   dataLocksController.lockEvent
 );
 
@@ -176,7 +177,7 @@ router.delete('/event/:studyEventId',
   requireRole('admin'),
   validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.unlockBody }),
   requireEntityStudyAccess('studyEvent', 'studyEventId'),
-  requireSignatureFor('I authorize unlocking this visit data for editing'),
+  requirePart11({ meaning: 'I authorize unlocking this visit data for editing' }),
   dataLocksController.unlockEvent
 );
 
@@ -185,7 +186,7 @@ router.post('/event/:studyEventId/unlock',
   requireRole('admin'),
   validate({ params: dataLockSchemas.studyEventIdParam, body: dataLockSchemas.unlockBody }),
   requireEntityStudyAccess('studyEvent', 'studyEventId'),
-  requireSignatureFor('I authorize unlocking this visit data for editing'),
+  requirePart11({ meaning: 'I authorize unlocking this visit data for editing' }),
   dataLocksController.unlockEvent
 );
 
@@ -203,7 +204,7 @@ router.get('/freeze',
 router.post('/freeze/subject/:id',
   requireRole('monitor', 'data_manager', 'admin'),
   requireEntityStudyAccess('studySubject', 'id'),
-  requireSignatureFor('I confirm this subject data is ready to be frozen'),
+  requirePart11({ meaning: 'I confirm this subject data is ready to be frozen' }),
   dataLocksController.freezeSubject
 );
 
@@ -212,7 +213,7 @@ router.post('/freeze/subject/:id',
 router.delete('/freeze/subject/:id',
   requireRole('data_manager', 'admin'),
   requireEntityStudyAccess('studySubject', 'id'),
-  requireSignatureFor('I authorize unfreezing this subject data for editing'),
+  requirePart11({ meaning: 'I authorize unfreezing this subject data for editing' }),
   dataLocksController.unfreezeSubject
 );
 
@@ -220,7 +221,7 @@ router.delete('/freeze/subject/:id',
 router.post('/freeze/subject/:id/unfreeze',
   requireRole('data_manager', 'admin'),
   requireEntityStudyAccess('studySubject', 'id'),
-  requireSignatureFor('I authorize unfreezing this subject data for editing'),
+  requirePart11({ meaning: 'I authorize unfreezing this subject data for editing' }),
   dataLocksController.unfreezeSubject
 );
 
@@ -229,7 +230,7 @@ router.post('/freeze/:eventCrfId',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.freeze }),
   requireEntityStudyAccess('eventCrf', 'eventCrfId'),
-  requireSignatureFor('I confirm this form data is ready to be frozen'),
+  requirePart11({ meaning: 'I confirm this form data is ready to be frozen' }),
   dataLocksController.freeze
 );
 
@@ -239,7 +240,7 @@ router.delete('/freeze/:eventCrfId',
   requireRole('data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
   requireEntityStudyAccess('eventCrf', 'eventCrfId'),
-  requireSignatureFor('I authorize unfreezing this form for editing'),
+  requirePart11({ meaning: 'I authorize unfreezing this form for editing' }),
   dataLocksController.unfreeze
 );
 
@@ -248,7 +249,7 @@ router.post('/freeze/:eventCrfId/unfreeze',
   requireRole('data_manager', 'admin'),
   validate({ params: dataLockSchemas.eventCrfIdParam, body: dataLockSchemas.unfreeze }),
   requireEntityStudyAccess('eventCrf', 'eventCrfId'),
-  requireSignatureFor('I authorize unfreezing this form for editing'),
+  requirePart11({ meaning: 'I authorize unfreezing this form for editing' }),
   dataLocksController.unfreeze
 );
 
@@ -256,7 +257,7 @@ router.post('/freeze/:eventCrfId/unfreeze',
 router.post('/batch/freeze',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: dataLockSchemas.batchIds }),
-  requireSignatureFor('I confirm these forms are ready to be frozen'),
+  requirePart11({ meaning: 'I confirm these forms are ready to be frozen' }),
   dataLocksController.batchFreeze
 );
 
@@ -268,7 +269,7 @@ router.post('/batch/freeze',
 router.post('/batch/lock',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: dataLockSchemas.batchIds }),
-  requireSignatureFor(SignatureMeanings.FORM_LOCK),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.FORM_LOCK }),
   dataLocksController.batchLock
 );
 
@@ -276,7 +277,7 @@ router.post('/batch/lock',
 router.post('/batch/unlock',
   requireRole('admin'),
   validate({ body: dataLockSchemas.batchIds }),
-  requireSignatureFor('I authorize unlocking these forms for editing'),
+  requirePart11({ meaning: 'I authorize unlocking these forms for editing' }),
   dataLocksController.batchUnlock
 );
 
@@ -284,7 +285,7 @@ router.post('/batch/unlock',
 router.post('/batch/sdv',
   requireRole('monitor', 'data_manager', 'admin'),
   validate({ body: dataLockSchemas.batchIds }),
-  requireSignatureFor('I confirm source data verification of these forms'),
+  requirePart11({ meaning: 'I confirm source data verification of these forms' }),
   dataLocksController.batchSDV
 );
 
@@ -307,7 +308,7 @@ router.post('/unlock-requests',
 router.put('/unlock-requests/:requestId/review',
   requireRole('admin', 'data_manager'),
   validate({ params: dataLockSchemas.requestIdParam, body: dataLockSchemas.reviewUnlockRequest }),
-  requireSignatureFor('I authorize this unlock request decision'),
+  requirePart11({ meaning: 'I authorize this unlock request decision' }),
   dataLocksController.reviewUnlockRequest
 );
 
@@ -350,7 +351,7 @@ router.get('/study/:studyId/status',
 router.post('/study/:studyId',
   requireRole('admin', 'investigator'),
   validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.lockStudy }),
-  requireSignatureFor('I authorize the final lock of this study dataset'),
+  requirePart11({ meaning: 'I authorize the final lock of this study dataset' }),
   dataLocksController.lockStudy
 );
 
@@ -359,7 +360,7 @@ router.post('/study/:studyId',
 router.delete('/study/:studyId',
   requireRole('admin'),
   validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.unlockBody }),
-  requireSignatureFor('I authorize unlocking this study dataset'),
+  requirePart11({ meaning: 'I authorize unlocking this study dataset' }),
   dataLocksController.unlockStudy
 );
 
@@ -367,7 +368,7 @@ router.delete('/study/:studyId',
 router.post('/study/:studyId/unlock',
   requireRole('admin'),
   validate({ params: commonSchemas.studyIdParam, body: dataLockSchemas.unlockBody }),
-  requireSignatureFor('I authorize unlocking this study dataset'),
+  requirePart11({ meaning: 'I authorize unlocking this study dataset' }),
   dataLocksController.unlockStudy
 );
 

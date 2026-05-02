@@ -93,10 +93,20 @@ export const getQueries = async (
     const params: any[] = [];
     let paramIndex = 1;
 
+    // ── Organization scoping ─────────────────────────────────────────
+    // Restrict queries to studies owned by the caller's organization.
+    // Uses the same pattern as study.service.ts: study.owner_id must be
+    // an active member of one of the caller's organizations.
     if (callerUserId) {
       const orgUserIds = await getOrgMemberUserIds(callerUserId);
-      if (orgUserIds) {
-        conditions.push(`(dn.owner_id = ANY($${paramIndex}::int[]) OR dn.assigned_user_id = $${paramIndex + 1})`);
+      if (orgUserIds && orgUserIds.length > 0) {
+        conditions.push(`(
+          dn.study_id IN (
+            SELECT s_inner.study_id FROM study s_inner
+            WHERE s_inner.owner_id = ANY($${paramIndex}::int[])
+          )
+          OR dn.assigned_user_id = $${paramIndex + 1}
+        )`);
         params.push(orgUserIds, callerUserId);
         paramIndex += 2;
       }
@@ -223,8 +233,16 @@ export const getQueryById = async (queryId: number, callerUserId?: number): Prom
 
     if (callerUserId) {
       const orgUserIds = await getOrgMemberUserIds(callerUserId);
-      if (orgUserIds && !orgUserIds.includes(parent.ownerId) && parent.assignedUserId !== callerUserId) {
-        return null;
+      if (orgUserIds) {
+        const studyRow = parent.studyId
+          ? await pool.query('SELECT owner_id FROM study WHERE study_id = $1', [parent.studyId])
+          : { rows: [] };
+        const studyOwner: number | undefined = studyRow.rows[0]?.ownerId;
+        const studyBelongsToOrg = studyOwner != null && orgUserIds.includes(studyOwner);
+        const assignedToMe = parent.assignedUserId === callerUserId;
+        if (!studyBelongsToOrg && !assignedToMe) {
+          return null;
+        }
       }
     }
 

@@ -20,7 +20,8 @@ import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, subjectSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 import * as studyParamsService from '../services/database/studyParameters.service';
 import * as studyGroupsService from '../services/database/studyGroups.service';
 import { logger } from '../config/logger';
@@ -126,7 +127,7 @@ router.put('/:id',
 router.put('/:id/status', 
   requireRole('admin', 'data_manager', 'coordinator', 'investigator'), 
   validate({ params: commonSchemas.idParam, body: subjectSchemas.updateStatus }), 
-  requireSignatureFor(SignatureMeanings.SUBJECT_WITHDRAW),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.SUBJECT_WITHDRAW }),
   controller.updateStatus
 );
 
@@ -134,7 +135,7 @@ router.put('/:id/status',
 router.delete('/:id', 
   requireRole('admin', 'data_manager', 'coordinator', 'investigator'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.SUBJECT_DELETE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.SUBJECT_DELETE }),
   controller.remove
 );
 

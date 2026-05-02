@@ -11,7 +11,7 @@ import { Router } from 'express';
 import Joi from 'joi';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validation.middleware';
-import { requireSignature } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
 import * as rtsmCtrl from '../controllers/rtsm.controller';
 
 const router = Router();
@@ -63,7 +63,7 @@ router.post('/shipments/:id/confirm', rtsmCtrl.confirmShipmentReceipt);
 
 // ── Dispensing ───────────────────────────────────────────────────────────────
 
-router.post('/dispense', requireSignature, rtsmCtrl.dispenseKit);
+router.post('/dispense', requirePart11({ meaning: 'Authorized action', required: true }), rtsmCtrl.dispenseKit);
 router.get('/dispensations', rtsmCtrl.listDispensations);
 
 // ── Temperature ──────────────────────────────────────────────────────────────

@@ -16,7 +16,8 @@ import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/authorization.middleware';
 import { validate, eventSchemas, commonSchemas } from '../middleware/validation.middleware';
 import { soapRateLimiter } from '../middleware/rateLimiter.middleware';
-import { requireSignatureFor, SignatureMeanings } from '../middleware/part11.middleware';
+import { requirePart11 } from '../middleware/part11.middleware';
+import { SIGNATURE_MEANINGS } from '@accura-trial/shared-types';
 
 const router = express.Router();
 
@@ -47,19 +48,19 @@ router.get('/instance/:studyEventId/lock-eligibility', controller.getVisitLockEl
 router.post('/', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ body: eventSchemas.create }), 
-  requireSignatureFor(SignatureMeanings.EVENT_CREATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.EVENT_CREATE }),
   controller.create
 );
 router.put('/:id', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ params: commonSchemas.idParam, body: eventSchemas.update }), 
-  requireSignatureFor(SignatureMeanings.EVENT_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.EVENT_UPDATE }),
   controller.update
 );
 router.delete('/:id', 
   requireRole('admin'), 
   validate({ params: commonSchemas.idParam }), 
-  requireSignatureFor(SignatureMeanings.EVENT_DELETE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.EVENT_DELETE }),
   controller.remove
 );
 
@@ -68,7 +69,7 @@ router.post('/schedule',
   requireRole('data_manager', 'coordinator', 'investigator'), 
   soapRateLimiter, 
   validate({ body: eventSchemas.schedule }), 
-  requireSignatureFor(SignatureMeanings.EVENT_SCHEDULE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.EVENT_SCHEDULE }),
   controller.scheduleEvent
 );
 
@@ -83,35 +84,35 @@ router.get('/study/:studyId/event/:eventId/available-crfs', controller.getAvaila
 router.post('/:eventId/crfs', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
   validate({ body: eventSchemas.assignCrf }),
-  requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_ASSIGN }),
   controller.assignCrf
 );
 
 // Update CRF assignment settings (signature required)
 router.put('/crf-assignment/:crfAssignmentId', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
-  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_UPDATE }),
   controller.updateEventCrf
 );
 
 // Remove CRF from event (signature required)
 router.delete('/crf-assignment/:crfAssignmentId', 
   requireRole('admin', 'data_manager', 'investigator'), 
-  requireSignatureFor(SignatureMeanings.CRF_DELETE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_DELETE }),
   controller.removeCrf
 );
 
 // Reorder CRFs within an event (signature required)
 router.put('/:eventId/crfs/reorder', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
-  requireSignatureFor(SignatureMeanings.CRF_UPDATE),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_UPDATE }),
   controller.reorderCrfs
 );
 
 // Bulk assign CRFs to event (signature required)
 router.post('/:eventId/crfs/bulk', 
   requireRole('admin', 'data_manager', 'investigator', 'coordinator'), 
-  requireSignatureFor(SignatureMeanings.CRF_ASSIGN),
+  requirePart11({ meaning: SIGNATURE_MEANINGS.CRF_ASSIGN }),
   controller.bulkAssignCrfs
 );
 

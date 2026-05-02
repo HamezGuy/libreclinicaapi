@@ -9,8 +9,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as randomizationService from '../services/database/randomization.service';
 import * as engine from '../services/database/randomization-engine.service';
-import { logger } from '../config/logger';
-import type { Part11Request } from '../middleware/part11.middleware';
+import { demandSignature, type SignedRequest } from '../middleware/part11.middleware';
 import type { ApiResponse, RandomizationConfig, RandomizationResult } from '@accura-trial/shared-types';
 
 // ============================================================================
@@ -111,12 +110,7 @@ export const updateConfig = asyncHandler(async (req: Request, res: Response) => 
  * Generate the sealed randomization list
  */
 export const generateList = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Randomization list generation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to generate randomization list (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { configId } = req.params;
 
@@ -133,12 +127,7 @@ export const generateList = asyncHandler(async (req: Request, res: Response) => 
  * Activate the randomization scheme
  */
 export const activateConfig = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Randomization activation attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to activate randomization scheme (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { configId } = req.params;
 
@@ -187,12 +176,7 @@ export const getListStats = asyncHandler(async (req: Request, res: Response) => 
  * The server determines the treatment assignment — no manual group selection.
  */
 export const randomize = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Subject randomization attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to randomize a subject (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { studyId, studySubjectId, stratumValues } = req.body;
 
@@ -238,12 +222,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
  * Prefer POST /randomize for proper engine-based randomization.
  */
 export const create = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Legacy randomization attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required for randomization (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { studySubjectId, studyGroupId } = req.body;
 
@@ -293,12 +272,7 @@ export const getSubjectRandomization = asyncHandler(async (req: Request, res: Re
 });
 
 export const remove = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Randomization removal attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to remove randomization (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { subjectId } = req.params;
 
@@ -324,12 +298,7 @@ export const getUnblindingEvents = asyncHandler(async (req: Request, res: Respon
 });
 
 export const unblind = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Unblinding attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required for unblinding (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { subjectId } = req.params;
   const { reason } = req.body;

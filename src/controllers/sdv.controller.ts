@@ -12,8 +12,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as sdvService from '../services/database/sdv.service';
-import { logger } from '../config/logger';
-import type { Part11Request } from '../middleware/part11.middleware';
+import { demandSignature, type SignedRequest } from '../middleware/part11.middleware';
 import type { ApiResponse, SDVRecord, SDVStats } from '@accura-trial/shared-types';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
@@ -57,12 +56,7 @@ export const getFormData = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const verify = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('SDV verification attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required for source data verification (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { id } = req.params;
 
@@ -75,12 +69,7 @@ export const verify = asyncHandler(async (req: Request, res: Response) => {
  * Bulk verify multiple SDV records
  */
 export const bulkVerify = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('Bulk SDV verification attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required for bulk source data verification (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { eventCrfIds } = req.body;
 
@@ -141,12 +130,7 @@ export const getByVisit = asyncHandler(async (req: Request, res: Response) => {
  * Unverify SDV record
  */
 export const unverify = asyncHandler(async (req: Request, res: Response) => {
-  const p11 = req as Part11Request;
-  if (!p11.signatureVerified) {
-    logger.warn('SDV unverify attempted without verified e-signature', { userId: p11.user?.userId, path: req.path });
-    res.status(403).json({ success: false, message: 'Electronic signature required to remove SDV verification (21 CFR Part 11 §11.50)' });
-    return;
-  }
+  demandSignature(req as SignedRequest);
   const user = (req as any).user;
   const { id } = req.params;
 

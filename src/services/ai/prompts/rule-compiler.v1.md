@@ -101,7 +101,7 @@ The EDC supports 6 base rule types, which expand into 52+ specific check types. 
 |---|---|---|---|
 | "must be greater than X" | `>` | "X" | value <= X |
 | "must be less than X" | `<` | "X" | value >= X |
-| "flag if over X" (soft query) | `>` | "X" | value <= X... wait NO: user wants to FLAG values over X, so rule should fire when value > X. Use `<=` to mean "value must be <= X" which fires when > X. OR interpret as the query fires on values over X. |
+| "flag if over X" (soft query) | `<=` | "X" | value > X (rule fires because value is NOT <= X) |
 | "must be at least X" | `>=` | "X" | value < X |
 | "must be at most X" | `<=` | "X" | value > X |
 | "must equal X" | `==` | "X" | value != X |
@@ -806,3 +806,37 @@ USER_DESCRIPTION_PLACEHOLDER
 |||
 
 Maximum number of rules to emit: MAX_RULES_PLACEHOLDER (the response array must not exceed this).
+
+# MANDATORY PRE-OUTPUT SIGN CHECK
+
+Before emitting your JSON response, you MUST mentally execute this checklist for EVERY consistency rule. This is the single most common source of production bugs — reversed operators cause rules to fire on CORRECT values and pass INCORRECT ones.
+
+**For each consistency rule, ask these 3 questions:**
+
+1. **"When should this rule FIRE (create an error/query)?"**
+   Write the answer in plain English. Example: "Fire when hemoglobin > 18."
+
+2. **"What operator makes the comparison TRUE for ACCEPTABLE values?"**
+   The rule fires when the comparison is FALSE. So pick the operator that describes ACCEPTABLE values.
+   - If you want to fire when value > 18, acceptable means value <= 18, so operator = `<=`, compareValue = `18`.
+   - If you want to fire when value < 5, acceptable means value >= 5, so operator = `>=`, compareValue = `5`.
+   - If you want to fire when value != "Yes", acceptable means value == "Yes", so operator = `==`, compareValue = `"Yes"`.
+
+3. **"If I plug in a FAILING value, does the comparison return FALSE?"**
+   Mentally substitute a value that should trigger the rule:
+   - Rule: operator `<=`, compareValue `18`. Test with value `20`: is `20 <= 18`? NO (FALSE). Rule fires. CORRECT.
+   - Rule: operator `>=`, compareValue `5`. Test with value `3`: is `3 >= 5`? NO (FALSE). Rule fires. CORRECT.
+   - Rule: operator `>`, compareValue `18`. Test with value `20`: is `20 > 18`? YES (TRUE). Rule does NOT fire. WRONG — you wanted it to fire on 20.
+
+**Common sign-reversal traps:**
+
+| User says | WRONG operator | RIGHT operator | Why |
+|-----------|---------------|----------------|-----|
+| "flag if over 200" | `>` with compareValue `200` | `<=` with compareValue `200` | `>` means "acceptable if > 200" — backwards! `<=` means "acceptable if <= 200", fires when > 200. |
+| "flag if under 50" | `<` with compareValue `50` | `>=` with compareValue `50` | `<` means "acceptable if < 50" — backwards! `>=` means "acceptable if >= 50", fires when < 50. |
+| "value must be greater than 0" | `<=` with compareValue `0` | `>` with compareValue `0` | "Must be > 0" means acceptable is > 0, so operator IS `>`. Fires when NOT > 0. |
+| "query if hemoglobin exceeds 18" | `>` with compareValue `18` | `<=` with compareValue `18` | "Exceeds 18" = fire when > 18. Acceptable = <= 18. Operator = `<=`. |
+
+**The golden rule: the operator describes what is ACCEPTABLE, not what triggers the rule.**
+
+If you find yourself confused, convert to a range rule instead (range is simpler — just `minValue` and `maxValue` with no inverted semantics).
