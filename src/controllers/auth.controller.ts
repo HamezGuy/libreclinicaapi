@@ -17,6 +17,7 @@ import { logger } from '../config/logger';
 import { config } from '../config/environment';
 import jwt from 'jsonwebtoken';
 import type { ApiResponse, LoginResponse, UserProfile } from '@accura-trial/shared-types';
+import { blockToken, getActiveSession, registerSession, clearSession } from '../services/database/token-blocklist.service';
 
 /**
  * Login with username/password
@@ -39,6 +40,16 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const jwtPayload = await authService.buildJwtPayload(result.data);
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
   const customPermissions = await authService.fetchCustomPermissions(result.data.userId);
+
+  const existingSession = getActiveSession(result.data.userId);
+  if (existingSession) {
+    const decoded = jwt.decode(existingSession.token);
+    const exp = decoded && typeof decoded === 'object' && typeof decoded.exp === 'number'
+      ? decoded.exp * 1000
+      : Date.now();
+    blockToken(existingSession.token, exp);
+  }
+  registerSession(result.data.userId, tokens.accessToken, ipAddress);
 
   const body: LoginResponse & { organizations: { organizationId: string; organizationName: string; role: string }[] } = {
     success: true,
@@ -87,6 +98,16 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
   const jwtPayload = await authService.buildJwtPayload(result.data);
   const tokens = jwtUtil.generateTokenPair(jwtPayload);
   const customPermissions = await authService.fetchCustomPermissions(result.data.userId);
+
+  const existingSession = getActiveSession(result.data.userId);
+  if (existingSession) {
+    const decoded = jwt.decode(existingSession.token);
+    const exp = decoded && typeof decoded === 'object' && typeof decoded.exp === 'number'
+      ? decoded.exp * 1000
+      : Date.now();
+    blockToken(existingSession.token, exp);
+  }
+  registerSession(result.data.userId, tokens.accessToken, ipAddress);
 
   const body: LoginResponse & { organizations: { organizationId: string; organizationName: string; role: string }[] } = {
     success: true,
@@ -182,8 +203,19 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const ipAddress = req.ip || 'unknown';
 
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    const decoded = jwt.decode(token);
+    const exp = decoded && typeof decoded === 'object' && typeof decoded.exp === 'number'
+      ? decoded.exp * 1000
+      : Date.now();
+    blockToken(token, exp);
+  }
+
   const username = user?.userName || user?.username;
   if (user?.userId && username) {
+    clearSession(user.userId);
     await authService.logUserLogout(user.userId, username, ipAddress);
   }
 

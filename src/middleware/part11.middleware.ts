@@ -65,7 +65,7 @@ export function demandSignature(req: SignedRequest): Part11Signature {
 // PASSWORD FIELD SCRUBBING
 // ─────────────────────────────────────────────────────────────────────
 
-const CREDENTIAL_KEYS = ['password', 'signaturePassword', 'signatureUsername'] as const;
+const CREDENTIAL_KEYS = ['password', 'signaturePassword', 'signatureUsername', 'username'] as const;
 
 function stripCredentials(body: Record<string, unknown>): void {
   for (const key of CREDENTIAL_KEYS) {
@@ -146,20 +146,19 @@ export function requirePart11(opts: Part11Options) {
     const effectivePassword: string | undefined =
       body.signaturePassword || body.password || undefined;
     const effectiveUsername: string | undefined =
-      body.signatureUsername || signed.user?.userName || signed.user?.username || undefined;
+      body.signatureUsername || body.username || undefined;
+    const jwtUsername: string | undefined =
+      signed.user?.userName || signed.user?.username || undefined;
     const customMeaning: string | undefined = body.signatureMeaning;
 
-    // Scrub credentials from body BEFORE anything else — services must never
-    // see raw passwords regardless of whether verification succeeds.
     stripCredentials(body);
 
-    // ── No credentials supplied ──────────────────────────────────────
     if (!effectivePassword) {
       if (required) {
         res.status(403).json({
           success: false,
           code: 'SIGNATURE_REQUIRED',
-          message: `Electronic signature required for this action (21 CFR Part 11 §11.50). Submit with a password field.`,
+          message: `Electronic signature required for this action (21 CFR Part 11 §11.50). Submit with signatureUsername and signaturePassword fields.`,
         });
         return;
       }
@@ -168,22 +167,31 @@ export function requirePart11(opts: Part11Options) {
       return;
     }
 
-    // ── Have password but no username ────────────────────────────────
-    if (!effectiveUsername) {
+    const resolvedUsername = effectiveUsername || jwtUsername;
+
+    if (!resolvedUsername) {
       res.status(400).json({
         success: false,
-        message: 'Cannot verify signature: no username in body or JWT.',
+        message: 'Cannot verify signature: no username provided. Per §11.200, both identification code and password are required.',
+      });
+      return;
+    }
+
+    if (required && !effectiveUsername) {
+      res.status(400).json({
+        success: false,
+        message: 'Per 21 CFR Part 11 §11.200(a)(1)(ii), both username and password must be explicitly provided for this signing action. Include signatureUsername in your request.',
       });
       return;
     }
 
     // ── Verify ───────────────────────────────────────────────────────
     try {
-      const { valid, userId } = await verifyCredentials(effectiveUsername, effectivePassword);
+      const { valid, userId } = await verifyCredentials(resolvedUsername, effectivePassword);
 
       if (!valid) {
         logger.warn('Electronic signature failed', {
-          username: effectiveUsername,
+          username: resolvedUsername,
           path: req.path,
         });
         res.status(401).json({ success: false, message: 'Invalid electronic signature credentials' });
@@ -193,7 +201,7 @@ export function requirePart11(opts: Part11Options) {
       signed.signature = {
         verified: true,
         signerId: userId,
-        signerUsername: effectiveUsername,
+        signerUsername: resolvedUsername,
         meaning: customMeaning || meaning,
       };
 

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '../config/environment';
 import { logger } from '../config/logger';
+import { isTokenBlocked } from '../services/database/token-blocklist.service';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -41,7 +42,19 @@ export const authMiddleware = (
     return;
   }
   
-  const token = authHeader.substring(7); // Remove 'Bearer '
+  const token = authHeader.substring(7);
+  
+  if (isTokenBlocked(token)) {
+    logger.warn('Blocked token used', { path: req.path, ip: req.ip });
+    res.status(401).json({
+      success: false,
+      error: {
+        code: 'TOKEN_REVOKED',
+        message: 'Token has been revoked'
+      }
+    });
+    return;
+  }
   
   try {
     const decoded = jwt.verify(token, config.jwt.secret) as any;

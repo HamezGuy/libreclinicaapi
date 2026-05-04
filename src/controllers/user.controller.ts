@@ -6,6 +6,8 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import * as userService from '../services/database/user.service';
 import * as featureAccessService from '../services/database/feature-access.service';
+import { pool } from '../config/database';
+import { logger } from '../config/logger';
 import type { ApiResponse, UserAccount, FeatureDefinition, UserFeatureAccess } from '@accura-trial/shared-types';
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
@@ -200,8 +202,59 @@ export const removeFeatureOverride = asyncHandler(async (req: Request, res: Resp
   res.json(result);
 });
 
+/**
+ * §11.300(c) — Emergency session revocation for compromised accounts.
+ * Blocks all active tokens for the target user and optionally locks the account.
+ */
+export const revokeSessions = asyncHandler(async (req: Request, res: Response) => {
+  const userId = parseInt(req.params.id);
+  const { lockAccount: shouldLock, reason } = req.body || {};
+
+  const { revokeAllUserSessions } = await import('../services/database/token-blocklist.service');
+  const hadActiveSession = revokeAllUserSessions(userId);
+
+  if (shouldLock) {
+    await pool.query('UPDATE user_account SET status_id = 5 WHERE user_id = $1', [userId]);
+  }
+
+  const adminUser = (req as Record<string, unknown>).user as { userId: number; userName?: string } | undefined;
+  const adminUsername = adminUser?.userName || 'unknown';
+
+  await pool.query(`
+    INSERT INTO audit_log_event (
+      audit_date, audit_table, user_id, entity_id, entity_name,
+      new_value, audit_log_event_type_id, reason_for_change
+    ) VALUES (
+      NOW(), 'user_account', $1, $2, 'Emergency Session Revocation (§11.300(c))',
+      $3,
+      (SELECT audit_log_event_type_id FROM audit_log_event_type WHERE name = 'Entity Updated' LIMIT 1),
+      $4
+    )
+  `, [
+    adminUser?.userId || 0,
+    userId,
+    JSON.stringify({ accountLocked: Boolean(shouldLock), hadActiveSession, revokedBy: adminUsername }),
+    reason || 'Emergency session revocation — compromised account'
+  ]);
+
+  logger.warn('Emergency session revocation (§11.300(c))', {
+    targetUserId: userId,
+    accountLocked: Boolean(shouldLock),
+    hadActiveSession,
+    revokedBy: adminUser?.userId,
+  });
+
+  res.json({
+    success: true,
+    message: shouldLock
+      ? 'All sessions revoked and account locked'
+      : 'All sessions revoked',
+  });
+});
+
 export default {
   list, get, create, update, remove, getRoles, assignToStudy, getUserRole,
-  getAllFeatures, getUserFeatures, setUserFeatures, setOneUserFeature, removeFeatureOverride
+  getAllFeatures, getUserFeatures, setUserFeatures, setOneUserFeature, removeFeatureOverride,
+  revokeSessions
 };
 

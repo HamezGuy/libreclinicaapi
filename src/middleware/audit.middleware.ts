@@ -26,6 +26,7 @@ export interface AuditRequest extends Request {
   username?: string;
   userRole?: string;
   startTime?: number;
+  reasonForChange?: string;
 }
 
 /**
@@ -65,9 +66,10 @@ export const auditMiddleware = async (
   req.startTime = Date.now();
 
   // Extract user information from JWT (set by auth middleware)
-  const userId = (req as any).user?.userId;
-  const username = (req as any).user?.username;
-  const userRole = (req as any).user?.role;
+  const authedReq = req as AuditRequest & { user?: { userId?: number; username?: string; role?: string } };
+  const userId = authedReq.user?.userId;
+  const username = authedReq.user?.username;
+  const userRole = authedReq.user?.role;
 
   req.userId = userId;
   req.username = username;
@@ -101,11 +103,11 @@ export const auditMiddleware = async (
 
   // Capture the original res.json to log responses
   const originalJson = res.json.bind(res);
-  res.json = function (body: any) {
+  res.json = function (body: unknown) {
     const duration = Date.now() - (req.startTime || Date.now());
     const statusCode = res.statusCode;
+    const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
 
-    // Log response
     logger.info('API Response', {
       auditId: req.auditId,
       userId,
@@ -117,8 +119,7 @@ export const auditMiddleware = async (
       timestamp: new Date().toISOString()
     });
 
-    // Write audit entry to database (async, non-blocking)
-    logToDatabase({
+    const auditPayload = {
       auditId: req.auditId!,
       userId,
       username: username || 'anonymous',
@@ -131,10 +132,22 @@ export const auditMiddleware = async (
       ipAddress,
       userAgent,
       duration
-    }).catch(err => {
-      logger.error('Failed to write audit log to database', { error: err.message });
-    });
+    };
 
+    if (isMutation) {
+      logToDatabase(auditPayload)
+        .then(() => originalJson(body))
+        .catch((err: Error) => {
+          logger.error('CRITICAL: Audit log write failed for mutation', { error: err.message, method, path });
+          res.status(503);
+          originalJson({ success: false, message: 'Audit system unavailable — mutation cannot be completed' });
+        });
+      return res;
+    }
+
+    logToDatabase(auditPayload).catch((err: Error) => {
+      logger.error('Failed to write audit log for read operation', { error: err.message });
+    });
     return originalJson(body);
   };
 
@@ -188,9 +201,10 @@ export const logAuditEvent = async (
       username,
       entityId: details.entityId
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
     logger.error('Failed to log audit event', {
-      error: error.message,
+      error: message,
       eventType,
       userId
     });
@@ -215,45 +229,40 @@ async function logToDatabase(data: {
   userAgent: string;
   duration: number;
 }): Promise<void> {
-  try {
-    // Check if table exists, create if not
-    await ensureAuditTableExists();
+  await ensureAuditTableExists();
 
-    const query = `
-      INSERT INTO audit_user_api_log (
-        audit_id,
-        user_id,
-        username,
-        user_role,
-        http_method,
-        endpoint_path,
-        query_params,
-        request_body,
-        response_status,
-        ip_address,
-        user_agent,
-        duration_ms,
-        created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-    `;
+  const query = `
+    INSERT INTO audit_user_api_log (
+      audit_id,
+      user_id,
+      username,
+      user_role,
+      http_method,
+      endpoint_path,
+      query_params,
+      request_body,
+      response_status,
+      ip_address,
+      user_agent,
+      duration_ms,
+      created_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+  `;
 
-    await pool.query(query, [
-      data.auditId,
-      data.userId || null,
-      data.username,
-      data.userRole || null,
-      data.method,
-      data.path,
-      data.query,
-      data.requestBody,
-      data.responseStatus,
-      data.ipAddress,
-      data.userAgent,
-      data.duration
-    ]);
-  } catch (error: any) {
-    logger.error('Database audit log error', { error: error.message });
-  }
+  await pool.query(query, [
+    data.auditId,
+    data.userId || null,
+    data.username,
+    data.userRole || null,
+    data.method,
+    data.path,
+    data.query,
+    data.requestBody,
+    data.responseStatus,
+    data.ipAddress,
+    data.userAgent,
+    data.duration
+  ]);
 }
 
 /**
@@ -270,9 +279,9 @@ async function ensureAuditTableExists(): Promise<void> {
     if (!result.rows[0].exists) {
       logger.warn('audit_user_api_log table not found — startup migrations may not have run');
     }
-  } catch (error: any) {
-    // Table might already exist, ignore error
-    logger.debug('Audit table creation skipped', { error: error.message });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.debug('Audit table creation skipped', { error: message });
   }
 }
 
@@ -280,13 +289,15 @@ async function ensureAuditTableExists(): Promise<void> {
  * Sanitize request body to remove sensitive information
  * Removes passwords, tokens, and other sensitive fields from logs
  */
-function sanitizeRequestBody(body: any): any {
+function sanitizeRequestBody(body: unknown): unknown {
   if (!body || typeof body !== 'object') {
     return body;
   }
 
-  const sanitized = { ...body };
-  const sensitiveFields = [
+  const source = body as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = { ...source };
+
+  const secretFields = [
     'password',
     'newPassword',
     'oldPassword',
@@ -299,14 +310,53 @@ function sanitizeRequestBody(body: any): any {
     'privateKey'
   ];
 
-  for (const field of sensitiveFields) {
+  const phiFields = [
+    'firstName', 'lastName', 'first_name', 'last_name',
+    'dateOfBirth', 'date_of_birth', 'dob', 'birthDate',
+    'ssn', 'socialSecurityNumber', 'social_security_number',
+    'medicalRecordNumber', 'medical_record_number', 'mrn',
+    'diagnosis', 'diagnoses', 'medicalHistory', 'medical_history',
+    'phoneNumber', 'phone_number', 'phone',
+    'address', 'streetAddress', 'street_address',
+    'emailAddress', 'patientEmail', 'patient_email',
+    'insuranceId', 'insurance_id',
+  ];
+
+  for (const field of secretFields) {
     if (field in sanitized) {
       sanitized[field] = '***REDACTED***';
     }
   }
 
+  for (const field of phiFields) {
+    if (field in sanitized) {
+      sanitized[field] = '***PHI_REDACTED***';
+    }
+  }
+
   return sanitized;
 }
+
+/**
+ * Requires a reasonForChange field on clinical data mutation requests.
+ * 21 CFR Part 11 §11.10(e) — audit trails must include reason for change.
+ */
+export const requireReasonForChange = (
+  req: AuditRequest,
+  res: Response,
+  next: NextFunction
+): void => {
+  const body = req.body as Record<string, unknown> | undefined;
+  if (!body || typeof body.reasonForChange !== 'string' || body.reasonForChange.trim() === '') {
+    res.status(400).json({
+      success: false,
+      message: 'A reason for change is required for clinical data modifications per 21 CFR Part 11 §11.10(e)'
+    });
+    return;
+  }
+  req.reasonForChange = body.reasonForChange.trim();
+  next();
+};
 
 /**
  * Audit middleware for electronic signatures
@@ -408,7 +458,7 @@ export const electronicSignatureMiddleware = async (
     );
 
     // Add signature info to request
-    (req as any).electronicSignature = {
+    (req as AuditRequest & { electronicSignature?: { userId: number; username: string; meaning: string; timestamp: Date } }).electronicSignature = {
       userId: user.userId,
       username,
       meaning,
@@ -416,8 +466,9 @@ export const electronicSignatureMiddleware = async (
     };
 
     next();
-  } catch (error: any) {
-    logger.error('Electronic signature validation error', { error: error.message });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('Electronic signature validation error', { error: message });
     res.status(500).json({
       success: false,
       message: 'Electronic signature validation failed'

@@ -38,4 +38,7 @@ router.put('/:id/features', validate({ params: commonSchemas.idParam }), control
 router.put('/:id/features/:featureKey', validate({ params: commonSchemas.idParam }), controller.setOneUserFeature);
 router.delete('/:id/features/:featureKey', validate({ params: commonSchemas.idParam }), controller.removeFeatureOverride);
 
+// §11.300(c) — Emergency session revocation for compromised accounts
+router.post('/:id/revoke-sessions', validate({ params: commonSchemas.idParam }), controller.revokeSessions);
+
 export default router;

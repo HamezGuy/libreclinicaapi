@@ -159,6 +159,15 @@ export const authenticateUser = async (
 
     const user = result.rows[0];
 
+    // Check if account is locked (status_id = 5) — §11.300(d) lockout enforcement
+    if (user.statusId === 5) {
+      logger.warn('Authentication failed - account locked', { username });
+      return {
+        success: false,
+        message: 'Account is locked due to excessive failed login attempts. Please contact your administrator.'
+      };
+    }
+
     // Check if user is active via status_id (1 = active, other = inactive)
     if (user.statusId !== 1) {
       logger.warn('Authentication failed - user not active', { username, statusId: user.statusId });
@@ -202,14 +211,13 @@ export const authenticateUser = async (
       }
     }
 
-    // Skip password expiration check for now (LibreClinica manages this internally)
-    // if (user.passwd_timestamp && isPasswordExpired(user.passwd_timestamp)) {
-    //   logger.warn('Authentication failed - password expired', { username });
-    //   return {
-    //     success: false,
-    //     message: 'Password has expired. Please reset your password.'
-    //   };
-    // }
+    if (user.passwdTimestamp && isPasswordExpired(user.passwdTimestamp)) {
+      logger.warn('Authentication failed - password expired', { username });
+      return {
+        success: false,
+        message: 'Password has expired. Please reset your password.'
+      };
+    }
 
     // Password expiration warning (within 7 days)
     const daysUntilExpiration = user.passwdTimestamp 
@@ -665,12 +673,84 @@ async function logFailedLogin(username: string, ipAddress: string, reason: strin
   try {
     await pool.query(loginAuditQuery, [username, `Failed: ${reason} from ${ipAddress}`]);
     logger.warn('Failed login audit recorded to audit_user_login', { username, ipAddress, reason });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
     logger.error('Failed to log failed login to audit_user_login', {
-      error: error.message,
+      error: msg,
       username,
       reason
     });
+  }
+
+  // §11.300(d) — Account lockout enforcement
+  try {
+    const userResult = await pool.query(
+      'SELECT user_id, lock_counter FROM user_account WHERE user_name = $1',
+      [username]
+    );
+    if (userResult.rows.length > 0) {
+      const user = userResult.rows[0] as { userId: number; lockCounter: number };
+      const newCount = (user.lockCounter || 0) + 1;
+      const maxAttempts = parseInt(process.env.MAX_LOGIN_ATTEMPTS || '5', 10);
+
+      await incrementLockCounter(user.userId, newCount);
+
+      if (newCount >= maxAttempts) {
+        await lockAccount(user.userId);
+        logger.warn('Account locked due to excessive failed login attempts', {
+          username,
+          attempts: newCount,
+          ipAddress,
+        });
+
+        try {
+          const { notifyUsers } = await import('./notification.service');
+          const adminResult = await pool.query(
+            `SELECT u.user_id FROM user_account u
+             JOIN user_type ut ON u.user_type_id = ut.user_type_id
+             WHERE ut.user_type IN ('admin', 'sysadmin') AND u.status_id = 1`
+          );
+          const adminIds = adminResult.rows.map((r: Record<string, unknown>) => (r as { userId: number }).userId);
+          if (adminIds.length > 0) {
+            await notifyUsers(
+              adminIds,
+              'general',
+              `SECURITY ALERT: Account Locked — "${username}"`,
+              `Account "${username}" was locked after ${newCount} failed login attempts from IP ${ipAddress}. Per 21 CFR Part 11 §11.300(d), this requires immediate review.`
+            );
+          }
+        } catch {
+          logger.error('Failed to send security alert notification for account lockout', { username });
+        }
+      } else if (newCount >= 3) {
+        logger.warn('Multiple failed login attempts detected (§11.300(d))', {
+          username, attempts: newCount, maxAttempts, ipAddress,
+        });
+
+        try {
+          const { notifyUsers } = await import('./notification.service');
+          const adminResult = await pool.query(
+            `SELECT u.user_id FROM user_account u
+             JOIN user_type ut ON u.user_type_id = ut.user_type_id
+             WHERE ut.user_type IN ('admin', 'sysadmin') AND u.status_id = 1`
+          );
+          const adminIds = adminResult.rows.map((r: Record<string, unknown>) => (r as { userId: number }).userId);
+          if (adminIds.length > 0) {
+            await notifyUsers(
+              adminIds,
+              'general',
+              `Security Warning: Repeated Failed Logins — "${username}"`,
+              `${newCount} failed login attempts detected for account "${username}" from IP ${ipAddress} (lockout threshold: ${maxAttempts}). Per 21 CFR Part 11 §11.300(d), unauthorized use attempts must be reported.`
+            );
+          }
+        } catch {
+          logger.error('Failed to send pre-lockout warning notification', { username });
+        }
+      }
+    }
+  } catch (lockError: unknown) {
+    const msg = lockError instanceof Error ? lockError.message : String(lockError);
+    logger.error('Failed to enforce account lockout', { error: msg, username });
   }
 }
 
@@ -1017,12 +1097,32 @@ export const changePassword = async (
     return { success: false, message: 'Current password is incorrect' };
   }
 
+  const bcryptHash = await hashBcrypt(newPassword);
+
+  const historyResult = await pool.query(
+    `SELECT password_hash FROM acc_password_history
+     WHERE user_id = $1 ORDER BY changed_at DESC LIMIT 5`,
+    [userId]
+  );
+
+  const { compareSync } = await import('bcrypt');
+  for (const row of historyResult.rows) {
+    if (compareSync(newPassword, row.passwordHash)) {
+      return { success: false, message: 'New password must not match any of your last 5 passwords' };
+    }
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const md5Hash = hashPasswordMD5(newPassword);
-    const bcryptHash = await hashBcrypt(newPassword);
+
+    await client.query(
+      `INSERT INTO acc_password_history (user_id, password_hash, changed_at)
+       VALUES ($1, $2, NOW())`,
+      [userId, bcryptHash]
+    );
 
     await client.query(
       `UPDATE user_account SET passwd = $1, passwd_timestamp = NOW(), date_updated = NOW() WHERE user_id = $2`,

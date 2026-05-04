@@ -24,27 +24,32 @@ export const verifyPassword = asyncHandler(async (req: Request, res: Response) =
   const user = (req as any).user;
   const { password, username } = req.body;
 
-  if (!password) {
+  if (!username || !password) {
     res.status(400).json({
       success: false,
-      message: 'Password is required for electronic signature verification'
+      message: 'Both username and password are required for electronic signature verification (§11.200(a)(1))'
     });
     return;
   }
 
-  // Use username from request body (frontend sends it per §11.200) or fall back to JWT
-  const effectiveUsername = username || user.userName || user.username;
+  const jwtUsername = user.userName || user.username;
+  if (username !== jwtUsername) {
+    res.status(403).json({
+      success: false,
+      message: 'Username does not match authenticated session. Electronic signatures must be executed by their genuine owner (§11.200(a)(2)).'
+    });
+    return;
+  }
 
   const result = await esignatureService.verifyPasswordForSignature(
     user.userId,
-    effectiveUsername,
+    username,
     password
   );
 
-  // Log verification attempt (success or failure) for audit trail
   logger.info('E-signature password verification attempt', {
     userId: user.userId,
-    username: user.username,
+    username,
     success: result.success,
     timestamp: new Date().toISOString()
   });
@@ -61,21 +66,29 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   const {
     entityType,
     entityId,
+    username,
     password,
     meaning,
     reasonForSigning
   } = req.body;
 
-  // Validate required fields
-  if (!entityType || entityId === undefined || entityId === null || !password || !meaning) {
+  if (!entityType || entityId === undefined || entityId === null || !password || !meaning || !username) {
     res.status(400).json({
       success: false,
-      message: 'entityType, entityId, password, and meaning are required'
+      message: 'entityType, entityId, username, password, and meaning are required (§11.200(a)(1))'
     });
     return;
   }
 
-  // Validate entity type
+  const jwtUsername = user.userName || user.username;
+  if (username !== jwtUsername) {
+    res.status(403).json({
+      success: false,
+      message: 'Username does not match authenticated session. Electronic signatures must be executed by their genuine owner (§11.200(a)(2)).'
+    });
+    return;
+  }
+
   const validEntityTypes = [
     'event_crf', 'study_event', 'study_subject', 'discrepancy_note', 'data_lock', 'consent', 'study',
     'eventCrf', 'studyEvent', 'studySubject', 'discrepancyNote', 'dataLock',
@@ -89,7 +102,6 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
     return;
   }
 
-  // Validate meaning (21 CFR Part 11 §11.50)
   const validMeanings = [
     'authorship',
     'approval',
@@ -111,11 +123,20 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
     return;
   }
 
-  const resolvedUsername = user.userName || user.username || req.body.username;
+  const certStatus = await esignatureService.getCertificationStatus(user.userId);
+  if (!certStatus.data?.isCertified) {
+    res.status(403).json({
+      success: false,
+      code: 'CERTIFICATION_REQUIRED',
+      message: 'You must certify that your electronic signature is the legally binding equivalent of a handwritten signature before signing (§11.100(c)). Use POST /api/esignature/certify first.'
+    });
+    return;
+  }
+
   const result = await esignatureService.applyElectronicSignature({
     userId: user.userId,
-    username: resolvedUsername,
-    userFullName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || resolvedUsername,
+    username,
+    userFullName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || username,
     entityType,
     entityId: parseInt(entityId),
     password,
@@ -126,7 +147,7 @@ export const applySignature = asyncHandler(async (req: Request, res: Response) =
   if (result.success) {
     logger.info('Electronic signature applied', {
       userId: user.userId,
-      username: resolvedUsername,
+      username,
       entityType,
       entityId,
       meaning,
@@ -203,15 +224,23 @@ export const getPendingSignatures = asyncHandler(async (req: Request, res: Respo
  */
 export const certifySignature = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { password, acknowledgment } = req.body;
+  const { username, password, acknowledgment } = req.body;
 
-  // Required acknowledgment text per 21 CFR Part 11 §11.100(c)
   const requiredAcknowledgment = 'I certify that my electronic signature is the legally binding equivalent of my traditional handwritten signature';
 
-  if (!password || !acknowledgment) {
+  if (!username || !password || !acknowledgment) {
     res.status(400).json({
       success: false,
-      message: 'Password and acknowledgment are required'
+      message: 'Username, password, and acknowledgment are required (§11.100(c), §11.200(a)(1))'
+    });
+    return;
+  }
+
+  const jwtUsername = user.userName || user.username;
+  if (username !== jwtUsername) {
+    res.status(403).json({
+      success: false,
+      message: 'Username does not match authenticated session. Certification must be performed by the account owner (§11.200(a)(2)).'
     });
     return;
   }
@@ -226,7 +255,7 @@ export const certifySignature = asyncHandler(async (req: Request, res: Response)
 
   const result = await esignatureService.certifyUser(
     user.userId,
-    user.username,
+    username,
     password,
     acknowledgment
   );

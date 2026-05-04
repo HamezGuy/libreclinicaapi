@@ -115,6 +115,7 @@ export async function runStartupMigrations(pool: any): Promise<void> {
     { name: 'pef_query_count_trigger', fn: createPefQueryCountTrigger },
     { name: 'repair_patients_without_events', fn: repairPatientsWithoutEvents },
     { name: 'query_cell_target_columns', fn: addQueryCellTargetColumns },
+    { name: 'password_history', fn: createPasswordHistoryTable },
   ];
 
   let successCount = 0;
@@ -2800,4 +2801,17 @@ async function addQueryCellTargetColumns(pool: any): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_dn_ssm_dn ON dn_study_subject_map(discrepancy_note_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_dn_ssm_ss ON dn_study_subject_map(study_subject_id)`);
   logger.info('cell_target, column_name, entity_type, assigned_user_id, study_id columns and dn_study_subject_map verified');
+}
+
+async function createPasswordHistoryTable(pool: any): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS acc_password_history (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+      password_hash VARCHAR(255) NOT NULL,
+      changed_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pwd_history_user ON acc_password_history(user_id, changed_at DESC)`);
+  logger.info('acc_password_history table verified');
 }
