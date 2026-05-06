@@ -148,6 +148,7 @@ const corsOptions: cors.CorsOptions = {
 
     const allowed = [
       /^https:\/\/(www\.)?accuratrials\.com$/,
+      /^https:\/\/app\.accuratrials\.com$/,
       /^https:\/\/edc-real[a-z0-9-]*\.vercel\.app$/,
       /^http:\/\/localhost:(3000|3001|4200)$/
     ];

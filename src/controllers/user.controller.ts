@@ -217,7 +217,7 @@ export const revokeSessions = asyncHandler(async (req: Request, res: Response) =
     await pool.query('UPDATE user_account SET status_id = 5 WHERE user_id = $1', [userId]);
   }
 
-  const adminUser = (req as Record<string, unknown>).user as { userId: number; userName?: string } | undefined;
+  const adminUser = (req as unknown as Record<string, unknown>).user as { userId: number; userName?: string } | undefined;
   const adminUsername = adminUser?.userName || 'unknown';
 
   await pool.query(`

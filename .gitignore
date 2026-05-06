@@ -64,3 +64,4 @@ credentials/
 *.tar
 *.tar.gz
 *.zip
+.vercel
