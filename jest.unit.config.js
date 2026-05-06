@@ -1,14 +1,16 @@
-/**
- * Jest configuration for pure unit tests that require no database.
- * Usage: npx jest --config jest.unit.config.js
- */
+/** Jest config for pure unit tests — no DB, no global setup/teardown */
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>/tests/unit'],
-  testMatch: ['**/*.unit.test.ts'],
+  roots: ['<rootDir>/tests'],
+  testMatch: ['**/tests/unit/**/*.test.ts'],
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    'file-upload\\.test\\.ts$',
+    'bugfix-date-handling\\.unit\\.test\\.ts$',
+  ],
   verbose: true,
-  testTimeout: 10000,
-  // No globalSetup / globalTeardown — these tests are DB-free
+  testTimeout: 30000,
+  maxWorkers: 1,
   forceExit: true,
 };

@@ -7,10 +7,10 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
 // Mock the database pool
-const mockQuery = jest.fn();
-const mockConnect = jest.fn();
+const mockQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockConnect = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockRelease = jest.fn();
-const mockClientQuery = jest.fn();
+const mockClientQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 
 jest.mock('../../src/config/database', () => ({
   pool: {
@@ -30,8 +30,8 @@ jest.mock('../../src/config/logger', () => ({
 
 // Mock e-signature service
 jest.mock('../../src/services/database/esignature.service', () => ({
-  verifyPasswordForSignature: jest.fn().mockResolvedValue(true),
-  applyElectronicSignature: jest.fn().mockResolvedValue({ 
+  verifyPasswordForSignature: jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(true),
+  applyElectronicSignature: jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue({ 
     success: true, 
     data: { signatureId: 1 } 
   })

@@ -7,10 +7,10 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
 // Mock the database pool
-const mockQuery = jest.fn();
-const mockConnect = jest.fn();
+const mockQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockConnect = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockRelease = jest.fn();
-const mockClientQuery = jest.fn();
+const mockClientQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 
 jest.mock('../../src/config/database', () => ({
   pool: {

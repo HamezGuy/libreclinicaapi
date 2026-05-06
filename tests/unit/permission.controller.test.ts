@@ -65,12 +65,12 @@ describe('Permission Controller Logic - Unit Tests', () => {
 
       // Every AVAILABLE_PERMISSIONS key should be a valid UserPermissions key
       for (const key of availableKeys) {
-        expect(userPermissionKeys).withContext(`${key} should be in UserPermissions`).toContain(key);
+        expect(userPermissionKeys).toContain(key);
       }
 
       // Every UserPermissions key should be in AVAILABLE_PERMISSIONS
       for (const key of userPermissionKeys) {
-        expect(availableKeys).withContext(`${key} should be in AVAILABLE_PERMISSIONS`).toContain(key);
+        expect(availableKeys).toContain(key);
       }
     });
   });

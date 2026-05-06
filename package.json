@@ -14,6 +14,7 @@
     "test:watch": "jest --watch",
     "test:unit": "jest tests/*.service.test.ts --runInBand",
     "test:unit:schemas": "jest --config jest.unit.config.js --no-coverage",
+    "test:unit:all": "jest --config jest.unit.config.js --verbose",
     "test:query": "jest tests/query-system-comprehensive.test.ts --runInBand",
     "test:integration": "jest tests/integration.test.ts --runInBand",
     "test:e2e": "jest tests/e2e-integration.test.ts --runInBand",

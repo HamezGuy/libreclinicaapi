@@ -1640,7 +1640,8 @@ export const dataLockSchemas = {
 
 export const esignatureSchemas = {
   verifyPassword: Joi.object({
-    username: Joi.string().optional().max(255),
+    username: Joi.string().required().max(255)
+      .messages({ 'any.required': 'Username is required for e-signature verification (§11.200(a)(1))' }),
     password: Joi.string().required().min(1)
       .messages({ 'string.empty': 'Password is required for verification' })
   }),
@@ -1648,7 +1649,8 @@ export const esignatureSchemas = {
   sign: Joi.object({
     entityType: Joi.string().required().max(100),
     entityId: Joi.number().integer().positive().required(),
-    username: Joi.string().optional().max(255),
+    username: Joi.string().required().max(255)
+      .messages({ 'any.required': 'Username is required for electronic signature (§11.200(a)(1))' }),
     password: Joi.string().required().min(1),
     meaning: Joi.string().optional().max(500).allow(''),
     reason: Joi.string().optional().max(500).allow(''),
@@ -1661,9 +1663,12 @@ export const esignatureSchemas = {
   }),
 
   certify: Joi.object({
+    username: Joi.string().required().max(255)
+      .messages({ 'any.required': 'Username is required for certification (§11.200)' }),
     password: Joi.string().required().min(1)
       .messages({ 'string.empty': 'Password is required for certification' }),
-    meaning: Joi.string().optional().max(500).allow('')
+    acknowledgment: Joi.string().required()
+      .messages({ 'any.required': 'Acknowledgment text is required for e-signature certification (§11.100(c))' })
   }),
 
   invalidate: Joi.object({

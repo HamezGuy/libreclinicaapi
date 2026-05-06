@@ -9,12 +9,12 @@ import express from 'express';
 import request from 'supertest';
 
 // Mock the database pool
-const mockQuery = jest.fn();
+const mockQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 
 jest.mock('../../src/config/database', () => ({
   pool: {
     query: mockQuery,
-    connect: jest.fn().mockResolvedValue({
+    connect: jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue({
       query: mockQuery,
       release: jest.fn()
     })

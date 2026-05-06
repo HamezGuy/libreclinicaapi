@@ -5,14 +5,15 @@
  */
 
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import type { PDFGenerationOptions } from '../../src/services/pdf/pdf.types';
 
 // Mock the database pool
-const mockQuery = jest.fn();
+const mockQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 
 jest.mock('../../src/config/database', () => ({
   pool: {
     query: mockQuery,
-    connect: jest.fn().mockResolvedValue({
+    connect: jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue({
       query: mockQuery,
       release: jest.fn()
     })
@@ -204,7 +205,7 @@ describe('PDF Service', () => {
       };
 
       const { generateFormHtml } = await import('../../src/services/pdf/pdf.service');
-      const html = generateFormHtml(mockForm, { pageSize: 'A4' });
+      const html = generateFormHtml(mockForm, { pageSize: 'A4', orientation: 'portrait', includeHeader: true, includeFooter: true, includeAuditTrail: false });
 
       expect(html).toContain('Test Form');
       expect(html).toContain('SUB001');
@@ -226,7 +227,7 @@ describe('PDF Service', () => {
       };
 
       const { generateFormHtml } = await import('../../src/services/pdf/pdf.service');
-      const html = generateFormHtml(mockForm, { watermark: 'DRAFT' });
+      const html = generateFormHtml(mockForm, { pageSize: 'Letter', orientation: 'portrait', includeHeader: true, includeFooter: true, includeAuditTrail: false } as PDFGenerationOptions & { watermark?: string });
 
       expect(html).toContain('DRAFT');
     });
@@ -252,7 +253,7 @@ describe('PDF Service', () => {
       };
 
       const { generateCasebookHtml } = await import('../../src/services/pdf/pdf.service');
-      const html = generateCasebookHtml(mockCasebook, {});
+      const html = generateCasebookHtml(mockCasebook, { pageSize: 'Letter', orientation: 'portrait', includeHeader: true, includeFooter: true, includeAuditTrail: false });
 
       expect(html).toContain('SUB001');
       expect(html).toContain('Baseline');
@@ -281,7 +282,7 @@ describe('PDF Service', () => {
       };
 
       const { generateAuditTrailHtml } = await import('../../src/services/pdf/pdf.service');
-      const html = generateAuditTrailHtml(mockAuditTrail, {});
+      const html = generateAuditTrailHtml(mockAuditTrail, { pageSize: 'Letter', orientation: 'portrait', includeHeader: true, includeFooter: true, includeAuditTrail: true });
 
       expect(html).toContain('Audit Trail');
       expect(html).toContain('Test User');
