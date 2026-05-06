@@ -18,6 +18,7 @@ import { logger } from '../../config/logger';
 import * as dataSoap from '../soap/dataSoap.service';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+import { uploadWoundImageToS3 } from '../backup/cloud-storage.service';
 import {
   WoundSession,
   CreateSessionRequest,
@@ -209,15 +210,21 @@ export const uploadImage = async (
     const imageId = uuidv4();
     const now = new Date();
     
-    // For now, store path reference (actual S3 upload would happen here)
     const storagePath = `wounds/${sessionId}/${imageId}.jpg`;
+
+    // Upload to S3 (with SSE-KMS encryption) or local fallback
+    const uploadResult = await uploadWoundImageToS3(imageData, storagePath);
+    if (!uploadResult.success) {
+      logger.error('Wound image storage failed', { sessionId, imageId, error: uploadResult.error });
+    }
+    const storageType = uploadResult.provider === 's3' ? 's3' : 'local';
 
     const query = `
       INSERT INTO wound_images (
         id, session_id, filename, content_type, size_bytes,
         storage_path, storage_type, hash, hash_verified,
         captured_at, upload_completed_at, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, 's3', $7, $8, $9, $9, $9)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $10)
       RETURNING id, hash, hash_verified, size_bytes
     `;
 
@@ -228,6 +235,7 @@ export const uploadImage = async (
       contentType,
       imageData.length,
       storagePath,
+      storageType,
       calculatedHash,
       hashVerified,
       now

@@ -116,6 +116,17 @@ services:
       # 21 CFR Part 11 §11.10(a) — Data-at-rest encryption
       ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY}
       ENCRYPTION_SALT: ${ENCRYPTION_SALT}
+      ENABLE_FIELD_ENCRYPTION: "true"
+      ENCRYPTED_TABLES: "item_data,study_subject,wound_measurements"
+      BACKUP_ENCRYPTION_ENABLED: "true"
+      # Cloud backup (S3 offsite)
+      CLOUD_STORAGE_PROVIDER: ${CLOUD_STORAGE_PROVIDER:-local}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      AWS_S3_REGION: ${AWS_S3_REGION:-us-east-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      WOUND_IMAGES_S3_BUCKET: ${WOUND_IMAGES_S3_BUCKET:-}
+      WOUND_IMAGES_S3_REGION: ${WOUND_IMAGES_S3_REGION:-us-east-2}
       # DB_SSL: not needed — postgres is on the same Docker bridge network.
       # If you move to a remote/managed database (e.g. RDS), set DB_SSL=true.
       # CORS - all allowed frontend origins

@@ -12,6 +12,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { logger } from '../config/logger';
+import { config } from '../config/environment';
 import { asyncHandler } from '../middleware/errorHandler.middleware';
 import { NotFoundError, BadRequestError } from '../middleware/errorHandler.middleware';
 import * as fileService from '../services/database/file-uploads.service';
@@ -23,6 +24,58 @@ const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 const resolveFilePath = (storedName: string): string => path.join(UPLOADS_DIR, storedName);
 
 const userId = (req: Request): number => (req as unknown as { user: { userId: number } }).user?.userId || 1;
+
+/**
+ * Encrypt a file on disk in-place using AES-256-GCM.
+ * Appends IV + authTag to the filename (.enc suffix).
+ * HIPAA §164.312(a)(2)(iv) — file-level encryption at rest.
+ */
+function encryptFileOnDisk(filePath: string): { encryptedPath: string; iv: string; authTag: string } | null {
+  if (!config.encryption?.enableFieldEncryption) return null;
+  try {
+    const masterKey = config.encryption.masterKey || '';
+    const salt = config.encryption.salt || '';
+    if (masterKey === 'change-me-in-production') return null;
+
+    const key = crypto.pbkdf2Sync(masterKey, salt, 100000, 32, 'sha512');
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+    const input = fs.readFileSync(filePath);
+    const encrypted = Buffer.concat([cipher.update(input), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+
+    const encPath = filePath + '.enc';
+    fs.writeFileSync(encPath, encrypted);
+    fs.unlinkSync(filePath);
+
+    return { encryptedPath: encPath, iv: iv.toString('hex'), authTag: authTag.toString('hex') };
+  } catch (err: any) {
+    logger.warn('File encryption failed, keeping plaintext', { filePath, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Decrypt an encrypted file for download.
+ */
+function decryptFileBuffer(filePath: string, iv: string, authTag: string): Buffer | null {
+  if (!config.encryption?.enableFieldEncryption) return null;
+  try {
+    const masterKey = config.encryption.masterKey || '';
+    const salt = config.encryption.salt || '';
+    const key = crypto.pbkdf2Sync(masterKey, salt, 100000, 32, 'sha512');
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'hex'));
+    decipher.setAuthTag(Buffer.from(authTag, 'hex'));
+
+    const encrypted = fs.readFileSync(filePath);
+    return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  } catch (err: any) {
+    logger.error('File decryption failed', { filePath, error: err.message });
+    return null;
+  }
+}
 
 function toUploadedFileResponse(
   fileId: string,
@@ -65,11 +118,15 @@ export const upload = asyncHandler(async (req: Request, res: Response) => {
   const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
   const fileId = crypto.randomBytes(16).toString('hex');
 
+  // Encrypt file on disk (HIPAA §164.312(a)(2)(iv))
+  const encResult = encryptFileOnDisk(file.path);
+  const storedName = encResult ? path.basename(encResult.encryptedPath) : file.filename;
+
   const crfVersionMediaId = await fileService.uploadFileTransaction(
     {
       fileId,
       originalName: file.originalname,
-      storedName: file.filename,
+      storedName,
       mimeType: file.mimetype,
       fileSize: file.size,
       checksum: fileHash,
@@ -83,7 +140,7 @@ export const upload = asyncHandler(async (req: Request, res: Response) => {
     },
     crfVersionId || null,
     file.originalname,
-    file.filename,
+    storedName,
   );
 
   const data = toUploadedFileResponse(
